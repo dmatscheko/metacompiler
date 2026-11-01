@@ -3195,6 +3195,7 @@ HasStatic   = :script(~~
         var name = items[0]
         var cls = curClassName
         var atys = jCallArgTys(text, items.length - 1)
+        var actx = jAccCtx("call")
         var args = jVaWrap(items.slice(1), atys, name, function() { return cls })
         var chain = jEnclChain()
         return function(b) {
@@ -3240,7 +3241,7 @@ HasStatic   = :script(~~
             if (name == "getClass" && args.length == 0) { return {b: b, v: callExt(b, "js_jvgetclass", [recvV])} }
             var ea = emitArgs(b, args)
             b = ea.b
-            var sig = jOvStaticSig(owner, name, atys, null)
+            var sig = jOvStaticSig(owner, name, atys, null, actx)
             if (sig != "") {
                 return {b: b, v: callExt(b, "js_jvsigcall", [recvV, emitStr(b, name), emitStr(b, sig), ea.v])}
             }
@@ -3295,6 +3296,7 @@ HasStatic   = :script(~~
         if (jMapWants(clsName) || jMapWants(qual)) { jMapWant = true }
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         jCtorUse(qual, args.length, atys, "new", pos)
+        var actx = jAccCtx("new")
         // new String(...) can throw StringIndexOutOfBoundsException (js_jvnewstr).
         if (clsName == "String") { jUsesStrIdx = true }
         var ctx = curClassName
@@ -3334,7 +3336,7 @@ HasStatic   = :script(~~
             }
             // The constructor javac picks from static argument types (jOvCtorSig),
             // from its "__ctor#<n>#<sig>" slot; otherwise the dispatcher.
-            var sig = jOvCtorSig(clsName, atys)
+            var sig = jOvCtorSig(clsName, atys, actx)
             var ctorV = callExt(b, "js_get", [clsV, emitStr(b, sig == "" ? "__ctor" : "__ctor#" + args.length + "#" + sig)])
             callExt(b, "js_call", [ctorV, hUndef, argsV])
             return {b: b, v: objV}
@@ -4628,7 +4630,7 @@ HasStatic   = :script(~~
         var dargs = items.slice(1)
         var atys = jCallArgTys(text, dargs.length)
         if (items[0] == "super") { jCtorUse(curClassName, dargs.length, atys, "super", pos) }
-        return {deleg: items[0], dargs: dargs, atys: atys}
+        return {deleg: items[0], dargs: dargs, atys: atys, actx: jAccCtx(items[0])}
     }
     // Splits a CtorBody item list into the optional leading delegate and the rest.
     function splitCtorBody(cbody) {
@@ -4680,7 +4682,7 @@ HasStatic   = :script(~~
             var tgtObj = ownV
             if (!isThis) { tgtObj = callExt(b, "js_get", [ownV, emitStr(b, "__super")]) }
             // The constructor javac picks from static argument types (jOvCtorSig).
-            var sig = (isThis || supKnown) ? jOvCtorSig(isThis ? clsName : superName, deleg.atys) : ""
+            var sig = (isThis || supKnown) ? jOvCtorSig(isThis ? clsName : superName, deleg.atys, deleg.actx) : ""
             var ctorV = callExt(b, "js_get", [tgtObj, emitStr(b, sig == "" ? slot : "__ctor#" + args.length + "#" + sig)])
             callExt(b, "js_call", [ctorV, hUndef, argsV])
             return b
@@ -6324,7 +6326,7 @@ HasStatic   = :script(~~
                 dargs.push(makeVarRef("$a" + k))
             }
             mem.push({kind: "ctor", name: aname, params: ps, body: null,
-                      deleg: {deleg: "super", dargs: dargs, atys: atys}})
+                      deleg: {deleg: "super", dargs: dargs, atys: atys, actx: jAccCtx("anon")}})
         }
         for (var j = 0; j < members.length; j++) { mem.push(members[j]) }
         jOvDeclare(aname, mem)

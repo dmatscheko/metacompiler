@@ -4805,6 +4805,7 @@ HasStatic   = :script(~~
         var args = items.slice(1)
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         jCtorUse(clsName, args.length, atys, "new", pos)
+        var actx = jAccCtx("new")
         var sig = anytype // the static constructor signature, resolved at the first run
         return function() {
             var cls = jResolveClass(clsName)
@@ -4827,7 +4828,7 @@ HasStatic   = :script(~~
             if (cls.__lscope != undefined) { obj.__cscope = cls.__lscope }
             var argv = []
             for (var i = 0; i < args.length; i++) argv.push(args[i]())
-            if (sig == undefined) { sig = jOvCtorSig(cls.__name, atys) }
+            if (sig == undefined) { sig = jOvCtorSig(cls.__name, atys, actx) }
             jCallCtorSig(cls, obj, argv, sig)
             return obj
         }
@@ -4909,6 +4910,7 @@ HasStatic   = :script(~~
         }
         var atys = jCallArgTys(text, args.length)
         jCtorUse(superName, args.length, atys, "anon", pos)
+        var actx = jAccCtx("anon")
         var built = null
         return function() {
             if (built == null) {
@@ -4922,7 +4924,7 @@ HasStatic   = :script(~~
                 built.__name = superName
                 // The super constructor javac picks from the arguments' static
                 // types; makeCtorDispatch forwards to it.
-                built.__supsig = jOvCtorSig(superName, atys)
+                built.__supsig = jOvCtorSig(superName, atys, actx)
             }
             // An anonymous class body names the enclosing instance's fields
             // unqualified and reads `Outer.this`, so the instance records it -
@@ -5986,7 +5988,7 @@ HasStatic   = :script(~~
         var args = items.slice(1)
         var atys = jCallArgTys(text, args.length)
         if (which == "super") { jCtorUse(curClassName, args.length, atys, "super", pos) }
-        return {ctorhead: true, which: which, args: args, atys: atys}
+        return {ctorhead: true, which: which, args: args, atys: atys, actx: jAccCtx(which)}
     }
     function makeFieldVar(items, text) {
         var dims = ""
@@ -6521,7 +6523,7 @@ HasStatic   = :script(~~
                     var av = []
                     for (var k = 0; k < head.args.length; k++) { av.push(head.args[k]()) }
                     var target = head.which == "this" ? refs.self : refs.sup
-                    if (target != null && head.sig == undefined) { head.sig = jOvCtorSig(target.__name, head.atys) }
+                    if (target != null && head.sig == undefined) { head.sig = jOvCtorSig(target.__name, head.atys, head.actx) }
                     if (head.which == "this") { jCallCtorSig(refs.self, self, av, head.sig) }
                     else {
                         if (refs.sup != null) { jCallCtorSig(refs.sup, self, av, head.sig) }
@@ -6878,6 +6880,7 @@ HasStatic   = :script(~~
         var name = items[0]
         var cls = curClassName
         var atys = jCallArgTys(text, items.length - 1)
+        var actx = jAccCtx("call")
         var args = jVaWrap(items.slice(1), atys, name, function() { return cls })
         var sig = anytype // the static signature, resolved at the first call (jOvStaticSig)
         var outers = jClassStack.slice(0)
@@ -6906,7 +6909,7 @@ HasStatic   = :script(~~
                 while (ov != undefined && ov != null && !(ov.__class != undefined && jClassIs(ov.__class, outerInst))) { ov = ov.__outer }
                 if (ov != undefined && ov != null) { return mcall(ov, name, argv) }
             }
-            if (sig == undefined) { sig = (cls == "" || cls == undefined) ? "" : jOvStaticSig(cls, name, atys, null) }
+            if (sig == undefined) { sig = (cls == "" || cls == undefined) ? "" : jOvStaticSig(cls, name, atys, null, actx) }
             if (kind != "static") {
                 var self = jThisOrNull()
                 // An anonymous body names its enclosing instance's methods

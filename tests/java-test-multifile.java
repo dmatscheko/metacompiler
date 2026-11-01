@@ -8,6 +8,7 @@
 import java.util.List;
 import util.Toolbox;
 import util.Pair;
+import util.Gauge;
 
 class Square extends PeerShape {
     int sides() { return 4; }
@@ -16,6 +17,12 @@ class Square extends PeerShape {
 // A subclass in another package may use Toolbox's protected member.
 class Tripler extends Toolbox {
     int triple(int v) { return v * this.scale(); }
+}
+
+// super(4) from another package: Gauge(long) is protected, Gauge(int, ...)
+// forms are no candidates.
+class Dial extends Gauge {
+    Dial() { super(4); }
 }
 
 class Main {
@@ -35,6 +42,14 @@ class Main {
         Square sq = new Square();
         Main.check("superclass from a peer file", sq.sides() == 4 && sq.name().equals("shape"));
         Main.check("protected member from a subclass", new Tripler().triple(5) == 15);
+        Gauge g = new Gauge(1, 2);
+        Main.check("inaccessible ctor no candidate", g.v == 2);
+        Main.check("protected ctor no candidate to new", new Gauge(4).v == 5);
+        Main.check("protected ctor a candidate to super", new Dial().v == 4);
+        Main.check("private method no candidate", g.pick(5) == 2);
+        Main.check("package-private method no candidate", g.near(5) == 4);
+        Main.check("private static method no candidate", Gauge.scale(5) == 6);
+        Main.check("every overload a candidate inside", g.reading() == 13);
 
         if (Main.fails == 0) {
             System.out.println("java multifile test passed");

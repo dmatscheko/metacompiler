@@ -665,14 +665,17 @@ function jOvDeclare(name, members) {
         if (m.impls != undefined) { jOvIfaceSupers(name, m.impls) }
         if (m.kind == "method") {
             var v = jOvIsVar(m)
-            ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik})
+            ms.push(jOvAccNote({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik}, name, m))
         }
         if (m.kind == "ctor" && m.ptys != undefined) { ctors.push(m) }
         if (m.kind == "field") { fl["$" + m.name] = !m.statik ? "i" : (m.sconst === true ? "k" : "s") }
         if (m.kind == "sinit" || m.kind == "staticinit" || (m.kind == "field" && m.statik && m.pure === false)) { eff = true }
     }
     var cts = jOvCtorCands(ctors)
-    for (var k = 0; k < cts.length; k++) { cts[k].n = ctors[k].params.length }
+    for (var k = 0; k < cts.length; k++) {
+        cts[k].n = ctors[k].params.length
+        jOvAccNote(cts[k], name, ctors[k])
+    }
     if (jOvCls["$" + name] == undefined) { jOvNames.push(name) }
     jOvCls["$" + name] = {sup: sup, ms: ms, cts: cts, fl: fl, eff: eff}
 }
@@ -925,11 +928,45 @@ function jSfxHome(s) {
     }
     return s.home
 }
-// The signature `new cls(args)`, `this(args)` or `super(args)` resolves to
-// among cls' constructors of that many parameters, "" when there are fewer
-// than two of them (one needs no choosing) or an argument type is unknown.
-// Its implementation is the class' "__ctor#<n>#<sig>" slot.
-function jOvCtorSig(cls, atys) {
+// An inaccessible method or constructor is no candidate (JLS 15.12.2.1,
+// 15.9.3), so a call site's static pick sees only the declarations its
+// context reaches. A candidate record of a program class carries its access
+// (jAccOf), package and top-level type; a library class's carries none.
+function jOvAccNote(rec, cls, m) {
+    if (jPkgPrefix == "" && m.acc != undefined) {
+        rec.acc = m.acc
+        rec.pkg = jFilePkg
+        rec.top = jTopOf(cls)
+    }
+    return rec
+}
+// A call site's access context, read as the walk passes it: its package, its
+// top-level type and how it names a constructor (as jCtorUse); null in a
+// library file, which filters nothing.
+function jAccCtx(how) {
+    if (jPkgPrefix != "") { return null }
+    return {pkg: jFilePkg, top: jTopOf(curClassName), how: how}
+}
+// The candidates of cands accessible from ctx. A protected constructor is
+// accessible from another package to super(...) and an anonymous class's
+// creation only (JLS 6.6.2.2); a protected method is kept, as its
+// subclass-and-receiver test is jAccessPostCheck's.
+function jOvAccFilter(cands, ctx) {
+    if (ctx == undefined || ctx == null) { return cands }
+    var out = []
+    for (var i = 0; i < cands.length; i++) {
+        var d = cands[i]
+        if (d.acc == undefined || jAccessible(d, ctx.pkg, ctx.top)
+            || (d.acc == "protected" && (ctx.how != "new" || d.pkg == ctx.pkg))) { out.push(d) }
+    }
+    return out
+}
+// The signature `new cls(args)`, `this(args)` or `super(args)` from context
+// ctx (jAccCtx) resolves to among cls' accessible constructors of that many
+// parameters, "" when cls has fewer than two of them (one needs no choosing),
+// none of them is accessible or an argument type is unknown. Its
+// implementation is the class' "__ctor#<n>#<sig>" slot.
+function jOvCtorSig(cls, atys, ctx) {
     if (atys == null) { return "" }
     var rec = jOvCls["$" + jOvBare(cls)]
     if (rec == undefined) { return "" }
@@ -938,6 +975,9 @@ function jOvCtorSig(cls, atys) {
         if (rec.cts[i].n == atys.length) { same.push(rec.cts[i]) }
     }
     if (same.length < 2) { return "" }
+    same = jOvAccFilter(same, ctx)
+    if (same.length == 1) { return same[0].raw }
+    if (same.length == 0) { return "" }
     var stoks = []
     for (var k = 0; k < atys.length; k++) {
         var s = jOvSTok(atys[k])
@@ -2046,12 +2086,13 @@ function jOvPickStatic(spec, stoks) {
     }
     return ""
 }
-// The signature a call of `mname` on a receiver of static type rty resolves
-// to, "" when the call keeps the runtime pick: the receiver type is unknown
-// or not overloaded on mname, an argument type is unknown, or the
-// candidates' static-ness is not the receiver's (wantStatic: true for a
-// class name, false for an instance, null for an unqualified call).
-function jOvStaticSig(rty, mname, atys, wantStatic) {
+// The signature a call of `mname` on a receiver of static type rty from
+// context ctx (jAccCtx) resolves to among the accessible candidates, "" when
+// the call keeps the runtime pick: the receiver type is unknown or not
+// overloaded on mname, an argument type is unknown, or the candidates'
+// static-ness is not the receiver's (wantStatic: true for a class name,
+// false for an instance, null for an unqualified call).
+function jOvStaticSig(rty, mname, atys, wantStatic, ctx) {
     if (atys == null || rty == "") { return "" }
     var b = jOvBare(rty)
     var cands = jOvCands(b, mname)
@@ -2069,6 +2110,8 @@ function jOvStaticSig(rty, mname, atys, wantStatic) {
             if (jTyVarErasure(pb) != "") { return "" }
         }
     }
+    cands = jOvAccFilter(cands, ctx)
+    if (cands.length < 2) { return cands.length == 1 ? cands[0].raw : "" }
     var stoks = []
     for (var i = 0; i < atys.length; i++) {
         var s = jOvSTok(atys[i])
@@ -2113,7 +2156,7 @@ function jMcallSfx(name, args, text) {
     // Collections' Map and Set members are lib/java-map.java's types.
     if (name == "emptyMap" || name == "singletonMap" || name == "unmodifiableMap" || name == "emptySet"
         || name == "singleton" || name == "unmodifiableSet") { jMapWant = true }
-    return {kind: "mcall", name: name, args: args, stext: text, atys: jCallArgTys(text, args.length)}
+    return {kind: "mcall", name: name, args: args, stext: text, atys: jCallArgTys(text, args.length), actx: jAccCtx("call")}
 }
 // Gives each `.m(...)` suffix of a member chain `rty`, its receiver's static
 // type: jRecvTy of the chain's text up to that suffix, measured by taking the
@@ -2141,7 +2184,7 @@ function jChainRecvTys(sfxs, text) {
 function jSfxSig(s) {
     if (s.sig == undefined) {
         var rty = jSfxRty(s)
-        s.sig = rty == "" ? "" : jOvMemberSig(rty, s.name, s.atys)
+        s.sig = rty == "" ? "" : jOvMemberSig(rty, s.name, s.atys, s.actx)
     }
     return s.sig
 }
@@ -2243,9 +2286,9 @@ function jClassLit(text) {
     return {simple: jOvBare(t), dims: dims, prim: jOvIsPrim(t) || t == "void", name: name, iface: iface}
 }
 // jOvStaticSig for a member call whose receiver jRecvTy read as rty.
-function jOvMemberSig(rty, mname, atys) {
-    if (rty.length > 7 && rty.substring(0, 7) == "static:") { return jOvStaticSig(rty.substring(7), mname, atys, true) }
-    return jOvStaticSig(rty, mname, atys, false)
+function jOvMemberSig(rty, mname, atys, ctx) {
+    if (rty.length > 7 && rty.substring(0, 7) == "static:") { return jOvStaticSig(rty.substring(7), mname, atys, true, ctx) }
+    return jOvStaticSig(rty, mname, atys, false, ctx)
 }
 // ----- nested types of one simple name (JLS 6.3, 6.5.5) -----
 //
