@@ -2783,6 +2783,9 @@ function js_phpropunset(o, key, scope) {
         var d = phPropDecl(o["__class"], name)
         var typed = d !== undefined && d["typ"] != ""
         if (o[key] !== undefined || (typed && !phInUn(o, name))) {
+            // The slot stops holding a reference it held. Twin of
+            // js_phpropunset in abnf/jsrtphp.go.
+            phRefAdjust(phCellOf(o[key]), -1)
             if (!typed) {
                 delKey(o, phStr(key))
                 return undefined
@@ -2977,7 +2980,9 @@ function phCast(kind, v) {
         if (phIsArr(v)) { return v }
         var out = phNewArr()
         if (rtIsNil(v)) { return out }
-        if (phIsObj(v)) { return phObjArr(v, false, null) }
+        // A copy of the property table, keeping a reference another slot holds.
+        // Twin of phpCast in abnf/jsrtphp.go.
+        if (phIsObj(v)) { return phArrCopy(phObjArr(v, false, null)) }
         // A Closure or a Generator is an object with no properties.
         if (typeof v == "function" || phIsGen(v)) { return out }
         phArrPush(out, v)
@@ -3049,6 +3054,7 @@ function phGenState(g) {
     st["auto"] = 0
     st["moved"] = false    // resumed past its first yield: it cannot be rewound
     st["del"] = false      // parked at a 'yield from' over another generator
+    st["run"] = false      // its body is running
     phGenCell.push(g)
     phGenSt.push(st)
     return st
@@ -3066,18 +3072,25 @@ function phGenStep(g, sent, thr) {
         end["done"] = true
         return end
     }
+    // A running body (it resumed itself) is not resumed: the floor's RT_GEN_BUSY
+    // hook raises PHP's Error and the generator stays as it is. Twin of
+    // jsGenerator.enter in abnf/jsrt.go.
+    if (st["run"] === true) { return g.next(sent) }
     if (st["started"]) { st["moved"] = true }
     st["started"] = true
+    st["run"] = true
     var r = anytype
     // A body an exception leaves is finished.
     try {
         if (thr === true) { r = g["throw"](sent) } else { r = g.next(sent) }
     } catch (e) {
+        st["run"] = false
         st["done"] = true
         st["last"] = null
         st["key"] = null
         throw e
     }
+    st["run"] = false
     if (phTest(r["done"])) {
         st["done"] = true
         st["ret"] = r["value"]

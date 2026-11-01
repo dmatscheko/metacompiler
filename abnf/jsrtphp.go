@@ -2313,8 +2313,12 @@ func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
 		if isNullish(v) {
 			return out
 		}
+		// The cast is a copy of the property table: a property another slot
+		// also references stays that reference (zend_proptable_to_symtable).
+		// Twin of phCast in lib/php-rt.metajs and phpObjArr in
+		// php-interpreter.abnf.
 		if o, ok := v.(*jsObject); ok && phpIsObj(v) {
-			return rt.phpObjArr(o, false, nil)
+			return rt.phpArrCopy(rt.phpObjArr(o, false, nil))
 		}
 		// A Closure or a Generator is an object with no properties.
 		if phpIsGenOrClosure(v) {
@@ -5023,6 +5027,9 @@ func init() {
 				if raw, has := o.props[key]; has {
 					_, _, typ := rt.phpPropDecl(cls, name)
 					if raw != jsUndef || (typ != "" && !rt.phpInUn(o, name)) {
+						// The slot stops holding a reference it held. Twin of
+						// phpUnsetProp in php-interpreter.abnf.
+						phpRefAdjust(phpCellOf(raw), -1)
 						if typ == "" {
 							phpObjDel(o, key)
 							return 0
@@ -5496,7 +5503,9 @@ func phpGenCur(g *jsGenerator, v interface{}) interface{} {
 
 // phpGenStep resumes the body with sent as the value of its yield.
 func (rt *jsrt) phpGenStep(g *jsGenerator, sent interface{}) interface{} {
-	if g.started && !g.done {
+	// A running body is not resumed (jsGenerator.enter raises), so it is not
+	// moved either (zend_generator_resume).
+	if g.started && !g.done && !g.running {
 		g.moved = true
 	}
 	return g.step(rt, sent)

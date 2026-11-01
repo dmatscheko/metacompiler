@@ -1801,6 +1801,83 @@ function s89() {
     check("gt5", $in === "in:e" && $d->current() === "ret5" && $d2->throw(new Exception("q")) === "out:q");
 }
 
+// ===== SECTION 90: (array) of an object keeps its references; a running generator =====
+// (array) copies an object's property table, and a property that some other
+// slot also references stays that reference in the copy, while one nothing else
+// references becomes its value (zend_proptable_to_symtable, zend_array_dup_element).
+// unset() of a property, typed or not, stops it holding its reference.
+// A generator whose body is running - it resumed itself, directly or through
+// another generator - cannot be resumed: next() and send() throw an Error at the
+// caller, while current() and key() answer the yield it last stopped at
+// (zend_generator_resume).
+class S90P { public $x = 1; private $y = 2; function refY() { $r = &$this->y; return (array)$this; } }
+class S90U { public int $t = 1; public $d = 2; }
+function s90self() { global $s90g; yield 1; try { $s90g->next(); } catch (Error $e) { yield get_class($e) . ":" . $e->getMessage(); } yield $s90g->current() . "@" . $s90g->key(); }
+function s90send() { global $s90h; yield 1; $s90h->send(5); yield 2; }
+function s90a() { global $s90b; yield 1; $s90b->next(); yield 2; }
+function s90b() { global $s90a; yield 10; try { $s90a->next(); } catch (Error $e) { yield "b:" . $e->getMessage(); } }
+function s90() {
+    global $s90g, $s90h, $s90a, $s90b;
+    $o = new stdClass;
+    $o->a = 1;
+    $r = &$o->a;
+    $arr = (array)$o;
+    $r = 5;
+    $p = new stdClass;
+    $p->arr = [1];
+    $p->arr[] = &$p->arr;
+    $h = (array)$p;
+    $h["arr"][0] = 7;
+    $q = new stdClass;
+    $q->b = 1;
+    $qa = (array)$q;
+    $qa["b"] = 9;
+    check("oac1", $arr["a"] === 5 && $p->arr[0] === 7 && $q->b === 1);
+    $s = new stdClass;
+    $s->c = 1;
+    $rs = &$s->c;
+    unset($rs);
+    $sa = (array)$s;
+    $sa["c"] = 4;
+    $t = new S90P;
+    $ta = $t->refY();
+    $ta["\0S90P\0y"] = 8;
+    $tb = (array)$t;
+    check("oac2", $s->c === 1 && $ta["x"] === 1 && $tb["\0S90P\0y"] === 8);
+    $u = new stdClass;
+    $u->a = 1;
+    $ua = [];
+    $ua[0] = &$u->a;
+    unset($u->a);
+    $ub = $ua;
+    $ub[0] = 9;
+    $w = new S90U;
+    $wa = [];
+    $wa[0] = &$w->t;
+    $wa[1] = &$w->d;
+    unset($w->t, $w->d);
+    $wb = $wa;
+    $wb[0] = 7;
+    $wb[1] = 6;
+    check("uref1", $ua[0] === 1 && $wa === [1, 2]);
+    $s90g = s90self();
+    $seen = [];
+    foreach ($s90g as $v) { $seen[] = $v; }
+    check("grun1", $seen === [1, "Error:Cannot resume an already running generator",
+        "Error:Cannot resume an already running generator@1"]);
+    $s90h = s90send();
+    $s90h->current();
+    $m = "";
+    try { $s90h->next(); } catch (Error $e) { $m = $e->getMessage(); }
+    $s90a = s90a();
+    $s90b = s90b();
+    $s90a->current();
+    $s90b->current();
+    $s90a->next();
+    check("grun2", $m === "Cannot resume an already running generator" && !$s90h->valid()
+        && $s90a->current() === 2 && $s90b->current() === "b:Cannot resume an already running generator");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1835,6 +1912,7 @@ function main() {
     s87(); // SECTION-CALL 87
     s88(); // SECTION-CALL 88
     s89(); // SECTION-CALL 89
+    s90(); // SECTION-CALL 90
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

@@ -3043,6 +3043,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // One resume of the body, with sendv as the value of the yield it is parked at.
     function genStep(g, sendv) {
         if (g.done) { return }
+        // A resume of a body that is running (it stepped itself, directly or
+        // through another generator) is an Error (zend_generator_resume). Twin of
+        // the js_rt_genbusy hook php-to-llvm-ir.abnf registers.
+        for (var gi = 0; gi < genCur.length; gi++) {
+            if (genCur[gi] === g) { phpRaise("Error", "Cannot resume an already running generator") }
+        }
         if (g.started) { g.moved = true }
         if (g.co === null) { g.co = coNew(function() { return g.run() }) }
         var sc = scopes
@@ -4373,6 +4379,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var typed = d != null && d.typ != ""
                 if (o.p.vals[i] !== undefined || (typed && !phpInUn(o, name))) {
                     if (!typed) { arrDel(o.p, name); return }
+                    rebind(o.p.vals[i], undefined)
                     dictSet(o.p, name, undefined)
                     if (!phpInUn(o, name)) { o.un = (typeof o.un == "string" ? o.un : ",") + name + "," }
                     return
@@ -8007,7 +8014,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // An object's properties as an array: every one with a non-public name
     // MANGLED the way (array) does ("\0*\0p", "\0Class\0q"), or, for foreach,
-    // only those visible from the class scope (null outside every class).
+    // only those visible from the class scope (null outside every class). The
+    // cast is a copy of the property table, so a property another slot also
+    // references stays that reference (copySlot, zend_proptable_to_symtable);
+    // foreach reads values. Twin of phpCast in abnf/jsrtphp.go.
     function phpObjArr(o, iter, scope) {
         var out = newArr()
         var ks = o.p.keys
@@ -8017,7 +8027,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var pn = phpKeyName(ks[i])
             var vis = pn == phpStr(ks[i]) ? phpVisOf(o.__class, pn) : ""
             var pv = anytype
-            pv = phpCopy(deref(o.p.vals[i]))
+            pv = iter ? phpCopy(deref(o.p.vals[i])) : copySlot(o.p.vals[i])
             if (iter) {
                 if (vis == "" || phpVisible(o, vis, scope)) { arrSet(out, pn, pv) }
             } else if (vis == "") { arrSet(out, pn, pv) }
