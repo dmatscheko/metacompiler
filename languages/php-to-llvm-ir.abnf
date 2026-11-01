@@ -188,7 +188,7 @@ CloseAhead  = :script(~~ "pure";
 // parameter and return types are checked at the call and at each return.
 // 'function &name()' returns by REFERENCE (DefAmp, refFnEnter).
 Def         <~~ push(makeFun(takeAll())); refFnStack.pop() ~~>
-            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(noteFnName(up.in)); refFnEnter(up.in); genPush(); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(noteFnName(up.in)); refFnEnter(up.in, "$"); genPush(); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
 DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
@@ -239,8 +239,8 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: of its modifiers only the visibility is kept, and a reference-return
 // '&' is accepted and ignored; an abstract/interface method has no body (';'
 // instead of a block -> empty method).
-MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = [ AttrGrp ] { MethMod } KwFunction [ "&" ] MethodName <~~ push(noteFnName(up.in)); genPush(); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+MethodDecl  <~~ push({method: makeFun(takeAll())}); refFnStack.pop() ~~>
+            = [ AttrGrp ] { MethMod } KwFunction [ DefAmp ] MethodName <~~ push(noteFnName(up.in)); refFnEnter(up.in, "->"); genPush(); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: 'const A = 1, B = 2;', with PHP 8.3's typed form ('const int
 // SIZE = 4') and any modifier (final/public/...). They are published on the class
 // descriptor under a 'k:' key and resolved by walking __super, so a subclass and an
@@ -556,7 +556,7 @@ ForeachV2T  <~~ push({v2: pop()}) ~~>
 // value.
 FeRef       <~~ noteRef(); push({feref: true}) ~~> = "&" ;
 
-Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in))) ~~>
+Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in))) ~~>
             = KwReturn [ Expression ] Semi ;
 // 'break 2' / 'continue 2' leave that many enclosing loops (and switches). The level
 // is a literal integer in PHP - it has to be known where the jump is emitted - so it
@@ -611,14 +611,14 @@ KwFrom      = CiF :whitespace() CiR CiO CiM :whitespace(Whitespace) KwEnd ;
 RefAssign   <~~ push(makeRefAssign(takeAll())) ~~>
             = Target PlainEq RefAmp Target !"(" ;
 RefAmp      <~~ noteRef() ~~> = "&" !"&" ;
-// '$h =& f();' - the right side is a call to a function DECLARED to return by
-// reference ('function &f()'). Only a variable-like right side has a storage cell to
-// share, so this form cannot go through makeRefAssign; it degrades to an ordinary
-// assignment of the returned value, which is what the alias would have observed for
-// every read. Tried AFTER RefAssign, so '$b = &$a' keeps its exact real-reference
-// binding. The '&' pushes nothing, so makeAssign sees just the two items.
-RefAssignVal <~~ push(makeAssign(takeAll())) ~~>
-            = Target PlainEq <~~ push("=") ~~> "&" !"&" ExprCore ;
+// '$h =& f();' - a call to a function or method declared to return by reference
+// ('function &f()') binds the left side to the variable it returned
+// (makeRefAssignCall); any other right side is assigned by value. Tried AFTER
+// RefAssign, so '$b = &$a' keeps its exact real-reference binding.
+RefAssignVal <~~ var rv = pop(); push(makeRefAssignCall(pop(), rv)) ~~>
+            = Target PlainEq "&" !"&" RefCallRhs ;
+RefCallRhs  <~~ push({rv: pop(), fn: refCallKey(up.in)}) ~~>
+            = ExprCore ;
 
 // list($a, $b) = e  /  [$a, $b] = e  -- array destructuring. A slot may be EMPTY
 // ([, $second]), KEYED (["y" => $py]) or itself a nested pattern ([[$m, $n], [$o]]).
@@ -1070,7 +1070,7 @@ ArgEnd      = :script(~~ "pure";
         return abnf.newToken("\x01notlval", 0)
     })()
 ~~) ;
-NamedArg    <~~ push(placedArg({aname: argLabel(up.in), pos: pop(), vtext: plainVarText(up.in.substring(up.in.indexOf(":") + 1)), dyn: phpLibDynArg(up.in.substring(up.in.indexOf(":") + 1))})) ~~>
+NamedArg    <~~ push(placedArg({aname: argLabel(up.in), pos: pop(), vtext: phpLibVarText(up.in.substring(up.in.indexOf(":") + 1)), dyn: phpLibDynArg(up.in.substring(up.in.indexOf(":") + 1))})) ~~>
             = ArgLabel Expression ;
 ArgLabel    = Id ":" !":" ;
 // acv: the name of a spread plain variable, whose elements a by-reference parameter
@@ -1080,7 +1080,7 @@ SpreadArg   <~~ var sv = trimWs(up.in).substring(3); push(placedArg({aspread: po
             = "..." Expression ;
 FccArg      <~~ push({fcc: true}) ~~>
             = "..." ;
-PosArg      <~~ push({pos: pop(), vtext: plainVarText(up.in), dyn: phpLibDynArg(up.in)}) ~~>
+PosArg      <~~ push({pos: pop(), vtext: phpLibVarText(up.in), dyn: phpLibDynArg(up.in)}) ~~>
             = Expression ;
 // 'f($a[])' / 'f($x[][$y])': an APPEND target is an argument only for a by-reference
 // parameter, which then binds the new element's cell (targetCell). It has no value to
@@ -1088,7 +1088,7 @@ PosArg      <~~ push({pos: pop(), vtext: plainVarText(up.in), dyn: phpLibDynArg(
 // (Zend/tests/func_arg_fetch_optimization). Twin of LvalArg in php-interpreter.abnf,
 // which takes every target this way; here only the '[]' form needs it, since PosArg
 // cannot parse it as an expression at all.
-AppendArg   <~~ pop(); push({pos: makeRaise("Cannot use [] for reading"), vtext: plainVarText(up.in)}) ~~>
+AppendArg   <~~ pop(); push({pos: makeRaise("Cannot use [] for reading"), vtext: phpLibVarText(up.in)}) ~~>
             = AppendAhead TgtOnly ArgEnd ;
 AppendAhead = :script(~~ "pure";
     (function() {
@@ -1268,8 +1268,8 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
-ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
-            = [ AttrGrp ] [ CloStatic ] KwFunction <~~ cloEnter(up.pos); genPush(); fnEnter() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
+ClosureExpr <~~ push(makeClosure(takeAll())); refFnStack.pop() ~~>
+            = [ AttrGrp ] [ CloStatic ] KwFunction <~~ cloEnter(up.pos); genPush(); fnEnter(); refFnStack.push(false) ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
 // A static closure (or arrow function) binds no $this (cloEnter).
 CloStatic   <~~ cloStatic = true ~~> = "static" KwEnd ;
 UseClause   = KwUse "(" [ UseVar { "," UseVar } ] [ "," ] ")" ;
@@ -2080,31 +2080,58 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var rhs = items[1]
         return function(b) {
             var rc = targetCell(b, rhs)
-            b = rc.b
-            if (lhs.path.length == 0 && lhs.gkey != undefined) {
-                var gn = globalsNameV(b, lhs)
-                b = gn.b
-                bindRefIn(b, globalsFrameV(b), gn.v, rc.v)
-            } else if (lhs.path.length == 0) {
-                bindRefIn(b, curScopeV, emitStr(b, lhs.name), rc.v)
-            } else {
-                var p = emitRefPathV(b, lhs, true)
-                b = p.b
-                callExt(b, "js_phrebind", [hUndef, rc.v])
-                if (p.kind == "append") { callExt(b, "js_phpush", [p.obj, rc.v]) }
-                else if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, rc.v]) }
-                else {
-                    // A typed property bound to a reference takes the referenced
-                    // value as it would an assigned one, and coerces it in place.
-                    if (mayUninit(p.keyName)) {
-                        callExt(b, "js_set", [rc.v, emitStr(b, "v"),
-                                callExt(b, "js_phptyped", [p.obj, p.key, callExt(b, "js_get", [rc.v, emitStr(b, "v")])])])
-                    }
-                    callExt(b, "js_set", [p.obj, p.key, rc.v])
-                }
-            }
-            return {b: b, v: callExt(b, "js_get", [rc.v, emitStr(b, "v")])}
+            return bindTargetV(rc.b, lhs, rc.v)
         }
+    }
+    // $h = &f() : a function or method returning by reference leaves the variable
+    // it returned in the globals frame's \x00refret (makeReturn), and the left side
+    // binds that cell; a returned value that is no variable, or a callee not
+    // returning by reference, is assigned by value. Twin of makeRefAssignCall in
+    // php-interpreter.abnf.
+    function makeRefAssignCall(lhs, r) {
+        return function(b) {
+            if (r.fn == "" || refFns[r.fn] !== true) { return makeAssign([lhs, "=", r.rv])(b) }
+            callExt(b, "js_scope_decl", [globalsFrameV(b), emitStr(b, "\x00refret"), hNull])
+            var rr = r.rv(b)
+            b = rr.b
+            var cellV = callExt(b, "js_scope_get", [globalsFrameV(b), emitStr(b, "\x00refret")])
+            var valB = curF.NewBlock("")
+            var refB = curF.NewBlock("")
+            var endB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, cellV, hNull), valB, refB)
+            var va = makeAssign([lhs, "=", constThunkV(rr.v)])(valB)
+            va.b.NewBr(endB)
+            var vr = bindTargetV(refB, lhs, cellV)
+            vr.b.NewBr(endB)
+            return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(va.v, va.b), llvm.ir.NewIncoming(vr.v, vr.b)])}
+        }
+    }
+    function bindTargetV(b, lhs, cellV) {
+        if (lhs.path.length == 0 && lhs.gkey != undefined) {
+            var gn = globalsNameV(b, lhs)
+            b = gn.b
+            bindRefIn(b, globalsFrameV(b), gn.v, cellV)
+        } else if (lhs.path.length == 0) {
+            var rn = refNameV(b, lhs)
+            b = rn.b
+            bindRefIn(b, curScopeV, rn.v, cellV)
+        } else {
+            var p = emitRefPathV(b, lhs, true)
+            b = p.b
+            callExt(b, "js_phrebind", [hUndef, cellV])
+            if (p.kind == "append") { callExt(b, "js_phpush", [p.obj, cellV]) }
+            else if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, cellV]) }
+            else {
+                // A typed property bound to a reference takes the referenced
+                // value as it would an assigned one, and coerces it in place.
+                if (mayUninit(p.keyName)) {
+                    callExt(b, "js_set", [cellV, emitStr(b, "v"),
+                            callExt(b, "js_phptyped", [p.obj, p.key, callExt(b, "js_get", [cellV, emitStr(b, "v")])])])
+                }
+                callExt(b, "js_set", [p.obj, p.key, cellV])
+            }
+        }
+        return {b: b, v: callExt(b, "js_get", [cellV, emitStr(b, "v")])}
     }
     // A closure's capture scope, built exactly the way php-interpreter.abnf's
     // makeClosure builds its env: a by-VALUE name is snapshotted, a by-REFERENCE one
@@ -2665,18 +2692,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     function makeConstStmt() { return function(b) { return b } }
-    function makeReturn(items, rv) {
+    function makeReturn(items, rv, rt) {
         var t = items.length > 0 ? items[0] : null
         return function(b) {
             var v = hNull
-            if (t != null) { var r = t(b); b = r.b; v = r.v }
+            var cellV = hNull
+            if (rt != null) {
+                // An element or property returned by reference is fetched for
+                // writing, created if missing, and its cell is what the caller binds.
+                var tc = targetCell(b, rt)
+                b = tc.b
+                cellV = tc.v
+                v = callExt(b, "js_get", [cellV, emitStr(b, "v")])
+            } else if (t != null) { var r = t(b); b = r.b; v = r.v }
             if (curRet != null) { v = emitRetFit(b, v) }
             // In a function returning by reference: the variable's cell, or null for a
             // value that is no variable, is left in the globals frame's \x00refret for
             // a caller that writes through the result (memoRefV).
             if (rv != null) {
-                var cv = hNull
-                if (rv != "") {
+                var cv = cellV
+                if (rv != "" && rt == null) {
                     var rc = varCell(b, rv)
                     b = rc.b
                     cv = rc.v
@@ -2687,15 +2722,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     // 'function &f()': the functions declared to return by reference, by lower-cased
-    // name, and for each function being parsed whether it is one (refFnStack).
-    // Twins of refFns / refRetVar / callHeadName in php-interpreter.abnf.
+    // name after "$" ("->" for a method), and for each function being parsed whether
+    // it is one (refFnStack; a closure counts as none). Twins of refFns /
+    // refRetVar / refRetTarget / callHeadName / refCallKey in php-interpreter.abnf.
     var refFns = {}
     var refFnStack = []
     var defAmp = false
-    function refFnEnter(name) {
+    function refFnEnter(name, pre) {
         refFnStack.push(defAmp)
         if (defAmp) {
-            refFns["$" + phsCase(stripWs(name), false)] = true
+            refFns[pre + phsCase(stripWs(name), false)] = true
             noteRef()
         }
         defAmp = false
@@ -2709,6 +2745,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (!(isNameStart(ch) || (ch >= "0" && ch <= "9"))) { return "" }
         }
         return e
+    }
+    function refRetTarget(t) {
+        if (refFnStack.length == 0 || refFnStack[refFnStack.length - 1] !== true) { return null }
+        var w = phpLibVarText(t.substring(6, t.length - 1))
+        if (w == null || isCvText(w) || w == "$this" || w.indexOf("[]") >= 0) { return null }
+        return argTarget(w)
     }
     function callHeadName(t) {
         var i = 0
@@ -2724,6 +2766,27 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
         }
         return lastSeg(phsCase(t.substring(0, i), false))
+    }
+    function refCallKey(t) {
+        var fn = callHeadName(t)
+        if (fn != "") { return "$" + fn }
+        if (t.length == 0 || t.charAt(t.length - 1) != ")") { return "" }
+        var depth = 0
+        var j = t.length - 1
+        while (j >= 0) {
+            if (t.charAt(j) == ")") { depth++ }
+            else if (t.charAt(j) == "(") {
+                depth--
+                if (depth == 0) { break }
+            }
+            j--
+        }
+        var e = j
+        while (j > 0 && (isNameStart(t.charAt(j - 1)) || (t.charAt(j - 1) >= "0" && t.charAt(j - 1) <= "9"))) { j-- }
+        if (j == e || j < 2) { return "" }
+        var op = t.substring(j - 2, j)
+        if (op != "->" && op != "::") { return "" }
+        return "->" + phsCase(t.substring(j, e), false)
     }
     // break / continue go through emitBreak / emitContinue so a jump that leaves a try
     // body (with no loop of its own) becomes a control signal instead of an invalid
@@ -5630,9 +5693,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var rw = op == "=" ? null : rwSite(ref, pos)
         var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
         // An array literal with '&' elements is a temporary: once copied it no
-        // longer holds their cells. A static property keeps the literal itself.
-        // Twin of makeAssign in php-interpreter.abnf.
-        var lit = op == "=" && items.length > 3 && items[3].rlit === true && !(ref.sbase != undefined && ref.path.length == 0)
+        // longer holds their cells. Twin of makeAssign in php-interpreter.abnf.
+        var lit = op == "=" && items.length > 3 && items[3].rlit === true
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -5645,6 +5707,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 b = rs5.b
                 var snV = rs5.v
                 if (op != "=") { v = compoundOp(b, oc, op, sGetV(b, rb.v, snV, sRefName(ref), false), v) }
+                else { v = callExt(b, "js_phcopy", [v]) }
                 sSetV(b, rb.v, snV, sRefName(ref), v)
             } else if (ref.path.length == 0) {
                 var rn4 = refNameV(b, ref)
@@ -5887,10 +5950,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return out
     }
     // An argument that denotes a STORAGE LOCATION, so a by-reference parameter can bind
-    // to it: '$name', '$a[0]', '$a["k"]["j"]', '$o->p'. The text is recognized here and
-    // re-parsed as a Target (argTarget) - the same door heredoc interpolation uses to
-    // reach the grammar from a tag - which yields the very ref record makeAssign and
-    // targetCell already understand, so every assignable form is covered at once.
+    // to it: '$name', '$a[0]', '$a["k"]["j"]', '$o->p'. The text is recognized
+    // (phpLibVarText) and re-parsed as a Target (argTarget) - the same door heredoc
+    // interpolation uses to reach the grammar from a tag - which yields the very ref
+    // record makeAssign and targetCell already understand, so every assignable form
+    // is covered at once.
     // Anything else answers null and is passed by value.
     function trimWs(t) {
         var a = 0
@@ -5906,48 +5970,6 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (t.length < 2 || t.charAt(0) != "$" || !isNameStart(t.charAt(1))) { return false }
         for (var i = 2; i < t.length; i++) { if (!isNameChar(t.charAt(i))) { return false } }
         return t != "$this" && t != "$GLOBALS"
-    }
-    function plainVarText(t) {
-        var w = trimWs(t)
-        if (w.length < 2 || w.charAt(0) != "$") { return null }
-        if (!isNameStart(w.charAt(1))) { return null }
-        // A bare $GLOBALS is a read-only copy, no variable (NotGlobalsBare): by value.
-        if (w == "$GLOBALS") { return null }
-        var i = 2
-        while (i < w.length && isNameChar(w.charAt(i))) { i++ }
-        // Any run of '[...]' and '->name' steps, with brackets balanced and string
-        // literals skipped so a ']' inside one cannot end the step early.
-        while (i < w.length) {
-            if (w.charAt(i) == "[") {
-                var depth = 0
-                while (i < w.length) {
-                    var ch = w.charAt(i)
-                    if (ch == "'" || ch == "\"") {
-                        var q = ch
-                        i++
-                        while (i < w.length && w.charAt(i) != q) {
-                            if (w.charAt(i) == "\\") { i++ }
-                            i++
-                        }
-                        if (i >= w.length) { return null }
-                    } else if (ch == "[") { depth++ }
-                    else if (ch == "]") {
-                        depth--
-                        if (depth == 0) { i++; break }
-                    }
-                    i++
-                }
-                if (depth != 0) { return null }
-                continue
-            }
-            if (w.charAt(i) == "-" && i + 2 < w.length && w.charAt(i + 1) == ">" && isNameStart(w.charAt(i + 2))) {
-                i += 2
-                while (i < w.length && isNameChar(w.charAt(i))) { i++ }
-                continue
-            }
-            return null
-        }
-        return w
     }
     // The ref record an assignable argument text denotes, parsed with the grammar
     // itself. A text that does not parse as a Target is passed by value.

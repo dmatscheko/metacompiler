@@ -1520,6 +1520,66 @@ function s82() {
     check("rc5", s82static(2) === 8);
 }
 
+// ===== SECTION 83: return by reference; a static property takes a copy =====
+// A function or method declared 'function &f()' returns the variable its return
+// names, and '$x = &f()' binds $x to it; a returned element or property is
+// fetched for writing, so it is created when missing. Any other right side of
+// '= &', a call to a function not returning by reference included, is assigned
+// by value (ZEND_ASSIGN_REF of a function result, ZEND_RETURN_BY_REF). Assigning
+// an array to a static property copies it, as any assignment does.
+function &s83counter() { static $c = 0; $c++; return $c; }
+function &s83global() { global $s83g; return $s83g; }
+function s83plain() { global $s83g; return $s83g; }
+function &s83slot(array &$a, $k) { return $a[$k]["in"]; }
+class S83 {
+    public static $p;
+    public $items = ["a" => 1];
+    public static function &shared() { static $v = 0; return $v; }
+    public function &item($k) { return $this->items[$k]; }
+    public function &all() { return $this->items; }
+}
+function s83() {
+    global $s83g;
+    $c1 = &s83counter();
+    $c1 += 100;
+    check("rr1", s83counter() === 102);
+    $s83g = 1;
+    $h = &s83global();
+    $h = 3;
+    check("rr2", $s83g === 3);
+    $p = &s83plain();
+    $p = 99;
+    check("rr3", $s83g === 3);
+    $v = &S83::shared();
+    $v = 10;
+    check("rr4", S83::shared() === 10);
+    $o = new S83;
+    $it = &$o->item("b");
+    $it = "B";
+    check("rr5", $o->items["b"] === "B");
+    $o->item("c");
+    check("rr6", array_key_exists("c", $o->items) && $o->items["c"] === null);
+    $all = &$o->all();
+    $all["z"] = 26;
+    $cp = $o->all();
+    $cp["y"] = 25;
+    check("rr7", count($o->items) === 4 && !isset($o->items["y"]));
+    $arr = [];
+    $d = &s83slot($arr, "k");
+    $d = "deep";
+    check("rr8", $arr["k"]["in"] === "deep");
+    $a = [1];
+    S83::$p = $a;
+    $a[0] = 2;
+    S83::$p[] = 5;
+    check("rr9", S83::$p[0] === 1 && count($a) === 1);
+    $n = "dyn";
+    $x = 1;
+    $$n = &$x;
+    $dyn = 5;
+    check("rr10", $x === 5);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1547,6 +1607,7 @@ function main() {
     s80dump(); // SECTION-CALL 80
     s81(); // SECTION-CALL 81
     s82(); // SECTION-CALL 82
+    s83(); // SECTION-CALL 83
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
