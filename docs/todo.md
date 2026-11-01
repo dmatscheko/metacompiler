@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1030** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1031** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,12 +72,8 @@ python3 3.14: `type(range(3)).__name__` → range, `type(iter(range(3))).__name_
 
 # RB — Ruby
 
-### T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(Enumerator)`; default_proc lambda arity · P3 · RB · IN PROGRESS (RB worker, round 38) [V]
-Found by the RB worker, round 37 (oracle ruby 2.6). `[1].each.is_a?(Enumerable)`, `[1].cycle.is_a?(Enumerable)`,
-`[1,2].lazy.kind_of?(Enumerable)` → true; ours false (rubyIsA in abnf/jsrt.go, rbIsA in layer 2, valueIsA in the interpreter need an
-Enumerator arm). `{1=>2}.to_proc.call(1)` → 2; ours nothing, so `h.default_proc = {}` stores the Hash. `[1].lazy.instance_of?(Enumerator)`
-→ false; ours true (instance_of? goes through is_a?). `h.default_proc = lambda{|x|}` → TypeError "default_proc takes two arguments
-(2 for 1)". Note: tests/ruby-test-full.rb's -frozen leg is at ~95-100M of the 100M step brake - put new sections in .2.rb or split it.
+### T-1030 ruby: Proc#=== as an operator returns a boolean; Struct is not Enumerable · P3 · RB · OPEN [V]
+ruby 2.6: `pr = proc{|x| x*2}; p(pr === 3)` → 6, `p({a: 1}.to_proc === :a)` → 1; ours: interp `true`, llvm.Run/native `false` (js_rcase has no callable arm and falls to rubyEq; interpreter and layer 2 need the same arm; case/when with a proc already works). `Struct.new(:a).new(1).is_a?(Enumerable)` → true; ours false in all three engines. Found by RB r38.
 
 # JS — JavaScript and TypeScript
 
@@ -1090,6 +1086,7 @@ T-1000 php: reference counts are never decremented (var_dump `&`, copy of an arr
 T-1016 java: overload resolution still counts inaccessible constructors (and probably methods) as candidates — DONE (JV r20, 2480267f): private/package-private/protected-for-new overloads and ctors dropped from static picks (JLS 6.6); pinned in java-test-multifile + imports/util/Gauge.java; master ran it under javac/java 24: passed. Runtime dispatcher (js_jvovcall) still context-blind when static types are unknown — no probe reached it.
 T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a BCL type fails late — DONE (CS r3, 9c4811dc): runtime throws set ParamName from the '(Parameter ..)' clause in all 3 engines; reading an unknown static member of Math/MathF/string/char/Enumerable fails at the read. Master spec probe: Substring(-1)/(1,5) ParamName, valid method groups Math.Abs/Sqrt/string.IsNullOrEmpty/Select(Math.Abs) all agree on 3 legs.
 T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attribute on an iterator; python-test-full.5.py near the step brake — PARTIAL→split (PY r20, 4a64d854): generator dir(); no-__dict__ AttributeError for iterators; unicode_escape/raw_unicode_escape/punycode/ASCII idna codecs; random.seed bit ops 3x cheaper with identical sequences. Master probe vs python3 3.14 (7 seeds incl. bignum/neg/str/bytes, big & | ^ << >>, codecs, dir): 4 legs agree. CJK codecs, \N{}, idna nameprep remain.
+T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(Enumerator)`; default_proc lambda arity — DONE (RB r38, 28b9c6e8): Enumerator/Lazy Enumerable, Symbol Comparable, exact instance_of?, Hash#to_proc and &hash, default_proc= conversion + lambda arity TypeError (2.6 rules). Master probe vs ruby 2.6: 4 legs agree.
 
 # Settled — do not re-open
 
