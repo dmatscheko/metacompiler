@@ -77,7 +77,7 @@ ruby 2.6: `class Bag; include Enumerable; def initialize(a); @a=a; end; def each
 
 # JS — JavaScript and TypeScript
 
-### T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)` modifiers · P3 · JS · OPEN [V]
+### T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)` modifiers · P3 · JS · IN PROGRESS (JS worker, round 40) [V]
 node 24: `/\{1}n/v` → SyntaxError "Lone quantifier brackets"; ours accepts (v-mode class-set syntax and its stricter rules are unimplemented — 212 of 6000 random v-flag patterns differ). Lookbehind `(?<=a)b` / `(?<!a)b` and ES2025 modifiers `(?i:a)b` are accepted at construction but abort when matched; node matches them. Found by JS r39.
 
 # JV — Java
@@ -137,7 +137,7 @@ Also found by PHP r36: (1) compiler: `function g2(){ try { thrower(); } catch (E
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed declare -A · P3 · SH · OPEN [V]
+### T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed declare -A · P3 · SH · IN PROGRESS (SH worker, round 27) [V]
 Oracle /opt/homebrew/bin/bash 5.3, LC_ALL=C (found by SH r26, repros in scratchpad SH26/):
 - `s=5 f` with `local s+=4` in f: bash `declare -x s="54"`; ours `declare -- s="54"` (export attribute lost).
 - `read -n N` / `read -N N` ignored.
