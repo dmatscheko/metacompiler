@@ -2726,7 +2726,7 @@ func init() {
 			ff, isFl := from.(jsJFlo)
 			rg := ktRangeLong(ktRange{from: fn, to: tn, st: sn,
 				down: mode == 1, ch: isCh, fl: isFl, f32: isFl && jvmIs32(ff.sty),
-				lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, st)
+				lg: ktIsLongBox(from) || ktIsLongBox(to), un: ktRangeUn(from)}, from, to, st)
 			if mode == 2 {
 				rg = ktRangeOpenEnd(rg)
 			}
@@ -4106,16 +4106,28 @@ func ktRangeClass(v interface{}) string {
 		}
 		return "kotlin.ranges.Closed" + k + "Range"
 	}
-	k := "Int"
-	if rg.ch {
-		k = "Char"
-	} else if rg.lg {
-		k = "Long"
-	}
+	k := ktRangeElemTy(rg)
 	if ktRangePlain(rg) {
 		return "kotlin.ranges." + k + "Range"
 	}
 	return "kotlin.ranges." + k + "Progression"
+}
+
+// ktRangeElemTy is the element type naming an integral range's class: IntRange,
+// ULongProgression. Twin of kRangeElemTy in kotlin-interpreter.abnf and
+// languages/lib/kotlin-rt.metajs.
+func ktRangeElemTy(rg ktRange) string {
+	switch {
+	case rg.ch:
+		return "Char"
+	case rg.lg:
+		return "Long"
+	case rg.un == 64:
+		return "ULong"
+	case rg.un == 32:
+		return "UInt"
+	}
+	return "Int"
 }
 
 // ktRangePlain: an IntRange-style `..` (step 1, ascending, not built by step /
@@ -7715,6 +7727,9 @@ type ktRange struct {
 	// past 2^53 - and the iteration, the count and toString use them.
 	lg         bool
 	lf, lt, ls int64
+	// un is 32 for a UIntRange / UIntProgression and 64 for a ULong one (0
+	// otherwise): its elements and bounds read back as UInts / ULongs.
+	un uint8
 }
 
 // ktRangeLong fills the exact bounds of a Long range from its bound values.
@@ -7771,6 +7786,20 @@ func ktIsLongBox(v interface{}) bool {
 	return ok && g.w == 64 && !g.u
 }
 
+// ktRangeUn is the un of a range from this bound: UByte and UShort ranges are
+// UIntRanges, exactly as Byte and Short ranges are IntRanges. Twin of kRangeUn in
+// kotlin-interpreter.abnf and k4RangeUn in languages/lib/kotlin-rt.metajs.
+func ktRangeUn(v interface{}) uint8 {
+	g, ok := v.(jsGInt)
+	if !ok || !g.u {
+		return 0
+	}
+	if g.w == 64 {
+		return 64
+	}
+	return 32
+}
+
 // The function spelling of rangeTo / rangeUntil / until / downTo, shared by the
 // number and Char receivers. The `..<` / until subtraction is on the BOUND,
 // exactly as the emitter's own lowering does it (ktRangeOpenEnd).
@@ -7780,7 +7809,8 @@ func ktRangeMake(from, to interface{}, name string) *jsObject {
 	_, isCh := from.(jsChar)
 	ff, isFl := from.(jsJFlo)
 	rg := ktRangeLong(ktRange{from: fn, to: tn, st: 1, down: name == "downTo",
-		ch: isCh, fl: isFl, f32: isFl && jvmIs32(ff.sty), lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, float64(1))
+		ch: isCh, fl: isFl, f32: isFl && jvmIs32(ff.sty), lg: ktIsLongBox(from) || ktIsLongBox(to),
+		un: ktRangeUn(from)}, from, to, float64(1))
 	if name == "until" || name == "rangeUntil" {
 		rg = ktRangeOpenEnd(rg)
 	}
@@ -7806,7 +7836,7 @@ func ktRangeOpenEnd(rg ktRange) ktRange {
 // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
 func ktRangeRev(rg ktRange) ktRange {
 	rv := ktRange{from: ktRangeLastEl(rg), to: rg.from, st: rg.st,
-		down: !rg.down, ch: rg.ch, pg: true, lg: rg.lg}
+		down: !rg.down, ch: rg.ch, pg: true, lg: rg.lg, un: rg.un}
 	if rg.lg {
 		rv.lf, rv.lt, rv.ls = ktRangeLastL(rg), rg.lf, rg.ls
 	}
@@ -7975,6 +8005,8 @@ func ktRangeOf(v interface{}) (ktRange, bool) {
 	rg.oe, _ = o.props["oe"].(bool)
 	rg.pg, _ = o.props["pg"].(bool)
 	rg.lg, _ = o.props["lg"].(bool)
+	un, _ := o.props["un"].(float64)
+	rg.un = uint8(un)
 	if rg.lg {
 		rg.lf, rg.lt, rg.ls = ktLongOf(o.props["lf"]), ktLongOf(o.props["lt"]), ktLongOf(o.props["ls"])
 	}
@@ -8003,6 +8035,9 @@ func ktMakeRange(rg ktRange) *jsObject {
 	}
 	o.set("pg", rg.pg)
 	o.set("lg", rg.lg)
+	if rg.un > 0 {
+		o.set("un", float64(rg.un))
+	}
 	if rg.lg {
 		o.set("lf", jsGInt{v: rg.lf, w: 64})
 		o.set("lt", jsGInt{v: rg.lt, w: 64})
@@ -8043,7 +8078,26 @@ func ktRangeEl(rg ktRange, n float64) interface{} {
 	if rg.lg {
 		return jsGInt{v: int64(n), w: 64}
 	}
+	if rg.un > 0 {
+		// Double.toUInt / toULong: a ULong bound past 2^53 is already a rounded
+		// double here, which this saturates rather than wraps.
+		return ktNorm(ktFloNarrow(n, rg.un, true), rg.un, true)
+	}
 	return n
+}
+
+// ktRangeMax is the MAX_VALUE of an integral range's element type, as a double.
+// Twin of kRangeMax in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktRangeMax(rg ktRange) float64 {
+	switch {
+	case rg.ch:
+		return 65535
+	case rg.un == 64:
+		return math.MaxUint64
+	case rg.un == 32:
+		return math.MaxUint32
+	}
+	return math.MaxInt32
 }
 
 // ktRangeEndEx is OpenEndRange.endExclusive: a half-open floating range's bound,
@@ -8058,11 +8112,9 @@ func (rt *jsrt) ktRangeEndEx(rg ktRange) (interface{}, bool) {
 	if rg.fl || rg.pg || rg.down {
 		return nil, false
 	}
-	top := rg.to == 2147483647
+	top := rg.to == ktRangeMax(rg)
 	if rg.lg {
 		top = rg.lt == math.MaxInt64
-	} else if rg.ch {
-		top = rg.to == 65535
 	}
 	if top {
 		rt.ktRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.")
@@ -8459,12 +8511,7 @@ func ktRangeIsType(rg ktRange, t string) bool {
 	if t == "ClosedRange" || t == "OpenEndRange" {
 		return plain
 	}
-	k := "Int"
-	if rg.ch {
-		k = "Char"
-	} else if rg.lg {
-		k = "Long"
-	}
+	k := ktRangeElemTy(rg)
 	if t == k+"Progression" {
 		return true
 	}

@@ -6832,6 +6832,34 @@ fun s154() {
     check("endex154g", tops.all { it == "Cannot return the exclusive upper bound of a range that includes MAX_VALUE." })
 }
 
+// ===== SECTION 155: unsigned ranges =====
+// `..`, `..<`, until, downTo and step over UInt / ULong bounds build a
+// UIntRange / ULongRange (a UIntProgression / ULongProgression once stepped or
+// reversed), never an IntRange; UByte / UShort bounds build a UIntRange. The
+// elements, first, last and bounds are UInts / ULongs again, and endExclusive is
+// refused at the UNSIGNED MAX_VALUE (kotlinc 2.2.21 on java 24).
+fun s155() {
+    val us = listOf(1u, 5u, 2147483647u, 4000000000u, UInt.MAX_VALUE)
+    val uls = listOf(1uL, 9uL, 9223372036854775807uL, ULong.MAX_VALUE)
+    val r = us[0]..us[3]
+    check("urange155a", r is UIntRange && "$r" == "1..4000000000" && 3000000000u in r && r.last == us[3] &&
+        listOf(r.first, r.endInclusive, (us[0]..us[1]).endExclusive).map { it::class.simpleName } == listOf("UInt", "UInt", "UInt") &&
+        (uls[0]..uls[1]) is ULongRange && listOf((uls[0]..uls[1]).last).map { it::class.simpleName } == listOf("ULong") &&
+        (us[0]..us[1]).toList() == listOf(1u, 2u, 3u, 4u, 5u) && (us[4] - 1u..us[4]).toList() == listOf(4294967294u, us[4]))
+    val anys = listOf<Any>(us[0]..us[1], us[1] downTo us[0], (us[0]..us[1]).reversed(), uls[0]..uls[1],
+        us[0].toUByte()..us[1].toUByte())
+    check("urange155b", anys.map { it is UIntRange } == listOf(true, false, false, false, true) &&
+        anys.map { it is UIntProgression } == listOf(true, true, true, false, true) &&
+        anys.map { it is ULongRange } == listOf(false, false, false, true, false) &&
+        anys.map { it is IntRange || it is IntProgression || it is LongRange } == listOf(false, false, false, false, false) &&
+        "${anys[1]}" == "5 downTo 1 step 1" && "${(us[0]..us[1] step 2)}" == "1..5 step 2")
+    check("uendex155c", (us[0]..us[2]).endExclusive == 2147483648u && (us[0] until us[1]).endExclusive == us[1] &&
+        (uls[0]..uls[2]).endExclusive == 9223372036854775808uL)
+    val tops = listOf({ (us[0]..us[4]).endExclusive }, { (uls[0]..uls[3]).endExclusive })
+        .map { try { it(); "ok" } catch (e: IllegalStateException) { e.message } }
+    check("uendex155d", tops.all { it == "Cannot return the exclusive upper bound of a range that includes MAX_VALUE." })
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6983,6 +7011,7 @@ fun main() {
     s152() // SECTION-CALL 152
     s153() // SECTION-CALL 153
     s154() // SECTION-CALL 154
+    s155() // SECTION-CALL 155
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

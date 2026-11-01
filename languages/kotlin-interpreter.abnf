@@ -3408,9 +3408,12 @@ NotMemberKw = :script(~~ "pure";
     // boxes): from / to / st are doubles, which cannot step past 2^53, so the
     // iteration, the count and toString use these. Twin of ktRangeLong in
     // abnf/jsrtkotlin.go and k4RangeLong in languages/lib/kotlin-rt.metajs.
+    // `un` is 32 for a UIntRange / UIntProgression and 64 for a ULong one (0
+    // otherwise): its elements and bounds read back as UInts / ULongs.
     function kRange(from, to, down) {
         var rg = {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down,
-                  ch: kIsChar(from), fl: kIsFlo(from), f32: kIsF32(from), pg: false, lg: kIsLongBox(from) || kIsLongBox(to)}
+                  ch: kIsChar(from), fl: kIsFlo(from), f32: kIsF32(from), pg: false, lg: kIsLongBox(from) || kIsLongBox(to),
+                  un: kRangeUn(from)}
         if (rg.lg) {
             rg.lf = kAdoptLong(from)
             rg.lt = kAdoptLong(to)
@@ -3435,7 +3438,7 @@ NotMemberKw = :script(~~ "pure";
         var stn = kNum(st)
         if (stn <= 0) { kStepBad(st) }
         var out = {__range: true, from: rg.from, to: rg.to, st: stn, down: rg.down,
-                   ch: rg.ch, fl: rg.fl, pg: true, lg: rg.lg}
+                   ch: rg.ch, fl: rg.fl, pg: true, lg: rg.lg, un: rg.un}
         if (rg.lg) {
             out.lf = rg.lf
             out.lt = rg.lt
@@ -3457,6 +3460,13 @@ NotMemberKw = :script(~~ "pure";
     // A signed 64-bit sized integer, the value model's Long. Twin of ktIsLongBox in
     // abnf/jsrtkotlin.go.
     function kIsLongBox(v) { return szIs(v) && v.w == 64 && !v.u }
+    // The `un` of a range from this bound: UByte and UShort ranges are UIntRanges,
+    // exactly as Byte and Short ranges are IntRanges. Twin of ktRangeUn in
+    // abnf/jsrtkotlin.go and k4RangeUn in languages/lib/kotlin-rt.metajs.
+    function kRangeUn(v) {
+        if (!szIs(v) || !v.u) { return 0 }
+        return v.w == 64 ? 64 : 32
+    }
     // An element of a LongArray is a Long, so an integer literal written into one
     // (`longArrayOf(1, 2)`, `LongArray(2) { 7 }`) is typed by that expectation. Twin
     // of ktAdoptLong in abnf/jsrtkotlin.go.
@@ -3467,7 +3477,7 @@ NotMemberKw = :script(~~ "pure";
     // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
     function rangeRev(rg) {
         var rv = {__range: true, from: rangeLastEl(rg), to: rg.from, st: rg.st,
-                  down: !rg.down, ch: rg.ch, fl: false, pg: true, lg: rg.lg}
+                  down: !rg.down, ch: rg.ch, fl: false, pg: true, lg: rg.lg, un: rg.un}
         if (rg.lg) {
             rv.lf = kRangeLastL(rg)
             rv.lt = rg.lf
@@ -3641,6 +3651,9 @@ NotMemberKw = :script(~~ "pure";
         if (rg.ch) { return kChar(n) }
         if (rg.fl === true) { return rg.f32 === true ? kFlo32(n) : kFlo(n) }
         if (rg.lg === true) { return kAdoptLong(n) }
+        // Double.toUInt / toULong: a ULong bound past 2^53 is already a rounded
+        // double here, which this saturates rather than wraps.
+        if (rg.un > 0) { return kConv(kFlo(n), rg.un, true) }
         return n
     }
     // OpenEndRange.endExclusive: a half-open floating range's bound, else (an
@@ -3651,10 +3664,16 @@ NotMemberKw = :script(~~ "pure";
     function kRangeEndEx(rg) {
         if (rg.oe === true) { return rangeEl(rg, rg.to) }
         if (rg.fl === true || rg.pg === true || rg.down) { return undefined }
-        var top = rg.lg === true ? kCmpI("==", rg.lt, szMake(kLongMaxP, 64, kNoU)) : rg.to == (rg.ch ? 65535 : 2147483647)
+        var top = rg.lg === true ? kCmpI("==", rg.lt, szMake(kLongMaxP, 64, kNoU)) : rg.to == kRangeMax(rg)
         if (top) { kRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.") }
         if (rg.lg === true) { return kArith("+", rg.lt, 1) }
         return rangeEl(rg, rg.to + 1)
+    }
+    // The MAX_VALUE of an integral range's element type, as a double.
+    function kRangeMax(rg) {
+        if (rg.ch) { return 65535 }
+        if (rg.un > 0) { return rg.un == 64 ? 18446744073709551615 : 4294967295 }
+        return 2147483647
     }
     function rangeEmpty(rg) {
         // ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound
@@ -3671,8 +3690,8 @@ NotMemberKw = :script(~~ "pure";
     function rangeStr(rg) {
         // ClosedFloatingPointRange.toString is "$start..$endInclusive".
         if (rg.fl === true) { return kstr(rangeEl(rg, rg.from)) + (rg.oe === true ? "..<" : "..") + kstr(rangeEl(rg, rg.to)) }
-        var a = kstr(rg.ch ? kChar(rg.from) : rg.from)
-        var b = kstr(rg.ch ? kChar(rangeLastEl(rg)) : rangeLastEl(rg))
+        var a = kstr(rangeEl(rg, rg.from))
+        var b = kstr(rangeEl(rg, rangeLastEl(rg)))
         if (rg.lg === true && rg.lf !== undefined) {
             a = kstr(rg.lf)
             b = kstr(kRangeLastL(rg))
@@ -6924,8 +6943,10 @@ NotMemberKw = :script(~~ "pure";
         if (kIsCRange(v)) { return v.open ? "kotlin.ranges.ComparableOpenEndRange" : "kotlin.ranges.ComparableRange" }
         if (!isRange(v)) { return "" }
         if (v.fl === true) { return "kotlin.ranges." + (v.oe === true ? "OpenEnd" : "Closed") + (v.f32 === true ? "Float" : "Double") + "Range" }
-        return "kotlin.ranges." + (v.ch ? "Char" : v.lg === true ? "Long" : "Int") + (kRangePlain(v) ? "Range" : "Progression")
+        return "kotlin.ranges." + kRangeElemTy(v) + (kRangePlain(v) ? "Range" : "Progression")
     }
+    // The element type naming an integral range's class: IntRange, ULongProgression.
+    function kRangeElemTy(v) { return v.ch ? "Char" : v.lg === true ? "Long" : v.un == 64 ? "ULong" : v.un == 32 ? "UInt" : "Int" }
     // An IntRange-style `..` (step 1, ascending, not built by step / reversed), as
     // opposed to an IntProgression.
     function kRangePlain(v) { return v.st == 1 && !v.down && v.pg !== true }
@@ -12796,7 +12817,7 @@ NotMemberKw = :script(~~ "pure";
             if (t == "Iterable") { return true }
             var plain = kRangePlain(v)
             if (t == "ClosedRange" || t == "OpenEndRange") { return plain }
-            var rk = v.ch ? "Char" : v.lg === true ? "Long" : "Int"
+            var rk = kRangeElemTy(v)
             if (t == rk + "Progression") { return true }
             return t == rk + "Range" && plain
         }

@@ -4208,8 +4208,7 @@ function ktRangeClass(v) {
         if (v["oe"] === true) { return "kotlin.ranges.OpenEnd" + fk + "Range" }
         return "kotlin.ranges.Closed" + fk + "Range"
     }
-    var k = "Int"
-    if (v["ch"] === true) { k = "Char" } else if (v["lg"] === true) { k = "Long" }
+    var k = k4RangeElemTy(v)
     if (k4RangePlain(v)) { return "kotlin.ranges." + k + "Range" }
     return "kotlin.ranges." + k + "Progression"
 }
@@ -10169,7 +10168,7 @@ function js_ktrange(from, to, st, down) {
     // `oe` the half-open `1.0..<2.0` (k4RangeDec).
     var rg = {__range: true, from: k4RangeNum(from), to: k4RangeNum(to),
               st: stn, down: down === 1, ch: ktIsChar(from), fl: floIs(from), f32: k4IsF32(from), pg: false,
-              lg: k4IsLongBox(from) || k4IsLongBox(to)}
+              lg: k4IsLongBox(from) || k4IsLongBox(to), un: k4RangeUn(from)}
     k4RangeLong(rg, from, to, st)
     if (down === 2) { k4RangeDec(rg) }
     return rg
@@ -10213,7 +10212,7 @@ function js_ktrestep(r, st) {
     // `step` answers an IntProgression, never an IntRange, whatever the step is:
     // `(1..5) step 1` prints "1..5 step 1" and `is IntRange` is false for it.
     return {__range: true, from: r["from"], to: r["to"], st: stn,
-            down: r["down"], ch: r["ch"], fl: r["fl"], pg: true, lg: r["lg"] === true,
+            down: r["down"], ch: r["ch"], fl: r["fl"], pg: true, lg: r["lg"] === true, un: r["un"],
             lf: r["lf"], lt: r["lt"], ls: ktNorm(k1Val(st), 64, 0)}
 }
 
@@ -10222,14 +10221,22 @@ function k4IsF32(v) {
     return ktIsF32(v)
 }
 
+// jsrtkotlin.go ktRangeMax: the MAX_VALUE of an integral range's element type.
+function k4RangeMax(rg) {
+    if (rg["ch"] === true) { return 65535 }
+    if (rg["un"] === 64) { return 18446744073709551615 }
+    if (rg["un"] === 32) { return 4294967295 }
+    return 2147483647
+}
+
 // jsrtkotlin.go ktRangeEndEx: OpenEndRange.endExclusive, KT_MISS on a stepped or
 // downward progression.
 function k4RangeEndEx(rg) {
     if (rg["oe"] === true) { return k4RangeEl(rg, rg["to"]) }
     if (rg["fl"] === true || rg["pg"] === true || rg["down"] === true) { return KT_MISS }
     var lg = rg["lg"] === true
-    var top = rg["to"] == 2147483647
-    if (lg) { top = k1Cmp("==", rg["lt"], k1MaxI64()) } else if (rg["ch"] === true) { top = rg["to"] == 65535 }
+    var top = rg["to"] == k4RangeMax(rg)
+    if (lg) { top = k1Cmp("==", rg["lt"], k1MaxI64()) }
     if (top) { ktRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.") }
     if (lg) { return k1Arith("+", rg["lt"], 1) }
     return k4RangeEl(rg, rg["to"] + 1)
@@ -10241,6 +10248,10 @@ function k4RangeEl(rg, n) {
         return flo(n, 0)
     }
     if (rg["lg"] === true) { return ktAdoptLong(n) }
+    // Double.toUInt / toULong: a ULong bound past 2^53 is already a rounded
+    // double here, which this saturates rather than wraps.
+    var un = rg["un"]
+    if (un === 32 || un === 64) { return ktNorm(k1FloNarrow(n, un, 1), un, 1) }
     return n
 }
 
@@ -10250,6 +10261,14 @@ function k4RangeEl(rg, n) {
 function k4IsLongBox(v) {
     if (!sintIs(v)) { return false }
     return sintWidth(v) == 64 && !sintUns(v)
+}
+
+// jsrtkotlin.go ktRangeUn: `un` is 32 for a UIntRange / UIntProgression (UByte
+// and UShort bounds too) and 64 for a ULong one, 0 otherwise.
+function k4RangeUn(v) {
+    if (!sintIs(v) || !sintUns(v)) { return 0 }
+    if (sintWidth(v) == 64) { return 64 }
+    return 32
 }
 
 // An element of a LongArray is a Long, so an integer literal written into one
@@ -10316,7 +10335,7 @@ function ktRangeEmpty(rg) {
 // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
 function ktRangeRev(rg) {
     var rv = {__range: true, from: ktRangeLastEl(rg), to: rg["from"], st: rg["st"],
-              down: rg["down"] !== true, ch: rg["ch"], fl: false, pg: true, lg: rg["lg"] === true}
+              down: rg["down"] !== true, ch: rg["ch"], fl: false, pg: true, lg: rg["lg"] === true, un: rg["un"]}
     if (rg["lg"] === true) {
         rv["lf"] = k4RangeLastL(rg)
         rv["lt"] = rg["lf"]
@@ -10352,7 +10371,7 @@ function ktRangeAt(rg, i) {
 function k4RangeMake(from, to, name) {
     var rg = {__range: true, from: k4RangeNum(from), to: k4RangeNum(to), st: 1,
               down: name == "downTo", ch: ktIsChar(from), fl: floIs(from), f32: k4IsF32(from), pg: false,
-              lg: k4IsLongBox(from) || k4IsLongBox(to)}
+              lg: k4IsLongBox(from) || k4IsLongBox(to), un: k4RangeUn(from)}
     k4RangeLong(rg, from, to, 1)
     if (name == "until" || name == "rangeUntil") { k4RangeDec(rg) }
     return rg
@@ -10619,6 +10638,15 @@ function ktRangeHash(rg) {
     return (Math.imul(31, h) + ktElemHash(step)) | 0
 }
 
+// jsrtkotlin.go ktRangeElemTy: the element type naming an integral range's class.
+function k4RangeElemTy(rg) {
+    if (rg["ch"] === true) { return "Char" }
+    if (rg["lg"] === true) { return "Long" }
+    if (rg["un"] === 64) { return "ULong" }
+    if (rg["un"] === 32) { return "UInt" }
+    return "Int"
+}
+
 // `r is T`. Twin of ktRangeIsType in abnf/jsrtkotlin.go, which has the rules.
 function k4RangeIsType(rg, tname) {
     var t = k4bStripQ(k4bStripAngle(tname))
@@ -10630,8 +10658,7 @@ function k4RangeIsType(rg, tname) {
     if (t == "Iterable") { return true }
     var plain = k4RangePlain(rg)
     if (t == "ClosedRange" || t == "OpenEndRange") { return plain }
-    var k = "Int"
-    if (rg["ch"] === true) { k = "Char" } else if (rg["lg"] === true) { k = "Long" }
+    var k = k4RangeElemTy(rg)
     if (t == k + "Progression") { return true }
     if (t == k + "Range") { return plain }
     return false
