@@ -147,13 +147,13 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-955 kotlin: fail-fast iteration is missing for the other higher-order functions and for sets · P2 · KT · OPEN [V]
+### T-955 kotlin: fail-fast iteration is missing for the other higher-order functions and for sets · P2 · KT · IN PROGRESS (KT worker, round 11) [V]
 Found by the KT worker, round 10. `val ml = mutableListOf(1,2,3); ml.filter { ml.add(9); true }` (also `any`, `count`, `all`,
 `none`, `sumOf`, `first { }` and the rest that iterate) runs to the end; the JVM throws ConcurrentModificationException for each.
 `val s = mutableSetOf(1,2); s.forEach { s.add(it + 10) }` and `s.map { … }` likewise: JVM CME, ours none. for loops, list
 forEach / forEachIndexed / map and map views already check (kIterN0 / ktIterStart / k4IterStart in the three engines).
 
-### T-956 kotlin: `map.keys.remove(k)` / `map.values.remove(v)` change only the view · P2 · KT · OPEN [V]
+### T-956 kotlin: `map.keys.remove(k)` / `map.values.remove(v)` change only the view · P2 · KT · IN PROGRESS (KT worker, round 11) [V]
 Found by the KT worker, round 10. `val m = mutableMapOf(1 to "a", 2 to "b"); m.keys.remove(1); println(m)` → JVM `{2=b}`,
 every engine `{1=a, 2=b}`; same for `m.values.remove("a")` and `m.entries.removeIf { … }`. The view's iterator `remove()`
 already reaches the map (the `__wsrc` link); the view's own remove/removeAll/retainAll/removeIf/clear should too.
