@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1016** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1017** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -94,12 +94,11 @@ text to U+FFFD (U+D800 matches \p{Grapheme_Base}). `\p{sc=Zyyy}` matches Unicode
 
 # JV — Java
 
-### T-1013 java: protected receiver rule, package-private constructors, untyped receivers escape the access check · P3 · JV · IN PROGRESS (JV worker, round 19) [V]
-Found by the JV worker, round 18 (oracle javac 24). `class Sub extends q.Box { int peek(Box b) { return b.prot(); } }` → javac "prot()
-has protected access in Box" (JLS 6.6.2.1: the receiver must be Sub or below); all legs print 3. `new Box(3)` with a package-private
-`Box(int)` from another package (and a public `Box()`) → javac "constructor Box in class Box cannot be applied to given types;"; all
-legs run it (constructor access unchecked). `Main.mk().a += 2` with package-private `a` → javac refuses; jRecvTy does not type a
-class-qualified static call's result, so nothing is checked.
+### T-1016 java: overload resolution still counts inaccessible constructors (and probably methods) as candidates · P3 · JV · OPEN [V]
+Found by the JV worker, round 19 (oracle java 24). `package r; public class K { public int v; private K(int a,int b){v=a+b;} public
+K(double d,int b){v=b;} }`, then from another package `new K(1,2).v` → java 2 (the private ctor is not a candidate, JLS 15.12.2.1);
+interpreter, compiler and native 3. jOvCtorSig needs the call site's package and top-level type to filter candidates; check private
+and package-private method overloads the same way.
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
@@ -1086,6 +1085,7 @@ T-1007 c#: `string.CompareOrdinal` of an astral character vs an ASCII one has th
 T-991 js: member store on a primitive base; `(this).x++`; compiler parse of `println("s".x = 5)` — DONE - member writes on primitives dropped (sloppy) / TypeError (strict) in all engines, (this) targets, logical-assignment places evaluated once
 T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case folding under `iu`; private brand check in decorator access — DONE - Script_Extensions and the 30 ES binary properties (Unicode 17 tables), Unicode simple case folding under iu incl. \w/\b, private brand checks in decorator access
 T-925 parse time grows exponentially with bracket nesting in seven grammars, both halves — DONE - packrat memo for pure recursive productions in abnf/parser.go ("pure" directive for peek-only guards), Go SliceAhead guard; bracket nesting linear in all seven grammars, no measurable cost
+T-1013 java: protected receiver rule, package-private constructors, untyped receivers escape the access check — DONE - protected receiver rule, constructor access (incl. protected via super/anonymous), enclosing-class call results typed; javac messages, both halves
 
 # Settled — do not re-open
 
