@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1091** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1093** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,20 +69,27 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for · P3 · RB · IN PROGRESS (RB worker, round 49) [V]
-Design state (2 rounds attempted, not landed): interpreter - deferred Enumerator over a user #each gets t.co = coNew(() => mcall(src, meth, margs, (...a) => coYield(packed a))); next/peek coResume, done -> StopIteration with result; rewind drops t.co unresumed; swap block/self frames, $!/rescue state and catch-tag stack at each resume/yield (cf. python-interpreter generators); forEnumItems and Lazy#next pull from it. Compiled - emitter emits rbCoBody(src, meth, margs) (block body = js_yield(args)) and registers js_genfn(closure(rbCoBody)) at module init via a new extern (e.g. js_rcoreg), lua libCoBody-style; Go twin / layer 2 create and step the generator through it; rubyCatchTags (Go), js_rcatch/js_rthrow tag stack (layer 2) and the current-exception slot saved/restored per resume; js_rfornext resuming gives for-interleaving. Floor - needs additive gen_drop(g) (mark done, free cb[8], drop from collector's suspended roots, never resume): gen_close runs finallys but MRI runs no ensure on rewind/abandon, and without it every rewound Enumerator leaks a 2 MB stack. Needs a dedicated round with the floor change coordinated as a shared-file (CORE) change. Oracle probe: scratch RB46/h.rb.
-Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c gen_resume/gen_close) - coordinate as a shared-file change. Oracle /usr/bin/ruby 2.6, class whose #each logs 1,2,3,:end and yields 10,20,30 (returns :done):
-- `e.next` -> 10, log [1]; `e.peek` -> 20, log [1, 2]; after the third next, StopIteration "iteration reached an end", `result` :done. `rewind` drops the run WITHOUT running ensure (MRI runs none on rewind or at exit).
-- `lazy.map { |v| v + 1 }.next` twice -> 11, 21, log [1, 2]; `C.new(l).map.next` -> 10, log [1]; `each_slice(2).next` -> [10, 20] then [30].
-- `to_enum` / `enum_for` (NoMethodError today).
-- `for` over a user #each must interleave the body with #each's side effects (today all yields are collected first).
-Needs: interpreter coroutine running src.each(&blk) with blk = coYield, switching run state (block/self frames, rescue state) on resume; compiled: one emitted generator closure registered with the Go twin / layer 2 (js_genfn/js_yield are emitter-only externs); per-coroutine rubyCatchTags (Go) and js_rcatch/js_rthrow state (layer 2) plus the current-exception slot; close of an unfinished one must skip ensure.
-
 ### T-1086 ruby: deferred Enumerator size after forcing; with_index value on to_enum; top-level to_enum · P3 · RB · OPEN [V]
 Oracle /usr/bin/ruby 2.6; interpreter seen, Go twin / layer 2 share the logic:
 - a deferred Enumerator over a user #each (`C.new.each_slice(1)`) answers `.size` as its element count once forced (`to_a`); MRI nil.
 - `with_index` / `with_object` with a block on a forced to_enum Enumerator answer the receiver; MRI the underlying method's value (e.g. :done).
 - `to_enum` at the top level (self is main) is not handled.
+
+### T-1091 ruby: compiled block splat param `|m, *a|` does not auto-splat a single array arg · P3 · RB · OPEN [V]
+
+The interpreter matches ruby 2.6. llvm.Run and native do not:
+- `[[1,2,3]].each { |m, *a| p [m, a] }` should print `[1, [2, 3]]`; the compiled legs print `[1, []]`.
+- Same with `def y; yield [4,5,6]; end; y { |m, *a| p [m, a] }`.
+
+Ruby rule: a proc/block with more than one declared parameter, or with a rest parameter after a leading one, auto-splats a lone Array argument (vm_callee_setup_block_arg / arg_setup_block). Lambdas never auto-splat. Also cover `|m, (x, y), *r|` and `|*a|` (no splat: a == [[1,2,3]]).
+
+### T-1092 ruby: `for x in obj` over any object with #each (user Enumerable) · P3 · RB · OPEN [V]
+
+`for` accepts only Array, Hash, Range and Enumerator. Ruby's `for x in e` is `e.each { |x| ... }` without a new scope, so it works on any object that responds to #each. On every leg, `class D; def each; yield 1; yield 2; end; end; for x in D.new; p x; end` fails:
+- interpreter: "for-in needs an array or a hash";
+- compiled legs: "len() of a object".
+
+Ruby prints 1 and 2. `break` must run the #each method's ensure: `[:start, 10, -10, 20, -20, :ensure]` is the oracle output for the C class in the T-1069 probe. The loop variable must stay visible after the loop, and `next`/`redo` need the same semantics as for arrays.
 
 # JS — JavaScript and TypeScript
 
@@ -1149,6 +1156,7 @@ T-1083 php: builtin argument TypeErrors; dynamic undefined-call line; opcode-com
 T-1084 bash: subscript leftovers (${a[@]:'1'}, [[ -v a[@] ]], quoted computed declare); option after operand — DONE (SH r32, 76ec1067): ${v:off:len} offsets fall back to run-time arithmetic (quoted offsets error like bash), [[ -v NAME[@] ]] / [*] semantics incl. assoc and nameref, quoted subscripts in computed declare operands, late option words in declare mark later literals; 4 legs = bash 5.3 incl. stderr and exit status. Stderr-only token wordings + pre-existing declare gaps filed; nullglob/locale out of scope
 T-1085 kotlin: apply{} receiver inside an extension (compiled crash); implicit javaClass; unboxed inline-lambda it — DONE (KT r27, 49f0b1c3): scope-function receivers are the innermost implicit receiver inside extensions and members (compiled apply{append} crash fixed, this@label resolution, fall-through to outer receiver), implicit javaClass, unboxed inline-lambda it, reified T through multi-line when lambdas and member references (map(Int::toString) was Unit); native String receivers no longer answered by C-floor methods; classNames keys $-prefixed (FROZEN-DIFF). Master probe: single-line when lambda still infers Any - filed
 T-1089 kotlin: nested builtin receivers in scope functions; single-line when lambda typing — DONE (KT r28, fb543678): kotlinc-derived builtin member table (9 kinds x 70 names) lets names an inner builtin receiver lacks fall through to the outer receiver, identical in all 3 engines; one-expression lambda bodies split only at top-level ; / newline (when lambdas type); 4 legs = kotlinc
+T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for — DONE r49 (af985019): suspendable Enumerator next/peek/rewind over user #each with ensure, map/lazy/each_slice .next, catch/throw across a suspended run; master-probed vs ruby 2.6, 4 legs agree
 
 # Settled — do not re-open
 
