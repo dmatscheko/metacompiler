@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1104** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1106** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,27 +69,24 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1086 ruby: deferred Enumerator size after forcing; with_index value on to_enum; top-level to_enum · P3 · RB · IN PROGRESS (RB worker, round 50) [V]
-Oracle /usr/bin/ruby 2.6; interpreter seen, Go twin / layer 2 share the logic:
-- a deferred Enumerator over a user #each (`C.new.each_slice(1)`) answers `.size` as its element count once forced (`to_a`); MRI nil.
-- `with_index` / `with_object` with a block on a forced to_enum Enumerator answer the receiver; MRI the underlying method's value (e.g. :done).
-- `to_enum` at the top level (self is main) is not handled.
+### T-1104 ruby: interpreter `break` from a block is caught by the nearest call with a block literal (untagged) · P3 · RB · OPEN [V]
 
-### T-1091 ruby: compiled block splat param `|m, *a|` does not auto-splat a single array arg · P3 · RB · IN PROGRESS (RB worker, round 50) [V]
+Only the interpreter is wrong; llvm.Run and native match ruby 2.6.
 
-The interpreter matches ruby 2.6. llvm.Run and native do not:
-- `[[1,2,3]].each { |m, *a| p [m, a] }` should print `[1, [2, 3]]`; the compiled legs print `[1, []]`.
-- Same with `def y; yield [4,5,6]; end; y { |m, *a| p [m, a] }`.
+```ruby
+def b; [1].each { yield }; :b_end; end
+p(b { break 5 })                          # ruby: 5      interp: :b_end
+def c; r = [1, 2].map { |v| yield v }; [:c, r]; end
+p(c { |v| break v * 7 })                  # ruby: 7      interp: [:c, 7]
+```
 
-Ruby rule: a proc/block with more than one declared parameter, or with a rest parameter after a leading one, auto-splats a lone Array argument (vm_callee_setup_block_arg / arg_setup_block). Lambdas never auto-splat. Also cover `|m, (x, y), *r|` and `|*a|` (no splat: a == [[1,2,3]]).
+`break` must end the call that the block was written for: the frame that received the block literal, not the innermost call currently running a block. Tag the break throw with the block's home call (as the compiled legs do) and catch it only there. A break from a proc whose home call has already returned must raise LocalJumpError.
 
-### T-1092 ruby: `for x in obj` over any object with #each (user Enumerable) · P3 · RB · IN PROGRESS (RB worker, round 50) [V]
+### T-1105 ruby: split tests/ruby-test-full.rb, which is ~0.4% below the -frozen 100M step brake · P3 · RB · OPEN [V]
 
-`for` accepts only Array, Hash, Range and Enumerator. Ruby's `for x in e` is `e.each { |x| ... }` without a new scope, so it works on any object that responds to #each. On every leg, `class D; def each; yield 1; yield 2; end; end; for x in D.new; p x; end` fails:
-- interpreter: "for-in needs an array or a hash";
-- compiled legs: "len() of a object".
+Under the -frozen interpreter the file takes about 99.5–99.7M steps against the 100M brake. Almost any per-call cost added to the interpreter trips it; the r50 worker had to add fast paths to bindParams and blkBind just to stay under it.
 
-Ruby prints 1 and 2. `break` must run the #each method's ensure: `[:start, 10, -10, 20, -20, :ensure]` is the oracle output for the C class in the T-1069 probe. The loop variable must stay visible after the loop, and `next`/`redo` need the same semantics as for arrays.
+Move a block of SECTIONs out into a new tests/ruby-test-full.3.rb, with its SECTION-CALL lines, and wire it up the same way ruby-test-full.2.rb is wired into test.sh --full, gen and native-full. This is a mechanical move: the total assertion count must stay the same, and both halves must agree.
 
 # JS — JavaScript and TypeScript
 
@@ -1191,6 +1188,9 @@ T-1090 kotlin: class members / user extensions called inside builtin implicit re
 T-1093 php: `[$this, 'parent::m']` / `['B', 'parent::m']` callables — DONE r47 (fdff473a): [$obj|'Cls', 'K::m'] non-virtual callables, self/parent/static + compound-form deprecations (is_callable deprecates too, per callable_self_parent_static_deprecation.phpt — ticket text was wrong), no-parent TypeError; master-probed
 T-1094 php: fractional float key deprecation in array literals, isset, unset, array_key_exists — DONE r47 (f517d6ef): float-key deprecation in literals, isset/empty, ??/??=, unset, array_key_exists
 T-1095 php: ENT_* constants undefined (htmlspecialchars($s, ENT_QUOTES) fatals) — DONE r47 (a0f891bc): ENT_* constants, quote flags, htmlspecialchars_decode/html_entity_decode (HTML 4.01 table, numeric), Array to string conversion on (string)[]/strval; master-probed
+T-1091 ruby: compiled block splat param `|m, *a|` does not auto-splat a single array arg — DONE r50 (c83e6cb4): block auto-splat by MRI parameter shape, loose block binding, groups, |x,|, block-locals, lambdas never spread; master-probed vs ruby 2.6
+T-1092 ruby: `for x in obj` over any object with #each (user Enumerable) — DONE r50 (7dcfb202): for over any #each object (suspended run, break runs ensure, loop value), redo in for/while/until; master-probed
+T-1086 ruby: deferred Enumerator size after forcing; with_index value on to_enum; top-level to_enum — DONE r50 (c9434a56): user-#each Enumerator size nil, to_enum.with_index, receiver-less to_enum/enum_for; master-probed
 
 # Settled — do not re-open
 
