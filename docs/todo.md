@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-993** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-994** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -150,15 +150,11 @@ go/test/typeparam/slices.go: interpreter `panic: _Max([]) = %!q(<nil>), want ""`
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-977 swift: "cannot find label" and "continue cannot target an if label" are not diagnosed · P3 · SW · IN PROGRESS (SW worker, round 12) [V]
-Found by the SW worker, round 11 (oracle swiftc 6.1.2). `break nope` with no such label → swiftc "cannot find label 'nope' in
-scope"; `lbl: if c { continue lbl }` → "'continue' cannot be used with if statements". Neither half refuses them.
-
-### T-987 swift: undefined names need scope tables (out-of-scope uses, upper-case names, members of open types); `#if DEBUG`; MemoryLayout · P3 · SW · IN PROGRESS (SW worker, round 12) [V]
-Found by the GO worker, round 17 (oracle swiftc 6.1.2). T-959's swift check is flow-insensitive: a name declared somewhere but used
-out of its scope, an upper-case name, or a use inside a type that may inherit members is still caught only at run time. Needs
-lexical scope tables in both swift grammars. Also `#if DEBUG` keeps its first branch (swiftc without -D DEBUG drops it) and
-`MemoryLayout<Int>.size` → "unknown name: MemoryLayout".
+### T-993 swift: local func called before its declaration; body-less `@_silgen_name` func; if-let binding used in its else branch · P3 · SW · OPEN [V]
+Found by the SW worker, round 12 (oracle swiftc 6.1.2). `let r = helper(2); func helper(_ x: Int) -> Int {..}` inside one body →
+swiftc accepts; interpreter "unknown name: helper" at run time. `@_silgen_name("puts") func cputs(_: UnsafePointer<CChar>) -> Int32`
+(no body) does not parse in the interpreter. `if let x = o { } else { print(x) }` → swiftc "cannot find 'x' in scope"; ours only at
+run time (the if's scope covers both branches - needs the then-block's extent).
 
 # DA — Dart  (no dart here: spec-only)
 
@@ -1116,6 +1112,8 @@ T-979 bash: diagnostics lack bash's "file: line N:" prefix (incl. `${!v}` bad su
 T-980 bash: nameref limits and function definitions leaking out of subshells — DONE - nameref element targets, chains, cycle diagnostics; subshell function definitions end with the subshell
 T-981 bash: "command not found" aborts the script with 127; bash continues — DONE - command not found prints, sets 127 and continues
 T-965 ts/js: `\p{…}` property escapes under the u flag; decorator `context.metadata`; `[1].a++` in the js compiler — DONE - update of any based member place (both forms, all JS/TS engines), decorator context access/metadata as tsc+node 24, \p{..}/\P{..} under u
+T-977 swift: "cannot find label" and "continue cannot target an if label" are not diagnosed — DONE - unknown labels and continue naming if/switch diagnosed as swiftc; continue on a do label restarts it
+T-987 swift: undefined names need scope tables (out-of-scope uses, upper-case names, members of open types); `#if DEBUG`; MemoryLayout — DONE - scoped undefined-name check incl. upper-case and open types, #if on unset flag false, MemoryLayout size/stride/alignment; if-let-in-else gap filed
 
 # Settled — do not re-open
 
