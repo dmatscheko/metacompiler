@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1077** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1078** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,15 +114,10 @@ Spec-only (ECMA-334 12.21.4 + 12.4.1 left-to-right). `static int x = 1; static i
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1073 kotlin: compiled reified call to a function declared later crashes · P2 · KT · IN PROGRESS (KT worker, round 24) [V]
-Oracle kotlinc 2.2.21: `inline fun <reified T: Any> outer(x: T) = inner<String>()` followed (later in the file) by `inline fun <reified T: Any> inner() = T::class.simpleName`; `println(outer(1))` -> String. Interpreter prints String; run and native die with "js runtime error: member 'simpleName' of undefined" (also on the pre-T-1066 base). The callee only gets its hidden type-argument parameters if declared earlier; defer the reified decision to emit time (compiler) / first run (interpreter). Check reified `is T` and `T::class` through forward calls, member and extension forms.
-
-### T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-cast javaClass · P3 · KT · IN PROGRESS (KT worker, round 24) [V]
-Oracle kotlinc 2.2.21; all engines:
-- `Long::class.javaPrimitiveType` -> long (ours: "member .javaPrimitiveType of a class literal"); `KClass.hashCode()` missing ("method .hashCode() of a class literal"); `kc<Int>().hashCode() == Int::class.hashCode()` -> true.
-- destructured lambda params: `mapOf(1 to 2).forEach { (k, v) -> print(k.javaClass.name) }` -> int, ours java.lang.Integer.
-- smart cast: after `a as Int` (a: Any), `a.let { it.javaClass.name }` -> int; not modelled.
-(KClass toString "(Kotlin reflection is not available)" suffix stays declined as before.)
+### T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin · P3 · KT · OPEN [V]
+Oracle kotlinc 2.2.21:
+- `inline fun <reified T: Any> T.extName() = T::class.simpleName + " " + (this is T) + " " + ("q" is T)`; `5.extName()` -> "Int true false". Interpreter "Any false false", run/native "Any true true" (halves disagree). `List<T>.elName()` on listOf(1,2) -> Int, ours Any. Likely ktNoteGeneric reads the name of `fun <T> T.ext()` as "T".
+- `Long::class.javaObjectType.kotlin` aborts all engines ("member .kotlin of a class literal"); oracle gives the KClass (its javaPrimitiveType -> long).
 
 # GO — Go  (oracle: `go run`)
 
@@ -1140,6 +1135,8 @@ T-1057 bash: assoc/declare remainder after T-1044 — PARTIAL→split (SH r29, 8
 T-1066 kotlin: static-type javaClass for computed receivers; reified primitives / inference — DONE (KT r23, e3ccbe88): shared static typer (ktStaticTy/ktJvmTy) gives javaClass by JVM type for computed receivers (loop vars, lambda it, arithmetic, calls, members, array/string index) while casts/!!/List elements stay boxed; reified primitive .java is the wrapper; reified T inferred from argument types (ktInferTArgs); anonymous KClass simpleName null; 4 legs = kotlinc 2.2.21
 T-1067 php: Exception::__toString / uncaught format; getFile/getLine/getTrace; named ctor args — PARTIAL→split (PHP r42, 97eb6ff6): Exception::__toString with Next-chain, getFile/getLine from the new site, getTrace []/getTraceAsString '#0 {main}', PHP Fatal error Uncaught format + exit 255 (display_errors rule documented), named ctor args (+ inherited-ctor named-arg drop fixed), ErrorException, throw-type check; 3 legs byte-identical, formats per php-src. Trace frames / engine-raised positions / destructor chaining filed
 T-1071 csharp: member access on null never raises a catchable NullReferenceException — DONE (CS r13, c70a8ed8): member/method/indexer/delegate access through null raises a catchable NullReferenceException (.NET message) in all engines - interpreter csNullRef, compiler via floor miss-hooks, js_csmcall/js_cslen in Go twin + layer 2, new C#-only js_cshas; ?. and extension-on-null unaffected; 3 legs agree with ECMA-335/334
+T-1073 kotlin: compiled reified call to a function declared later crashes — DONE (KT r24, c50317b5): reified hidden args appended at emit time / inferred at first run, so calls to later-declared reified functions work in all legs; forwarded reified T in is-checks (plain + extension) fixed in both engines; member form covered; 4 legs = kotlinc
+T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-cast javaClass — DONE (KT r24, 377b9b84): KClass javaPrimitiveType/hashCode, KClass keys in sets/maps compare by name (run/native), destructured lambda/for/val components and let-after-cast smart cast typed; 4 legs = kotlinc
 
 # Settled — do not re-open
 
