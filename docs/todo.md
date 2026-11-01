@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1055** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1056** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -98,8 +98,8 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1049 csharp: null message on non-Argument exceptions gives "" · P3 · CS · IN PROGRESS (CS worker, round 7) [V spec-only]
-Exception.cs (all .NET versions): Message is `_message ?? SR.Format(Exception_WasThrown, GetClassName())`. `string[] s={null}; new Exception(s[0]).Message` → "Exception of type 'System.Exception' was thrown."; `new InvalidOperationException(s[0]).Message` → "Exception of type 'System.InvalidOperationException' was thrown."; user `MyEx : Exception` with `: base(m)` → "Exception of type 'MyEx' was thrown." Ours "" in all engines. Found by CS r6.
+### T-1055 csharp: `base.Prop` / `base.Field` reads unsupported · P3 · CS · OPEN [V spec-only]
+`class A { public virtual string P => "A"; } class B : A { public override string P => "B" + base.P; }` then `Console.WriteLine(new B().P)` → C#: "BA". Ours: interpreter "unknown name: base", run/native "variable not defined: base" — only `base.M(...)` calls work. Also blocks `public override string Message => "x" + base.Message;` (today an override drops the stored base message, which is only safe while base.Message is unreadable — revisit js_csexcvirt when fixing). Found by CS r7.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1101,6 +1101,7 @@ T-1036 php: array refcount/COW for reference holders; generator eager-run and yi
 T-1048 ruby: Enumerable over a user #each doesn't stop early; Array#* / #/ #% #** with bad operands — DONE (RB r43, 8d529dd4): Enumerable over a user #each stops early (any?/all?/none?/one?/find/find_index/include?/first/take/take_while) via catch/throw out of #each; Array#* implicit-int TypeErrors; Array / % ** NoMethodError; find(ifnone); Go twin any?(pattern) uses ===. Master probe vs ruby 2.6 (21 lines with #each logs): 4 legs agree. did_you_mean second line not implemented anywhere (separate feature).
 T-1050 php: Generator::throw(); `yield from` value and send forwarding — DONE (PHP r38, 652f03e2): Generator::throw (runs a fresh generator to its first yield; throws into a yield-from delegate); yield from evaluates to the delegate's return value and forwards send(); uncaught throw finishes the generator. Master spec probe: generator protocol incl. throw/yield-from, 3 legs agree.
 T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comments — PARTIAL→split (PHP r38, 652f03e2): stale comments fixed; exception-unwound param-copy holders kept by design (PHP's trace keeps frame args). print_r depth + per-array COW + property-hook params need array copy-on-write identity → design ticket.
+T-1049 csharp: null message on non-Argument exceptions gives "" — DONE (CS r7, 6ded3040): null message → "Exception of type 'X' was thrown." for all non-Argument exceptions (BCL + user); inner exceptions in ToString; user override of Message honoured (and no more compiler crash on __get_Message). Master spec probe + the 3 earlier exception probes: all legs agree.
 
 # Settled — do not re-open
 
