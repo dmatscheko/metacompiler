@@ -78,7 +78,7 @@ Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c 
 - `for` over a user #each must interleave the body with #each's side effects (today all yields are collected first).
 Needs: interpreter coroutine running src.each(&blk) with blk = coYield, switching run state (block/self frames, rescue state) on resume; compiled: one emitted generator closure registered with the Go twin / layer 2 (js_genfn/js_yield are emitter-only externs); per-coroutine rubyCatchTags (Go) and js_rcatch/js_rthrow state (layer 2) plus the current-exception slot; close of an unfinished one must skip ensure.
 
-### T-1082 ruby: eager endless Enumerators answer a Lazy; to_enum on user Enumerable; Enumerator dup/clone · P3 · RB · OPEN [V]
+### T-1082 ruby: eager endless Enumerators answer a Lazy; to_enum on user Enumerable; Enumerator dup/clone · P3 · RB · IN PROGRESS (RB worker, round 48) [V]
 Oracle /usr/bin/ruby 2.6; all engines unless noted:
 - `[1, 2].cycle.take_while { |x| x < 2 }` -> [1]; ours a Lazy (the block-op path ignores the `lazy` flag). Same for blockless `.with_index`, uniq, zip on eager endless Enumerators (cycle, endless each_slice): MRI answers an Enumerator or runs eagerly.
 - `C.new.to_enum` on a user Enumerable: interpreter NoMethodError; MRI an Enumerator, `.lazy.each {}` on it -> :done. (to_enum/enum_for with external next is T-1069's scope; this item is the eager/each side only.)
