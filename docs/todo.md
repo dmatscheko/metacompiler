@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1021** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1022** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -138,10 +138,11 @@ are queued, buffers past capacity instead of blocking. go/test/chan powser1/2, s
 (10000 nested drains overflow the stack) still fail. Needs a suspension mechanism that works in all three engines (the manual calls
 real coroutines out of the subset - decide first). Go also runs the most recently spawned goroutine first; we run spawn order.
 
-### T-1003 go: a promoted method used as a method-expression value · P3 · GO · IN PROGRESS (GO worker, round 20) [V]
-Found by the GO worker, round 19 (oracle go run). `f := (*Q).Add` (Add promoted from embedded *P), `f(&Q{&P{1}}, 2)` → go 3; both
-halves "call of a non function: f". Same for `(*U).Sum` promoted through an embedded *T over a defined non-struct type. The call form
-`(*Q).Add(&Q{..}, 2)` works; the value form needs a closure taking the receiver from its first argument, in all three engines.
+### T-1021 go: interface dispatch to a method promoted from a defined non-struct type; `%T` of a method expression · P3 · GO · OPEN [V]
+Found by the GO worker, round 20 (oracle go run). `type T []int; func (t *T) Sum() int {..}; type U struct{ *T }; type Summer interface{
+Sum() int }; var s Summer = &U{&t}; s.Sum()` → go the sum; interpreter 0, run/native "range over a object" (goHasMethod/goMethod only
+follow embedded fields holding class instances - interpreter, abnf/jsrtgolang.go/jsrt.go, go-rt.metajs). `fmt.Printf("%T %T", (*P).Add,
+P.Twice)` → `func(*main.P, int) int func(main.P) int`; ours `%!T(0x...)` (stChainFrom gives a method expression no func type).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
@@ -1092,6 +1093,7 @@ T-1011 ruby: `compare_by_identity`; `default_proc=` type check; nested `for` des
 T-1004 kotlin: string `<`/`>`, sorted, sortedDescending, maxOf, toSortedSet order by code point instead of UTF-16 — DONE - String <,>,<=,>= and the natural-order key compare (max/min/maxOf/TreeSet/PriorityQueue) use UTF-16 order in all engines; kotlinc-verified
 T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupError (utf-7, cp437, mac-roman...) — PARTIAL - utf-7, utf-8-sig, all 69 charmap codecs, undefined, 'not a text encoding' refusals; CJK multibyte, idna/punycode, escape codecs filed
 T-1005 python: generator `gi_running` — DONE - gi_running in all engines, read-only; generator/tuple new-attribute errors; full.5 split only gained 1.6M steps (random.seed costs 88M), filed
+T-1003 go: a promoted method used as a method-expression value — DONE - promoted methods (incl. via embedded defined non-struct types) as method-expression values and on expression receivers, all three engines
 
 # Settled — do not re-open
 
