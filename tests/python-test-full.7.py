@@ -1,9 +1,10 @@
-# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-203: the
-# data model's bound-method equality, three-argument pow's operand protocol,
-# list.sort's timsort and the codecs with the surrogateescape handler. A file of
-# its own because tests/python-test-full.py is close to the step brake
-# (-max-steps, 100M per call) of the -frozen interpreter leg; see
-# tests/python-test-full.py for the conventions.
+# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-204 and
+# 152: the data model's bound-method equality, three-argument pow's operand
+# protocol, list.sort's timsort, the codecs with the surrogateescape handler,
+# statistics' paired measures and a generator's gi_running. A file of its own
+# because tests/python-test-full.py is close to the step brake (-max-steps, 100M
+# per call) of the -frozen interpreter leg; see tests/python-test-full.py for
+# the conventions.
 
 fails = [0]
 checks = [0]
@@ -129,6 +130,30 @@ def s202():
           and err(lambda: b"\xff".decode("utf-8", "xmlcharrefreplace"))
           == "TypeError: don't know how to handle UnicodeDecodeError in error callback")
 
+# ===== SECTION 152: statistics.covariance, correlation, linear_regression =====
+# Built on math.sumprod; every value here is CPython 3.14's.
+import statistics as S152st
+
+def s152():
+    x = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    y = [1, 2, 3, 1, 2, 3, 1, 2, 3]
+    z = [2.5, -1.25, 7.0, 3.3, 0.1, 9.9, -4.0, 2.2, 5.5]
+    lr = S152st.linear_regression(x, z)
+    check("stat2", S152st.covariance(x, y) == 0.75 and S152st.covariance(x, z) == 0.8687500000000001
+          and S152st.correlation(x, z) == 0.0742632702055162 and S152st.correlation(x, [9 - v for v in x]) == -1.0
+          and S152st.correlation([1, 2, 2, 3], [5, 6, 6, 8], method="ranked") == 1.0
+          and repr(lr) == "LinearRegression(slope=0.11583333333333336, intercept=2.2263888888888888)"
+          and S152st.linear_regression(x, z, proportional=True).slope == 0.46736842105263166)
+    msgs = []
+    for f in [lambda: S152st.covariance([1], [2]), lambda: S152st.correlation([1, 1], [1, 2]),
+              lambda: S152st.linear_regression([2, 2], [1, 3])]:
+        try:
+            f()
+        except S152st.StatisticsError as e:
+            msgs.append(str(e))
+    check("stat3", msgs == ["covariance requires at least two data points", "at least one of the inputs is constant",
+                            "x is constant"])
+
 # ===== SECTION 203: utf-7, utf-8-sig, the charmap codecs and the refused names =====
 # utf-7 is RFC 2152 as CPython writes and reads it (its errors name the codec
 # "utf7"), every single-byte charmap codec decodes through its table and
@@ -175,11 +200,48 @@ def s203():
           and err(lambda: "x".encode("undefined")) == "UnicodeError: undefined encoding"
           and err(lambda: "x".encode("utf8-sig")) == "LookupError: unknown encoding: utf8-sig")
 
+# ===== SECTION 204: a generator's gi_running =====
+# True only while the generator's own frame executes - read from inside its
+# body, also when a throw() resumes it - and read-only; neither a generator
+# nor a tuple takes a new attribute. Rows from CPython 3.14.
+def s204():
+    seen = []
+    def gen():
+        seen.append(g.gi_running)
+        x = yield 1
+        seen.append(g.gi_running)
+        try:
+            yield 2
+        except ValueError:
+            seen.append(g.gi_running)
+            yield 3
+    g = gen()
+    seen.append(g.gi_running)
+    next(g)
+    seen.append(g.gi_running)
+    g.send(5)
+    g.throw(ValueError)
+    g.close()
+    seen.append(g.gi_running)
+    check("girun", seen == [False, True, False, True, True, False] and hasattr(g, "gi_running")
+          and type(getattr(g, "gi_running")).__name__ == "bool")
+    msgs = []
+    for f in [lambda: setattr(g, "gi_running", True), lambda: setattr(g, "nope", 1), lambda: setattr((1,), "nope", 1)]:
+        try:
+            f()
+        except AttributeError as e:
+            msgs.append(str(e))
+    check("giro", msgs == ["attribute 'gi_running' of 'generator' objects is not writable",
+                           "'generator' object has no attribute 'nope' and no __dict__ for setting new attributes",
+                           "'tuple' object has no attribute 'nope' and no __dict__ for setting new attributes"])
+
 def main():
     s199() # SECTION-CALL 199
     s200() # SECTION-CALL 200
     s201() # SECTION-CALL 201
     s202() # SECTION-CALL 202
+    s152() # SECTION-CALL 152
     s203() # SECTION-CALL 203
+    s204() # SECTION-CALL 204
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -2240,6 +2240,9 @@ function pyGetAttrRaw(obj, name) {
     // were readable. Placed before the bound-builtin arm because a module's own
     // data slots (math.pi) must win.
     if (pyIsSlice(obj) && pySliceField(name) >= 0) { return obj["__pyslice"][pySliceField(name)] }
+    // gi_running: True only while the generator's own body executes (Go:
+    // rt.pyGetAttrRaw).
+    if (name == "gi_running" && isGenerator(obj)) { return genState(obj) == 3 }
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined && obj[name] === undefined) {
             // Every module names itself. Twin of rt.pyModuleAttr in abnf/jsrtpydesc.go.
@@ -2746,14 +2749,18 @@ function pyFnOwner(f) {
     return f
 }
 
-// A builtin value with no __dict (None, a number, a str, a list, a dict, a set)
-// refuses a new attribute, and its deletion, with a catchable AttributeError.
-// Go: rt.pyNoDictAttr in abnf/jsrt.go.
+// A builtin value with no __dict refuses a new attribute, and its deletion,
+// with a catchable AttributeError. Twin of pyNoDictAttr in
+// python-interpreter.abnf, which lists the types; Go: rt.pyNoDictAttr.
 function pyNoDictAttr(obj, name) {
     var tn = pyTypeName(obj)
     if (pyIsCplx(obj)) { tn = "complex" }
+    if (tn == "generator" && name == "gi_running") {
+        pyRaiseExc("AttributeError", "attribute 'gi_running' of 'generator' objects is not writable")
+    }
     if (tn == "NoneType" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
-        tn == "list" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex") {
+        tn == "list" || tn == "tuple" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex" ||
+        tn == "generator") {
         pyRaiseExc("AttributeError", "'" + tn + "' object has no attribute '" + name +
                    "' and no __dict__ for setting new attributes")
     }
@@ -6996,6 +7003,7 @@ function pyDHasAttr(obj, name) {
     // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
     // has to agree with what `math.sqrt` answers.
     if (pyIsSlice(obj) && pySliceField(name) >= 0) { return true }
+    if (name == "gi_running" && isGenerator(obj)) { return true }
     if ((pyDIsStatic(obj) || pyDIsClsM(obj)) && pyDescAttrHas(name)) { return true }
     if (name == "__args__" && pyUnionOf(obj) !== null) { return true }
     if (pyIsObj(obj)) {

@@ -23048,6 +23048,11 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	if sl, ok := pySliceParts(obj); ok && pySliceField(name) >= 0 {
 		return sl[pySliceField(name)]
 	}
+	// gi_running: True only while the generator's own body executes. Twin of
+	// pyattr in languages/python-interpreter.abnf.
+	if g, ok := obj.(*jsGenerator); ok && name == "gi_running" {
+		return !g.done && g.running
+	}
 	if inst, cls, ok := pyInstance(obj); ok {
 		switch name {
 		case "__class__":
@@ -23740,17 +23745,19 @@ func (rt *jsrt) pyFuncSetAttr(f interface{}, name string, v interface{}) {
 	dictAppend(keys, vals, name, v)
 }
 
-// pyNoDictAttr: a builtin value with no __dict (None, a number, a str, a list, a
-// dict, a set) refuses a new attribute, and its deletion, with a catchable
-// AttributeError. Twin of pyNoDictAttr in languages/python-interpreter.abnf and
-// languages/lib/python-rt.metajs.
+// pyNoDictAttr: a builtin value with no __dict refuses a new attribute, and its
+// deletion, with a catchable AttributeError. Twin of pyNoDictAttr in
+// languages/python-interpreter.abnf, which lists the types.
 func (rt *jsrt) pyNoDictAttr(obj interface{}, name string) {
 	tn := pyTypeName(rt, obj)
 	if isPyComplex(obj) {
 		tn = "complex"
 	}
+	if tn == "generator" && name == "gi_running" {
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError", "attribute 'gi_running' of 'generator' objects is not writable")})
+	}
 	switch tn {
-	case "NoneType", "int", "float", "bool", "str", "list", "dict", "set", "frozenset", "complex":
+	case "NoneType", "int", "float", "bool", "str", "list", "tuple", "dict", "set", "frozenset", "complex", "generator":
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+tn+"' object has no attribute '"+name+"' and no __dict__ for setting new attributes")})
 	}
@@ -25688,6 +25695,9 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 		return true
 	}
 	if _, ok := pySliceParts(obj); ok && pySliceField(name) >= 0 {
+		return true
+	}
+	if _, ok := obj.(*jsGenerator); ok && name == "gi_running" {
 		return true
 	}
 	if _, ok := pyNumAttr(obj, name); ok {

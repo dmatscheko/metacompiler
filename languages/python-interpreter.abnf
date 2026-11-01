@@ -3004,6 +3004,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
         if (isSlice(o) && pySliceField(name) >= 0) { return true }
+        if (name == "gi_running" && isGen(o)) { return true }
         if ((pyIsStatic(o) || pyIsClsM(o)) && pyDescAttrHas(name)) { return true }
         if (pyIsUnion(o) && name == "__args__") { return true }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return true }
@@ -13096,15 +13097,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // method. Reading off a CLASS gives the raw attribute (so Base.m(self) works).
     // Writing an attribute: a data descriptor's __set__ takes over, and __slots__
     // (when the class declares them) restricts which names an instance may carry.
-    // A builtin value with no __dict (None, a number, a str, a list, a dict, a set,
-    // an object()) refuses a new attribute, and its deletion, with a catchable
-    // AttributeError. Twin of pyNoDictAttr in abnf/jsrt.go and
+    // A builtin value with no __dict (None, a number, a str, a list, a tuple, a
+    // dict, a set, a generator, an object()) refuses a new attribute, and its
+    // deletion, with a catchable AttributeError; a generator's read-only
+    // gi_running says so. Twin of pyNoDictAttr in abnf/jsrt.go and
     // languages/lib/python-rt.metajs.
     function pyNoDictAttr(o, name) {
         if (pyUser(o) && o.__class !== hostGlobals["object"]) { return }
         var tn = pyTypeOf(o).__name
+        if (tn == "generator" && name == "gi_running") {
+            pyRaise(pyMakeExc("AttributeError", ["attribute 'gi_running' of 'generator' objects is not writable"]))
+        }
         if (tn == "NoneType" || tn == "object" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
-            tn == "list" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex") {
+            tn == "list" || tn == "tuple" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex" ||
+            tn == "generator") {
             pyRaise(pyMakeExc("AttributeError", ["'" + tn + "' object has no attribute '" + name +
                                                  "' and no __dict__ for setting new attributes"]))
         }
@@ -13328,6 +13334,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // hands out, so `[].__class__ is list` holds.
         if (pyIsUnion(o) && name == "__args__") { return pyTup(o.__pyunion.slice(0)) }
         if (isSlice(o) && pySliceField(name) >= 0) { return o.__pyslice[pySliceField(name)] }
+        // gi_running: True only while the generator's own body executes. Twins:
+        // rt.pyGetAttrRaw in abnf/jsrt.go and pyGetAttrRaw in lib/python-rt.metajs.
+        if (name == "gi_running" && isGen(o)) { return o.running === true && o.st.done !== true }
         if (o !== null && o !== undefined && typeof o == "object" && o.__genalias === true) {
             if (name == "__args__") { return pyTup(o.targs.slice(0)) }
             if (name == "__origin__") { return o.origin }
