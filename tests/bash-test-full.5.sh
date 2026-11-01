@@ -592,6 +592,23 @@ a'
 declare -A s108o=([a+b]="1" )'
   r=$(n=s108n; declare -a "$n=(2*3 a?b)"; declare -p s108n); check dlit6 "$r" 'declare -a s108n=([0]="2*3" [1]="a?b")'
 }
+# ===== SECTION 109: a quoted part of an indexed subscript stays quoted =====
+# In NAME[SUB]=v the SUB of an indexed array is arithmetic text that keeps a quoted part's
+# quotes ($'..' re-quoted, \x its backslash), so bash 5.3 refuses it as an arithmetic
+# syntax error; a declaration's operand, an array literal and an associative key read SUB
+# as a word. Every expected value is bash 5.3's.
+s109() {
+  local r
+  r=$(s109a=(a b c); (s109a[$'1']=5) 2>/dev/null; echo "st=$?"; (s109a['1']=5) 2>/dev/null; echo "st=$?"; (s109a[\1]=5) 2>/dev/null; echo "st=$?"; k=1; (s109a[$k'']=5) 2>/dev/null; echo "st=$?"; (s109a[1+$'2']=5) 2>/dev/null; echo "st=$?"; s109a["1"]=6; echo "${s109a[*]}"); check aqs1 "$r" 'st=1
+st=1
+st=1
+st=1
+st=1
+a 6 c'
+  r=$(s109b=(a b c); declare -g s109b[$'1']=D; s109b+=([$'2']=E); declare -A s109m; s109m[$'k k']=1; s109m['q']=2; echo "${s109b[*]} ${s109m[k k]} ${s109m[q]}"); check aqs2 "$r" 'a D E 1 2'
+  r=$(f() { local s109c[\0]=F; echo "${s109c[*]}"; }; f; (s109u[$'0']=1) 2>/dev/null; echo "st=$?"); check aqs3 "$r" 'F
+st=1'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -613,5 +630,6 @@ s105  # SECTION-CALL 105
 s106  # SECTION-CALL 106
 s107  # SECTION-CALL 107
 s108  # SECTION-CALL 108
+s109  # SECTION-CALL 109
 echo "full: $checks checks, $fails failures"
 exit $fails

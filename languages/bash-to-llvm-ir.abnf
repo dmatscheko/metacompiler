@@ -313,7 +313,13 @@ AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
 // appends (a string for a scalar, elements for an array).
 AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
 // {aidx} is the subscript as written, which bash's "NAME[SUB]: bad array subscript" quotes.
-AsgIdx      <~~ push({aidx: arSrc(up.start + 1, up.pos - 1)}) ~~> = "[" :whitespace() IdxWord "]" ;
+// The subscript of an indexed array is arithmetic text in which a quoted part keeps its
+// quotes, a $'...' one quoted as by bash's sh_single_quote, and an escape its backslash
+// (bash 5.3: `a[$'1']=5` and `a[\1]=5` are arithmetic syntax errors), while the key of an
+// associative one is the word: mkAsgIdx makes both.
+AsgIdx      <~~ push(mkAsgIdx(takeAll(), arSrc(up.start + 1, up.pos - 1))) ~~> = "[" :whitespace() { AsgIdxSeg } "]" ;
+AsgIdxSeg   = AsgIdxQ | DqSeg | ExpSeg | IdxBare ;
+AsgIdxQ     <~~ push(idxQuoted(pop(), arSrc(up.start, up.pos))) ~~> = AnsiSeg | SqSeg | EscSeg ;
 AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
 AsgRhs      = ArrayLit | AsgWord ;
 AsgWord     = [ NsWord ] ;
@@ -3482,23 +3488,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function storeStatus(b, v) { b.NewStore(v, gStatus) }
     function storeStatusI(b, n) { b.NewStore(llvm.constant.NewInt(i32, n), gStatus) }
 
-    // items = [{aname}, {aidx}?, idxWord?, {aop2}, valueWord? | {arr}]
+    // items = [{aname}, {aidx, aiw, aqw}?, {aop2}, valueWord? | {arr}]
     function mkArrayKV(items, src) { return {kv: 1, key: items[0], val: (items.length > 1) ? items[1] : null, src: src} }
     function mkArrayLit(items) { return {arr: items} }
     function parseAssign(items) {
         var name = items[0].aname
-        var idxT = null, op = "=", valT = null, lit = null, isrc = null
+        var idxT = null, aqT = null, op = "=", valT = null, lit = null, isrc = null
         var i
-        for (i = 1; i < items.length; i++) { if (items[i].aidx != undefined) { isrc = items[i].aidx } }
         for (i = 1; i < items.length; i++) {
             var it = items[i]
-            if (it.fn != undefined) {
-                if (isrc != null && idxT == null && valT == null && op == "=") { idxT = it } else { valT = it }
-            }
+            if (it.fn != undefined) { valT = it }
+            else if (it.aidx != undefined) { isrc = it.aidx; idxT = it.aiw; aqT = it.aqw }
             else if (it.aop2 != undefined) { op = it.aop2 }
             else if (it.arr != undefined) { lit = it.arr }
         }
-        return {name: name, idxT: idxT, op: op, valT: valT, lit: lit, isrc: isrc}
+        return {name: name, idxT: idxT, aqT: aqT, op: op, valT: valT, lit: lit, isrc: isrc}
+    }
+    // A quoted part SEG of an assignment's subscript, written as SRC, and {aq} the part it is in an
+    // indexed array's arithmetic (AsgIdx). Twin of idxQuoted in bash-interpreter.abnf.
+    function idxQuoted(seg, src) { return {seg: seg, aq: (src.charAt(0) == "$") ? ansiWord(bashSq(ansiC(src.slice(2, src.length - 1)))) : makeConst(src)} }
+    // NAME[SUB]'s subscript: {aidx} as written, {aiw} the word, {aqw} an indexed array's
+    // arithmetic text when a part of SUB is quoted, else null. Twin of mkAsgIdx in
+    // bash-interpreter.abnf.
+    function mkAsgIdx(items, src) {
+        var w = [], q = [], anyQ = false
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.aq != undefined) { w.push(it.seg); q.push(it.aq); anyQ = true }
+            else { w.push(it); q.push(it) }
+        }
+        return {aidx: src, aiw: mkWord(w), aqw: anyQ ? mkWord(q) : null}
     }
     // An array literal element list; a bare word contributes one element per FIELD. Every
     // word is expanded BEFORE the array is cleared: f=([5]=x "${f[@]}") reads the old f.
@@ -3602,13 +3622,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The key of NAME[SUB]=v for a name not declared associative: rt_arr_akey refuses a
     // written @ or * and an index still negative from the end, quoting the subscript as
     // written (a declaration's, a.xl, expanded), and an empty SUB for an associative array
-    // too. Twin of asgKey in bash-interpreter.abnf.
-    function asgKeyOf(b, a) {
-        var r = evalWord(b, a.idxT)
+    // too. Only an assignment statement reads an indexed array's SUB as arithmetic text
+    // (AsgIdx), the word it expands chosen when it runs unless the name may be associative.
+    // Twin of asgKey in bash-interpreter.abnf.
+    function asgKeyOf(b, a, assoc) {
+        var r = asgSubOf(b, a, assoc)
         var whole = (a.isrc == "") ? llvm.constant.NewInt(i32, 2) : ((a.isrc == "@" || a.isrc == "*") ? one : zero)
         var lbl = (a.xl == true) ? r.b.NewCall(rtStrcat, [r.b.NewCall(rtStrcat, [gepStr(r.b, a.name + "["), r.v]), gepStr(r.b, "]")])
             : gepStr(r.b, a.name + "[" + a.isrc + "]")
         return {b: r.b, v: r.v, k: r.b.NewCall(rtArrAkey, [gepStr(r.b, a.name), r.v, lbl, whole])}
+    }
+    // Has an assignment statement's SUB arithmetic text of its own (AsgIdx)?
+    function subAq(a, assoc) { return a.aqT != null && a.xl != true && !assoc }
+    function asgSubOf(b, a, assoc) {
+        if (!subAq(a, assoc)) { return evalWord(b, a.idxT) }
+        if (!maybeAssoc(a.name)) { return evalWord(b, a.aqT) }
+        var asB = curF.NewBlock(""), ixB = curF.NewBlock(""), jB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, gepStr(b, a.name)), zero), asB, ixB)
+        var r1 = evalWord(asB, a.idxT)
+        r1.b.NewBr(jB)
+        var r2 = evalWord(ixB, a.aqT)
+        r2.b.NewBr(jB)
+        return {b: jB, v: jB.NewPhi([llvm.ir.NewIncoming(r1.v, r1.b), llvm.ir.NewIncoming(r2.v, r2.b)])}
     }
     // An expansion error in a value abandons the command before anything is stored:
     // `k=$(( 1/0 ))` leaves k as it was. Twin of runAssign in bash-interpreter.abnf.
@@ -3637,7 +3672,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (a.idxT != null) {
             // An associative key that may expand to nothing goes through rt_arr_akey.
-            var lit = a.isrc != "" && a.idxT.c != undefined && (assoc ? a.idxT.c != "" : isIndexLit(a.idxT.c))
+            var lit = a.isrc != "" && a.idxT.c != undefined && (assoc ? a.idxT.c != "" : isIndexLit(a.idxT.c) && !subAq(a, assoc))
             // A builtin's store (a.soft, an i32 slot: declare, local, read, printf -v): a
             // refused subscript sets the slot and stores nothing, where an assignment abandons
             // the line; the subscript's arithmetic errors carry no builtin's prefix. Twin of
@@ -3645,7 +3680,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var soft = a.soft != undefined && !lit
             var pfx = soft ? b.NewLoad(i8ptr, gArPfx) : null
             if (soft) { b.NewStore(emptyPtr(b), gArPfx) }
-            var rk = lit ? subKeyOf(b, a.name, a.idxT, null) : asgKeyOf(b, a)
+            var rk = lit ? subKeyOf(b, a.name, a.idxT, null) : asgKeyOf(b, a, assoc)
             b = rk.b
             var skipB = null
             if (soft) {

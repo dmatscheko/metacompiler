@@ -323,7 +323,13 @@ AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
 // appends (a string for a scalar, elements for an array).
 AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
 // {aidx} is the subscript as written, which bash's "NAME[SUB]: bad array subscript" quotes.
-AsgIdx      <~~ push({aidx: arSrc(up.start + 1, up.pos - 1)}) ~~> = "[" :whitespace() IdxWord "]" ;
+// The subscript of an indexed array is arithmetic text in which a quoted part keeps its
+// quotes, a $'...' one quoted as by bash's sh_single_quote, and an escape its backslash
+// (bash 5.3: `a[$'1']=5` and `a[\1]=5` are arithmetic syntax errors), while the key of an
+// associative one is the word: mkAsgIdx makes both.
+AsgIdx      <~~ push(mkAsgIdx(takeAll(), arSrc(up.start + 1, up.pos - 1))) ~~> = "[" :whitespace() { AsgIdxSeg } "]" ;
+AsgIdxSeg   = AsgIdxQ | SubXSeg ;
+AsgIdxQ     <~~ push(idxQuoted(pop(), arSrc(up.start, up.pos))) ~~> = AnsiSeg | SqSeg | EscSeg ;
 AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
 AsgRhs      = ArrayLit | AsgWord ;
 AsgWord     = [ NsWord ] ;
@@ -3847,7 +3853,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rn = refTarget(a.name)
         if (rn == "") { arithErr = true; return null }
         if (rn == a.name) { return a }
-        return {name: rn, idxT: a.idxT, op: a.op, valT: a.valT, lit: a.lit, isrc: a.isrc, lbl: a.lbl}
+        return {name: rn, idxT: a.idxT, aqT: a.aqT, op: a.op, valT: a.valT, lit: a.lit, isrc: a.isrc, lbl: a.lbl}
     }
     // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
     // a call frame unwinding a `local` - so membership alone is not the answer.
@@ -5471,25 +5477,44 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- statement / command thunks: function() -> int status | {ret: int} ----
 
-    // items = [{aname}, {aidx}?, idxThunk?, {aop2}, valueWordThunk? | {arr}]
+    // items = [{aname}, {aidx, aiw, aqw}?, {aop2}, valueWordThunk? | {arr}]
     function mkArrayKV(items, src) { return {kv: 1, key: items[0], val: (items.length > 1) ? items[1] : null, src: src} }
     function mkArrayLit(items) { return {arr: items} }
     function parseAssign(items) {
         var name = items[0].aname
         var idxT = null
+        var aqT = null
         var op = "="
         var valT = null
         var lit = null
         var isrc = null
         var i
-        for (i = 1; i < items.length; i++) { if (typeof items[i] != "function" && items[i].aidx != undefined) { isrc = items[i].aidx } }
         for (i = 1; i < items.length; i++) {
             var it = items[i]
-            if (typeof it == "function") { if (idxT == null && op == "=" && lit == null && valT == null && isrc != null) { idxT = it } else { valT = it } }
+            if (typeof it == "function") { valT = it }
+            else if (it.aidx != undefined) { isrc = it.aidx; idxT = it.aiw; aqT = it.aqw }
             else if (it.aop2 != undefined) { op = it.aop2 }
             else if (it.arr != undefined) { lit = it.arr }
         }
-        return {name: name, idxT: idxT, op: op, valT: valT, lit: lit, isrc: isrc, lbl: name}
+        return {name: name, idxT: idxT, aqT: aqT, op: op, valT: valT, lit: lit, isrc: isrc, lbl: name}
+    }
+    // A quoted part SEG of an assignment's subscript, written as SRC, and {aq} the part it is in an
+    // indexed array's arithmetic (AsgIdx). Twin of idxQuoted in bash-to-llvm-ir.abnf.
+    function idxQuoted(seg, src) { return {seg: seg, aq: makeConst((src.charAt(0) == "$") ? bashSq(seg()) : src)} }
+    // NAME[SUB]'s subscript: {aidx} as written, {aiw} the word, {aqw} an indexed array's
+    // arithmetic text when a part of SUB is quoted, else null. Twin of mkAsgIdx in
+    // bash-to-llvm-ir.abnf.
+    function mkAsgIdx(items, src) {
+        var w = []
+        var q = []
+        var anyQ = false
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it != "function" && it.aq != undefined) { w.push(it.seg); q.push(it.aq); anyQ = true }
+            else { w.push(it); q.push(it) }
+        }
+        return {aidx: src, aiw: mkWord(w), aqw: anyQ ? mkWord(q) : null}
     }
     // Evaluate an array literal into a list of (key, value) pairs; a bare word contributes
     // one element per FIELD, so a=($x) with x="a b c" really is three elements - but not in
@@ -5667,12 +5692,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Through a nameref r, `r[SUB]=v` quotes r[SUB]. An empty SUB (`b[]=x`) is a bad
     // subscript for an associative array too. A declaration builtin (decl) quotes SUB
-    // expanded, as the word it was handed: k=''; declare m[$k]=v is "m[]: ...".
+    // expanded, as the word it was handed: k=''; declare m[$k]=v is "m[]: ...". Only an
+    // assignment statement reads an indexed array's SUB as arithmetic text (AsgIdx).
     function asgKey(a, isAs, decl) {
         var none = a.isrc == ""
         var svp = arPfx
         arPfx = ""
-        var w = wordJoin(a.idxT())
+        var w = wordJoin((a.aqT != null && !isAs && !decl) ? a.aqT() : a.idxT())
         var k = arrAkey(a.name, w, a.lbl + "[" + (decl ? w : a.isrc) + "]", isAs && !none, none || a.isrc == "@" || a.isrc == "*")
         arPfx = svp
         return k
