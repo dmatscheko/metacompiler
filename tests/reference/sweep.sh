@@ -276,7 +276,7 @@ if [ "$LIST" -eq 1 ]; then
         [ -z "$lang" ] && continue
         g="languages/$stem-$KIND.abnf"
         [ -f "$REPO/$g" ] || g="$g (MISSING)"
-        if [ -d "$ROOT/$dir" ]; then st="$(find "$ROOT/$dir" -name "*.$ext" | wc -l | tr -d ' ') files"
+        if [ -d "$ROOT/$dir" ]; then st="$(find -L "$ROOT/$dir" -name "*.$ext" | wc -l | tr -d ' ') files"
         else st="not fetched"; fi
         printf '%-11s %-34s %-36s %s\n' "$lang" "$g" "$dir" "$st"
     done <<< "$CORPORA"
@@ -300,7 +300,8 @@ echo "building compiler..."
 expectations_for() {
     local lang="$1" dir="$ROOT/$2" ext="$3"
     local all="$TMP/all.$lang" neg="$TMP/neg.$lang"
-    find "$dir" -name "*.$ext" -type f | sort > "$all"
+    # -L: a corpus directory may be a symlink (a worktree sharing the fetched corpora).
+    find -L "$dir" -name "*.$ext" -type f | sort > "$all"
     [ -n "$FILTER" ] && { grep -i -- "$FILTER" "$all" > "$all.f" || true; mv "$all.f" "$all"; }
     : > "$neg"
 
@@ -504,10 +505,16 @@ expectations_for() {
             # uses ('{a:}', '(..1)', 'def foo(...)', '**nil'), and luac reports a
             # <const> violation, which is semantic, not syntactic. Re-verify the
             # version before extending this approach to another language.
+            #
+            # `bash -n` executes nothing, so a file's own `shopt -s extglob` never
+            # takes effect and its @(...) / !(...) patterns read as syntax errors.
+            # Such a file is parsed again with extglob on, as running it would.
             if command -v bash >/dev/null 2>&1; then
                 while IFS= read -r f; do
-                    if bash -n "$f" 2>/dev/null; then printf 'parse|%s\n' "$f"
-                    else                              printf 'reject|%s\n' "$f"; fi
+                    if bash -n "$f" 2>/dev/null \
+                       || { grep -q 'shopt -s.*extglob' "$f" && bash -O extglob -n "$f" 2>/dev/null; }
+                    then printf 'parse|%s\n' "$f"
+                    else printf 'reject|%s\n' "$f"; fi
                 done < "$all"
             else
                 echo "  [warn] bash: no bash on PATH, falling back to must-parse" >&2
@@ -526,9 +533,10 @@ expectations_for() {
             # OpenJDK's suite has TWO negative conventions, and only one of them
             # was being read.
             #
-            # (1) '@compile/fail' in a jtreg header - the file must not COMPILE.
-            #     Mostly semantic (type errors, bad references), so it keeps the
-            #     informational 'reject?', exactly like go/swift/dart.
+            # (1) '@compile/fail' or '@run compile/fail' in a jtreg header - the
+            #     file must not COMPILE. Mostly semantic (type errors, bad
+            #     references), so it keeps the informational 'reject?', exactly
+            #     like go/swift/dart.
             #
             # (2) javac/diags/examples/ is a directory of DIAGNOSTIC examples,
             #     one minimal file per compiler message, keyed by a
@@ -696,7 +704,7 @@ JAVA_DIAG_KEYS
                 grep -rlE -f "$TMP/java.diagre" "$dir/javac/diags/examples" \
                      --include="*.$ext" 2>/dev/null | sort > "$TMP/java.hard" || : > "$TMP/java.hard"
             fi
-            grep -rl '@compile/fail' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg"
+            grep -rlE '@(run[[:space:]]+)?compile/fail' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg"
             awk -v hard="$TMP/java.hard" -v soft="$neg" '
                 BEGIN { while ((getline l < hard) > 0) h[l] = 1
                         while ((getline l < soft) > 0) s[l] = 1 }

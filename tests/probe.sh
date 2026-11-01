@@ -366,12 +366,19 @@ if want native; then
         # this is the grammar saying it has no native path - say so, do not
         # quietly drop to three legs.
         reject native "$COMPILE declares no c.exePath - no native leg exists"
-    elif ! ./mec "$COMPILE" "$PROG" -q ${CF[@]+"${CF[@]}"} -exe "$work/a.out" >/dev/null 2>"$work/build.err"; then
-        reject native "the -exe BUILD FAILED"
-        sed -n '1,3p' "$work/build.err" | sed 's/^/           /'
     else
-        run_leg native "$work/a.out"
-        accept_leg native
+        # The build runs under the leg watchdog: a hanging build must not hold
+        # the probe forever.
+        run_leg build ./mec "$COMPILE" "$PROG" -q ${CF[@]+"${CF[@]}"} -exe "$work/a.out"
+        if [ -f "$work/build.timeout" ]; then
+            reject native "the -exe BUILD was KILLED after ${TIMEOUT}s"
+        elif [ "$(cat "$work/build.rc")" != 0 ]; then
+            reject native "the -exe BUILD FAILED"
+            sed -n '1,3p' "$work/build.err" | sed 's/^/           /'
+        else
+            run_leg native "$work/a.out"
+            accept_leg native
+        fi
     fi
 fi
 
