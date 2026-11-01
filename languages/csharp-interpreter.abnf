@@ -743,8 +743,9 @@ BaseTarget  <~~ push(makeBaseTarget(pop())) ~~>
 // repetition never gives a match back, so the two-part spelling could never see
 // its final suffix. The LAST suffix the run consumed is the place. PlaceAhead is
 // a fast-fail: without it every expression is parsed twice per nesting level.
-ChainTarget <~~ push(makeChainTarget(takeAll())) ~~>
-            = PlaceAhead CallSeed ChainSfx { ChainSfx } ;
+ChainTarget = PlaceAhead ChainPlace ;
+ChainPlace  <~~ push(makeChainTarget(takeAll())) ~~>
+            = CallSeed ChainSfx { ChainSfx } ;
 // A path rooted at a CONSTRUCTED type - 'Test<int>.Count = 0', '++Test<long>.Count',
 // 'Outer.Inner<string>.Values = v'. GenSeed would take the whole 'Test<int>.Count' as
 // a value, so the type name is the root here and the member is an ordinary step.
@@ -1038,8 +1039,12 @@ UnaryExpr   = Await | PreIncDec | Cast | Neg | UPlus | Not | BitNot | AddrOf | D
 UPlus       = "+" !"+" UnaryExpr ;
 AddrOf      = "&" !"=" UnaryExpr ;
 Deref       = "*" !"=" UnaryExpr ;
+// The operand of a prefix ++ / -- is always a place, and PlaceAhead looks for an
+// operator AFTER the place, so a member chain is taken without it: `++a[i]`,
+// `--GetC()[i]`, `++o.P`.
 PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> PreTarget ;
+PreTarget   = ParenTarget | ChainPlace | GenTarget | BaseTarget | PlainTarget ;
 Await       = "await" KwEnd UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;

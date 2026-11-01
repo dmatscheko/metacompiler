@@ -736,8 +736,9 @@ BaseTarget  <~~ push(makeBaseTarget(pop())) ~~>
 // repetition never gives a match back, so the two-part spelling could never see
 // its final suffix. The LAST suffix the run consumed is the place. PlaceAhead is
 // a fast-fail: without it every expression is parsed twice per nesting level.
-ChainTarget <~~ push(makeChainTarget(takeAll())) ~~>
-            = PlaceAhead CallSeed ChainSfx { ChainSfx } ;
+ChainTarget = PlaceAhead ChainPlace ;
+ChainPlace  <~~ push(makeChainTarget(takeAll())) ~~>
+            = CallSeed ChainSfx { ChainSfx } ;
 // A path rooted at a CONSTRUCTED type - 'Test<int>.Count = 0', '++Test<long>.Count',
 // 'Outer.Inner<string>.Values = v'. GenSeed would take the whole 'Test<int>.Count' as
 // a value, so the type name is the root here and the member is an ordinary step.
@@ -827,7 +828,7 @@ PlaceAhead  = :script(~~
         return found ? undefined : abnf.newToken("\x01no-place", 0)
     })()
 ~~) ;
-PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
+PlainTarget <~~ push(csPlainTarget(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 
 TIndex      <~~ push({idx: pop()}) ~~>
@@ -1029,8 +1030,12 @@ UnaryExpr   = Await | PreIncDec | Cast | Neg | UPlus | Not | BitNot | AddrOf | D
 UPlus       = "+" !"+" UnaryExpr ;
 AddrOf      = "&" !"=" UnaryExpr ;
 Deref       = "*" !"=" UnaryExpr ;
+// The operand of a prefix ++ / -- is always a place, and PlaceAhead looks for an
+// operator AFTER the place, so a member chain is taken without it: `++a[i]`,
+// `--GetC()[i]`, `++o.P`.
 PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> PreTarget ;
+PreTarget   = ParenTarget | ChainPlace | GenTarget | BaseTarget | PlainTarget ;
 Await       = "await" KwEnd UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
@@ -3451,6 +3456,14 @@ KwLet       = "let" KwEnd ;
         // succeeds and the enclosing Assignment fails on the missing operator.
         return {name: "", path: [{key: "\x01not-a-place"}], base: foldCallMember(head)}
     }
+    // `a[i]` / `a.F` spelled as a bare name and a path: the root is read as any
+    // name is, so a member of the enclosing class (`arr[1]` for a static `arr`) is
+    // found off its owner. The class is snapshotted at walk time, like makeVarRef's.
+    function csPlainTarget(items) {
+        var r = makeTargetRef(items)
+        r.dcls = curClassName
+        return r
+    }
     function emitRefPath(b, ref) {
         var o = anytype // Either the lowered base expression or a scope read.
         // A STATIC member written through a DERIVED type name: the same walk-time
@@ -3465,13 +3478,9 @@ KwLet       = "let" KwEnd ;
             return {b: b, obj: csDeclOwnerV(b, ref.sseed, wcls),
                     key: emitStr(b, wkey), keyName: wkey, isField: true}
         }
-        if (ref.base != undefined) {
-            var br = ref.base(b)
-            b = br.b
-            o = br.v
-        } else {
-            o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
-        }
+        var br = (ref.base != undefined) ? ref.base(b) : csEmitVarRead(b, ref.dcls, ref.name)
+        b = br.b
+        o = br.v
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {

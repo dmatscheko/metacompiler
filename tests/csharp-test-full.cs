@@ -3944,6 +3944,27 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s63d1", d["k"] == 101 && s == "ab");
         }
 
+        // ===== SECTION 64: prefix ++ / -- and parenthesised targets on a path =====
+        // The operand of a prefix ++ / -- is any variable, property or indexer access
+        // (ECMA-334 12.9.6), including one reached through a call (`--Get()[i]`), and a
+        // parenthesised variable is still that variable (12.8.5). A bare-named root is
+        // a member of the enclosing class when no local hides it. No C# toolchain here:
+        // the values follow the specification.
+        static int[] S64Arr = { 1, 2, 3 };
+        static S63C S64Get() { Program.S63Log += "c"; return Program.S63Obj; }
+        static void S64()
+        {
+            Program.S63Obj[1] = 9;
+            Program.S63Log = "";
+            int a = --S64Get()[S63I()];
+            Program.Check("s64c1", a == 8 && Program.S63Log == "ciGS8");
+            int b = ++S64Arr[1];
+            (S64Arr[0]) = 20;
+            (S64Arr[2]) += 5;
+            int e = ++(S64Arr[2]);
+            Program.Check("s64s1", b == 3 && S64Arr[0] == 20 && S64Arr[1] == 3 && e == 9 && S64Arr[2] == 9);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -4009,6 +4030,7 @@ b";                                                   // verbatim keeps the newl
             Program.S61(); // SECTION-CALL 61
             Program.S62(); // SECTION-CALL 62
             Program.S63(); // SECTION-CALL 63
+            Program.S64(); // SECTION-CALL 64
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
