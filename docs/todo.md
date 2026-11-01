@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1038** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1039** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,8 +108,8 @@ Found by CS r4 + master probe.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1032 kotlin: enum compareTo/ranges, Boolean ranges, IntRange.endExclusive · P3 · KT · IN PROGRESS (KT worker, round 17) [V]
-kotlinc 2.2.21 (repros: scratchpad KT16/q3.kt, q4.kt): `enum class Col{A,B,C}; Col.B.compareTo(Col.C)` → -1; ours aborts in all engines ("unknown method 'compareTo'"). `Col.B in Col.A.rangeTo(Col.C)` → true; interpreter says false (run/native true). `false..true` / `false.rangeTo(true)` → prints `false..true`, `true in false..true` → true; run/native abort "method call 'rangeTo' on a boolean". `(1..5).endExclusive` → 6; interpreter prints kotlin.Unit, compiled legs wrong too. Found by KT r16.
+### T-1038 kotlin: unsigned ranges lose their type · P3 · KT · OPEN [V]
+kotlinc 2.2.21: `val r = 1u..4000000000u; println(r is UIntRange)` → true; ours false in all three engines (the range value has no unsigned marker). Consequence: endExclusive on UIntRange/ULongRange checks the signed MAX_VALUE — `(1u..2147483647u).endExclusive` wrongly throws, `(1u..UInt.MAX_VALUE).endExclusive` does not throw. Found by KT r17.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1086,6 +1086,7 @@ T-1017 bash: `read` without -r keeps backslashes; empty subscript `b[]` accepted
 T-1026 php: return-by-reference functions; static property assignment copy — DONE (PHP r36, 5c2f0c64): function &f / &m with =&, by-ref returns of elements/properties/statics; static property assignment copies in the compiler; $$n = &$x binds the computed name. Master spec probe: 3 legs agree.
 T-1025 php: reference counts: remaining release points — PARTIAL→split (PHP r36, 5c2f0c64): holders released on exception unwinding (catch/finally/finally-return) and for computed names. Dying arrays, unfinished generators, by-value param sharing, print_r depth, count() recursion warning need COW/array refcounting — filed as follow-up.
 T-1027 csharp: ParamName is "" (not null) when unset; `int.Parse(null)` throws FormatException — DONE (CS r4, b11a4fd7): ParamName null when unset (Argument*/user subclasses, : base(p) as param name); integral Parse(null) throws ArgumentNullException 's'. Master spec probe: 3 legs agree.
+T-1032 kotlin: enum compareTo/ranges, Boolean ranges, IntRange.endExclusive — DONE (KT r17, e394af8c): kotlin.Enum.compareTo (ordinal) → <, ranges, sorted, coerce; Boolean rangeTo/coerce; endExclusive for Int/Long/Char ranges with MAX_VALUE throw; when-in compares with Kotlin ordering. Master probe vs kotlinc 2.2.21 (20 lines): 4 legs agree.
 
 # Settled — do not re-open
 
