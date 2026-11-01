@@ -941,6 +941,27 @@ def s146
   check("ct146b", S146OS[0].f == 10 && S146OS[0].g == [0, 5] && S146OS[1].g == [0, 0] && hits == 0)
 end
 
+# ===== SECTION 147: class_eval on a builtin class, succ past a length's end, endless slices =====
+# A def in a class_eval block of String / Integer / Array is callable on their
+# values; String#succ of a string without alphanumerics wraps a character that is
+# the largest of its UTF-8 length and carries; each_slice / each_cons on an endless
+# range pull one value at a time. /usr/bin/ruby 2.6 settles each.
+def s147
+  String.class_eval { def s147shout; upcase + "!"; end }
+  Integer.class_eval { def s147dbl; self * 2; end }
+  Array.class_eval { def s147sec; self[1]; end }
+  check("ce147a", "hi".s147shout == "HI!" && 4.s147dbl == 8 && [1, 2].s147sec == 2)
+  check("su147b", "\x7f".succ.bytes == [1, 0] && "-\x7f".succ.bytes == [46, 0] && "\x7f\x7f".succ.bytes == [1, 0, 0] &&
+                  "߿".succ.codepoints == [1, 128] && "￿".succ.codepoints == [1, 2048] &&
+                  "퟿".succ.codepoints == [57344] && "a\x7f".succ.bytes == [98, 127])
+  e = (1..).each_cons(2)
+  check("es147c", (1..).each_slice(2).first(2) == [[1, 2], [3, 4]] && (1..).each_cons(3).first(2) == [[1, 2, 3], [2, 3, 4]] &&
+                  (1..).each_slice(2).inspect == "#<Enumerator: 1..:each_slice(2)>" && e.next == [1, 2] && e.next == [2, 3] &&
+                  (1..).lazy.take_while { |x| x < 6 }.each_slice(2).to_a == [[1, 2], [3, 4], [5]] &&
+                  (1..).lazy.select(&:even?).each_slice(2).first(2) == [[2, 4], [6, 8]] &&
+                  (1..).each_slice(2).lazy.map { |a| a.sum }.first(3) == [3, 7, 11])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -966,5 +987,6 @@ s143() # SECTION-CALL 143
 s144() # SECTION-CALL 144
 s145() # SECTION-CALL 145
 s146() # SECTION-CALL 146
+s147() # SECTION-CALL 147
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

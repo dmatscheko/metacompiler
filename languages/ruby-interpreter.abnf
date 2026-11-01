@@ -5812,6 +5812,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // materialized array, membership stays lazy (an endless range has no array).
     function rangeMethod(t, name, args, blk) {
         if (name == "lazy") { return rangeLazy(t) }
+        // A blockless each_slice / each_cons on an endless Integer range is an
+        // Enumerator that pulls one value at a time. Twins: rbRangeMethod,
+        // rubyRangeMethod.
+        if (rbaSliceOp(name) != "" && blk == null && typeof t.lo == "number" && (t.hi === null || t.hi === undefined) &&
+            Math.trunc(toF(args[0])) > 0) {
+            var rsn = Math.trunc(toF(args[0]))
+            return lazyCopy(rangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
+                "#<Enumerator: " + rinspect(t) + ":" + name + "(" + rsn + ")>")
+        }
         if (name == "to_a" || name == "entries" || name == "to_ary") { return rangeToA(t) }
         if (name == "include?" || name == "member?" || name == "cover?" || name == "===") { return rangeCover(t, args[0]) }
         if (name == "begin") { return t.lo }
@@ -10097,6 +10106,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return t
         }
         if (name == "lazy") { return t.lazy ? t : lazyCopy(t, null, true, "#<Enumerator::Lazy: " + t.desc + ">") }
+        // each_slice(n) / each_cons(n) without a block stay one value at a time.
+        // Twins: rbLazyMethod, rubyLazyMethod.
+        if (rbaSliceOp(name) != "" && blk == null && args.length > 0 && Math.trunc(toF(args[0])) > 0) {
+            var sn = Math.trunc(toF(args[0]))
+            return lazyCopy(t, {k: rbaSliceOp(name), f: null, n: sn}, t.lazy,
+                (t.lazy ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + t.desc + ":" + name + "(" + sn + ")>")
+        }
         if (name == "next" || name == "peek") {
             var got = lazyFirst(t, t.pos + 1)
             if (got.length <= t.pos) {
@@ -12546,6 +12562,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var evalClass = anytype
     evalClass = null
     function classEval(cls, args, blk) {
+        // A def in the block of a builtin class reopens it, as `class String' does.
+        if (cls.__builtin === true) { builtinReopened = true }
         var savedEval = evalClass
         var savedVis = curVis
         evalClass = cls

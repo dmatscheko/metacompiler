@@ -19,28 +19,27 @@ function rbaFirstAdded(orig, keys) {
     return keys.length
 }
 
-// Enumerator::Lazy, and the endless Enumerator of a blockless Array#cycle: an
-// Enumerator object that also carries __rlazy, a SOURCE - kind "arr" (items),
-// "cycle" (items, forever) or "range" (lo, lo+1, ... up to hi; hi null is
-// endless) - and the OPS map / select / reject / take_while / drop_while / take,
-// {k, f, n}, applied to one value at a time. rbaLazyFirst pulls the first n
-// results (all of them when n < 0); call(f, v) runs a block, test(v) is Ruby
-// truthiness. A take op ends the run once its count has passed it, so nothing
-// past it is evaluated. Go twin: rubyLazyFirst in abnf/jsrtrubystr.go.
+// Enumerator::Lazy, and the endless Enumerator of a blockless Array#cycle or of
+// each_slice / each_cons on an endless range: an Enumerator object that also
+// carries __rlazy, a SOURCE - kind "arr" (items), "cycle" (items, forever) or
+// "range" (lo, lo+1, ... up to hi; hi null is endless) - and the OPS map /
+// select / reject / take_while / drop_while / take / slice / cons, {k, f, n},
+// applied to one value at a time. rbaLazyFirst pulls the first n results (all of
+// them when n < 0); call(f, v) runs a block, test(v) is Ruby truthiness. A take
+// op ends the run once its count has passed it, so nothing past it is
+// evaluated. Go twin: rubyLazyFirst in abnf/jsrtrubystr.go.
 function rbaLazyFirst(lz, n, call, test) {
-    var out = []
     var ops = lz.ops
-    var cnt = []
-    var on = []
+    var st = {out: [], n: n, cnt: [], on: [], buf: [], done: n == 0, full: false, stopAt: 0 - 1}
     var j = 0
     while (j < ops.length) {
-        cnt.push(0)
-        on.push(false)
+        st.cnt.push(0)
+        st.on.push(false)
+        st.buf.push([])
         j = j + 1
     }
     var i = 0
-    var done = n == 0
-    while (!done) {
+    while (!st.done) {
         var v = anytype
         if (lz.kind == "range") {
             v = lz.lo + i
@@ -51,42 +50,74 @@ function rbaLazyFirst(lz, n, call, test) {
             v = lz.items[i % len]
         }
         i = i + 1
-        var keep = true
-        j = 0
-        while (keep && j < ops.length) {
-            var op = ops[j]
-            if (op.k == "map") {
-                v = call(op.f, v)
-            } else if (op.k == "select") {
-                keep = test(call(op.f, v))
-            } else if (op.k == "reject") {
-                keep = !test(call(op.f, v))
-            } else if (op.k == "take_while") {
-                if (!test(call(op.f, v))) {
-                    keep = false
-                    done = true
-                }
-            } else if (op.k == "drop_while") {
-                if (!on[j]) {
-                    if (test(call(op.f, v))) { keep = false } else { on[j] = true }
-                }
-            } else if (op.k == "take") {
-                if (op.n <= 0) {
-                    keep = false
-                    done = true
-                } else {
-                    cnt[j] = cnt[j] + 1
-                    if (cnt[j] >= op.n) { done = true }
-                }
-            }
-            j = j + 1
-        }
-        if (keep) {
-            out.push(v)
-            if (n >= 0 && out.length >= n) { done = true }
-        }
+        rbaLazyRun(st, ops, v, 0, call, test)
     }
-    return out
+    // A slice op still holding values hands them on as a last, short slice when
+    // the run ended above it: the source ran out, or a take / take_while before
+    // it stopped.
+    j = 0
+    while (j < ops.length && !st.full) {
+        if (ops[j].k == "slice" && st.buf[j].length > 0 && j > st.stopAt) {
+            var rest = st.buf[j]
+            st.buf[j] = []
+            rbaLazyRun(st, ops, rest, j + 1, call, test)
+        }
+        j = j + 1
+    }
+    return st.out
+}
+// One value through ops[from..], into st.out unless an op holds it back.
+function rbaLazyRun(st, ops, v, from, call, test) {
+    var cur = anytype
+    cur = v
+    var j = from
+    while (j < ops.length) {
+        var op = ops[j]
+        if (op.k == "map") {
+            cur = call(op.f, cur)
+        } else if (op.k == "select") {
+            if (!test(call(op.f, cur))) { return }
+        } else if (op.k == "reject") {
+            if (test(call(op.f, cur))) { return }
+        } else if (op.k == "take_while") {
+            if (!test(call(op.f, cur))) {
+                rbaLazyStop(st, j)
+                return
+            }
+        } else if (op.k == "drop_while") {
+            if (!st.on[j]) {
+                if (test(call(op.f, cur))) { return }
+                st.on[j] = true
+            }
+        } else if (op.k == "take") {
+            if (op.n <= 0) {
+                rbaLazyStop(st, j)
+                return
+            }
+            st.cnt[j] = st.cnt[j] + 1
+            if (st.cnt[j] >= op.n) { rbaLazyStop(st, j) }
+        } else if (op.k == "slice") {
+            st.buf[j].push(cur)
+            if (st.buf[j].length < op.n) { return }
+            cur = st.buf[j]
+            st.buf[j] = []
+        } else if (op.k == "cons") {
+            st.buf[j].push(cur)
+            if (st.buf[j].length > op.n) { st.buf[j] = st.buf[j].slice(1) }
+            if (st.buf[j].length < op.n) { return }
+            cur = st.buf[j].slice(0)
+        }
+        j = j + 1
+    }
+    st.out.push(cur)
+    if (st.n >= 0 && st.out.length >= st.n) {
+        st.done = true
+        st.full = true
+    }
+}
+function rbaLazyStop(st, j) {
+    st.done = true
+    if (st.stopAt < 0) { st.stopAt = j }
 }
 
 // The lazy name an op is reached by, or "" when the method is not one.
@@ -94,6 +125,14 @@ function rbaLazyOp(name) {
     if (name == "map" || name == "collect") { return "map" }
     if (name == "select" || name == "filter") { return "select" }
     if (name == "reject" || name == "take_while" || name == "drop_while") { return name }
+    return ""
+}
+
+// The op a blockless each_slice / each_cons is on an Enumerator that pulls one
+// value at a time, or "". Go twin: rubySliceOp in abnf/jsrtrubystr.go.
+function rbaSliceOp(name) {
+    if (name == "each_slice") { return "slice" }
+    if (name == "each_cons") { return "cons" }
     return ""
 }
 

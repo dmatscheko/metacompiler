@@ -469,7 +469,9 @@ function rbsSuccKind(c) {
 // leftwards through alphanumerics ("az" -> "ba", "zz" -> "aaa") and across
 // non-alphanumerics ("1.9" -> "2.0") unless the next one is of the other kind
 // ("a-9" -> "a-10"). A string without alphanumerics increments its last
-// character.
+// character within its UTF-8 length (enc_succ_char): past the largest one of
+// that length it wraps to the smallest and the carry moves one character left,
+// and a string the carry runs off gains "\x01" in front ("\x7f" -> "\x01\x00").
 function rbsSucc(s) {
     if (s.length == 0) { return s }
     var out = s
@@ -507,15 +509,30 @@ function rbsSucc(s) {
         i = i - 1
     }
     if (carryAt >= 0) { return out.substring(0, carryAt) + carry + out.substring(carryAt, out.length) }
-    var j = s.length - 1
-    var lo = s.charCodeAt(j)
-    if (j > 0 && lo >= 56320 && lo <= 57343 && rbsCharLen(s, j - 1) == 2) {
-        var cp = (s.charCodeAt(j - 1) - 55296) * 1024 + (lo - 56320) + 65536 + 1
-        return s.substring(0, j - 1) + String.fromCharCode(55296 + Math.floor((cp - 65536) / 1024), 56320 + (cp - 65536) % 1024)
+    var tail = ""
+    var j = s.length
+    var err = []
+    while (j > 0) {
+        var at = j - 1
+        var cp = s.charCodeAt(at)
+        if (at > 0 && cp >= 56320 && cp <= 57343 && rbsCharLen(s, at - 1) == 2) {
+            at = at - 1
+            cp = (s.charCodeAt(at) - 55296) * 1024 + (cp - 56320) + 65536
+        }
+        var wrap = rbsSuccWrap(cp)
+        if (wrap < 0) { return s.substring(0, at) + rbsChrUtf8(cp == 55295 ? 57344 : cp + 1, err) + tail }
+        tail = rbsChrUtf8(wrap, err) + tail
+        j = at
     }
-    if (lo == 55295) { return s.substring(0, j) + String.fromCharCode(57344) }
-    if (lo == 65535) { return s.substring(0, j) + String.fromCharCode(55296, 56320) }
-    return s.substring(0, j) + String.fromCharCode(lo + 1)
+    return "\x01" + tail
+}
+// The smallest code point of cp's UTF-8 length when cp is the largest, else -1.
+function rbsSuccWrap(cp) {
+    if (cp == 127) { return 0 }
+    if (cp == 2047) { return 128 }
+    if (cp == 65535) { return 2048 }
+    if (cp == 1114111) { return 65536 }
+    return 0 - 1
 }
 
 // The text of a sub / gsub replacement template for match m of re in s

@@ -7456,6 +7456,14 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	}
 	pos, blk := rubyBlockArgs(args)
 	endless := isUndefOrNull(t.props["begin"]) || isUndefOrNull(t.props["end"])
+	// A blockless each_slice / each_cons on an endless Integer range is an
+	// Enumerator that pulls one value at a time. Twin of the arm in rangeMethod.
+	if _, num := t.props["begin"].(float64); num && isUndefOrNull(t.props["end"]) && blk == nil && rubySliceOp(name) != "" {
+		if sn := int(math.Trunc(rubyToF(argAt(pos, 0)))); sn > 0 {
+			return rubySliceEnum(rt.rubyRangeLazy(t).(*jsObject), name, sn, false,
+				"#<Enumerator: "+rt.rubyInspect(t)+":"+name+"("+strconv.Itoa(sn)+")>")
+		}
+	}
 	switch name {
 	// Membership stays LAZY - it is the one part an endless range can answer, and
 	// materializing (1..1_000_000) to ask `include?(3)' would be absurd.
@@ -11609,6 +11617,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					if _, own := args[len(args)-1].(*jsObject).props["__rself"]; own {
 						if name == "class_eval" || name == "module_eval" {
 							pos = nil
+						}
+						if _, bi := o.props["__rbuiltin"]; bi {
+							rt.rubyBuiltinExt = true
 						}
 						return rt.call(blk, jsUndef, append([]interface{}{o}, pos...))
 					}

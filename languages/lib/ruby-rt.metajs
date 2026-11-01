@@ -4915,6 +4915,15 @@ function rbRangeMethod(t, name, args) {
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
     var endless = rtIsNil(t["end"]) || rtIsNil(t["begin"])
+    // A blockless each_slice / each_cons on an endless Integer range is an
+    // Enumerator that pulls one value at a time. Twin of the arm in rangeMethod.
+    if (rbaSliceOp(name) != "" && blk === null && typeof t["begin"] == "number" && rtIsNil(t["end"])) {
+        var rsn = Math.trunc(rbToF(rbArgAt(args, 0)))
+        if (rsn > 0) {
+            return rbLazyCopy(rbRangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
+                "#<Enumerator: " + rbInspect(t) + ":" + name + "(" + rsn + ")>")
+        }
+    }
     // Membership stays LAZY - it is the one part that an endless range can answer,
     // and materializing (1..1_000_000) to ask `include?(3)` would be absurd.
     if (name == "cover?" || name == "include?" || name == "member?" || name == "===") {
@@ -6759,6 +6768,14 @@ function rbLazyMethod(t, name, args) {
     if (name == "lazy") {
         if (t["lazy"] === true) { return t }
         return rbLazyCopy(t, null, true, "#<Enumerator::Lazy: " + desc + ">")
+    }
+    // each_slice(n) / each_cons(n) without a block stay one value at a time. Twins:
+    // lazyMethod in ruby-interpreter.abnf, rubyLazyMethod in abnf/jsrtrubystr.go.
+    if (rbaSliceOp(name) != "" && blk === null && Math.trunc(rbToF(rbArgAt(args, 0))) > 0) {
+        var sn = Math.trunc(rbToF(rbArgAt(args, 0)))
+        var lz = t["lazy"] === true
+        return rbLazyCopy(t, {k: rbaSliceOp(name), f: null, n: sn}, lz,
+            (lz ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + desc + ":" + name + "(" + sn + ")>")
     }
     if (name == "next" || name == "peek") {
         var pos = Math.trunc(rbToF(t["pos"]))
@@ -8802,6 +8819,8 @@ function rbMethod(target, name, args) {
             // module as self. Twin of classEval in ruby-interpreter.abnf.
             if ((name == "class_eval" || name == "module_eval" || name == "class_exec" || name == "module_exec")
                 && target["__isclass"] === true && rbBlockOf(args) !== null && args[args.length - 1]["__rself"] === true) {
+                // A def in the block of a builtin class reopens it, as `class String' does.
+                if (target["__rbuiltin"] !== undefined) { rbBuiltinExtOn = true }
                 var eargs = [target]
                 if (name == "class_exec" || name == "module_exec") {
                     var en = rbNPos(args)
@@ -10780,6 +10799,9 @@ function js_rlvar(scope, name) {
     if (rbIsObj(lself) && rbRestricted(lself["__class"], n)) { return js_rxmcall(lself, "$q$" + n, []) }
     // Module#name, where self is a class or module (a method of an extended module).
     if (rbIsObj(lself) && (rbSingRespond(lself, n) || (n == "name" && lself["__isclass"] === true))) { return js_rxmcall(lself, n, []) }
+    // In a method a class_eval block added to a builtin class, self is a builtin
+    // value and the name may be one of its methods (`upcase' in String#shout).
+    if (rbBuiltinExtOn && rbRespondClass(lself) != "" && js_rrespond(lself, [n]) === true) { return js_rxmcall(lself, n, []) }
     rbNameErr("NameError", "undefined local variable or method `" + n + "' for " + rbNoMethodDesc(lself), n, lself)
     return null
 }

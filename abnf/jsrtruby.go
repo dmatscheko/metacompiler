@@ -204,6 +204,12 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		if o, isObj := self.(*jsObject); isObj && (rubySingRespond(o, name) || (name == "name" && o.props["__isclass"] == true)) {
 			return m["js_rxmcall"]([]uint64{w(self), a[1], w(&jsArray{})})
 		}
+		// In a method a class_eval block added to a builtin class, self is a
+		// builtin value and the name may be one of its methods (`upcase' in
+		// String#shout). Twin of builtinSelfMethod in ruby-interpreter.abnf.
+		if rt.rubyBuiltinExt && rt.rubyRespondClass(self) != "" && rubyTruthy(rt.rubyRespond(self, []interface{}{name})) {
+			return m["js_rxmcall"]([]uint64{w(self), a[1], w(&jsArray{})})
+		}
 		rt.rubyNameErr("NameError", "undefined local variable or method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
 		return 0
 	}

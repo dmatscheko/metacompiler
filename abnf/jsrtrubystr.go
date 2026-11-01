@@ -94,18 +94,15 @@ func rubyLazyCopy(t *jsObject, op *jsObject, lazy bool, desc string) *jsObject {
 }
 
 func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} {
-	out := []interface{}{}
 	ops := t.props["ops"].(*jsArray).elems
 	items := t.props["items"].(*jsArray).elems
 	kind := t.props["kind"].(string)
 	lo := t.props["lo"].(float64)
 	hi, bounded := t.props["hi"].(float64)
 	excl := t.props["excl"] == true
-	cnt := make([]int, len(ops))
-	on := make([]bool, len(ops))
-	call := func(f, v interface{}) interface{} { return rt.call(f, jsUndef, []interface{}{v}) }
-	done := n == 0
-	for i := 0; !done; i++ {
+	st := &rubyLazyState{out: []interface{}{}, n: n, cnt: make([]int, len(ops)), on: make([]bool, len(ops)),
+		buf: make([][]interface{}, len(ops)), done: n == 0, stopAt: -1}
+	for i := 0; !st.done; i++ {
 		var v interface{}
 		if kind == "range" {
 			x := lo + float64(i)
@@ -119,48 +116,99 @@ func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} {
 			}
 			v = items[i%len(items)]
 		}
-		keep := true
-		for j := 0; keep && j < len(ops); j++ {
-			op := ops[j].(*jsObject)
-			f := op.props["f"]
-			switch op.props["k"] {
-			case "map":
-				v = call(f, v)
-			case "select":
-				keep = rubyTruthy(call(f, v))
-			case "reject":
-				keep = !rubyTruthy(call(f, v))
-			case "take_while":
-				if !rubyTruthy(call(f, v)) {
-					keep, done = false, true
-				}
-			case "drop_while":
-				if !on[j] {
-					if rubyTruthy(call(f, v)) {
-						keep = false
-					} else {
-						on[j] = true
-					}
-				}
-			case "take":
-				if lim := int(rubyToF(op.props["n"])); lim <= 0 {
-					keep, done = false, true
-				} else {
-					cnt[j]++
-					if cnt[j] >= lim {
-						done = true
-					}
-				}
-			}
-		}
-		if keep {
-			out = append(out, v)
-			if n >= 0 && len(out) >= n {
-				done = true
-			}
+		rt.rubyLazyRun(st, ops, v, 0)
+	}
+	for j := 0; j < len(ops) && !st.full; j++ {
+		if ops[j].(*jsObject).props["k"] == "slice" && len(st.buf[j]) > 0 && j > st.stopAt {
+			rest := &jsArray{elems: st.buf[j]}
+			st.buf[j] = nil
+			rt.rubyLazyRun(st, ops, rest, j+1)
 		}
 	}
-	return out
+	return st.out
+}
+
+// rubyLazyState is one rubyLazyFirst run. Twin of the st object of rbaLazyFirst.
+type rubyLazyState struct {
+	out        []interface{}
+	n          int
+	cnt        []int
+	on         []bool
+	buf        [][]interface{}
+	done, full bool
+	stopAt     int
+}
+
+func (st *rubyLazyState) stop(j int) {
+	st.done = true
+	if st.stopAt < 0 {
+		st.stopAt = j
+	}
+}
+
+// rubyLazyRun is one value through ops[from:]. Twin of rbaLazyRun in
+// lib/ruby-arr.js.
+func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{}, from int) {
+	call := func(f, v interface{}) interface{} { return rt.call(f, jsUndef, []interface{}{v}) }
+	for j := from; j < len(ops); j++ {
+		op := ops[j].(*jsObject)
+		f := op.props["f"]
+		switch op.props["k"] {
+		case "map":
+			v = call(f, v)
+		case "select":
+			if !rubyTruthy(call(f, v)) {
+				return
+			}
+		case "reject":
+			if rubyTruthy(call(f, v)) {
+				return
+			}
+		case "take_while":
+			if !rubyTruthy(call(f, v)) {
+				st.stop(j)
+				return
+			}
+		case "drop_while":
+			if !st.on[j] {
+				if rubyTruthy(call(f, v)) {
+					return
+				}
+				st.on[j] = true
+			}
+		case "take":
+			lim := int(rubyToF(op.props["n"]))
+			if lim <= 0 {
+				st.stop(j)
+				return
+			}
+			st.cnt[j]++
+			if st.cnt[j] >= lim {
+				st.stop(j)
+			}
+		case "slice":
+			st.buf[j] = append(st.buf[j], v)
+			if len(st.buf[j]) < int(rubyToF(op.props["n"])) {
+				return
+			}
+			v = &jsArray{elems: st.buf[j]}
+			st.buf[j] = nil
+		case "cons":
+			lim := int(rubyToF(op.props["n"]))
+			st.buf[j] = append(st.buf[j], v)
+			if len(st.buf[j]) > lim {
+				st.buf[j] = st.buf[j][1:]
+			}
+			if len(st.buf[j]) < lim {
+				return
+			}
+			v = &jsArray{elems: append([]interface{}{}, st.buf[j]...)}
+		}
+	}
+	st.out = append(st.out, v)
+	if st.n >= 0 && len(st.out) >= st.n {
+		st.done, st.full = true, true
+	}
 }
 
 func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
@@ -223,6 +271,14 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			return t
 		}
 		return rubyLazyCopy(t, nil, true, "#<Enumerator::Lazy: "+desc+">")
+	case "each_slice", "each_cons":
+		if sn := int(math.Trunc(rubyToF(argAt(pos, 0)))); blk == nil && sn > 0 {
+			sd := name + "(" + strconv.Itoa(sn) + ")>"
+			if lazy {
+				return rubySliceEnum(t, name, sn, true, "#<Enumerator::Lazy: "+desc+":"+sd)
+			}
+			return rubySliceEnum(t, name, sn, false, "#<Enumerator: "+desc+":"+sd)
+		}
 	case "next", "peek":
 		cur := int(rubyToF(t.props["pos"]))
 		got := rt.rubyLazyFirst(t, cur+1)
@@ -264,6 +320,28 @@ func rubyLazyOp(name string) string {
 		return name
 	}
 	return ""
+}
+
+// rubySliceOp is the op a blockless each_slice / each_cons is on a lazy
+// Enumerator, or "". Twin of rbaSliceOp in lib/ruby-arr.js.
+func rubySliceOp(name string) string {
+	switch name {
+	case "each_slice":
+		return "slice"
+	case "each_cons":
+		return "cons"
+	}
+	return ""
+}
+
+// rubySliceEnum is the Enumerator of a blockless each_slice(n) / each_cons(n) on
+// t, desc its #inspect. Twin of the arm in rbLazyMethod / rbRangeMethod.
+func rubySliceEnum(t *jsObject, name string, n int, lazy bool, desc string) *jsObject {
+	op := newJSObject()
+	op.set("k", rubySliceOp(name))
+	op.set("f", jsNull)
+	op.set("n", float64(n))
+	return rubyLazyCopy(t, op, lazy, desc)
 }
 
 // rubyFindRunes is the first index >= from where t occurs in s, or -1.
@@ -427,6 +505,11 @@ func rubySuccKind(c rune) int {
 	return 0
 }
 
+// rubySuccWrap maps the largest code point of each UTF-8 length to the smallest
+// of that length, where String#succ wraps and carries. Twin of rbsSuccWrap in
+// lib/ruby-str.js.
+var rubySuccWrap = map[rune]rune{0x7F: 0, 0x7FF: 0x80, 0xFFFF: 0x800, 0x10FFFF: 0x10000}
+
 // rubyStrSucc is String#succ (str_succ). Twin of rbsSucc in lib/ruby-str.js.
 func rubyStrSucc(str string) string {
 	s := []rune(str)
@@ -461,13 +544,19 @@ func rubyStrSucc(str string) string {
 	if carryAt >= 0 {
 		return string(s[:carryAt]) + string(carry) + string(s[carryAt:])
 	}
-	j := len(s) - 1
-	if s[j] == 0xD7FF {
-		s[j] = 0xE000
-	} else {
-		s[j]++
+	for j := len(s) - 1; j >= 0; j-- {
+		if w, at := rubySuccWrap[s[j]]; at {
+			s[j] = w
+			continue
+		}
+		if s[j] == 0xD7FF {
+			s[j] = 0xE000
+		} else {
+			s[j]++
+		}
+		return string(s)
 	}
-	return string(s)
+	return "\x01" + string(s)
 }
 
 // rubyRfindRunes is the last index <= from where t occurs in s, or -1.
