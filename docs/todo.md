@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1047** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1048** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -101,11 +101,8 @@ Per dotnet/runtime source (found by CS r5), all three engines: `new ArgumentExce
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPTY · P3 · KT · IN PROGRESS (KT worker, round 19) [V]
-kotlinc 2.2.21 (found by KT r18):
-- `val big = 18446744073709551613uL..ULong.MAX_VALUE`: kotlinc prints `18446744073709551613..18446744073709551615`, toList → 3 elements, `18446744073709551612uL in big` → false. Ours: `18446744073709551615..18446744073709551615`, toList hangs, `in` true (bounds held as doubles; needs an unsigned twin of the exact Long-range path lf/lt/ls in all engines; endExclusive MAX test too).
-- `class P(val x: Int); println(P(4).x::class.simpleName)` → Int; ours prints the source text `p.x` (any member-access receiver of ::class, e.g. `r.first::class`).
-- `IntRange.EMPTY` (and the other range companions) → interpreter "unknown name: IntRange"; kotlinc: `(1 until Int.MIN_VALUE) == IntRange.EMPTY` → true. Check compiled legs too.
+### T-1047 kotlin: interpreter `Pair::class.simpleName` is null · P4 · KT · OPEN [V]
+kotlinc 2.2.21: `val r = 1L to 2; println(r::class.simpleName)` → Pair; llvm.Run and native print Pair, the interpreter prints null. Found by KT r19.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1092,6 +1089,7 @@ T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-va
 T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed declare -A — PARTIAL→split (SH r27, 92e1b3da): prefix-binding export through local, read -n/-N, empty-subscript diagnostics (unset/${b[]}/+=/assoc literal/let/((...))), assoc @/* keys via read/printf -v, nameref value checks, declare +a/+A refusal. Master probe vs bash 5.3: 4 legs agree (external-command pipelines excluded). Per-scope assoc kind and compiler computed declare -A/array literal filed as follow-up.
 T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null — DONE (CS r5, 61eb7cf3): integral Parse overflow per type (format errors win, -0 ok for unsigned, .NET IsWhite set); two-arg Argument*/inner-exception ctors incl. : base(a,b); undefined == null in C# equality. Master spec probe (ctor messages, field/member == null, overflow, bounds): 3 legs agree.
 T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)` modifiers — DONE (JS r40, 680aacaa): lookbehind (backward emission, node-identical captures), (?ims-ims:) modifiers, v-flag class sets/strictness with V8 texts; also \r/U+2028/9 line terminators, \P{} under i, v-mode surrogate advancement. Properties of strings declined (no emoji-sequence data). Master probe vs node 24 (22 lines): 4 legs agree; dart+js rows green.
+T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPTY — DONE (KT r19, 57416b54): exact unsigned ULong ranges (iteration/in/step/count/for-last), ::class on member-access receivers, range companions EMPTY. Master probe vs kotlinc 2.2.21 (16 lines incl. ULong.MAX ranges): 4 legs agree.
 
 # Settled — do not re-open
 
