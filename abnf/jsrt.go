@@ -7240,6 +7240,9 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 		c.set("$c$E", jsFlo{f: math.E})
 		c.set("$c$DomainError", rt.rubyBuiltinClass("Math::DomainError"))
 	}
+	if name == "Enumerator" {
+		c.set("$c$Lazy", rt.rubyBuiltinClass("Enumerator::Lazy"))
+	}
 	// Regexp's option bits, the second argument of Regexp.new.
 	if name == "Regexp" {
 		c.set("$c$IGNORECASE", 1.0)
@@ -7856,6 +7859,8 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 			return true
 		case "Enumerable":
 			return kind == "Array" || kind == "Hash" || kind == "Range"
+		case "Enumerator::Lazy":
+			return rubyIsLazyEnum(v)
 		}
 		return false
 	}
@@ -10073,6 +10078,14 @@ func (rt *jsrt) rubyStructEq(l, r interface{}) bool {
 // entry until Hash#rehash. This compares at lookup time and still finds it.
 func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 	k = rubySV(k)
+	if keys.kind == rubyIdentKind {
+		for i, e := range keys.elems {
+			if rubyIdentKeyEq(e, k) {
+				return i
+			}
+		}
+		return -1
+	}
 	if i := rt.dictFind(keys, k); i >= 0 {
 		return i
 	}
@@ -11034,6 +11047,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	switch name {
 	case "class":
 		if kind := rt.rubyClassNameRT(target); kind != "" {
+			if kind == "Enumerator" && rubyIsLazyEnum(target) {
+				kind = "Enumerator::Lazy"
+			}
 			return rt.rubyBuiltinClass(kind)
 		}
 	case "is_a?", "kind_of?", "instance_of?":
@@ -11612,16 +11628,28 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					return p
 				}
 				return jsNull
+			case "compare_by_identity":
+				keys.kind = rubyIdentKind
+				return o
+			case "compare_by_identity?":
+				return keys.kind == rubyIdentKind
 			case "default=", "default_proc=":
+				v := argAt(args, 0)
+				if name == "default_proc=" {
+					if sy, isSym := v.(jsSym); isSym {
+						v = rt.rubySymProc(sy.s)
+					} else if _, _, isDict := dictParts(v); v != jsNull && !isCallable(v) && !isDict {
+						rt.rubyRaiseErr(name, "TypeError", "wrong default_proc type "+rubyOwnerName(v)+" (expected Proc)")
+					}
+				}
 				o.del("__hdef")
 				o.del("__hdefp")
-				v := argAt(args, 0)
 				if name == "default=" {
 					o.set("__hdef", v)
 				} else if v != jsNull {
 					o.set("__hdefp", v)
 				}
-				return v
+				return argAt(args, 0)
 			case "fetch":
 				// Hash#fetch DELIBERATELY ignores the default: MRI raises
 				// KeyError for a missing key unless a second argument or a
@@ -12540,6 +12568,8 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		mg := o
 		if name == "merge" {
 			mg = rubyHashCopy(o)
+			mk, _, _ := dictParts(mg)
+			mk.kind = keys.kind
 		}
 		mkeys, mvals, _ := dictParts(mg)
 		for _, src := range pos {
@@ -12565,7 +12595,10 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		mkeys.dropIdx()
 		return mg, true
 	case "dup", "clone":
-		return rubyHashCopy(o), true
+		cp := rubyHashCopy(o)
+		ck, _, _ := dictParts(cp)
+		ck.kind = keys.kind
+		return cp, true
 	case "to_h":
 		if blk == nil {
 			return o, true
@@ -12744,6 +12777,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		keys.elems = append([]interface{}{}, skeys.elems...)
 		vals.elems = append([]interface{}{}, svals.elems...)
 		keys.dropIdx()
+		keys.kind = skeys.kind
 		o.del("__hdef")
 		o.del("__hdefp")
 		if d, has := src.props["__hdef"]; has {

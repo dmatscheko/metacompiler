@@ -1062,15 +1062,27 @@ NoLoopDo = :script(~~
         var dd = c.peek(j)
         var st2 = 0
         while (st2 < 1000 && (dd === 32 || dd === 9 || dd === 13)) { j = j + 1; dd = c.peek(j); st2 = st2 + 1 }
+        // A loop that is the value of an assignment (`v = for x in xs do ... end`)
+        // is read past the `NAME =`.
         var w = ""
-        var st3 = 0
-        while (st3 < 100 && ((dd >= 65 && dd <= 90) || (dd >= 97 && dd <= 122) || dd === 95)) {
-            w = w + String.fromCharCode(dd)
+        var pass = 0
+        while (pass < 2) {
+            pass = pass + 1
+            w = ""
+            var st3 = 0
+            while (st3 < 100 && ((dd >= 65 && dd <= 90) || (dd >= 97 && dd <= 122) || (dd >= 48 && dd <= 57) || dd === 95)) {
+                w = w + String.fromCharCode(dd)
+                j = j + 1
+                dd = c.peek(j)
+                st3 = st3 + 1
+            }
+            if (w === "while" || w === "until" || w === "for") { return no }
+            while (dd === 32 || dd === 9) { j = j + 1; dd = c.peek(j) }
+            if (w === "" || dd !== 61 || c.peek(j + 1) === 61 || c.peek(j + 1) === 126 || c.peek(j + 1) === 62) { return undefined }
             j = j + 1
             dd = c.peek(j)
-            st3 = st3 + 1
+            while (dd === 32 || dd === 9) { j = j + 1; dd = c.peek(j) }
         }
-        if (w === "while" || w === "until" || w === "for") { return no }
         return undefined
     })()
 ~~) ;
@@ -1144,17 +1156,19 @@ TopConst    <~~ push(makeScopedConst(up.in.substring(2), true)) ~~>
 ParenBody   <~~ push(pop().body) ~~>
             = "(" Body ")" ;
 
-// for VAR[, VAR] in COLL ... end: unlike a block, `for` does NOT open a scope - the
-// loop variable stays visible after the loop (Ruby), so it is written with the same
-// assignment path as an ordinary local. Several variables destructure each element.
-ForExpr     <~~ push(makeForIn(takeAll())) ~~>
-            = KwFor ForVars KwIn Expression [ KwDo ] Body End ;
-// The trailing comma is meaningful, exactly as in a block parameter list: `for i, in`
-// forces each element to be DESTRUCTURED rather than taken whole.
-ForVars     = "(" ForVarList ")" | ForVarList ;
-ForVarList  = ForVar { "," [ "*" ] [ ForVar ] } ;
-// A parenthesised loop variable destructures one element; the names are collected
-// flat, which is what makeForIn already binds them as.
+// for VARS in COLL ... end: unlike a block, `for` does NOT open a scope - the loop
+// variables stay visible after the loop (Ruby), so each element is written with the
+// multiple-assignment path: one variable takes the element whole, several (or one
+// with a trailing comma, `for i, in`) destructure it as `a, (b, *c) = element` would.
+// Every loop variable is pushed as {ftgt: target}, in the shape MTarget builds.
+ForExpr     <~~ var fi = takeAll(); noteLexAssign(forTargets(fi), up.start); push(makeForIn(fi)) ~~>
+            = KwFor ForVarList KwIn Expression [ KwDo ] Body End ;
+ForVarList  = ForItem { "," ForItem } [ "," <~~ push({ftrail: true}) ~~> ] ;
+ForItem     = ForSplat | ForVar ;
+ForSplat    <~~ var n = takeAll(); push({ftgt: {splat: n.length > 0 ? n[0].ftgt : makeTargetRef([{var: "__splat_discard"}])}}) ~~>
+            = "*" !"*" [ ForVar ] ;
+ForGroup    <~~ push({ftgt: {group: forTargets(takeAll())}}) ~~>
+            = "(" ForVarList ")" ;
 // The loop variable may be an @ivar, a @@classvar or a $global as well as a local -
 // `for` does not open a scope, so every one of them is an ordinary assignment.
 // A `for` variable that is a METHOD-CALL target (`for obj.attr in coll`). The guard
@@ -1182,10 +1196,11 @@ ForPathAhead = :script(~~
         return no
     })()
 ~~) ;
-ForVar      = "(" ForVarList ")" | ForPathAhead Target <~~ push({ftarget: pop()}) ~~>
-            | "@@" Id <~~ push({fvar: "@@" + up.in}) ~~>
-            | "@" Id <~~ push({fvar: "@" + up.in}) ~~> | "$" Id <~~ push({fvar: "$" + up.in}) ~~>
-            | Name <~~ push({fvar: up.in}) ~~> ;
+ForVar      = ForGroup | ForPathAhead Target <~~ push({ftgt: pop()}) ~~>
+            | "@@" Id <~~ push({ftgt: makeTargetRef([{cvar: up.in}])}) ~~>
+            | "@" Id <~~ push({ftgt: makeTargetRef([{ivar: up.in}])}) ~~>
+            | "$" Id <~~ push({ftgt: makeTargetRef([{gvar: gvName(up.in)}])}) ~~>
+            | Name <~~ push({ftgt: makeTargetRef([{var: up.in}])}) ~~> ;
 
 // super / super(args): call the method of the same name in the superclass. A BARE
 // super forwards the arguments the current method received (Ruby), while super()
@@ -3090,78 +3105,62 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    // for VAR[, VAR] in COLL ... end. `for` does not open a scope, so the loop variable
-    // is written with the ordinary local-assignment rule and outlives the loop.
-    // A for-loop variable spelled @v / @@v / $v is written through the matching target
-    // kind; a plain name is an ordinary local (for does not open a scope).
-    // One loop variable: a general target (`for obj.attr in ...`) writes through the
-    // assignment path, everything else through its name.
-    function forOneSet(name, ref, v) {
-        if (ref == null) { forVarSet(name, v); return }
-        if (ref.path.length == 0) { writeTarget(ref, v); return }
-        var p = resolveRefRuby(ref)
-        writePathRuby(ref, p, v)
-    }
-    function forVarSet(name, v) {
-        if (name.charAt(0) != "@" && name.charAt(0) != "$") { rubySet(name, v); return }
-        if (name.charAt(0) == "$") { writeTarget({gvar: name.slice(1), path: []}, v); return }
-        if (name.charAt(1) == "@") { writeTarget({cvar: name.slice(2), path: []}, v); return }
-        writeTarget({ivar: name.slice(1), path: []}, v)
+    // for VARS in COLL ... end. The loop variables are {ftgt} multiple-assignment
+    // targets (see ForVarList); the value of the loop is COLL, as Array#each answers
+    // its receiver, or the value of the `break` that ended it.
+    function forTargets(items) {
+        var ts = []
+        for (var i = 0; i < items.length; i++) { if (items[i].ftgt != undefined) { ts.push(items[i].ftgt) } }
+        return ts
     }
     function makeForIn(items) {
-        var names = []
+        var tgts = forTargets(items)
+        var whole = tgts.length == 1 && tgts[0].splat == undefined
         var collT = null
         var body = null
-        var refs = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].fvar != undefined) { names.push(items[i].fvar); refs.push(null) }
-            else if (items[i].ftarget != undefined) { names.push(""); refs.push(items[i].ftarget) }
+            if (items[i].ftrail === true) { whole = false }
             else if (items[i].body != undefined) { body = items[i].body }
-            else { collT = items[i] }
+            else if (items[i].ftgt == undefined) { collT = items[i] }
         }
         return function() {
             var coll = anytype
             coll = collT()
-            if (isDict(coll)) { return forInHash(coll, names, refs, body) }
+            if (isDict(coll)) { return forInHash(coll, tgts, whole, body) }
             var seq = []
             if (Array.isArray(coll)) { seq = coll }
             else if (isRange(coll)) { seq = rangeToA(coll) }
             else { fail("for-in needs an array or a hash") }
             for (var i = 0; i < seq.length; i++) {
-                var st = forStep(names, refs, body, seq[i])
+                var st = forStep(tgts, whole, body, seq[i])
                 if (st.sig != undefined) { return st.sig }
                 if (st.stop) { return st.v }
             }
-            return null
+            return coll
         }
     }
-    // One pass of a for body with el bound to the loop variables: one variable
-    // takes el whole, several destructure it.
-    function forStep(names, refs, body, el) {
-        if (names.length == 1) { forOneSet(names[0], refs[0], el) }
-        else {
-            for (var j = 0; j < names.length; j++) {
-                forOneSet(names[j], refs[j], Array.isArray(el) && j < el.length ? el[j] : null)
-            }
-        }
+    // One pass of a for body with el bound to the loop variables.
+    function forStep(tgts, whole, body, el) {
+        if (whole) { assignOne(tgts[0], el) }
+        else { destructure(tgts, Array.isArray(el) ? el : [el]) }
         return runLoopBody(body)
     }
     // `for` over a Hash is Hash#each: the live entries as [key, value] pairs, run
     // inside an iteration over the Hash (hashIter), so an insertion in the body
     // raises. Twin of js_rforit / js_rfornext in abnf/jsrtrubystr.go and
     // lib/ruby-rt.metajs.
-    function forInHash(d, names, refs, body) {
+    function forInHash(d, tgts, whole, body) {
         var lev = d.__iter == undefined ? 0 : d.__iter
         d.__iter = lev + 1
         var r = anytype
-        r = null
+        r = d
         try {
             var i = 0
             var going = true
             while (going && i < d.keys.length) {
                 var k = anytype
                 k = d.keys[i]
-                var st = forStep(names, refs, body, [keyOut(k), d.vals[i]])
+                var st = forStep(tgts, whole, body, [keyOut(k), d.vals[i]])
                 if (st.sig != undefined) { r = st.sig; going = false }
                 else if (st.stop) { r = st.v; going = false }
                 else if (i < d.keys.length && d.keys[i] === k) { i = i + 1 }
@@ -8247,7 +8246,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "function") { return hostGlobals[isMethodVal(v) ? "Method" : "Proc"] }
         if (Array.isArray(v)) { return hostGlobals["Array"] }
         if (isDict(v)) { return hostGlobals["Hash"] }
-        if (isEnum(v)) { return hostGlobals["Enumerator"] }
+        if (isEnum(v)) { return hostGlobals[v.lazy === true ? "Enumerator::Lazy" : "Enumerator"] }
         if (isUserObj(v)) { return v.__class }
         // A class object's own class is Class, a module object's is Module.
         if (isClassObj(v)) {
@@ -9691,18 +9690,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return hdv == undefined ? null : hdv
         }
         // A Hash keeps ONE default, a value or a proc: setting either drops the
-        // other, and `default_proc = nil` leaves neither. Twin of the Hash arm of
-        // rubyMethod in abnf/jsrt.go and rbMethod in lib/ruby-rt.metajs.
+        // other, and `default_proc = nil` leaves neither. default_proc= takes a Proc,
+        // or a Symbol through its #to_proc; a Hash is stored as it is (MRI converts
+        // it with Hash#to_proc, which is not modelled); anything else is a
+        // TypeError raised before either default changes. Twin of the Hash arm of rubyMethod in
+        // abnf/jsrt.go and rbMethod in lib/ruby-rt.metajs.
         if (name == "default_proc") {
             var hdp = anytype
             hdp = target.__hdefp
             return hdp == undefined ? null : hdp
         }
+        // compare_by_identity switches the key rule to core.identEq for good and
+        // answers the receiver; entries the old rule kept apart stay apart.
+        if (name == "compare_by_identity") { target.__ident = true; return target }
+        if (name == "compare_by_identity?") { return target.__ident === true }
         if (name == "default=" || name == "default_proc=") {
+            var ndp = anytype
+            ndp = args[0]
+            if (name == "default_proc=" && isSym(ndp)) { ndp = symProc(ndp) }
+            else if (name == "default_proc=" && ndp !== null && typeof ndp != "function" && !isDict(ndp)) {
+                raiseErr(name, "TypeError", "wrong default_proc type " + classOf(ndp).__name + " (expected Proc)")
+            }
             target.__hdef = undefined
             target.__hdefp = undefined
-            if (name == "default=") { target.__hdef = args[0] }
-            else if (args[0] !== null) { target.__hdefp = args[0] }
+            if (name == "default=") { target.__hdef = ndp }
+            else if (ndp !== null) { target.__hdefp = ndp }
             return args[0]
         }
         // Hash#fetch DELIBERATELY ignores the default: MRI raises KeyError for a
@@ -9718,7 +9730,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // merge / dup / clone CARRY THE RECEIVER'S DEFAULT over, which is what
         // makes `Hash.new(0).merge(other)["missing"]` still answer 0 in MRI.
         if (name == "merge" || name == "merge!" || name == "update") {
-            var mg = name == "merge" ? hashCopy(target) : target
+            var mg = name == "merge" ? hashCopyId(target) : target
             for (var mi = 0; mi < args.length; mi++) {
                 var src = args[mi]
                 if (!isDict(src)) { continue }
@@ -9731,7 +9743,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return mg
         }
-        if (name == "dup" || name == "clone") { return hashCopy(target) }
+        if (name == "dup" || name == "clone") { return hashCopyId(target) }
         // Hash#to_h with a block maps each pair through it, as Array#to_h does.
         if (name == "to_h") { return blk == null ? target : arrayMethod(hashPairs(target), name, args, blk) }
         if (name == "delete") {
@@ -9848,6 +9860,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             arrReplace(target.vals, rsrc.vals.slice(0))
             target.__hdef = rsrc.__hdef
             target.__hdefp = rsrc.__hdefp
+            target.__ident = rsrc.__ident
             return target
         }
         // rehash stores every pair again: keys that have become equal merge into
@@ -10092,6 +10105,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (o.__hdefp != undefined) { c.__hdefp = o.__hdefp }
         return c
     }
+    // dup, clone and merge also keep compare_by_identity; the other copies do not.
+    function hashCopyId(o) {
+        var c = hashCopy(o)
+        if (o.__ident === true) { c.__ident = true }
+        return c
+    }
     function pairsToHash(pairs, src) {
         var d = {__dict: true, keys: [], vals: []}
         if (src.__hdef != undefined) { d.__hdef = src.__hdef }
@@ -10273,7 +10292,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "rewind") { t.pos = 0; return t }
         if (name == "size") { return t.kind == "arr" && t.ops.length == 0 ? t.items.length : null }
         if (name == "inspect" || name == "to_s") { return t.desc }
-        if (name == "class") { return hostGlobals["Enumerator"] }
+        if (name == "class") { return classOf(t) }
         noMethod(t, name)
     }
     function enumMethod(t, name, args, blk) {
@@ -14620,6 +14639,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (n == "Array") { return Array.isArray(v) }
             if (n == "Hash") { return isDict(v) }
             if (n == "Enumerator") { return isEnum(v) }
+            if (n == "Enumerator::Lazy") { return isEnum(v) && v.lazy === true }
             if (n == "Range") { return isRange(v) }
             if (n == "Regexp") { return isRegex(v) }
             if (n == "MatchData") { return isMatchD(v) }
@@ -14984,6 +15004,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["EncodingError"] = mkBuiltinClass("EncodingError", stdErr)
     hostGlobals["Encoding::CompatibilityError"] = mkBuiltinClass("Encoding::CompatibilityError", hostGlobals["EncodingError"])
     hostGlobals["Encoding"]["$c$CompatibilityError"] = hostGlobals["Encoding::CompatibilityError"]
+    // Enumerator::Lazy < Enumerator, the class of what #lazy answers.
+    hostGlobals["Enumerator::Lazy"] = mkBuiltinClass("Enumerator::Lazy", hostGlobals["Enumerator"])
+    hostGlobals["Enumerator"]["$c$Lazy"] = hostGlobals["Enumerator::Lazy"]
     // What String#encode raises.
     var encErrs = ["UndefinedConversionError", "InvalidByteSequenceError", "ConverterNotFoundError"]
     for (var eei = 0; eei < encErrs.length; eei++) {
@@ -15483,6 +15506,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRange(a) && isRange(b)) { return rangeEq(a, b) }
         if (!isBig(a) || !isBig(b)) { return false }
         return bigCmp(a, b) == 0
+    }
+
+    // The key rule of a Hash after #compare_by_identity: equal? - with one
+    // exception the value model forces. A String has no identity here (a literal
+    // is a plain string and the key is stored as its text), so two Strings are one
+    // key when their texts are equal. Twins: rubyIdentKeyEq in abnf/jsrtruby.go,
+    // rbIdentKeyEq in lib/ruby-rt.metajs.
+    core.identEq = function(a, b) {
+        if ((typeof a == "string" || isRStr(a)) && (typeof b == "string" || isRStr(b))) { return rsText(a) === rsText(b) }
+        return identicalP(a, b)
     }
 
     // ----- Project-file imports (require / require_relative) -----

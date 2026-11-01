@@ -1181,6 +1181,82 @@ def s150
         [1, 2, 3].find_all(&:odd?) == [1, 3])
 end
 
+# ===== SECTION 151: for-loop targets and value; compare_by_identity; default_proc=; Lazy =====
+# A for loop assigns each element as a multiple assignment does - nested groups, a
+# splat, a trailing comma - and its value is the collection (or a break's value).
+# compare_by_identity keys a Hash by equal?, so two equal Arrays are two keys (a
+# String is the exception here: it has no identity in this value model). default_proc=
+# takes a Proc or a Symbol and raises TypeError otherwise; #lazy answers an
+# Enumerator::Lazy < Enumerator. /usr/bin/ruby 2.6 settles each.
+def s151
+  out = []
+  for a, (b, c) in [[1, [2, 3]], [4, [5, 6, 7]], [8, 9]]
+    out << [a, b, c]
+  end
+  check("fd151a", out == [[1, 2, 3], [4, 5, 6], [8, 9, nil]])
+  out = []
+  for a, *r in [[1, 2, 3], [4]]; out << [a, r]; end
+  for i, in [[1, 2], [3, 4]]; out << i; end
+  for (p1, (p2, *p3)), p4 in [[[1, [2, 3, 4]], 5]]; out << [p1, p2, p3, p4]; end
+  for *h, t in [[1, 2, 3]]; out << [h, t]; end
+  check("fd151b", out == [[1, [2, 3]], [4, []], 1, 3, [1, 2, [3, 4], 5], [[1, 2], 3]])
+  for q1, (q2, q3) in []; end
+  check("fd151c", [q1, q2, q3] == [nil, nil, nil])
+  src = [1, 2]
+  rng = (1..3)
+  hs = {a: 1}
+  v1 = for e in src do end
+  v2 = for e in rng do end
+  v3 = for k, v in hs do end
+  v4 = for e in [] do end
+  v5 = for e in [1, 2, 3] do break e * 10 if e == 2 end
+  v6 = for e in [1, 2, 3] do break if e == 2 end
+  check("fd151d", v1.equal?(src) && v2 == (1..3) && v3.equal?(hs) && v4 == [] && v5 == 20 && v6.nil?)
+  ka = [1]
+  kb = [1]
+  ih = {}
+  check("cbi151a", !ih.compare_by_identity? && ih.compare_by_identity.equal?(ih) && ih.compare_by_identity?)
+  ih[ka] = :a
+  ih[kb] = :b
+  ih[:s] = 1
+  ih[:s] = 2
+  ih[2**70] = 3
+  check("cbi151b", ih.size == 4 && ih[ka] == :a && ih[kb] == :b && ih[[1]].nil? && ih[:s] == 2 && ih[2**70].nil? &&
+        ih.key?(kb) && !ih.key?([1]) && ih.fetch([1], :no) == :no && ih.delete([1]).nil? && ih.delete(ka) == :a)
+  check("cbi151c", ih.dup.compare_by_identity? && ih.merge({}).compare_by_identity? &&
+        !ih.select { true }.compare_by_identity? && !ih.transform_values { 1 }.compare_by_identity? &&
+        {}.replace(ih).compare_by_identity? && !ih.dup.replace({}).compare_by_identity?)
+  vh = {[1] => 1, [1].dup => 2}
+  vh.compare_by_identity
+  check("cbi151d", vh.size == 1 && vh[[1]].nil? && vh.keys == [[1]])
+  bad = [5, "s", 1.5, true].map do |x|
+    dh = {}
+    dh.default = 7
+    begin
+      dh.default_proc = x
+      :ok
+    rescue TypeError => err
+      [err.message, dh.default]
+    end
+  end
+  check("dp151a", bad == [["wrong default_proc type Integer (expected Proc)", 7],
+                          ["wrong default_proc type String (expected Proc)", 7],
+                          ["wrong default_proc type Float (expected Proc)", 7],
+                          ["wrong default_proc type TrueClass (expected Proc)", 7]])
+  sh = {}
+  sh.default = 7
+  sh.default_proc = :to_s
+  ph = {}
+  ph.default_proc = proc { |hh, kk| kk * 2 }
+  ph.default_proc = nil
+  check("dp151b", sh.default_proc.class == Proc && sh.default.nil? && ph.default_proc.nil? && ph[3].nil?)
+  lz = [1, 2].lazy
+  check("lz151a", lz.class == Enumerator::Lazy && lz.class.name == "Enumerator::Lazy" && lz.is_a?(Enumerator) &&
+        lz.is_a?(Enumerator::Lazy) && Enumerator::Lazy === lz && (1..3).lazy.class == Enumerator::Lazy &&
+        lz.map { |x| x }.class == Enumerator::Lazy && Enumerator::Lazy.superclass == Enumerator &&
+        [1].each.class == Enumerator && !([1].each.is_a?(Enumerator::Lazy)) && lz.force.class == Array)
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1210,5 +1286,6 @@ s147() # SECTION-CALL 147
 s148() # SECTION-CALL 148
 s149() # SECTION-CALL 149
 s150() # SECTION-CALL 150
+s151() # SECTION-CALL 151
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

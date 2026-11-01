@@ -689,7 +689,10 @@ function dictKeyEq(a, b) {
     if (core.keyEq != null) { return core.keyEq(a, b) }
     return false
 }
+// A dict flagged __ident (Ruby's Hash#compare_by_identity) compares its keys with
+// the language's core.identEq instead, by a scan: it is never indexed.
 function dictFind(d, k) {
+    if (d.__ident === true) { return dictFindIdent(d, k) }
     var id = dictKeyId(k)
     var ix = dictIndex(d)
     if (id != null && hasOwn(ix.m, id)) {
@@ -702,6 +705,10 @@ function dictFind(d, k) {
     }
     if (id != null && ix.all) { return -1 }
     for (var j = 0; j < d.keys.length; j++) { if (dictKeyEq(d.keys[j], k)) { return j } }
+    return -1
+}
+function dictFindIdent(d, k) {
+    for (var j = 0; j < d.keys.length; j++) { if (core.identEq(d.keys[j], k)) { return j } }
     return -1
 }
 function dictSet(d, k, v) {

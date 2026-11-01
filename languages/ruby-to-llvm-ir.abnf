@@ -1101,15 +1101,27 @@ NoLoopDo = :script(~~
         var dd = c.peek(j)
         var st2 = 0
         while (st2 < 1000 && (dd === 32 || dd === 9 || dd === 13)) { j = j + 1; dd = c.peek(j); st2 = st2 + 1 }
+        // A loop that is the value of an assignment (`v = for x in xs do ... end`)
+        // is read past the `NAME =`.
         var w = ""
-        var st3 = 0
-        while (st3 < 100 && ((dd >= 65 && dd <= 90) || (dd >= 97 && dd <= 122) || dd === 95)) {
-            w = w + String.fromCharCode(dd)
+        var pass = 0
+        while (pass < 2) {
+            pass = pass + 1
+            w = ""
+            var st3 = 0
+            while (st3 < 100 && ((dd >= 65 && dd <= 90) || (dd >= 97 && dd <= 122) || (dd >= 48 && dd <= 57) || dd === 95)) {
+                w = w + String.fromCharCode(dd)
+                j = j + 1
+                dd = c.peek(j)
+                st3 = st3 + 1
+            }
+            if (w === "while" || w === "until" || w === "for") { return no }
+            while (dd === 32 || dd === 9) { j = j + 1; dd = c.peek(j) }
+            if (w === "" || dd !== 61 || c.peek(j + 1) === 61 || c.peek(j + 1) === 126 || c.peek(j + 1) === 62) { return undefined }
             j = j + 1
             dd = c.peek(j)
-            st3 = st3 + 1
+            while (dd === 32 || dd === 9) { j = j + 1; dd = c.peek(j) }
         }
-        if (w === "while" || w === "until" || w === "for") { return no }
         return undefined
     })()
 ~~) ;
@@ -1175,17 +1187,19 @@ DefExpr     <~~ push(makeDefExpr(pop())) ~~>
 ParenBody   <~~ push(pop().body) ~~>
             = "(" Body ")" ;
 
-// for VAR[, VAR] in COLL ... end: unlike a block, `for` does NOT open a scope - the
-// loop variable stays visible after the loop (Ruby), so it is written with the same
-// assignment path as an ordinary local. Several variables destructure each element.
+// for VARS in COLL ... end: unlike a block, `for` does NOT open a scope - the loop
+// variables stay visible after the loop (Ruby), so each element is written with the
+// multiple-assignment path: one variable takes the element whole, several (or one
+// with a trailing comma, `for i, in`) destructure it as `a, (b, *c) = element` would.
+// Every loop variable is pushed as {ftgt: target}, in the shape MTarget builds.
 ForExpr     <~~ push(makeForIn(takeAll())) ~~>
-            = KwFor ForVars KwIn Expression [ KwDo ] Body End ;
-// The trailing comma is meaningful, exactly as in a block parameter list: `for i, in`
-// forces each element to be DESTRUCTURED rather than taken whole.
-ForVars     = "(" ForVarList ")" | ForVarList ;
-ForVarList  = ForVar { "," [ "*" ] [ ForVar ] } ;
-// A parenthesised loop variable destructures one element; the names are collected
-// flat, which is what makeForIn already binds them as.
+            = KwFor ForVarList KwIn Expression [ KwDo ] Body End ;
+ForVarList  = ForItem { "," ForItem } [ "," <~~ push({ftrail: true}) ~~> ] ;
+ForItem     = ForSplat | ForVar ;
+ForSplat    <~~ var n = takeAll(); push({ftgt: {splat: n.length > 0 ? n[0].ftgt : makeTargetRef([{var: "__splat_discard"}])}}) ~~>
+            = "*" !"*" [ ForVar ] ;
+ForGroup    <~~ push({ftgt: {group: forTargets(takeAll())}}) ~~>
+            = "(" ForVarList ")" ;
 // The loop variable may be an @ivar, a @@classvar or a $global as well as a local -
 // `for` does not open a scope, so every one of them is an ordinary assignment.
 // A `for` variable that is a METHOD-CALL target (`for obj.attr in coll`). The guard
@@ -1213,10 +1227,11 @@ ForPathAhead = :script(~~
         return no
     })()
 ~~) ;
-ForVar      = "(" ForVarList ")" | ForPathAhead Target <~~ push({ftarget: pop()}) ~~>
-            | "@@" Id <~~ push({fvar: "@@" + up.in}) ~~>
-            | "@" Id <~~ push({fvar: "@" + up.in}) ~~> | "$" Id <~~ push({fvar: "$" + up.in}) ~~>
-            | Name <~~ push({fvar: up.in}) ~~> ;
+ForVar      = ForGroup | ForPathAhead Target <~~ push({ftgt: pop()}) ~~>
+            | "@@" Id <~~ push({ftgt: makeTargetRef([{cvar: up.in}])}) ~~>
+            | "@" Id <~~ push({ftgt: makeTargetRef([{ivar: up.in}])}) ~~>
+            | "$" Id <~~ push({ftgt: makeTargetRef([{gvar: gvName(up.in)}])}) ~~>
+            | Name <~~ push({ftgt: makeTargetRef([{var: up.in}])}) ~~> ;
 
 // super / super(args): call the method of the same name in the superclass. A BARE
 // super forwards the arguments the current method received (Ruby), while super()
@@ -2877,7 +2892,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             // A branch to the enclosing loop, or a control signal out of a begin body.
             var lp = loopStack.length > 0 ? loopStack[loopStack.length - 1] : null
-            if (t != null && lp !== null && lp.bv !== undefined) {
+            if (lp !== null && lp.bv !== undefined && (t != null || lp.bareNil === true)) {
                 if (lp.bv == "") {
                     hidCount++
                     lp.bv = "$wbrk" + hidCount
@@ -4041,44 +4056,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: deadBlock(), v: hNull}
         }
     }
-    // for VAR[, VAR] in COLL ... end, lowered as a counted loop over the collection.
-    // `for` opens no scope, so the loop variable is written with the ordinary local
-    // assignment rule and outlives the loop, exactly as in Ruby.
-    // A for-loop variable spelled @v / @@v / $v is written through the matching target
-    // kind; a plain name is an ordinary local (for does not open a scope).
-    // One loop variable: a general target (`for obj.attr in ...`) writes through the
-    // assignment path, everything else through its name.
-    function forOneSet(b, name, ref, v) {
-        if (ref == null) { return forVarSet(b, name, v) }
-        if (ref.path.length == 0) { return emitHeadSet(b, ref, v) }
-        var p = emitRefPath(b, ref)
-        b = p.b
-        return emitPathSet(b, ref, p, v)
-    }
-    function forVarSet(b, name, v) {
-        if (name.charAt(0) != "@" && name.charAt(0) != "$") {
-            emitLocalSet(b, name, v)
-            return b
-        }
-        if (name.charAt(0) == "$") { callExt(b, "js_rgset", [emitStr(b, name.slice(1)), v]); return b }
-        if (name.charAt(1) == "@") {
-            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-            callExt(b, "js_rcvset", [selfV, emitStr(b, name.slice(2)), v])
-            return b
-        }
-        callExt(b, "js_set", [emitIvarSelf(b), emitStr(b, name.slice(1)), v])
-        return b
+    // for VARS in COLL ... end, lowered as a counted loop over the collection. The
+    // loop variables are {ftgt} multiple-assignment targets (see ForVarList), written
+    // with the ordinary assignment rule: `for` opens no scope, so they outlive the loop.
+    // Its value is COLL, or the value of the `break` that ended it (a bare break: nil).
+    // Twin of makeForIn in ruby-interpreter.abnf.
+    function forTargets(items) {
+        var ts = []
+        for (var i = 0; i < items.length; i++) { if (items[i].ftgt != undefined) { ts.push(items[i].ftgt) } }
+        return ts
     }
     function makeForIn(items) {
-        var names = []
+        var tgts = forTargets(items)
+        var whole = tgts.length == 1 && tgts[0].splat == undefined
         var collT = null
         var body = null
-        var refs = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].fvar != undefined) { names.push(items[i].fvar); refs.push(null) }
-            else if (items[i].ftarget != undefined) { names.push(""); refs.push(items[i].ftarget) }
+            if (items[i].ftrail === true) { whole = false }
             else if (items[i].body != undefined) { body = items[i].body }
-            else { collT = items[i] }
+            else if (items[i].ftgt == undefined) { collT = items[i] }
         }
         // The loop runs over js_rforit's iterator (see abnf/jsrtruby.go), inside an
         // ensure that closes it, so a Hash's iteration count drops however the loop
@@ -4088,11 +4084,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = rc.b
             hidCount++
             var itName = "$forit" + hidCount
+            var valName = "$forv" + hidCount
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itName), callExt(b, "js_rforit", [rc.v])])
-            for (var k = 0; k < names.length; k++) {
-                if (names[k] == "" || names[k].charAt(0) == "@" || names[k].charAt(0) == "$") { continue }
-                emitLocalSet(b, names[k], hNull)
-            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, valName), rc.v])
             var loopT = function(lb) {
                 var headB = curF.NewBlock("")
                 var bodyB = curF.NewBlock("")
@@ -4101,14 +4095,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var itV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, itName)])
                 var elV = callExt(headB, "js_rfornext", [itV])
                 headB.NewCondBr(headB.NewICmp(llvm.enum.IPredEQ, elV, hUndef), exitB, bodyB)
-                if (names.length == 1) {
-                    bodyB = forOneSet(bodyB, names[0], refs[0], elV)
-                } else {
-                    for (var j = 0; j < names.length; j++) {
-                        bodyB = forOneSet(bodyB, names[j], refs[j], callExt(bodyB, "js_pyget", [elV, emitNum(bodyB, j)]))
-                    }
+                if (whole) { bodyB = emitAssignOne(bodyB, tgts[0], elV) }
+                else {
+                    var w = emitAsArray(bodyB, elV)
+                    bodyB = emitDestructure(w.b, tgts, w.v)
                 }
-                loopStack.push({cont: headB, brk: exitB})
+                // The value slot starts as COLL, so a bare break must write its nil too.
+                loopStack.push({cont: headB, brk: exitB, bv: valName, bareNil: true})
                 var rb = body(bodyB)
                 rb.b.NewBr(headB)
                 loopStack.pop()
@@ -4118,7 +4111,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 callExt(eb, "js_rforend", [callExt(eb, "js_scope_get", [curScopeV, emitStr(eb, itName)])])
                 return {b: eb, v: hNull}
             }
-            return makeTry([{trybody: loopT}, {finalbody: endT}], -1)(b)
+            var r = makeTry([{trybody: loopT}, {finalbody: endT}], -1)(b)
+            return {b: r.b, v: callExt(r.b, "js_scope_get", [curScopeV, emitStr(r.b, valName)])}
         }
     }
 

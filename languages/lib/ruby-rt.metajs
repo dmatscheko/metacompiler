@@ -3608,7 +3608,13 @@ function rbTruthy(v) {
 }
 
 // ===================================================== dicts ================
-//
+
+// RB_IDENT_KIND is the arrKind of the key array of a Hash after
+// #compare_by_identity. rtDictFind's === hit is an equal? hit as well, so
+// rbDictFind consults the kind only on its miss. Twin of rubyIdentKind in
+// abnf/jsrtruby.go.
+var RB_IDENT_KIND = 1
+
 // dictFind / dictScan / dictAppend of abnf/jsrt.go. The Go side keeps an index
 // alongside the keys array as a pure ACCELERATOR (a hit is confirmed against the
 // array before it is used), so a linear scan answers exactly what it answers.
@@ -3626,6 +3632,14 @@ function rbTruthy(v) {
 function rbDictFind(keys, k) {
     var at = rtDictFind(keys, k)
     if (at >= 0) { return at }
+    if (arrKind(keys) == RB_IDENT_KIND) {
+        var ik = 0
+        while (ik < keys.length) {
+            if (rbIdentKeyEq(keys[ik], k)) { return ik }
+            ik = ik + 1
+        }
+        return 0 - 1
+    }
     if (k === null) { return 0 - 1 }
     // A String in another encoding keys with an equal String: the same bytes, in
     // the same encoding unless ASCII-only (rbBinEq). Twin of rubyDictFind in
@@ -3682,6 +3696,13 @@ function rbDictFind(keys, k) {
     return 0 - 1
 }
 
+// equal? on two keys, except that two Strings are one key when their texts are
+// equal: a String has no identity in this value model. Twin of rubyIdentKeyEq in
+// abnf/jsrtruby.go.
+function rbIdentKeyEq(a, b) {
+    if (typeof a == "string" || typeof b == "string") { return rbSV(a) === rbSV(b) }
+    return rbIdenticalP(a, b)
+}
 function rbDictSet(d, k, v) {
     var keys = d["keys"]
     var i = rbDictFind(keys, k)
@@ -4438,6 +4459,7 @@ function rbBuiltinClass(name) {
         c["$c$E"] = rbMkFlo(Math.E)
         c["$c$DomainError"] = rbBuiltinClass("Math::DomainError")
     }
+    if (name == "Enumerator") { c["$c$Lazy"] = rbBuiltinClass("Enumerator::Lazy") }
     // Regexp's option bits, the second argument of Regexp.new.
     if (name == "Regexp") {
         c["$c$IGNORECASE"] = 1
@@ -4547,6 +4569,9 @@ rbExcParent["$Encoding::CompatibilityError"] = "EncodingError"
 rbExcParent["$Encoding::UndefinedConversionError"] = "EncodingError"
 rbExcParent["$Encoding::InvalidByteSequenceError"] = "EncodingError"
 rbExcParent["$Encoding::ConverterNotFoundError"] = "EncodingError"
+// Enumerator::Lazy < Enumerator: not an exception, but the table is where a builtin
+// class's superclass and ancestors are read from by name.
+rbExcParent["$Enumerator::Lazy"] = "Enumerator"
 
 function rbExcParentOf(name) {
     var p = rbExcParent["$" + name]
@@ -4645,6 +4670,7 @@ function rbIsA(v, cls) {
         if (bn == "Object") { return true }
         if (bn == "BasicObject") { return true }
         if (bn == "Kernel") { return true }
+        if (bn == "Enumerator::Lazy") { return kind == "Enumerator" && v["lazy"] === true }
         if (bn == "Enumerable") {
             if (kind == "Array") { return true }
             if (kind == "Range") { return true }
@@ -6955,6 +6981,13 @@ function rbHashCopy(src) {
     return d
 }
 
+// dup, clone and merge also keep compare_by_identity; the other copies do not.
+function rbHashCopyId(src) {
+    var d = rbHashCopy(src)
+    arrKindSet(d["keys"], arrKind(src["keys"]))
+    return d
+}
+
 function rbPairsToHash(pairs, src) {
     var d = js_dict_new()
     var hd = src["__hdef"]
@@ -7000,7 +7033,7 @@ function rbHashMethod(o, keys, vals, name, args) {
     var nPos = rbNPos(args)
     var i = 0
     if (name == "merge" || name == "merge!" || name == "update") {
-        var mg = name == "merge" ? rbHashCopy(o) : o
+        var mg = name == "merge" ? rbHashCopyId(o) : o
         var mi = 0
         while (mi < nPos) {
             var src = args[mi]
@@ -7022,7 +7055,7 @@ function rbHashMethod(o, keys, vals, name, args) {
         }
         return mg
     }
-    if (name == "dup" || name == "clone") { return rbHashCopy(o) }
+    if (name == "dup" || name == "clone") { return rbHashCopyId(o) }
     if (name == "to_h") {
         if (blk === null) { return o }
         return rbArrayMethod(rbHashPairs(keys, vals), name, args)
@@ -7177,6 +7210,7 @@ function rbHashMethod(o, keys, vals, name, args) {
         var rsrc = rbArgAt(args, 0)
         rbArrReplace(keys, rsrc["keys"])
         rbArrReplace(vals, rsrc["vals"])
+        arrKindSet(keys, arrKind(rsrc["keys"]))
         o["__hdef"] = rsrc["__hdef"]
         o["__hdefp"] = rsrc["__hdefp"]
         return o
@@ -8572,6 +8606,7 @@ function rbMethod(target, name, args) {
     // Ruby's universal reflective methods, answered for every kind of value.
     if (name == "class") {
         var kind = rbClassName(target)
+        if (kind == "Enumerator" && target["lazy"] === true) { kind = "Enumerator::Lazy" }
         if (kind != "") { return rbBuiltinClass(kind) }
     }
     if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
@@ -8918,13 +8953,20 @@ function rbMethod(target, name, args) {
                 if (hdp === undefined) { return null }
                 return hdp
             }
+            if (name == "compare_by_identity") { arrKindSet(keys, RB_IDENT_KIND); return target }
+            if (name == "compare_by_identity?") { return arrKind(keys) == RB_IDENT_KIND }
             if (name == "default=" || name == "default_proc=") {
-                var nd = rbArgAt(args, 0)
+                var nd = anytype
+                nd = rbArgAt(args, 0)
+                if (name == "default_proc=" && rbIsSym(nd)) { nd = js_rsymproc(nd) }
+                else if (name == "default_proc=" && nd !== null && !rbIsFn(nd) && !rbIsDict(nd)) {
+                    rbRaiseErr(name, "TypeError", "wrong default_proc type " + rbOwnerName(nd) + " (expected Proc)")
+                }
                 target["__hdef"] = undefined
                 target["__hdefp"] = undefined
                 if (name == "default=") { target["__hdef"] = nd }
                 else if (nd !== null) { target["__hdefp"] = nd }
-                return nd
+                return rbArgAt(args, 0)
             }
             // Hash#fetch DELIBERATELY ignores the default: MRI raises KeyError for a
             // missing key unless a second argument or a block supplies the answer.

@@ -61,6 +61,17 @@ func (rt *jsrt) rubyChrUtf8(x float64) string {
 	return string(rune(cp))
 }
 
+// rubyIsLazyEnum: v is an Enumerator::Lazy (and not the endless Enumerator of
+// Array#cycle, which shares the representation).
+func rubyIsLazyEnum(v interface{}) bool {
+	o, isObj := v.(*jsObject)
+	if !isObj || !rubyIsEnum(o) {
+		return false
+	}
+	lz, _ := o.props["lazy"].(bool)
+	return lz
+}
+
 // rubyMkLazy is an Enumerator::Lazy or the endless Enumerator of Array#cycle.
 // Twins: mkLazy in ruby-interpreter.abnf (which states the rules), rbMkLazy in
 // lib/ruby-rt.metajs; the run itself is rubyLazyFirst, twin of rbaLazyFirst in

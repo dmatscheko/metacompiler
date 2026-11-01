@@ -31,6 +31,23 @@ import (
 	"unicode/utf16"
 )
 
+// rubyIdentKind is the jsArray kind of the key array of a Hash after
+// #compare_by_identity; rubyDictFind then compares keys with rubyIdentKeyEq.
+// Twin of the __ident flag of ruby-interpreter.abnf and RB_IDENT_KIND in
+// lib/ruby-rt.metajs.
+const rubyIdentKind = 1
+
+// rubyIdentKeyEq is equal? on two keys, except that two Strings are one key when
+// their texts are equal: a String has no identity in this value model. Twin of
+// core.identEq in ruby-interpreter.abnf.
+func rubyIdentKeyEq(a, b interface{}) bool {
+	if as, ok := a.(string); ok {
+		bs, ok := b.(string)
+		return ok && as == bs
+	}
+	return rubyIdenticalP(a, b)
+}
+
 func init() {
 	// FloatDomainError < RangeError, so `rescue FloatDomainError' and
 	// `rescue RangeError' both catch what rubyFloDomain raises. rubyExcParent is a
@@ -43,6 +60,9 @@ func init() {
 	rubyExcParent["Encoding::UndefinedConversionError"] = "EncodingError"
 	rubyExcParent["Encoding::InvalidByteSequenceError"] = "EncodingError"
 	rubyExcParent["Encoding::ConverterNotFoundError"] = "EncodingError"
+	// Enumerator::Lazy < Enumerator: not an exception, but the table is where a
+	// builtin class's superclass and ancestors are read from by name.
+	rubyExcParent["Enumerator::Lazy"] = "Enumerator"
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		rt.addRubyFmtExterns(m)
 	})
