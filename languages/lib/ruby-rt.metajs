@@ -4656,7 +4656,7 @@ function rbIsA(v, cls) {
         if (bn == "Numeric") { return rbIsNum(v) }
         if (bn == "Comparable") {
             if (rbIsNum(v)) { return true }
-            return kind == "String"
+            return kind == "String" || kind == "Symbol"
         }
         // `A.instance_of?(Class)' / `M.is_a?(Module)'. A Class IS a Module in MRI,
         // a Module is not a Class, and neither name means anything for a value that
@@ -4674,6 +4674,7 @@ function rbIsA(v, cls) {
         if (bn == "Enumerable") {
             if (kind == "Array") { return true }
             if (kind == "Range") { return true }
+            if (kind == "Enumerator") { return true }
             return kind == "Hash"
         }
         return false
@@ -8604,12 +8605,17 @@ function rbMethod(target, name, args) {
     }
     if (typeof target == "object" && rtTag(target, "__rbin")) { return rbBinMethod(target, name, args) }
     // Ruby's universal reflective methods, answered for every kind of value.
-    if (name == "class") {
+    // instance_of? is identity with #class, never is_a?: `1.instance_of?(Numeric)'
+    // and `[1].lazy.instance_of?(Enumerator)' are false.
+    if (name == "class" || name == "instance_of?") {
         var kind = rbClassName(target)
         if (kind == "Enumerator" && target["lazy"] === true) { kind = "Enumerator::Lazy" }
-        if (kind != "") { return rbBuiltinClass(kind) }
+        if (kind != "") {
+            if (name == "class") { return rbBuiltinClass(kind) }
+            if (!rbUserObj(target)) { return rbArgAt(args, 0) === rbBuiltinClass(kind) }
+        }
     }
-    if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
+    if (name == "is_a?" || name == "kind_of?") {
         if (rbClassName(target) != "" && !rbUserObj(target)) { return rbIsA(target, rbArgAt(args, 0)) }
     }
     // Object#method on a builtin value: a Method that re-dispatches by name, or
@@ -8955,12 +8961,16 @@ function rbMethod(target, name, args) {
             }
             if (name == "compare_by_identity") { arrKindSet(keys, RB_IDENT_KIND); return target }
             if (name == "compare_by_identity?") { return arrKind(keys) == RB_IDENT_KIND }
+            if (name == "to_proc") { return rbHashProc(target) }
             if (name == "default=" || name == "default_proc=") {
                 var nd = anytype
                 nd = rbArgAt(args, 0)
-                if (name == "default_proc=" && rbIsSym(nd)) { nd = js_rsymproc(nd) }
-                else if (name == "default_proc=" && nd !== null && !rbIsFn(nd) && !rbIsDict(nd)) {
-                    rbRaiseErr(name, "TypeError", "wrong default_proc type " + rbOwnerName(nd) + " (expected Proc)")
+                if (name == "default_proc=") {
+                    nd = js_rsymproc(nd)
+                    if (nd !== null && !rbIsFn(nd)) {
+                        rbRaiseErr(name, "TypeError", "wrong default_proc type " + rbOwnerName(nd) + " (expected Proc)")
+                    }
+                    rbDefaultProcArity(nd)
                 }
                 target["__hdef"] = undefined
                 target["__hdefp"] = undefined
@@ -11715,9 +11725,41 @@ function rbProcArity(f) {
     return rec[0]
 }
 
-// &:sym as a block argument: the "call this method on each element" proc. A Proc
-// is passed straight through.
+// Hash#to_proc: a proc taking exactly one argument and answering h[arg], the
+// default included. The absent parameters are counted the way js_rsymproc trims
+// them. Twin of rubyHashProc in abnf/jsrt.go and hashProc in
+// ruby-interpreter.abnf.
+function rbHashProc(h) {
+    return function(k, a1, a2) {
+        var given = 0
+        if (k !== undefined) { given = 1 }
+        if (a1 !== undefined) { given = 2 }
+        if (a2 !== undefined) { given = 3 }
+        if (given != 1) { rbArgCountErr(given, "0", false) }
+        return js_rget(h, k)
+    }
+}
+
+// MRI's check on Hash#default_proc=: a lambda (a Method counts, through its
+// #to_proc) must accept the two arguments (hash, key), so an arity other than 2,
+// -1, -2 or -3 is a TypeError naming the required count. Twin of
+// rubyDefaultProcArity in abnf/jsrt.go and defaultProcArity in
+// ruby-interpreter.abnf.
+function rbDefaultProcArity(p) {
+    if (!rbIsFn(p)) { return }
+    if (!rtHas(rbLambdas, p) && !rbIsMethodVal(p)) { return }
+    var n = rbProcArity(p)
+    if (n == 2) { return }
+    if (n < 0 && n >= -3) { return }
+    if (n < 0) { n = 0 - n - 1 }
+    rbRaiseErr("default_proc=", "TypeError", "default_proc takes two arguments (2 for " + n + ")")
+}
+
+// The implicit #to_proc of `&v' and Hash#default_proc=: a Symbol becomes the
+// "call this method on each element" proc, a Hash its #to_proc, and anything else
+// (a Proc) passes straight through.
 function js_rsymproc(v) {
+    if (rbIsDict(v)) { return rbHashProc(v) }
     if (!rbIsSym(v)) { return v }
     var name = v["s"]
     // The Go twin builds a variadic hostFunc; MetaJS has no `arguments`, so the

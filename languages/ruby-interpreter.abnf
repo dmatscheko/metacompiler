@@ -717,7 +717,8 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // with `[' binds e.
 TargetStep  = TargetCallAhead MethodSfx <~~ var ms = pop(); push({key: ms.name, call: true, msfx: ms}) ~~>
             | TargetCallAhead SafeMethodSfx <~~ var ss = pop(); push({key: ss.name, call: true, safe: true, msfx: ss}) ~~>
-            | "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
+            | "." Id <~~ push({key: noteMName(up.in), call: true}) ~~>
+            | "&." Id <~~ push({key: noteMName(up.in), call: true, safe: true}) ~~>
             | "::" Id <~~ push({key: up.in}) ~~> | SameLine TIndex ;
 :include("lib/ruby-target-call.abnf") ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
@@ -7707,15 +7708,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return pctSymbols(out, asSym)
         }
     }
-    // `arity' is the only method whose answer needs a closure's PARAMETER SHAPE, and
-    // that shape can only be kept in a registry keyed by function identity - which
-    // RETAINS every closure it records, together with its whole scope chain, and a
-    // block literal builds one closure per call. So the registry is armed only for a
-    // program that NAMES the method; always-on multiplies the live set of any loop that
-    // builds blocks. A program that reaches the method some other way (send(:arity))
+    // `arity' (with `curry' and `default_proc=', which read it) is the only method
+    // whose answer needs a closure's PARAMETER SHAPE, and that shape can only be
+    // kept in a registry keyed by function identity - which RETAINS every closure it
+    // records, together with its whole scope chain, and a block literal builds one
+    // closure per call. So the registry is armed only for a program that NAMES the
+    // method; always-on multiplies the live set of any loop that builds blocks. A program that reaches the method some other way (send(:arity))
     // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
-    function noteMName(n) { if (n == "arity" || n == "curry") { usesArity = true } return n }
+    function noteMName(n) { if (n == "arity" || n == "curry" || n == "default_proc") { usesArity = true } return n }
     // `x.+(y)' calls an operator METHOD by name, which is exactly `x.send(:+, y)'.
     // Twin of methodSfx in ruby-to-llvm-ir.abnf.
     function methodSfx(name, args) {
@@ -9691,9 +9692,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // A Hash keeps ONE default, a value or a proc: setting either drops the
         // other, and `default_proc = nil` leaves neither. default_proc= takes a Proc,
-        // or a Symbol through its #to_proc; a Hash is stored as it is (MRI converts
-        // it with Hash#to_proc, which is not modelled); anything else is a
-        // TypeError raised before either default changes. Twin of the Hash arm of rubyMethod in
+        // or a Symbol or Hash through its #to_proc; anything else is a TypeError
+        // raised before either default changes, and so is a lambda of the wrong
+        // arity (defaultProcArity). Twin of the Hash arm of rubyMethod in
         // abnf/jsrt.go and rbMethod in lib/ruby-rt.metajs.
         if (name == "default_proc") {
             var hdp = anytype
@@ -9704,12 +9705,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // answers the receiver; entries the old rule kept apart stay apart.
         if (name == "compare_by_identity") { target.__ident = true; return target }
         if (name == "compare_by_identity?") { return target.__ident === true }
+        if (name == "to_proc") { return hashProc(target) }
         if (name == "default=" || name == "default_proc=") {
             var ndp = anytype
             ndp = args[0]
-            if (name == "default_proc=" && isSym(ndp)) { ndp = symProc(ndp) }
-            else if (name == "default_proc=" && ndp !== null && typeof ndp != "function" && !isDict(ndp)) {
-                raiseErr(name, "TypeError", "wrong default_proc type " + classOf(ndp).__name + " (expected Proc)")
+            if (name == "default_proc=") {
+                ndp = toProcImplicit(ndp)
+                if (ndp !== null && typeof ndp != "function") {
+                    raiseErr(name, "TypeError", "wrong default_proc type " + classOf(ndp).__name + " (expected Proc)")
+                }
+                defaultProcArity(ndp)
             }
             target.__hdef = undefined
             target.__hdefp = undefined
@@ -11698,12 +11703,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return boxOut(a[0], mcall(a[0], "send", sa, null))
         }
     }
+    // Hash#to_proc: a proc taking exactly one argument and answering h[arg], the
+    // default included. Twin of rubyHashProc in abnf/jsrt.go and rbHashProc in
+    // lib/ruby-rt.metajs.
+    function hashProc(h) {
+        return function() {
+            var a = argsArray(arguments)
+            if (a.length != 1) { argCountErr(a.length, [{}], false) }
+            return rindex(h, a[0])
+        }
+    }
+    // The implicit #to_proc of `&v' and Hash#default_proc=: a Symbol and a Hash
+    // convert, anything else passes through unchanged.
+    function toProcImplicit(v) {
+        if (isSym(v)) { return symProc(v) }
+        if (isDict(v)) { return hashProc(v) }
+        return v
+    }
+    // MRI's check on Hash#default_proc=: a lambda (a Method counts, through its
+    // #to_proc) must accept the two arguments (hash, key), so an arity other than
+    // 2, -1, -2 or -3 is a TypeError naming the required count. Twin of
+    // rubyDefaultProcArity in abnf/jsrt.go and rbDefaultProcArity in
+    // lib/ruby-rt.metajs.
+    function defaultProcArity(p) {
+        if (typeof p != "function" || (!isLambda(p) && !isMethodVal(p))) { return }
+        var n = procArity(p)
+        if (n == 2 || (n < 0 && n >= -3)) { return }
+        if (n < 0) { n = 0 - n - 1 }
+        raiseErr("default_proc=", "TypeError", "default_proc takes two arguments (2 for " + n + ")")
+    }
     function makeBlockArg(t) {
         return function() {
             var v = anytype
             v = t()
             if (typeof v == "function") { return v }
-            if (isSym(v)) { return symProc(v) }
+            if (isSym(v) || isDict(v)) { return toProcImplicit(v) }
             // `&nil' is Ruby for "no block", and it is how a method FORWARDS the
             // block it may not have been given: `def a(*r, &b); c(*r, &b); end'
             // called without one passes &nil.
@@ -14653,7 +14687,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Comparable is NOT universal: MRI answers false for a plain object and
             // true only for a Numeric, a String, or a class that included it - which
             // the userIsA walk below settles.
-            if (n == "Comparable") { return isNumV(v) || typeof v == "string" || isRStr(v) || userIsA(v, cls) }
+            if (n == "Comparable") { return isNumV(v) || typeof v == "string" || isRStr(v) || isSym(v) || userIsA(v, cls) }
+            if (n == "Enumerable") { return Array.isArray(v) || isDict(v) || isRange(v) || isEnum(v) || userIsA(v, cls) }
             // `A.instance_of?(Class)' / `M.is_a?(Module)'. A Class IS a Module in
             // MRI; a Module is not a Class.
             if (n == "Class" || n == "Module") {

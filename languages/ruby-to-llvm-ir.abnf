@@ -756,7 +756,8 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // with `[' binds e.
 TargetStep  = TargetCallAhead MethodSfx <~~ var ms = pop(); push({key: ms.name, call: true, msfx: ms}) ~~>
             | TargetCallAhead SafeMethodSfx <~~ var ss = pop(); push({key: ss.name, call: true, safe: true, msfx: ss}) ~~>
-            | "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
+            | "." Id <~~ push({key: noteMName(up.in), call: true}) ~~>
+            | "&." Id <~~ push({key: noteMName(up.in), call: true, safe: true}) ~~>
             | "::" Id <~~ push({key: up.in}) ~~> | SameLine TIndex ;
 :include("lib/ruby-target-call.abnf") ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
@@ -3232,15 +3233,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: v}
         }
     }
-    // `arity' (and `curry', which reads it) is the only method whose answer needs a closure's PARAMETER SHAPE, and
-    // that shape can only be kept in a registry keyed by function identity - which
-    // RETAINS every closure it records, together with its whole scope chain, and a
-    // block literal builds one closure per call. So the registry is armed only for a
-    // program that NAMES the method; always-on multiplies the live set of any loop that
-    // builds blocks. A program that reaches the method some other way (send(:arity))
+    // `arity' (with `curry' and `default_proc=', which read it) is the only method
+    // whose answer needs a closure's PARAMETER SHAPE, and that shape can only be
+    // kept in a registry keyed by function identity - which RETAINS every closure it
+    // records, together with its whole scope chain, and a block literal builds one
+    // closure per call. So the registry is armed only for a program that NAMES the
+    // method; always-on multiplies the live set of any loop that builds blocks. A program that reaches the method some other way (send(:arity))
     // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
-    function noteMName(n) { if (n == "arity" || n == "curry") { usesArity = true } return n }
+    function noteMName(n) { if (n == "arity" || n == "curry" || n == "default_proc") { usesArity = true } return n }
     // `x.+(y)' calls an operator METHOD by name, which is exactly `x.send(:+, y)'.
     // Twin of methodSfx in ruby-interpreter.abnf, and isBinOpName of its set.
     function isBinOpName(n) {
@@ -4020,7 +4021,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {b: b, v: argsV}
     }
     // &expr as an argument: a Proc travels straight through, a Symbol becomes the
-    // "call this method on each element" proc (js_rsymproc).
+    // "call this method on each element" proc and a Hash its #to_proc (js_rsymproc).
     function makeBlockArg(t) {
         return function(b) {
             var r = t(b)

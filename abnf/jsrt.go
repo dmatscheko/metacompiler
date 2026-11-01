@@ -7837,7 +7837,7 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 		case "Numeric":
 			return rubyIsNum(v)
 		case "Comparable":
-			return rubyIsNum(v) || kind == "String"
+			return rubyIsNum(v) || kind == "String" || kind == "Symbol"
 		case "Class", "Module":
 			// `A.instance_of?(Class)' / `M.is_a?(Module)'. A Class IS a Module in
 			// MRI, a Module is not a Class, and neither name means anything for a
@@ -7858,7 +7858,7 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 		case "Object", "BasicObject", "Kernel":
 			return true
 		case "Enumerable":
-			return kind == "Array" || kind == "Hash" || kind == "Range"
+			return kind == "Array" || kind == "Hash" || kind == "Range" || kind == "Enumerator"
 		case "Enumerator::Lazy":
 			return rubyIsLazyEnum(v)
 		}
@@ -11045,14 +11045,21 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	}
 	// Ruby's universal reflective methods, answered for every kind of value.
 	switch name {
-	case "class":
+	// instance_of? is identity with #class, never is_a?: `1.instance_of?(Numeric)'
+	// and `[1].lazy.instance_of?(Enumerator)' are false.
+	case "class", "instance_of?":
 		if kind := rt.rubyClassNameRT(target); kind != "" {
 			if kind == "Enumerator" && rubyIsLazyEnum(target) {
 				kind = "Enumerator::Lazy"
 			}
-			return rt.rubyBuiltinClass(kind)
+			if name == "class" {
+				return rt.rubyBuiltinClass(kind)
+			}
+			if !rubyUserObj(target) {
+				return argAt(args, 0) == interface{}(rt.rubyBuiltinClass(kind))
+			}
 		}
-	case "is_a?", "kind_of?", "instance_of?":
+	case "is_a?", "kind_of?":
 		if rt.rubyClassNameRT(target) != "" && !rubyUserObj(target) {
 			return rt.rubyIsA(target, argAt(args, 0))
 		}
@@ -11633,14 +11640,16 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return o
 			case "compare_by_identity?":
 				return keys.kind == rubyIdentKind
+			case "to_proc":
+				return rt.rubyHashProc(o)
 			case "default=", "default_proc=":
 				v := argAt(args, 0)
 				if name == "default_proc=" {
-					if sy, isSym := v.(jsSym); isSym {
-						v = rt.rubySymProc(sy.s)
-					} else if _, _, isDict := dictParts(v); v != jsNull && !isCallable(v) && !isDict {
+					v = rt.rubyToProc(v)
+					if v != jsNull && !isCallable(v) {
 						rt.rubyRaiseErr(name, "TypeError", "wrong default_proc type "+rubyOwnerName(v)+" (expected Proc)")
 					}
+					rt.rubyDefaultProcArity(v)
 				}
 				o.del("__hdef")
 				o.del("__hdefp")
@@ -11969,6 +11978,49 @@ func (rt *jsrt) rubySymProc(name string) *hostFunc {
 		return rubyBoxOut(argAt(args, 0), rt.rubyMethod(argAt(args, 0), name, rest))
 	}}
 
+}
+
+// rubyHashProc is Hash#to_proc: a proc taking exactly one argument and answering
+// h[arg], the default included. Twin of rbHashProc in lib/ruby-rt.metajs and
+// hashProc in ruby-interpreter.abnf.
+func (rt *jsrt) rubyHashProc(h interface{}) *hostFunc {
+	return &hostFunc{name: "to_proc", fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if len(args) != 1 {
+			rt.rubyArgCountErr(len(args), "0", false)
+		}
+		return rt.rubyMethod(h, "[]", args)
+	}}
+}
+
+// rubyToProc is the implicit #to_proc of `&v' and Hash#default_proc=: a Symbol
+// and a Hash convert, anything else passes through unchanged.
+func (rt *jsrt) rubyToProc(v interface{}) interface{} {
+	if sy, isSym := v.(jsSym); isSym {
+		return rt.rubySymProc(sy.s)
+	}
+	if _, _, isDict := dictParts(v); isDict {
+		return rt.rubyHashProc(v)
+	}
+	return v
+}
+
+// rubyDefaultProcArity is MRI's check on Hash#default_proc=: a lambda (a Method
+// counts, through its #to_proc) must accept the two arguments (hash, key), so an
+// arity other than 2, -1, -2 or -3 is a TypeError naming the required count.
+// Twin of rbDefaultProcArity in lib/ruby-rt.metajs and defaultProcArity in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyDefaultProcArity(p interface{}) {
+	if _, isMeth := rt.rubyMethodValOf(p); !rt.rubyLambdas[p] && !isMeth {
+		return
+	}
+	n := int(rt.rubyArityOf(p))
+	if n == 2 || (n < 0 && n >= -3) {
+		return
+	}
+	if n < 0 {
+		n = -n - 1
+	}
+	rt.rubyRaiseErr("default_proc=", "TypeError", "default_proc takes two arguments (2 for "+strconv.Itoa(n)+")")
 }
 
 // rubyBlockArgs splits a Ruby argument list into its positional part and the
@@ -16276,14 +16328,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(rubyRand(arr.elems[0]))
 		},
-		// &:sym as a block argument: the "call this method on each element" proc
-		// (`[1, 2].map(&:to_s)`). A Proc is passed straight through.
+		// &v as a block argument: a Symbol becomes the "call this method on each
+		// element" proc (`[1, 2].map(&:to_s)`), a Hash its #to_proc, a Proc is
+		// passed straight through.
 		"js_rsymproc": func(a []uint64) uint64 {
-			sym, isSym := u(a[0]).(jsSym)
-			if !isSym {
-				return a[0]
-			}
-			return w(rt.rubySymProc(sym.s))
+			return w(rt.rubyToProc(u(a[0])))
 		},
 		// A BLOCK parameter read: Ruby auto-splats a single Array argument over a
 		// block that declares more than one parameter, so `[[1, [2, 3]]].each { |a,

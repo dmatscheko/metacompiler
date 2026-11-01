@@ -1257,6 +1257,64 @@ def s151
         [1].each.class == Enumerator && !([1].each.is_a?(Enumerator::Lazy)) && lz.force.class == Array)
 end
 
+# ===== SECTION 152: is_a? / instance_of? on builtins; Hash#to_proc; default_proc= arity =====
+# An Enumerator (a lazy one too) is Enumerable, a Symbol is Comparable, and
+# instance_of? is identity with #class - never is_a? - so `1.instance_of?(Numeric)'
+# and `[1].lazy.instance_of?(Enumerator)' are false. Hash#to_proc takes exactly one
+# argument and answers h[arg] (the default included), and is what `&hash' passes.
+# Hash#default_proc= rejects a lambda that cannot take (hash, key). /usr/bin/ruby
+# 2.6 settles each.
+def s152m1(a); end
+def s152m2(a, b); a.to_s + b.to_s; end
+def s152
+  vals = [1, 1.5, "s", :a, [1], {1 => 2}, (1..2), [1].each, [1].lazy, nil, true, 2**70]
+  clss = [Integer, Numeric, Comparable, Enumerable, Object, Kernel, Enumerator, Array, Hash, Range, String, Float]
+  isa = vals.map { |v| clss.map { |c| v.is_a?(c) ? 1 : 0 }.join }
+  iof = vals.map { |v| clss.map { |c| v.instance_of?(c) ? 1 : 0 }.join }
+  ceq = vals.map { |v| clss.map { |c| (c === v) ? 1 : 0 }.join }
+  want = ["111011000000", "011011000001", "001011000010", "001011000000", "000111010000", "000111001000",
+          "000111000100", "000111100000", "000111100000", "000011000000", "000011000000", "111011000000"]
+  check("ia152a", isa == want && ceq == want)
+  check("ia152b", iof == ["100000000000", "000000000001", "000000000010", "000000000000", "000000010000",
+                          "000000001000", "000000000100", "000000100000", "000000000000", "000000000000",
+                          "000000000000", "100000000000"])
+  check("ia152c", [1].cycle.is_a?(Enumerable) && [1, 2].lazy.kind_of?(Enumerable) && Enumerable === [1].each_slice(1) &&
+        [1].lazy.instance_of?(Enumerator::Lazy) && !(1..2).instance_of?(Enumerable) && [1].each.instance_of?(Enumerator))
+  hp = {1 => 2, 3 => 4}.to_proc
+  check("hp152a", hp.call(3) == 4 && hp[1] == 2 && hp.call(5).nil? && hp.yield(3) == 4 && hp.class == Proc)
+  errs = [[], [1, 2]].map do |a|
+    begin
+      hp.call(*a)
+    rescue ArgumentError => err
+      err.message
+    end
+  end
+  check("hp152b", errs == ["wrong number of arguments (given 0, expected 1)", "wrong number of arguments (given 2, expected 1)"])
+  dh = Hash.new(9)
+  dh[1] = 0
+  check("hp152c", [1, 2, 3].map(&{1 => :x}) == [:x, nil, nil] && [3, 1].select(&{1 => true}) == [1] &&
+        [1, 5].map(&dh) == [0, 9] && dh.to_proc.call(7) == 9)
+  bad = [lambda { |x| }, lambda { |x, y, z| }, ->() { }, lambda { |a, b, c, *d| }, method(:s152m1)].map do |l|
+    hh = {}
+    hh.default = 5
+    begin
+      hh.default_proc = l
+      :ok
+    rescue TypeError => err
+      [err.message, hh.default]
+    end
+  end
+  check("dp152a", bad == [["default_proc takes two arguments (2 for 1)", 5], ["default_proc takes two arguments (2 for 3)", 5],
+                          ["default_proc takes two arguments (2 for 0)", 5], ["default_proc takes two arguments (2 for 3)", 5],
+                          ["default_proc takes two arguments (2 for 1)", 5]])
+  good = [lambda { |x, y| 7 }, lambda { |*x| 8 }, lambda { |x, y = 1| 9 }, proc { |x| 10 }, ->(a, *b) { 11 },
+          lambda { |a, b, *c| 12 }, method(:s152m2)].map do |l|
+    hh = {}
+    hh.default_proc = l
+    hh[3]
+  end
+  check("dp152b", good == [7, 8, 9, 10, 11, 12, "{}3"])
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1287,5 +1345,6 @@ s148() # SECTION-CALL 148
 s149() # SECTION-CALL 149
 s150() # SECTION-CALL 150
 s151() # SECTION-CALL 151
+s152() # SECTION-CALL 152
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
