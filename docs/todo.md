@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-994** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-996** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -120,20 +120,16 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result · P3 · KT · IN PROGRESS (KT worker, round 12) [U]
-Moved from the ruby ticket T-920, where it was listed by mistake. `class R(var w: Int); fun rec(p: R, s: String) = p;
-val p = R(1); rec(p, "R").w++; println(p.w)` → Kotlin 2; re-probe both halves before assigning.
+### T-994 kotlin: a binary operator at the start of a line continues the previous expression · P2 · KT · OPEN [V]
+Found by the KT worker, round 12 (Kotlin grammar: no newline before an additive operator). `var i=0; var j=5` / `i++` / `--j` /
+`println("$i $j")` → Kotlin `1 4`; ours parses `i++ - (-j)` and prints `1 5`. AddExpr (probably MulExpr too) in both kotlin
+grammars lack a SameLine guard; the interpreter's `IncDec = Target ("++"|"--")` likewise, so `x` newline `++y` can read as `x++ y`.
 
-### T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see re-read elements · P2 · KT · IN PROGRESS (KT worker, round 12) [V]
-Found by the KT worker, round 11 (oracle: kotlin-stdlib 2.2.21 driven from java 24).
-- `val x = mutableMapOf(1 to "a", 2 to "b", 3 to "a"); x.keys -= 2; println(x)` → `{1=a, 3=a}` (keys is a val, so -= is
-  minusAssign = remove); interp `{}`, run/native `{1=a, 2=b, 3=a, keys=[1, 3]}`. ktAssignIsVal / ktMemberIsVal
-  (lib/kotlin-decltypes.js) answer "not val" for a member no class declares, and the result is written back as a field.
-- map views are snapshots: `val ks = m.keys; m[4] = "d"; ks.remove(2); println("$m $ks")` → java `{1=a, 3=a, 4=d} [1, 3, 4]`.
-- `val c = mutableListOf(1,2,3); c.filter { c[0] = 5; true }` → `[1, 2, 3]`; interp and native `[5, 2, 3]` (they re-read the
-  element after the lambda; the Go twin is right) - also filterNot, partition, first/find.
-- `single { }` / `singleOrNull { }` keep calling the predicate after a second match (Kotlin stops there).
-- sortedBy / sortedWith call the selector once per element; stdlib's comparator calls it per comparison (result identical).
+### T-995 kotlin: sortedBy/sortedWith selector call counts differ from the JDK's TimSort; held map entries are snapshots · P3 · KT · OPEN [V]
+Found by the KT worker, round 12 (oracle kotlin-stdlib 2.2.21 on java 24). `listOf(3,1,2).sortedBy { n++; it }` → JDK calls the
+selector 8 times; ours 3 (sortedWith(compareBy) 6). Results are identical; matching the count needs java.util TimSort's exact
+comparison sequence (run detection, binary insertion, galloping) in all 3 engines. `val e = m.entries.first(); m[k] = v; e.value`
+→ java sees the new value (live entry); ours the old one.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1114,6 +1110,8 @@ T-981 bash: "command not found" aborts the script with 127; bash continues — D
 T-965 ts/js: `\p{…}` property escapes under the u flag; decorator `context.metadata`; `[1].a++` in the js compiler — DONE - update of any based member place (both forms, all JS/TS engines), decorator context access/metadata as tsc+node 24, \p{..}/\P{..} under u
 T-977 swift: "cannot find label" and "continue cannot target an if label" are not diagnosed — DONE - unknown labels and continue naming if/switch diagnosed as swiftc; continue on a do label restarts it
 T-987 swift: undefined names need scope tables (out-of-scope uses, upper-case names, members of open types); `#if DEBUG`; MemoryLayout — DONE - scoped undefined-name check incl. upper-case and open types, #if on unset flag false, MemoryLayout size/stride/alignment; if-let-in-else gap filed
+T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result — DONE - ++/-- through a call's member or index (both forms), call runs once, ?. skips
+T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see re-read elements — PARTIAL - keys/values -= write through, live map views, lambdas read elements once, single stops at the 2nd match; sort selector counts filed
 
 # Settled — do not re-open
 
