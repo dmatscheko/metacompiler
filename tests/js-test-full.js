@@ -1934,6 +1934,30 @@ function s147() {
     check("upd147c", new C147().n++ === 5 && function () { return box }().v++ === 7 && box.v === 8)
 }
 
+// ===== SECTION 148: Unicode property escapes =====
+// Under the u flag \p{name} matches a code point with the property and \P{name} one
+// without it: a General_Category value (long or short, alone or as gc=), a Script
+// (sc=), or a binary property, the names case-sensitive; inside a class it is one more
+// item. Without u, \p is the letter p. Values read off node 24.
+function s148() {
+    var ts = ["a", "\u00c9", "\u0663", "\u03b1", "\u4e2d", " ", "$", "\ud83d\ude00", "\u0301"]
+    var hits = function (src) {
+        var re = new RegExp("^" + src + "$", "u")
+        var out = ""
+        for (var i = 0; i < ts.length; i++) { out = out + (re.test(ts[i]) ? "1" : "0") }
+        return out
+    }
+    check("uprop148a", hits("\\p{L}") === "110110000" && hits("\\P{L}") === "001001111" &&
+        hits("\\p{Lu}") === "010000000" && hits("\\p{Decimal_Number}") === "001000000" &&
+        hits("\\p{gc=Mn}") === "000000001" && hits("\\p{Sc}") === "000000100")
+    check("uprop148b", hits("\\p{Script=Greek}") === "000100000" && hits("\\p{sc=Hani}") === "000010000" &&
+        hits("\\p{sc=Latin}") === "110000000" && hits("\\p{Emoji_Presentation}") === "000000010" &&
+        hits("\\p{White_Space}") === "000001000" && hits("\\p{ASCII}") === "100001100")
+    check("uprop148c", hits("[\\p{Nd}a]") === "101000000" && hits("[^\\p{L}\\p{N}]") === "000001111" &&
+        /\p{L}+/u.exec("12\u00e9t\u00e9!")[0] === "\u00e9t\u00e9" && "a1\u03b2".replace(/\p{L}/gu, "_") === "_1_")
+    check("uprop148d", /\p{L}/.test("p{L}") && !/\p{L}/.test("a"))
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1998,6 +2022,7 @@ function main() {
     s145() // SECTION-CALL 145
     s146() // SECTION-CALL 146
     s147() // SECTION-CALL 147
+    s148() // SECTION-CALL 148
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

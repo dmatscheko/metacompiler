@@ -2346,6 +2346,12 @@ NotFuncHead = :script(~~
     // by declaration - see the shared-helper entry in docs/abnf-dialect-gotchas.md.
     include("lib/regex.js")
     rxFail = function (msg) { fail("regexp: " + msg) }
+    // \p{..} under the u flag reads java.lang.Character's tables (lib/java-chars.js,
+    // lib/java-regex.js) through regex.js's knobs rxPropHit and rxPropClsEs.
+    include("lib/java-chars.js")
+    include("lib/java-regex.js")
+    rxPropHit = function (id, c) { return jxPropHit(id, c) }
+    rxPropClsEs = function (st, name) { return jxPropClsEs(st, name) }
 
     // JSON.stringify / JSON.parse, shared with layer 2 (abnf/jsrtjson.go is the Go twin);
     // the jsonH* hooks it calls are defined beside jsJsonObj below.

@@ -3,7 +3,9 @@
 // message. Kotlin/JVM's
 // Regex IS java.util.regex, so this serves java-interpreter.abnf and
 // kotlin-interpreter.abnf (include) and lib/java-rt.metajs and lib/kotlin-rt.metajs
-// (import), each after lib/java-chars.js and lib/regex.js.
+// (import), each after lib/java-chars.js and lib/regex.js. Its tables also answer
+// JavaScript's \p{..} under the u flag (jxPropClsEs), for the js and typescript
+// grammars and lib/js-rt.metajs.
 
 // jxPropHit is regex.js's rxPropHit knob over java.lang.Character's tables
 // (lib/java-chars.js and the ones below). Twin of the rxPropHit switch in
@@ -236,6 +238,130 @@ function jxPropCls(st, name, at) {
     }
     if (!ok) { rxErrAt(st, "Unknown character property name {" + name + "}", at) }
     return cls
+}
+
+// jxPropClsEs is regex.js's rxPropClsEs knob: ECMAScript's \p{name} under the
+// u flag. The name is General_Category=V or gc=V, Script=V or sc=V, or a lone
+// general category value or binary property, each spelled exactly as the
+// specification's tables spell it. Script_Extensions and the binary properties
+// java.lang.Character has no table for are reported unsupported. Twin of
+// propClsEs in abnf/jsrtjavaprops.go.
+function jxPropClsEs(st, name) {
+    var cls = rxNewCls()
+    var eq = name.indexOf("=")
+    var key = eq < 0 ? "" : name.substring(0, eq)
+    var val = name.substring(eq + 1)
+    var ok = false
+    if (eq < 0) { ok = jxGcEs(cls, name) || jxBinEs(cls, name) }
+    else if (key == "General_Category" || key == "gc") { ok = jxGcEs(cls, val) }
+    else if (key == "Script" || key == "sc") { ok = jxScriptEs(cls, val) }
+    if (ok) { return cls }
+    if (key == "Script_Extensions" || key == "scx" || (eq < 0 && JX_BIN_ES_NONE.indexOf(" " + name + " ") >= 0)) {
+        rxErr(st, "unsupported character property \\p{" + name + "}")
+    } else {
+        rxErr(st, "Invalid property name")
+    }
+    return cls
+}
+
+// The General_Category value aliases as long:short, and the binary properties
+// with no table here, each name and alias.
+var JX_GC_ES = " Cased_Letter:LC Close_Punctuation:Pe Connector_Punctuation:Pc Control:Cc cntrl:Cc"
+    + " Currency_Symbol:Sc Dash_Punctuation:Pd Decimal_Number:Nd digit:Nd Enclosing_Mark:Me"
+    + " Final_Punctuation:Pf Format:Cf Initial_Punctuation:Pi Letter:L Letter_Number:Nl Line_Separator:Zl"
+    + " Lowercase_Letter:Ll Mark:M Combining_Mark:M Math_Symbol:Sm Modifier_Letter:Lm Modifier_Symbol:Sk"
+    + " Nonspacing_Mark:Mn Number:N Open_Punctuation:Ps Other:C Other_Letter:Lo Other_Number:No"
+    + " Other_Punctuation:Po Other_Symbol:So Paragraph_Separator:Zp Private_Use:Co Punctuation:P punct:P"
+    + " Separator:Z Space_Separator:Zs Spacing_Mark:Mc Surrogate:Cs Symbol:S Titlecase_Letter:Lt"
+    + " Unassigned:Cn Uppercase_Letter:Lu "
+var JX_BIN_ES_NONE = " Bidi_Control Bidi_C Case_Ignorable CI Changes_When_Casefolded CWCF"
+    + " Changes_When_Casemapped CWCM Changes_When_Lowercased CWL Changes_When_NFKC_Casefolded CWKCF"
+    + " Changes_When_Titlecased CWT Changes_When_Uppercased CWU Dash Default_Ignorable_Code_Point DI"
+    + " Deprecated Dep Diacritic Dia Extender Ext Grapheme_Base Gr_Base Grapheme_Extend Gr_Ext"
+    + " IDS_Binary_Operator IDSB IDS_Trinary_Operator IDST ID_Continue IDC ID_Start IDS"
+    + " Logical_Order_Exception LOE Math Pattern_Syntax Pat_Syn Quotation_Mark QMark Radical"
+    + " Sentence_Terminal STerm Soft_Dotted SD Terminal_Punctuation Term Unified_Ideograph UIdeo"
+    + " XID_Continue XIDC XID_Start XIDS "
+
+// A General_Category value, long or short.
+function jxGcEs(cls, v) {
+    var sh = v
+    var k = JX_GC_ES.indexOf(" " + v + ":")
+    if (k >= 0) {
+        var rest = JX_GC_ES.substring(k + v.length + 2)
+        sh = rest.substring(0, rest.indexOf(" "))
+    }
+    if (sh == "LC") { return jxProps(cls, RX_PGC + 1, RX_PGC + 2) && jxProps(cls, RX_PGC + 3, -1) }
+    if ((sh.length == 1 && "CLMNPSZ".indexOf(sh) >= 0) || (sh.length == 2 && sh != "--" && JX_GC_NAMES.indexOf(sh + " ") >= 0)) {
+        return jxGcs(cls, sh)
+    }
+    return false
+}
+
+// A binary property this engine decides: by fixed ranges, or by java.lang.Character's
+// own predicate where it is the Unicode property.
+function jxBinEs(cls, n) {
+    if (n == "Any") { rxClsAdd(cls, 0, 1114111) }
+    else if (n == "ASCII") { rxClsAdd(cls, 0, 127) }
+    else if (n == "ASCII_Hex_Digit" || n == "AHex" || n == "Hex_Digit" || n == "Hex") {
+        rxClsAdd(cls, 48, 57)
+        rxClsAdd(cls, 65, 70)
+        rxClsAdd(cls, 97, 102)
+        if (n == "Hex_Digit" || n == "Hex") {
+            rxClsAdd(cls, 65296, 65305)
+            rxClsAdd(cls, 65313, 65318)
+            rxClsAdd(cls, 65345, 65350)
+        }
+    } else if (n == "Regional_Indicator" || n == "RI") { rxClsAdd(cls, 127462, 127487) }
+    else if (n == "Variation_Selector" || n == "VS") {
+        rxClsAdd(cls, 6155, 6157)
+        rxClsAdd(cls, 6159, 6159)
+        rxClsAdd(cls, 65024, 65039)
+        rxClsAdd(cls, 917760, 917999)
+    } else if (n == "Pattern_White_Space" || n == "Pat_WS") {
+        rxClsAdd(cls, 9, 13)
+        rxClsAdd(cls, 32, 32)
+        rxClsAdd(cls, 133, 133)
+        rxClsAdd(cls, 8206, 8207)
+        rxClsAdd(cls, 8232, 8233)
+    } else if (n == "Join_Control" || n == "Join_C") { rxClsAdd(cls, 8204, 8205) }
+    else if (n == "Alphabetic" || n == "Alpha") { return jxProps(cls, RX_PALPHA, -1) }
+    else if (n == "Assigned") { return jxProps(cls, RX_PASSIGNED, -1) }
+    else if (n == "Cased") { return jxProps(cls, RX_PCASED, -1) }
+    else if (n == "Lowercase" || n == "Lower") { return jxProps(cls, RX_PLOWER, -1) }
+    else if (n == "Uppercase" || n == "Upper") { return jxProps(cls, RX_PUPPER, -1) }
+    else if (n == "Noncharacter_Code_Point" || n == "NChar") { return jxProps(cls, RX_PNONCH, -1) }
+    else if (n == "White_Space" || n == "space") { return jxProps(cls, RX_PWHITE, -1) }
+    else if (n == "Ideographic" || n == "Ideo") { return jxProps(cls, RX_PBIN, -1) }
+    else if (n == "Bidi_Mirrored" || n == "Bidi_M") { return jxProps(cls, RX_PBIN + 1, -1) }
+    else if (n == "Emoji") { return jxProps(cls, RX_PBIN + 2, -1) }
+    else if (n == "Emoji_Presentation" || n == "EPres") { return jxProps(cls, RX_PBIN + 3, -1) }
+    else if (n == "Emoji_Modifier" || n == "EMod") { return jxProps(cls, RX_PBIN + 4, -1) }
+    else if (n == "Emoji_Modifier_Base" || n == "EBase") { return jxProps(cls, RX_PBIN + 5, -1) }
+    else if (n == "Emoji_Component" || n == "EComp") { return jxProps(cls, RX_PBIN + 6, -1) }
+    else if (n == "Extended_Pictographic" || n == "ExtPict") { return jxProps(cls, RX_PBIN + 7, -1) }
+    else { return false }
+    return true
+}
+
+// A Script value: an ISO 15924 alias or a long name, in the case
+// PropertyValueAliases.txt writes it (the table's upper-cased word, title-cased
+// at each _), Qaai and Qaac the extra aliases of Zinh and Copt.
+function jxScriptEs(cls, v) {
+    var w = v == "Qaai" ? "Zinh" : v == "Qaac" ? "Copt" : v
+    var u = w.toUpperCase()
+    if (w != (u == "SIGNWRITING" ? "SignWriting" : jxTitle(u))) { return false }
+    return jxScriptCls(cls, w)
+}
+function jxTitle(u) {
+    var out = ""
+    var i = 0
+    while (i < u.length) {
+        var ch = u.charAt(i)
+        out = out + (i == 0 || u.charAt(i - 1) == "_" ? ch : ch.toLowerCase())
+        i = i + 1
+    }
+    return out
 }
 
 // jxProps adds the property ids to cls; jxGcs adds the general categories

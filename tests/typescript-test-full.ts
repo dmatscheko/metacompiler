@@ -6138,6 +6138,16 @@ function s151(): void {
     check("upd151", r1 == 1 && r2 == 3 && q.a == 3);
 }
 
+// ===== SECTION 152: Unicode property escapes =====
+// Under the u flag \p{name} and \P{name} match by General_Category, Script or a
+// binary property, also inside a class; without u, \p is the letter p. Values read
+// off tsc 6 with node 24.
+function s152(): void {
+    check("uprop152a", /^\p{Lu}$/u.test("\u00c9") && !/^\p{Lu}$/u.test("a") && /^\P{L}$/u.test("1") &&
+        /^\p{sc=Greek}+$/u.test("\u03b1\u03b2") && /^[\p{Nd}x]+$/u.test("x\u0663") && /^\p{Emoji}$/u.test("\ud83d\ude00"));
+    check("uprop152b", "a1\u03b2".replace(/\p{L}/gu, "_") == "_1_" && /\p{L}/.test("p{L}"));
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -6280,6 +6290,7 @@ function main(): number {
     s149(); // SECTION-CALL 149
     s150(); // SECTION-CALL 150
     s151(); // SECTION-CALL 151
+    s152(); // SECTION-CALL 152
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -852,6 +852,14 @@ var rxPropCls = function (st, name, at) {
     return rxNewCls()
 }
 
+// rxPropClsEs answers the class of JavaScript's \p{name} under U, or reports
+// the error. A KNOB like rxPropCls: the names are ECMAScript's, resolved over
+// java.lang.Character's tables (lib/java-regex.js's jxPropClsEs).
+var rxPropClsEs = function (st, name) {
+    rxErr(st, "unsupported character property \\p{" + name + "}")
+    return rxNewCls()
+}
+
 // rxEscJ reads the escapes java.util.regex spells differently, for rxEsc under J:
 // c (already consumed) is the character after the backslash. It answers false for
 // the escapes every dialect shares. Each error stands where Java reports it: the
@@ -1067,7 +1075,7 @@ function rxHexVal(c) {
 // rxEsc reads the escape whose backslash has already been consumed. It answers
 // {kind: 0, ch: code} for a literal character and {kind: 1, sp: code} for a
 // shorthand class; kind 2 is a backreference (ch = group number), and kind 3 a
-// \p{..} property, whose class is left in st.pcls (J only).
+// \p{..} property, whose class is left in st.pcls (J, and U).
 function rxEsc(st, inClass) {
     var res = {kind: 0, ch: 0, sp: 0}
     if (st.i >= st.n) {
@@ -1091,6 +1099,24 @@ function rxEsc(st, inClass) {
             bgot = bgot + 1
         }
         res.ch = bv
+        return res
+    }
+    // JavaScript's \p{name} and \P{name} under U; without U they are identity escapes.
+    if (st.uni && (c == 112 || c == 80)) {
+        res.kind = 3
+        var pe = st.n
+        if (st.i < st.n && p.charCodeAt(st.i) == 123) {
+            pe = st.i + 1
+            while (pe < st.n && p.charCodeAt(pe) != 125) { pe = pe + 1 }
+        }
+        if (pe >= st.n) {
+            rxErr(st, "Invalid property name")
+            st.pcls = rxNewCls()
+            return res
+        }
+        st.pcls = rxPropClsEs(st, p.substring(st.i + 1, pe))
+        st.pcls.neg = c == 80
+        st.i = pe + 1
         return res
     }
     if (c == 100) { res.kind = 1; res.sp = st.pyuni ? RX_SPD : RX_SD; return res }
@@ -1317,6 +1343,16 @@ function rxParseClass(st) {
                 rxClsAddSp(cls, e.sp)
                 continue
             }
+            // A \p{..} property (U) is a nested class, and cannot end a range.
+            if (e.kind == 3) {
+                var psubs = cls.subs
+                psubs.push(st.pcls)
+                cls.x = true
+                if (st.i + 1 < st.n && p.charCodeAt(st.i) == 45 && p.charCodeAt(st.i + 1) != 93) {
+                    rxErr(st, "Invalid character class")
+                }
+                continue
+            }
             loCode = e.ch
         } else {
             if (st.py || st.uni) { c = rxCpAt(p, st.i) }
@@ -1336,6 +1372,10 @@ function rxParseClass(st) {
             if (c2 == 92 && !st.ere) {
                 st.i = st.i + 1
                 var e2 = rxEsc(st, true)
+                if (e2.kind == 3) {
+                    rxErr(st, "Invalid character class")
+                    return node
+                }
                 if (e2.kind == 1) {
                     // "a-\d" is not a range; take the '-' literally and the class on.
                     rxClsAdd(cls, loCode, loCode)

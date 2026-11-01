@@ -305,6 +305,160 @@ func (st *rxSt) propCls(name string, at int) *rxCls {
 	return cls
 }
 
+// propClsEs is ECMAScript's reading of \p{name} under the u flag; twin of
+// jxPropClsEs in lib/java-regex.js, which describes it.
+func (st *rxSt) propClsEs(name string) *rxCls {
+	cls := rxNewCls()
+	key, val, isPair := strings.Cut(name, "=")
+	ok := false
+	switch {
+	case !isPair:
+		ok = jxGcEs(cls, name) || jxBinEs(cls, name)
+	case key == "General_Category" || key == "gc":
+		ok = jxGcEs(cls, val)
+	case key == "Script" || key == "sc":
+		ok = jxScriptEs(cls, val)
+	}
+	switch {
+	case ok:
+	case key == "Script_Extensions" || key == "scx" || (!isPair && strings.Contains(jxBinEsNone, " "+name+" ")):
+		st.fail("unsupported character property \\p{" + name + "}")
+	default:
+		st.fail("Invalid property name")
+	}
+	return cls
+}
+
+// Twins of JX_GC_ES and JX_BIN_ES_NONE in lib/java-regex.js.
+const jxGcEsNames = " Cased_Letter:LC Close_Punctuation:Pe Connector_Punctuation:Pc Control:Cc cntrl:Cc" +
+	" Currency_Symbol:Sc Dash_Punctuation:Pd Decimal_Number:Nd digit:Nd Enclosing_Mark:Me" +
+	" Final_Punctuation:Pf Format:Cf Initial_Punctuation:Pi Letter:L Letter_Number:Nl Line_Separator:Zl" +
+	" Lowercase_Letter:Ll Mark:M Combining_Mark:M Math_Symbol:Sm Modifier_Letter:Lm Modifier_Symbol:Sk" +
+	" Nonspacing_Mark:Mn Number:N Open_Punctuation:Ps Other:C Other_Letter:Lo Other_Number:No" +
+	" Other_Punctuation:Po Other_Symbol:So Paragraph_Separator:Zp Private_Use:Co Punctuation:P punct:P" +
+	" Separator:Z Space_Separator:Zs Spacing_Mark:Mc Surrogate:Cs Symbol:S Titlecase_Letter:Lt" +
+	" Unassigned:Cn Uppercase_Letter:Lu "
+const jxBinEsNone = " Bidi_Control Bidi_C Case_Ignorable CI Changes_When_Casefolded CWCF" +
+	" Changes_When_Casemapped CWCM Changes_When_Lowercased CWL Changes_When_NFKC_Casefolded CWKCF" +
+	" Changes_When_Titlecased CWT Changes_When_Uppercased CWU Dash Default_Ignorable_Code_Point DI" +
+	" Deprecated Dep Diacritic Dia Extender Ext Grapheme_Base Gr_Base Grapheme_Extend Gr_Ext" +
+	" IDS_Binary_Operator IDSB IDS_Trinary_Operator IDST ID_Continue IDC ID_Start IDS" +
+	" Logical_Order_Exception LOE Math Pattern_Syntax Pat_Syn Quotation_Mark QMark Radical" +
+	" Sentence_Terminal STerm Soft_Dotted SD Terminal_Punctuation Term Unified_Ideograph UIdeo" +
+	" XID_Continue XIDC XID_Start XIDS "
+
+// jxGcEs is a General_Category value, long or short; twin of jxGcEs.
+func jxGcEs(cls *rxCls, v string) bool {
+	sh := v
+	if k := strings.Index(jxGcEsNames, " "+v+":"); k >= 0 {
+		rest := jxGcEsNames[k+len(v)+2:]
+		sh = rest[:strings.Index(rest, " ")]
+	}
+	switch {
+	case sh == "LC":
+		return jxProps(cls, rxPGc+1, rxPGc+2, rxPGc+3)
+	case len(sh) == 1 && strings.Contains("CLMNPSZ", sh), len(sh) == 2 && sh != "--" && strings.Contains(jxGcNames, sh+" "):
+		return jxGcs(cls, sh)
+	}
+	return false
+}
+
+// jxBinEs is a binary property this engine decides; twin of jxBinEs.
+func jxBinEs(cls *rxCls, n string) bool {
+	switch n {
+	case "Any":
+		cls.add(0, 0x10FFFF)
+	case "ASCII":
+		cls.add(0, 0x7F)
+	case "ASCII_Hex_Digit", "AHex", "Hex_Digit", "Hex":
+		cls.add('0', '9')
+		cls.add('A', 'F')
+		cls.add('a', 'f')
+		if n == "Hex_Digit" || n == "Hex" {
+			cls.add(0xFF10, 0xFF19)
+			cls.add(0xFF21, 0xFF26)
+			cls.add(0xFF41, 0xFF46)
+		}
+	case "Regional_Indicator", "RI":
+		cls.add(0x1F1E6, 0x1F1FF)
+	case "Variation_Selector", "VS":
+		cls.add(0x180B, 0x180D)
+		cls.add(0x180F, 0x180F)
+		cls.add(0xFE00, 0xFE0F)
+		cls.add(0xE0100, 0xE01EF)
+	case "Pattern_White_Space", "Pat_WS":
+		cls.add(9, 13)
+		cls.add(0x20, 0x20)
+		cls.add(0x85, 0x85)
+		cls.add(0x200E, 0x200F)
+		cls.add(0x2028, 0x2029)
+	case "Join_Control", "Join_C":
+		cls.add(0x200C, 0x200D)
+	case "Alphabetic", "Alpha":
+		return jxProps(cls, rxPAlpha)
+	case "Assigned":
+		return jxProps(cls, rxPAssigned)
+	case "Cased":
+		return jxProps(cls, rxPCased)
+	case "Lowercase", "Lower":
+		return jxProps(cls, rxPLower)
+	case "Uppercase", "Upper":
+		return jxProps(cls, rxPUpper)
+	case "Noncharacter_Code_Point", "NChar":
+		return jxProps(cls, rxPNonCh)
+	case "White_Space", "space":
+		return jxProps(cls, rxPWhite)
+	case "Ideographic", "Ideo":
+		return jxProps(cls, rxPBin)
+	case "Bidi_Mirrored", "Bidi_M":
+		return jxProps(cls, rxPBin+1)
+	case "Emoji":
+		return jxProps(cls, rxPBin+2)
+	case "Emoji_Presentation", "EPres":
+		return jxProps(cls, rxPBin+3)
+	case "Emoji_Modifier", "EMod":
+		return jxProps(cls, rxPBin+4)
+	case "Emoji_Modifier_Base", "EBase":
+		return jxProps(cls, rxPBin+5)
+	case "Emoji_Component", "EComp":
+		return jxProps(cls, rxPBin+6)
+	case "Extended_Pictographic", "ExtPict":
+		return jxProps(cls, rxPBin+7)
+	default:
+		return false
+	}
+	return true
+}
+
+// jxScriptEs is a Script value in PropertyValueAliases.txt's case; twin of
+// jxScriptEs.
+func jxScriptEs(cls *rxCls, v string) bool {
+	w := v
+	switch v {
+	case "Qaai":
+		w = "Zinh"
+	case "Qaac":
+		w = "Copt"
+	}
+	for _, r := range w {
+		if r >= 0x80 {
+			return false
+		}
+	}
+	u := strings.ToUpper(w)
+	canon := "SignWriting"
+	if u != "SIGNWRITING" {
+		b := []byte(strings.ToLower(u))
+		for i := range b {
+			if i == 0 || b[i-1] == '_' {
+				b[i] = u[i]
+			}
+		}
+		canon = string(b)
+	}
+	return w == canon && jxScriptCls(cls, w)
+}
+
 // jxProps adds property ids to cls; jxGcs the general categories whose names
 // start with prefix.
 func jxProps(cls *rxCls, ids ...int) bool {

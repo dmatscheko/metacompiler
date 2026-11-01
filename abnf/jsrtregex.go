@@ -1089,6 +1089,26 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		}
 		return rxEscRes{ch: rune(v)}
 	}
+	// JavaScript's \p{name} and \P{name} under U; without U they are identity escapes.
+	if st.uni && (c == 'p' || c == 'P') {
+		res.kind = 3
+		pe := st.n
+		if st.i < st.n && st.p[st.i] == '{' {
+			pe = st.i + 1
+			for pe < st.n && st.p[pe] != '}' {
+				pe++
+			}
+		}
+		if pe >= st.n {
+			st.fail("Invalid property name")
+			st.pcls = rxNewCls()
+			return res
+		}
+		st.pcls = st.propClsEs(string(st.p[st.i+1 : pe]))
+		st.pcls.neg = c == 'P'
+		st.i = pe + 1
+		return res
+	}
 	switch c {
 	case 'd':
 		if st.pyuni {
@@ -1292,6 +1312,15 @@ func (st *rxSt) parseClass() *rxNode {
 				cls.addSp(e.sp)
 				continue
 			}
+			// A \p{..} property (U) is a nested class, and cannot end a range.
+			if e.kind == 3 {
+				cls.subs = append(cls.subs, st.pcls)
+				cls.x = true
+				if st.i+1 < st.n && st.p[st.i] == '-' && st.p[st.i+1] != ']' {
+					st.fail("Invalid character class")
+				}
+				continue
+			}
 			loCode = e.ch
 		} else {
 			st.i++
@@ -1309,6 +1338,10 @@ func (st *rxSt) parseClass() *rxNode {
 			if c2 == '\\' && !st.ere {
 				st.i++
 				e2 := st.esc(true)
+				if e2.kind == 3 {
+					st.fail("Invalid character class")
+					return node
+				}
 				if e2.kind == 1 {
 					// "a-\d" is not a range; take the '-' literally and the class on.
 					cls.add(loCode, loCode)
