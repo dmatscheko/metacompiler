@@ -6751,6 +6751,43 @@ fun s152() {
     check("crange152h", D152(1)..D152(4) == "span 1-4")
 }
 
+// ===== SECTION 153: range classes and the function-spelled range builders =====
+// IntRange, CharRange and LongRange implement both ClosedRange and OpenEndRange;
+// a stepped or downTo progression implements neither. `1.0..<2.0` is an
+// OpenEndDoubleRange (contains tests `< endExclusive`, isEmpty is
+// !(start < endExclusive)). Each range value's class is its kotlin.ranges class,
+// and rangeTo / rangeUntil are callable as functions on a number, a Char, a
+// String or any Comparable (kotlinc 2.2.21 on java 24).
+fun s153() {
+    val xs = listOf(1, 5, 2)
+    val rs: List<Any> = listOf(xs[0]..xs[1], xs[0]..<xs[1], xs[1] downTo xs[0], (xs[0]..xs[1]) step xs[2],
+        'a'..'c', 1L..5L, (1L..5L) step 2L, 1.0..2.0, 1.0..<2.0, 1.0f..<2.0f, "a".."c", "a"..<"c")
+    val cr = rs.map { if (it is ClosedRange<*>) 1 else 0 }
+    val oe = rs.map { if (it is OpenEndRange<*>) 1 else 0 }
+    check("rclass153a", cr == listOf(1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0) &&
+        oe == listOf(1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1))
+    val names = rs.map { it::class.simpleName }.joinToString(",")
+    check("rclass153b", names == "IntRange,IntRange,IntProgression,IntProgression,CharRange,LongRange," +
+        "LongProgression,ClosedDoubleRange,OpenEndDoubleRange,OpenEndFloatRange,ComparableRange,ComparableOpenEndRange")
+    check("rclass153c", ("a".."c")::class.qualifiedName == "kotlin.ranges.ComparableRange" &&
+        ("a"..<"c").javaClass.name == "kotlin.ranges.ComparableOpenEndRange" &&
+        rs[5] is LongRange && rs[5] !is IntRange && rs[6] is LongProgression && rs[6] !is LongRange)
+    val ds = listOf(1.0, 2.0, 1.5, -0.0, 0.0)
+    val h = ds[0]..<ds[1]
+    check("rclass153d", "$h" == "1.0..<2.0" && h.start == 1.0 && h.endExclusive == 2.0 && ds[2] in h &&
+        ds[1] !in h && ds[0] in h && !h.isEmpty() && (ds[0]..<ds[0]).isEmpty() && (ds[3]..<ds[4]).isEmpty() &&
+        h == (ds[0]..<ds[1]) && !h.equals(ds[0]..ds[1]) && h.hashCode() == (ds[0]..ds[1]).hashCode() &&
+        (ds[1]..<ds[0]).hashCode() == -1)
+    check("rclass153e", "${"a".rangeTo("c")}" == "a..c" && "${"a".rangeUntil("c")}" == "a..<c" &&
+        "b" in "a".rangeTo("c") && "c" !in "a".rangeUntil("c") && "a".rangeTo("c") == ("a".."c") &&
+        "${xs[0].rangeUntil(xs[1])}" == "1..4" && "${'a'.rangeUntil('c')}" == "a..b" &&
+        "${ds[0].rangeUntil(ds[1])}" == "1.0..<2.0" && "${ds[0].rangeTo(ds[1])}" == "1.0..2.0" &&
+        "${W153(1).rangeTo(W153(3))}" == "W153(n=1)..W153(n=3)" && W153(2) in W153(1).rangeUntil(W153(3)))
+}
+data class W153(val n: Int) : Comparable<W153> {
+    override fun compareTo(other: W153) = n.compareTo(other.n)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6900,6 +6937,7 @@ fun main() {
     s150() // SECTION-CALL 150
     s151() // SECTION-CALL 151
     s152() // SECTION-CALL 152
+    s153() // SECTION-CALL 153
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

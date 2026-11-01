@@ -3392,7 +3392,8 @@ NotMemberKw = :script(~~ "pure";
     // variable - the for-loop needs no range syntax of its own.
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
     // and no iteration for one, and its contains is the BOUNDS test alone
-    // (`1.5 in 1.0..2.0` is true).
+    // (`1.5 in 1.0..2.0` is true). `oe` marks the half-open `1.0..<2.0`, an
+    // OpenEndDoubleRange / OpenEndFloatRange, whose `to` is endExclusive.
     // `pg` marks a value that is an IntProgression and NOT an IntRange. `..`, `until`
     // and `..<` build an IntRange; `step` and `reversed()` build an IntProgression,
     // and kotlin.ranges.IntProgression.toString ALWAYS prints " step N" while
@@ -3418,8 +3419,13 @@ NotMemberKw = :script(~~ "pure";
         return rg
     }
     // The half-open `..<` / until: the inclusive bound is one less, unwrapped, so
-    // `x until Int.MIN_VALUE` is empty.
+    // `x until Int.MIN_VALUE` is empty. A floating range keeps its bound as
+    // endExclusive instead.
     function kRangeDec(rg) {
+        if (rg.fl) {
+            rg.oe = true
+            return rg
+        }
         rg.to = rg.to - 1
         if (rg.lg) { rg.lt = kArith("-", rg.lt, 1) }
         return rg
@@ -3602,7 +3608,7 @@ NotMemberKw = :script(~~ "pure";
         // A ClosedFloatingPointRange consults the bounds and nothing else.
         if (rg.fl === true) {
             if (kIsChar(x)) { return false }
-            return kNum(x) >= rg.from && kNum(x) <= rg.to
+            return kNum(x) >= rg.from && (rg.oe === true ? kNum(x) < rg.to : kNum(x) <= rg.to)
         }
         if (rg.ch !== kIsChar(x)) { return false }
         if (rg.lg === true) { return rangeHasL(rg, x) }
@@ -3638,8 +3644,9 @@ NotMemberKw = :script(~~ "pure";
         return n
     }
     function rangeEmpty(rg) {
-        // ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound empties it.
-        if (rg.fl === true) { return !(rg.from <= rg.to) }
+        // ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound
+        // empties it. The open form's is !(start < endExclusive).
+        if (rg.fl === true) { return rg.oe === true ? !(rg.from < rg.to) : !(rg.from <= rg.to) }
         if (rg.lg === true && rg.lf !== undefined) { return rg.down ? kCmpI("<", rg.lf, rg.lt) : kCmpI(">", rg.lf, rg.lt) }
         return rg.down ? (rg.from < rg.to) : (rg.from > rg.to)
     }
@@ -3650,7 +3657,7 @@ NotMemberKw = :script(~~ "pure";
     // with the IntRange form.
     function rangeStr(rg) {
         // ClosedFloatingPointRange.toString is "$start..$endInclusive".
-        if (rg.fl === true) { return kstr(rangeEl(rg, rg.from)) + ".." + kstr(rangeEl(rg, rg.to)) }
+        if (rg.fl === true) { return kstr(rangeEl(rg, rg.from)) + (rg.oe === true ? "..<" : "..") + kstr(rangeEl(rg, rg.to)) }
         var a = kstr(rg.ch ? kChar(rg.from) : rg.from)
         var b = kstr(rg.ch ? kChar(rangeLastEl(rg)) : rangeLastEl(rg))
         if (rg.lg === true && rg.lf !== undefined) {
@@ -3666,6 +3673,7 @@ NotMemberKw = :script(~~ "pure";
     function rangeEqK(a, b) {
         // A Float range never equals a Double range (ClosedFloatRange.equals).
         if ((a.f32 === true) !== (b.f32 === true)) { return false }
+        if ((a.oe === true) !== (b.oe === true)) { return false }
         if (rangeEmpty(a)) { return rangeEmpty(b) }
         if (rangeEmpty(b)) { return false }
         if (a.from !== b.from) { return false }
@@ -6880,7 +6888,8 @@ NotMemberKw = :script(~~ "pure";
         if ((kIsSet(v) || kIsMap(v)) && v.__jc !== undefined) { return v.__jc }
         if (kIsSet(v)) { return "java.util.LinkedHashSet" }
         if (kIsMap(v)) { return "java.util.LinkedHashMap" }
-        if (isRange(v)) { return kRangeJvmClass(v.fl === true, v.f32 === true, v.ch === true, v.lg === true, v.st == 1 && !v.down && v.pg !== true) }
+        var rjc = kRangeClass(v)
+        if (rjc != "") { return rjc }
         if (kIsPair(v)) { return v.third !== undefined ? "kotlin.Triple" : "kotlin.Pair" }
         var n = kSimpleName(v)
         if (szIs(v) && v.u) { return "kotlin." + n }
@@ -6896,13 +6905,17 @@ NotMemberKw = :script(~~ "pure";
         }
         return n
     }
-    // The kotlin.ranges class of a range value: plain means an IntRange-style `..`
-    // (step 1, ascending, not built by step / reversed). Twin of ktRangeJvmClass in
-    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
-    function kRangeJvmClass(fl, f32, ch, lg, plain) {
-        if (fl) { return f32 ? "kotlin.ranges.ClosedFloatRange" : "kotlin.ranges.ClosedDoubleRange" }
-        return "kotlin.ranges." + (ch ? "Char" : lg ? "Long" : "Int") + (plain ? "Range" : "Progression")
+    // The kotlin.ranges class of a range value, "" for any other value. Twin of
+    // ktRangeClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kRangeClass(v) {
+        if (kIsCRange(v)) { return v.open ? "kotlin.ranges.ComparableOpenEndRange" : "kotlin.ranges.ComparableRange" }
+        if (!isRange(v)) { return "" }
+        if (v.fl === true) { return "kotlin.ranges." + (v.oe === true ? "OpenEnd" : "Closed") + (v.f32 === true ? "Float" : "Double") + "Range" }
+        return "kotlin.ranges." + (v.ch ? "Char" : v.lg === true ? "Long" : "Int") + (kRangePlain(v) ? "Range" : "Progression")
     }
+    // An IntRange-style `..` (step 1, ascending, not built by step / reversed), as
+    // opposed to an IntProgression.
+    function kRangePlain(v) { return v.st == 1 && !v.down && v.pg !== true }
     function jxkHash(v) { return kHash(v) }
     function jxkThrow(cls, msg) { kThrowExc(cls, msg) }
 
@@ -8219,6 +8232,13 @@ NotMemberKw = :script(~~ "pure";
         // still wins (kScopeMethod declines then).
         var ksc = kScopeMethod(target, name, args)
         if (ksc != null) { return ksc.v }
+        // kotlin.ranges' `T.rangeTo` / `T.rangeUntil` on a Comparable<T>: the
+        // function spelling of `..` / `..<` over bounds that are not numbers or
+        // Chars (kRangeOp). A class declaring its own operator wins.
+        if ((name == "rangeTo" || name == "rangeUntil") && args.length == 1 && !kIsRangeNum(target) &&
+            lookupMethod(target, name) == null) {
+            return kCRange(target, args[0], name == "rangeUntil")
+        }
         // A Char receiver. Char is a real type here (the {__char} box), so .code,
         // .digitToInt(), .isLetter() and the case conversions answer from the CODE.
         if (kIsChar(target)) {
@@ -8287,15 +8307,16 @@ NotMemberKw = :script(~~ "pure";
         // numeric conversions, so there is no cast syntax to carry them. They are
         // shared by every numeric receiver, so they are answered before the
         // per-receiver branches below. The twin is ktNumMethod in abnf/jsrtkotlin.go.
-        // rangeTo / until / downTo in their FUNCTION spelling. `..`, `until` and
-        // `downTo` are the infix operators makeRange folds, but kotlin.ranges declares
-        // each as an ordinary member/extension too (`1.rangeTo(5)`). Char is here
-        // rather than in kCharMethod because the three share one body.
-        if ((name == "rangeTo" || name == "until" || name == "downTo") && args.length == 1 &&
+        // rangeTo / rangeUntil / until / downTo in their FUNCTION spelling. `..`,
+        // `..<`, `until` and `downTo` are the infix operators makeRange folds, but
+        // kotlin.ranges declares each as an ordinary member/extension too
+        // (`1.rangeTo(5)`). Char is here rather than in kCharMethod because the four
+        // share one body.
+        if ((name == "rangeTo" || name == "rangeUntil" || name == "until" || name == "downTo") && args.length == 1 &&
             (kIsFlo(target) || szIs(target) || typeof target == "number" || kIsChar(target))) {
             if (name == "downTo") { return kRange(target, args[0], true) }
             var rtr = kRange(target, args[0], false)
-            return (name == "until") ? kRangeDec(rtr) : rtr
+            return (name == "rangeTo") ? rtr : kRangeDec(rtr)
         }
         if (kIsFlo(target) || szIs(target) || typeof target == "number") {
             var cn = kConvName(name)
@@ -12045,9 +12066,11 @@ NotMemberKw = :script(~~ "pure";
         return {__kclass: true, kname: sn, jname: jc}
     }
     var kJvmPrimNames = ["int", "long", "double", "float", "char", "boolean", "byte", "short"]
-    // The JVM class of a List, a Set, a Map or a values view, "" for any other value.
-    // Twin of ktCollJvmClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // The JVM class of a List, a Set, a Map, a values view or a range, "" for any
+    // other value. Twin of ktCollJvmClass in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kCollJvmClass(v) {
+        if (isRange(v) || kIsCRange(v)) { return kRangeClass(v) }
         if (Array.isArray(v)) {
             var ak = arrKind(v)
             return ak <= 0 || ak == 3 || ak == 4 ? kJvmListClass(ak, v.length) : ""
@@ -12331,6 +12354,7 @@ NotMemberKw = :script(~~ "pure";
             // built from, not the last ELEMENT - the two coincide for every plain
             // `a..b`, and a stepped progression declares neither in Kotlin.
             if (name == "endInclusive") { return o.lg === true ? o.lt : rangeEl(o, o.to) }
+            if (name == "endExclusive" && o.oe === true) { return rangeEl(o, o.to) }
             if (name == "step") { return o.down ? -o.st : o.st }
             // `.size` on a progression is not Kotlin (IntRange is an Iterable, not a
             // Collection), but both halves answer the element count rather than
@@ -12729,23 +12753,24 @@ NotMemberKw = :script(~~ "pure";
             if (t == "Any" || t == "Comparable" || t == "Number") { return true }
             return t == "Int"
         }
-        // A plain a..b is an IntRange (a CharRange when the bounds were Chars) and
-        // therefore an IntProgression too; a STEPPED or downTo progression is an
-        // IntProgression and NOT an IntRange. A range is an Iterable, never a List.
-        // A LongRange is not distinguishable: a Long bound reduces to its numeric
-        // value here, so `1L..5L` and `1..5` are the same value.
+        // A plain a..b is an IntRange (a CharRange / LongRange when the bounds were
+        // Chars / Longs) and therefore an IntProgression, a ClosedRange and an
+        // OpenEndRange too; a STEPPED or downTo progression is an IntProgression
+        // only. A range is an Iterable, never a List.
         if (isRange(v)) {
             if (t == "Any") { return true }
-            // A floating range is a ClosedRange and NOT an Iterable.
-            if (v.fl === true) { return t == "ClosedFloatingPointRange" || t == "ClosedRange" }
-            if (t == "Iterable") { return true }
-            var plain = v.st == 1 && !v.down && v.pg !== true
-            if (v.ch) {
-                if (t == "CharProgression") { return true }
-                return t == "CharRange" && plain
+            // A floating range is NOT an Iterable; the closed one is a
+            // ClosedFloatingPointRange, the half-open one an OpenEndRange.
+            if (v.fl === true) {
+                if (v.oe === true) { return t == "OpenEndRange" }
+                return t == "ClosedFloatingPointRange" || t == "ClosedRange"
             }
-            if (t == "IntProgression") { return true }
-            return t == "IntRange" && plain
+            if (t == "Iterable") { return true }
+            var plain = kRangePlain(v)
+            if (t == "ClosedRange" || t == "OpenEndRange") { return plain }
+            var rk = v.ch ? "Char" : v.lg === true ? "Long" : "Int"
+            if (t == rk + "Progression") { return true }
+            return t == rk + "Range" && plain
         }
         if (kIsCRange(v)) { return t == "Any" || t == (v.open ? "OpenEndRange" : "ClosedRange") }
         var ci = kCollIsType(v, t)

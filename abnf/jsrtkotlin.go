@@ -686,11 +686,11 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		}
 	case "pow", "roundToInt", "roundToLong", "withSign", "nextUp", "nextDown":
 		return rt.ktMathMethod(target, name, args)
-	// rangeTo / until / downTo in their FUNCTION spelling. `..`, `until` and
-	// `downTo` are the infix operators the emitter lowers to js_ktrange, but
-	// kotlin.ranges declares each as an ordinary member/extension too
-	// (`1.rangeTo(5)`). ktRangeMake is shared with the Char receiver.
-	case "rangeTo", "until", "downTo":
+	// rangeTo / rangeUntil / until / downTo in their FUNCTION spelling. `..`,
+	// `..<`, `until` and `downTo` are the infix operators the emitter lowers to
+	// js_ktrange, but kotlin.ranges declares each as an ordinary member/extension
+	// too (`1.rangeTo(5)`). ktRangeMake is shared with the Char receiver.
+	case "rangeTo", "rangeUntil", "until", "downTo":
 		if len(args) == 1 {
 			return ktRangeMake(target, args[0], name), true
 		}
@@ -2107,6 +2107,11 @@ func init() {
 					if mname == "equals" && !ktClassChainHas(mo, "equals") {
 						return boolH(rt.strictEq(recv, argAt(arr.elems, 0)))
 					}
+					// kotlin.ranges' `T.rangeTo` / `T.rangeUntil` on a Comparable
+					// class that declares no operator of its own (ktCRangeFn).
+					if cr, ok := ktCRangeFn(recv, mname, arr.elems); ok && !ktClassChainHas(mo, mname) {
+						return w(cr)
+					}
 					// The coerce family of a Comparable class (kotlin.ranges').
 					if !ktClassChainHas(mo, mname) && ktClassChainHas(mo, "compareTo") {
 						if v, ok := rt.ktCoerceCmp(recv, mname, arr.elems); ok {
@@ -2713,8 +2718,7 @@ func init() {
 				down: mode == 1, ch: isCh, fl: isFl, f32: isFl && jvmIs32(ff.sty),
 				lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, st)
 			if mode == 2 {
-				rg.to--
-				rg.lt--
+				rg = ktRangeOpenEnd(rg)
 			}
 			return w(ktMakeRange(rg))
 		}
@@ -3166,6 +3170,10 @@ func init() {
 						return w(jsGInt{v: rg.lt, w: 64})
 					}
 					return w(ktRangeEl(rg, rg.to))
+				case "endExclusive":
+					if rg.oe {
+						return w(ktRangeEl(rg, rg.to))
+					}
 				case "step":
 					return w(ktRangeSigned(rg))
 				// `.size` on a progression is not Kotlin (IntRange is an Iterable,
@@ -3360,6 +3368,8 @@ func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bo
 		return float64(ktStrHash(rt, s)), true
 	case "coerceAtLeast", "coerceAtMost", "coerceIn":
 		return rt.ktCoerceCmp(s, name, args)
+	case "rangeTo", "rangeUntil":
+		return ktCRangeFn(s, name, args)
 	}
 	return rt.ktStrMethod2(s, name, args)
 }
@@ -4047,8 +4057,8 @@ func ktJvmClass(v interface{}) interface{} {
 	if _, _, isDict := dictParts(v); isDict {
 		return "java.util.LinkedHashMap"
 	}
-	if rg, ok := ktRangeOf(v); ok {
-		return ktRangeJvmClass(rg.fl, rg.f32, rg.ch, rg.lg, rg.st == 1 && !rg.down && !rg.pg)
+	if rc := ktRangeClass(v); rc != "" {
+		return rc
 	}
 	if p, ok := ktIsPair(v); ok {
 		if _, has := p.props["third"]; has {
@@ -4062,28 +4072,45 @@ func ktJvmClass(v interface{}) interface{} {
 	return ktSimpleName(v)
 }
 
-// ktRangeJvmClass is the kotlin.ranges class of a range value: plain means an
-// IntRange-style `..` (step 1, ascending, not built by step / reversed). Twin of
-// kRangeJvmClass in kotlin-interpreter.abnf and ktRangeJvmClass in
+// ktRangeClass is the kotlin.ranges class of a range value, "" for any other
+// value. Twin of kRangeClass in kotlin-interpreter.abnf and ktRangeClass in
 // languages/lib/kotlin-rt.metajs.
-func ktRangeJvmClass(fl, f32, ch, lg, plain bool) string {
-	if fl {
-		if f32 {
-			return "kotlin.ranges.ClosedFloatRange"
+func ktRangeClass(v interface{}) string {
+	if cr, isCr := ktCRangeOf(v); isCr {
+		if ktCRangeOpen(cr) {
+			return "kotlin.ranges.ComparableOpenEndRange"
 		}
-		return "kotlin.ranges.ClosedDoubleRange"
+		return "kotlin.ranges.ComparableRange"
+	}
+	rg, isRg := ktRangeOf(v)
+	if !isRg {
+		return ""
+	}
+	if rg.fl {
+		k := "Double"
+		if rg.f32 {
+			k = "Float"
+		}
+		if rg.oe {
+			return "kotlin.ranges.OpenEnd" + k + "Range"
+		}
+		return "kotlin.ranges.Closed" + k + "Range"
 	}
 	k := "Int"
-	if ch {
+	if rg.ch {
 		k = "Char"
-	} else if lg {
+	} else if rg.lg {
 		k = "Long"
 	}
-	if plain {
+	if ktRangePlain(rg) {
 		return "kotlin.ranges." + k + "Range"
 	}
 	return "kotlin.ranges." + k + "Progression"
 }
+
+// ktRangePlain: an IntRange-style `..` (step 1, ascending, not built by step /
+// reversed), as opposed to an IntProgression.
+func ktRangePlain(rg ktRange) bool { return rg.st == 1 && !rg.down && !rg.pg }
 
 // ktStr2 is kstr2: a string is itself, everything else renders through ktpRender.
 func (rt *jsrt) ktStr2(v interface{}) string {
@@ -5179,7 +5206,7 @@ func (rt *jsrt) ktScopeMethod(target interface{}, name string, args []interface{
 func (rt *jsrt) ktCharMethod(c jsChar, name string, args []interface{}) (interface{}, bool) {
 	r := rune(c.code)
 	switch name {
-	case "rangeTo", "until", "downTo":
+	case "rangeTo", "rangeUntil", "until", "downTo":
 		if len(args) == 1 {
 			return ktRangeMake(c, args[0], name), true
 		}
@@ -7661,8 +7688,9 @@ type ktRange struct {
 	// fl marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
 	// and no iteration for one, and its contains is the BOUNDS test alone
 	// (`1.5 in 1.0..2.0` is true). f32 marks one over Floats (ClosedFloatRange),
-	// whose bounds read back as Floats.
-	fl, f32 bool
+	// whose bounds read back as Floats. oe marks the half-open `1.0..<2.0`, an
+	// OpenEndDoubleRange / OpenEndFloatRange, whose `to` is endExclusive.
+	fl, f32, oe bool
 	// pg marks a value that is an IntProgression and NOT an IntRange. `..`, `until`
 	// and `..<` build an IntRange; `step` and `reversed()` build an IntProgression,
 	// and kotlin.ranges.IntProgression.toString ALWAYS prints " step N" where
@@ -7733,9 +7761,9 @@ func ktIsLongBox(v interface{}) bool {
 	return ok && g.w == 64 && !g.u
 }
 
-// The function spelling of rangeTo / until / downTo, shared by the number and Char
-// receivers. The `..<` / until subtraction is on the BOUND, exactly as the
-// emitter's own lowering does it.
+// The function spelling of rangeTo / rangeUntil / until / downTo, shared by the
+// number and Char receivers. The `..<` / until subtraction is on the BOUND,
+// exactly as the emitter's own lowering does it (ktRangeOpenEnd).
 func ktRangeMake(from, to interface{}, name string) *jsObject {
 	fn, _ := ktRangeNum(from)
 	tn, _ := ktRangeNum(to)
@@ -7743,11 +7771,23 @@ func ktRangeMake(from, to interface{}, name string) *jsObject {
 	ff, isFl := from.(jsJFlo)
 	rg := ktRangeLong(ktRange{from: fn, to: tn, st: 1, down: name == "downTo",
 		ch: isCh, fl: isFl, f32: isFl && jvmIs32(ff.sty), lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, float64(1))
-	if name == "until" {
-		rg.to--
-		rg.lt--
+	if name == "until" || name == "rangeUntil" {
+		rg = ktRangeOpenEnd(rg)
 	}
 	return ktMakeRange(rg)
+}
+
+// ktRangeOpenEnd makes rg the half-open `..<` / until: the inclusive bound is one
+// less, while a floating range keeps its bound as endExclusive. Twin of kRangeDec
+// in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktRangeOpenEnd(rg ktRange) ktRange {
+	if rg.fl {
+		rg.oe = true
+		return rg
+	}
+	rg.to--
+	rg.lt--
+	return rg
 }
 
 // IntProgression.reversed(): "a progression that goes over the same range in the
@@ -7922,6 +7962,7 @@ func ktRangeOf(v interface{}) (ktRange, bool) {
 	rg.ch, _ = o.props["ch"].(bool)
 	rg.fl, _ = o.props["fl"].(bool)
 	rg.f32, _ = o.props["f32"].(bool)
+	rg.oe, _ = o.props["oe"].(bool)
 	rg.pg, _ = o.props["pg"].(bool)
 	rg.lg, _ = o.props["lg"].(bool)
 	if rg.lg {
@@ -7946,6 +7987,9 @@ func ktMakeRange(rg ktRange) *jsObject {
 	o.set("fl", rg.fl)
 	if rg.f32 {
 		o.set("f32", true)
+	}
+	if rg.oe {
+		o.set("oe", true)
 	}
 	o.set("pg", rg.pg)
 	o.set("lg", rg.lg)
@@ -8016,8 +8060,11 @@ func ktRangeLastEl(rg ktRange) float64 {
 
 func ktRangeEmpty(rg ktRange) bool {
 	// ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound
-	// empties it.
+	// empties it. The open form's is !(start < endExclusive).
 	if rg.fl {
+		if rg.oe {
+			return !(rg.from < rg.to)
+		}
 		return !(rg.from <= rg.to)
 	}
 	if rg.lg {
@@ -8076,7 +8123,7 @@ func ktRangeHas(rg ktRange, x interface{}) bool {
 			return false
 		}
 		n, ok := ktRangeNum(x)
-		return ok && n >= rg.from && n <= rg.to
+		return ok && n >= rg.from && (n < rg.to || (n == rg.to && !rg.oe))
 	}
 	if _, isCh := x.(jsChar); rg.ch != isCh {
 		return false
@@ -8143,7 +8190,11 @@ func (rt *jsrt) ktRangeStr(rg ktRange) string {
 	// ClosedFloatingPointRange.toString is "$start..$endInclusive" - the declared
 	// BOUND, not a last element, since it has no step and no elements.
 	if rg.fl {
-		return rt.ktpRender(ktRangeEl(rg, rg.from), 1) + ".." + rt.ktpRender(ktRangeEl(rg, rg.to), 1)
+		op := ".."
+		if rg.oe {
+			op = "..<"
+		}
+		return rt.ktpRender(ktRangeEl(rg, rg.from), 1) + op + rt.ktpRender(ktRangeEl(rg, rg.to), 1)
 	}
 	a := rt.ktpRender(ktRangeEl(rg, rg.from), 1)
 	b := rt.ktpRender(ktRangeEl(rg, ktRangeLastEl(rg)), 1)
@@ -8163,7 +8214,7 @@ func (rt *jsrt) ktRangeStr(rg ktRange) string {
 // two non-empty ones agree when first, last and step agree.
 func ktRangeEq(a, b ktRange) bool {
 	// A Float range never equals a Double range (ClosedFloatRange.equals).
-	if a.f32 != b.f32 {
+	if a.f32 != b.f32 || a.oe != b.oe {
 		return false
 	}
 	if ktRangeEmpty(a) {
@@ -8220,6 +8271,17 @@ func ktCRange(lo, hi interface{}, open bool) *jsObject {
 		o.set("endInclusive", hi)
 	}
 	return o
+}
+
+// ktCRangeFn is kotlin.ranges' `T.rangeTo` / `T.rangeUntil` on a Comparable<T>:
+// the function spelling of `..` / `..<` over bounds that are not numbers or
+// Chars. Twin of the rangeTo arm of mcall in kotlin-interpreter.abnf and
+// k4CRangeFn in languages/lib/kotlin-rt.metajs.
+func ktCRangeFn(lo interface{}, name string, args []interface{}) (*jsObject, bool) {
+	if (name != "rangeTo" && name != "rangeUntil") || len(args) != 1 {
+		return nil, false
+	}
+	return ktCRange(lo, args[0], name == "rangeUntil"), true
 }
 
 func ktCRangeOf(v interface{}) (*jsObject, bool) {
@@ -8336,34 +8398,40 @@ func (rt *jsrt) ktCoerceCmp(t interface{}, name string, args []interface{}) (int
 	return t, true
 }
 
-// `r is T`. A plain a..b is an IntRange (a CharRange when the bounds were Chars)
-// and therefore an IntProgression too; a STEPPED or downTo progression is an
-// IntProgression and NOT an IntRange, which is what `10 downTo 1 is IntRange`
-// answers false to on the JVM. A range is an Iterable and is NOT a List.
-// A LongRange is not distinguishable here: ktRangeNum reduces a Long bound to
-// its numeric value, so `1L..5L` and `1..5` are the same value.
+// `r is T`. A plain a..b is an IntRange (a CharRange / LongRange when the bounds
+// were Chars / Longs) and therefore an IntProgression, a ClosedRange and an
+// OpenEndRange too; a STEPPED or downTo progression is an IntProgression only,
+// which is what `10 downTo 1 is IntRange` answers false to on the JVM. A range is
+// an Iterable and is NOT a List.
 func ktRangeIsType(rg ktRange, t string) bool {
 	if t == "Any" {
 		return true
 	}
 	if rg.fl {
-		// A floating range is a ClosedRange and NOT an Iterable.
+		// A floating range is NOT an Iterable; the closed one is a
+		// ClosedFloatingPointRange, the half-open one an OpenEndRange.
+		if rg.oe {
+			return t == "OpenEndRange"
+		}
 		return t == "ClosedFloatingPointRange" || t == "ClosedRange"
 	}
 	if t == "Iterable" {
 		return true
 	}
-	plain := rg.st == 1 && !rg.down && !rg.pg
-	if rg.ch {
-		if t == "CharProgression" {
-			return true
-		}
-		return t == "CharRange" && plain
+	plain := ktRangePlain(rg)
+	if t == "ClosedRange" || t == "OpenEndRange" {
+		return plain
 	}
-	if t == "IntProgression" {
+	k := "Int"
+	if rg.ch {
+		k = "Char"
+	} else if rg.lg {
+		k = "Long"
+	}
+	if t == k+"Progression" {
 		return true
 	}
-	return t == "IntRange" && plain
+	return t == k+"Range" && plain
 }
 
 // ktCollIsType is `c is T` for a builtin collection; ok is false when v is not one.
@@ -10919,9 +10987,9 @@ func ktJavaClass(jc string) *jsObject {
 
 var ktJvmPrimNames = [...]string{"int", "long", "double", "float", "char", "boolean", "byte", "short"}
 
-// ktCollJvmClass is the JVM class of a List, a Set, a Map or a values view, "" for
-// any other value. Twin of kCollJvmClass in kotlin-interpreter.abnf and
-// ktCollJvmClass in languages/lib/kotlin-rt.metajs.
+// ktCollJvmClass is the JVM class of a List, a Set, a Map, a values view or a
+// range, "" for any other value. Twin of kCollJvmClass in kotlin-interpreter.abnf
+// and ktCollJvmClass in languages/lib/kotlin-rt.metajs.
 func ktCollJvmClass(v interface{}) string {
 	if a, isArr := v.(*jsArray); isArr {
 		if a.kind <= 0 || a.kind == ktArrVals || a.kind == ktArrFixed {
@@ -10935,7 +11003,7 @@ func ktCollJvmClass(v interface{}) string {
 	if _, _, isDict := dictParts(v); isDict {
 		return ktJvmTag(v, "java.util.LinkedHashMap")
 	}
-	return ""
+	return ktRangeClass(v)
 }
 
 func ktIsClassLit(v interface{}) (*jsObject, bool) {

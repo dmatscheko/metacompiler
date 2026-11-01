@@ -2025,7 +2025,7 @@ function ktNumMethod(recv, name, args) {
     if (name == "takeHighestOneBit" || name == "takeLowestOneBit" || name == "rotateLeft" || name == "rotateRight") {
         if (k4IsIntKind(recv) && !floIs(recv)) { return k4IntBitFn(recv, name, args) }
     }
-    if (name == "rangeTo" || name == "until" || name == "downTo") {
+    if (name == "rangeTo" || name == "rangeUntil" || name == "until" || name == "downTo") {
         if (args.length == 1) { return k4RangeMake(recv, args[0], name) }
     }
     if (name == "floorDiv" || name == "mod") {
@@ -3332,6 +3332,7 @@ function ktStrMethod(s, name, args) {
     if (name == "lowercase" || name == "toLowerCase") { return s.toLowerCase() }
     if (name == "hashCode") { return k2StrHash(s) }
     if (name == "coerceAtLeast" || name == "coerceAtMost" || name == "coerceIn") { return ktCoerceCmp(s, name, args) }
+    if (name == "rangeTo" || name == "rangeUntil") { return k4CRangeFn(s, name, args) }
     return k2StrMethod2(s, name, args)
 }
 
@@ -4171,12 +4172,8 @@ function jxkClass(v) {
     }
     if (ktIsSet(v)) { return "java.util.LinkedHashSet" }
     if (rtIsDictObj(v)) { return "java.util.LinkedHashMap" }
-    if (ktIsRange(v)) {
-        var plain = v["st"] == 1
-        if (v["down"] === true) { plain = false }
-        if (v["pg"] === true) { plain = false }
-        return ktRangeJvmClass(v["fl"] === true, v["f32"] === true, v["ch"] === true, v["lg"] === true, plain)
-    }
+    var rjc = ktRangeClass(v)
+    if (rjc != "") { return rjc }
     if (ktIsPair(v)) {
         if (v["third"] !== undefined) { return "kotlin.Triple" }
         return "kotlin.Pair"
@@ -4197,16 +4194,23 @@ function jxkClass(v) {
     }
     return n
 }
-// ktRangeJvmClass is ktRangeJvmClass (jsrtkotlin.go): the kotlin.ranges class of a
-// range value.
-function ktRangeJvmClass(fl, f32, ch, lg, plain) {
-    if (fl) {
-        if (f32) { return "kotlin.ranges.ClosedFloatRange" }
-        return "kotlin.ranges.ClosedDoubleRange"
+// ktRangeClass is ktRangeClass (jsrtkotlin.go): the kotlin.ranges class of a
+// range value, "" for any other value.
+function ktRangeClass(v) {
+    if (ktIsCRange(v)) {
+        if (v["open"] === true) { return "kotlin.ranges.ComparableOpenEndRange" }
+        return "kotlin.ranges.ComparableRange"
+    }
+    if (!ktIsRange(v)) { return "" }
+    if (v["fl"] === true) {
+        var fk = "Double"
+        if (v["f32"] === true) { fk = "Float" }
+        if (v["oe"] === true) { return "kotlin.ranges.OpenEnd" + fk + "Range" }
+        return "kotlin.ranges.Closed" + fk + "Range"
     }
     var k = "Int"
-    if (ch) { k = "Char" } else if (lg) { k = "Long" }
-    if (plain) { return "kotlin.ranges." + k + "Range" }
+    if (v["ch"] === true) { k = "Char" } else if (v["lg"] === true) { k = "Long" }
+    if (k4RangePlain(v)) { return "kotlin.ranges." + k + "Range" }
     return "kotlin.ranges." + k + "Progression"
 }
 function jxkHash(v) { return ktElemHash(v) }
@@ -4219,7 +4223,7 @@ function jxkThrow(cls, msg) { ktRaise(cls, msg) }
 // these answers from the CODE rather than from a string.
 function ktCharMethod(c, name, args) {
     var r = ktCharCode(c)
-    if (name == "rangeTo" || name == "until" || name == "downTo") {
+    if (name == "rangeTo" || name == "rangeUntil" || name == "until" || name == "downTo") {
         if (args.length == 1) { return k4RangeMake(c, args[0], name) }
     }
     if (name == "code") { return r }
@@ -7353,8 +7357,8 @@ function ktJvmPrimName(c) {
     return names["IJDFCZBS".indexOf(c)]
 }
 
-// The JVM class of a List, a Set, a Map or a values view, "" for any other value.
-// Twin of ktCollJvmClass in abnf/jsrtkotlin.go.
+// The JVM class of a List, a Set, a Map, a values view or a range, "" for any
+// other value. Twin of ktCollJvmClass in abnf/jsrtkotlin.go.
 function ktCollJvmClass(v) {
     if (ktIsArr(v)) {
         var ak = arrKind(v)
@@ -7363,7 +7367,7 @@ function ktCollJvmClass(v) {
     }
     if (ktIsSet(v)) { return ktJvmTag(v, "java.util.LinkedHashSet") }
     if (rtIsDictObj(v)) { return ktJvmTag(v, "java.util.LinkedHashMap") }
-    return ""
+    return ktRangeClass(v)
 }
 
 // ktIsClassLit (jsrtkotlin.go:5889)
@@ -9857,6 +9861,12 @@ function ktSmcall(recv, name, args) {
             if (name == "equals") {
                 if (!ktClassChainHas(rv, "equals")) { return ktIdent(rv, k4At(as, 0)) }
             }
+            // kotlin.ranges' `T.rangeTo` / `T.rangeUntil` on a Comparable class
+            // that declares no operator of its own.
+            if (!ktClassChainHas(rv, name)) {
+                var crf = k4CRangeFn(rv, name, as)
+                if (!ktMiss(crf)) { return crf }
+            }
             // The coerce family of a Comparable class (kotlin.ranges').
             if (!ktClassChainHas(rv, name) && ktClassChainHas(rv, "compareTo")) {
                 var cc = ktCoerceCmp(rv, name, as)
@@ -9998,6 +10008,13 @@ function ktCRange(lo, hi, open) {
     return r
 }
 function ktIsCRange(v) { return ktIsObj(v) && v["__crange"] === true }
+// jsrtkotlin.go ktCRangeFn: `T.rangeTo` / `T.rangeUntil` on a Comparable<T>, the
+// function spelling of `..` / `..<` over bounds that are not numbers or Chars.
+function k4CRangeFn(lo, name, args) {
+    if (name != "rangeTo" && name != "rangeUntil") { return KT_MISS }
+    if (args.length != 1) { return KT_MISS }
+    return ktCRange(lo, args[0], name == "rangeUntil")
+}
 function k4CRangeEnd(r) { return r["open"] === true ? r["endExclusive"] : r["endInclusive"] }
 function k4CRangeType(r) { return r["open"] === true ? "OpenEndRange" : "ClosedRange" }
 // x lies below r's bound (strictly, for the open form).
@@ -10143,7 +10160,8 @@ function js_ktrange(from, to, st, down) {
     if (stn <= 0) { k4StepBad(st) }
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
     // and no iteration for one, and its contains is the BOUNDS test alone
-    // (`1.5 in 1.0..2.0` is true). `f32` marks one over Floats (ClosedFloatRange).
+    // (`1.5 in 1.0..2.0` is true). `f32` marks one over Floats (ClosedFloatRange),
+    // `oe` the half-open `1.0..<2.0` (k4RangeDec).
     var rg = {__range: true, from: k4RangeNum(from), to: k4RangeNum(to),
               st: stn, down: down === 1, ch: ktIsChar(from), fl: floIs(from), f32: k4IsF32(from), pg: false,
               lg: k4IsLongBox(from) || k4IsLongBox(to)}
@@ -10162,8 +10180,14 @@ function k4RangeLong(rg, from, to, st) {
         rg["ls"] = ktNorm(k1Val(st), 64, 0)
     }
 }
-// The half-open form's inclusive bound: one less.
+// The half-open form's inclusive bound: one less. A floating range keeps its
+// bound as endExclusive instead - an OpenEndDoubleRange / OpenEndFloatRange.
+// Twin of ktRangeOpenEnd in abnf/jsrtkotlin.go.
 function k4RangeDec(rg) {
+    if (rg["fl"] === true) {
+        rg["oe"] = true
+        return
+    }
     rg["to"] = rg["to"] - 1
     if (rg["lg"] === true) { rg["lt"] = k1Arith("-", rg["lt"], 1) }
 }
@@ -10256,8 +10280,11 @@ function ktRangeList(rg) {
 
 function ktRangeEmpty(rg) {
     // ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound
-    // empties it.
-    if (rg["fl"] === true) { return !(rg["from"] <= rg["to"]) }
+    // empties it. The open form's is !(start < endExclusive).
+    if (rg["fl"] === true) {
+        if (rg["oe"] === true) { return !(rg["from"] < rg["to"]) }
+        return !(rg["from"] <= rg["to"])
+    }
     if (rg["lg"] === true) {
         if (rg["down"] === true) { return k1Cmp("<", rg["lf"], rg["lt"]) }
         return k1Cmp(">", rg["lf"], rg["lt"])
@@ -10301,16 +10328,16 @@ function ktRangeAt(rg, i) {
     return k4RangeEl(rg, rg["from"] + off)
 }
 
-// The function spelling of rangeTo / until / downTo, shared by the number and the
-// Char receiver. `..`, `until` and `downTo` are the infix operators the emitter
-// lowers to js_ktrange, but kotlin.ranges declares each as an ordinary
-// member/extension too (`1.rangeTo(5)`).
+// The function spelling of rangeTo / rangeUntil / until / downTo, shared by the
+// number and the Char receiver. `..`, `..<`, `until` and `downTo` are the infix
+// operators the emitter lowers to js_ktrange, but kotlin.ranges declares each as
+// an ordinary member/extension too (`1.rangeTo(5)`).
 function k4RangeMake(from, to, name) {
     var rg = {__range: true, from: k4RangeNum(from), to: k4RangeNum(to), st: 1,
               down: name == "downTo", ch: ktIsChar(from), fl: floIs(from), f32: k4IsF32(from), pg: false,
               lg: k4IsLongBox(from) || k4IsLongBox(to)}
     k4RangeLong(rg, from, to, 1)
-    if (name == "until") { k4RangeDec(rg) }
+    if (name == "until" || name == "rangeUntil") { k4RangeDec(rg) }
     return rg
 }
 
@@ -10470,6 +10497,7 @@ function ktRangeHas(rg, x) {
     if (rg["fl"] === true) {
         if (ktIsChar(x)) { return false }
         var fn = ktNum(x)
+        if (rg["oe"] === true) { return fn >= rg["from"] && fn < rg["to"] }
         return fn >= rg["from"] && fn <= rg["to"]
     }
     if (rg["ch"] === true) {
@@ -10515,7 +10543,9 @@ function ktRangeStr(rg) {
     // ClosedFloatingPointRange.toString is "$start..$endInclusive" - the declared
     // BOUND, not a last element, since it has no step and no elements.
     if (rg["fl"] === true) {
-        return k2Render(k4RangeEl(rg, rg["from"]), 1) + ".." + k2Render(k4RangeEl(rg, rg["to"]), 1)
+        var op = ".."
+        if (rg["oe"] === true) { op = "..<" }
+        return k2Render(k4RangeEl(rg, rg["from"]), 1) + op + k2Render(k4RangeEl(rg, rg["to"]), 1)
     }
     var a = k2Render(k4RangeEl(rg, rg["from"]), 1)
     var b = k2Render(k4RangeEl(rg, ktRangeLastEl(rg)), 1)
@@ -10534,6 +10564,7 @@ function ktRangeStr(rg) {
 function ktRangeEq(a, b) {
     // A Float range never equals a Double range (ClosedFloatRange.equals).
     if ((a["f32"] === true) != (b["f32"] === true)) { return false }
+    if ((a["oe"] === true) != (b["oe"] === true)) { return false }
     if (ktRangeEmpty(a)) { return ktRangeEmpty(b) }
     if (ktRangeEmpty(b)) { return false }
     if (a["from"] != b["from"]) { return false }
@@ -10571,32 +10602,30 @@ function ktRangeHash(rg) {
     return (Math.imul(31, h) + ktElemHash(step)) | 0
 }
 
-// `r is T`. A plain a..b is an IntRange (a CharRange when the bounds were Chars)
-// and therefore an IntProgression too; a STEPPED or downTo progression is an
-// IntProgression and NOT an IntRange, which is what `10 downTo 1 is IntRange`
-// answers false to on the JVM. A range is an Iterable and is NOT a List.
+// `r is T`. Twin of ktRangeIsType in abnf/jsrtkotlin.go, which has the rules.
 function k4RangeIsType(rg, tname) {
     var t = k4bStripQ(k4bStripAngle(tname))
     if (t == "Any") { return true }
     if (rg["fl"] === true) {
-        // A floating range is a ClosedRange and NOT an Iterable.
+        if (rg["oe"] === true) { return t == "OpenEndRange" }
         return t == "ClosedFloatingPointRange" || t == "ClosedRange"
     }
     if (t == "Iterable") { return true }
-    var plain = rg["st"] == 1
-    if (rg["down"] === true) { plain = false }
-    if (rg["pg"] === true) { plain = false }
-    if (rg["ch"] === true) {
-        if (t == "CharProgression") { return true }
-        if (t == "CharRange") { return plain }
-        return false
-    }
-    if (t == "IntProgression") { return true }
-    if (t == "IntRange") { return plain }
-    // A LongRange is not distinguishable here: k4RangeNum reduces a Long bound to
-    // its numeric value, so `1L..5L` and `1..5` are the same value. Both halves
-    // answer the Int names.
+    var plain = k4RangePlain(rg)
+    if (t == "ClosedRange" || t == "OpenEndRange") { return plain }
+    var k = "Int"
+    if (rg["ch"] === true) { k = "Char" } else if (rg["lg"] === true) { k = "Long" }
+    if (t == k + "Progression") { return true }
+    if (t == k + "Range") { return plain }
     return false
+}
+
+// An IntRange-style `..` (step 1, ascending, not built by step / reversed), as
+// opposed to an IntProgression.
+function k4RangePlain(rg) {
+    if (rg["st"] != 1) { return false }
+    if (rg["down"] === true) { return false }
+    return rg["pg"] !== true
 }
 
 // The JVM class a set or map records (ktJvmTagged), else def.
@@ -10859,6 +10888,7 @@ function js_ktfget(o, name) {
             if (lg) { return o["lt"] }
             return k4RangeEl(o, o["to"])
         }
+        if (name == "endExclusive" && o["oe"] === true) { return k4RangeEl(o, o["to"]) }
         if (name == "step") {
             if (o["down"] === true) { return -o["st"] }
             return o["st"]
