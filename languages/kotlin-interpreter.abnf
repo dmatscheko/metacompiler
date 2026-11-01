@@ -2546,6 +2546,8 @@ NotMemberKw = :script(~~
     include("lib/kotlin-math.js")
     // ClassCastException's text is the JVM's.
     include("lib/java-cce.js")
+    // sorted / sortedBy / sortedWith / sortWith are java.util.TimSort.
+    include("lib/java-timsort.js")
 
     // ----- Imports (same policy as the compiler grammar) -----
     // Prefixes the runtime already provides as builtins; importing them is a no-op.
@@ -4573,14 +4575,37 @@ NotMemberKw = :script(~~
             if (vw.v === null) { vw.v = kViewOf(arrKindSet(m.vals.slice(0), 3), m) }
             return vw.v
         }
-        if (vw.e === null) { vw.e = kMapView(kSetOfDistinct(kElems(m)), m, "Entry") }
+        if (vw.e === null) { vw.e = kMapView(kSetOfDistinct(kMapNodes(m, [])), m, "Entry") }
         return vw.e
+    }
+    // The entry view's entries are java's map nodes: one object per mapping, kept
+    // across changes (old is the view's previous list, in map order), its value
+    // updated in place by a put and written through by setValue (__m is the map); a
+    // removed mapping's entry keeps its last value. Twin of ktMapNodes in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kMapNodes(m, old) {
+        var out = []
+        var p = 0
+        for (var i = 0; i < m.keys.length; i++) {
+            var q = p
+            while (q < old.length && old[q].key !== m.keys[i]) { q++ }
+            var en = anytype
+            if (q < old.length) {
+                en = old[q]
+                p = q + 1
+            } else {
+                en = kMapEntry(m.keys[i], m.vals[i])
+                en.__m = m
+            }
+            out.push(en)
+        }
+        return out
     }
     function kMapViewsSync(m) {
         var vw = m.__vw
         if (vw.k !== null) { kArrSetTo(vw.k.keys, m.keys.slice(0)) }
         if (vw.v !== null) { kArrSetTo(vw.v, m.vals.slice(0)) }
-        if (vw.e !== null) { kArrSetTo(vw.e.keys, kElems(m)) }
+        if (vw.e !== null) { kArrSetTo(vw.e.keys, kMapNodes(m, vw.e.keys.slice(0))) }
     }
     // The views after a put: entry i took a new value, or (i < 0) a key was appended
     // - a TreeMap sorts it in, so its views are re-read whole.
@@ -4591,9 +4616,15 @@ NotMemberKw = :script(~~
         if (i < 0 && vw.k !== null) { vw.k.keys.push(m.keys[at]) }
         if (vw.v !== null) { if (i < 0) { vw.v.push(m.vals[at]) } else { vw.v[at] = m.vals[at] } }
         if (vw.e !== null) {
-            var en = anytype
-            en = kMapEntry(m.keys[at], m.vals[at])
-            if (i < 0) { vw.e.keys.push(en) } else { vw.e.keys[at] = en }
+            if (i < 0) {
+                var en = anytype
+                en = kMapEntry(m.keys[at], m.vals[at])
+                en.__m = m
+                vw.e.keys.push(en)
+            } else {
+                vw.e.keys[at].value = m.vals[at]
+                vw.e.keys[at].second = m.vals[at]
+            }
         }
     }
     // A map's keys / values / entries view writes through: each element its own
@@ -4770,13 +4801,14 @@ NotMemberKw = :script(~~
     // A COMPARATOR is a plain function of two elements answering an Int, which is what
     // sortedWith / maxWith / minWith drive.
     // compareBy / compareByDescending take one or more selectors, and the first whose
-    // keys differ under compareValues decides. Twin of ktCmpBy in abnf/jsrtkotlin.go
-    // and k4CmpBy in languages/lib/kotlin-rt.metajs.
+    // keys differ under compareValues decides. The descending form is
+    // compareValuesBy(b, a, selector), so each selector sees b before a. Twin of
+    // ktCmpBy in abnf/jsrtkotlin.go and k4CmpBy in languages/lib/kotlin-rt.metajs.
     function kCmpBy(sels, desc) {
         return function(a, b) {
             for (var i = 0; i < sels.length; i++) {
-                var c = kCmpValues(sels[i](a), sels[i](b))
-                if (c != 0) { return desc ? 0 - c : c }
+                var c = desc ? kCmpValues(sels[i](b), sels[i](a)) : kCmpValues(sels[i](a), sels[i](b))
+                if (c != 0) { return c }
             }
             return 0
         }
@@ -4788,16 +4820,24 @@ NotMemberKw = :script(~~
     }
     hostGlobals["compareBy"] = function() { return kCmpBy(kSelectors(arguments), false) }
     hostGlobals["compareByDescending"] = function() { return kCmpBy(kSelectors(arguments), true) }
-    hostGlobals["naturalOrder"] = function() { return kCmpValues }
-    hostGlobals["reverseOrder"] = function() { return function(a, b) { return kCmpValues(b, a) } }
+    hostGlobals["naturalOrder"] = function() { return kCompareTo }
+    hostGlobals["reverseOrder"] = function() { return function(a, b) { return kCompareTo(b, a) } }
     hostGlobals["Comparator"] = function(f) { return f }
-    // compareValues: null sorts first, then compareTo (String's is java's).
+    // a.compareTo(b), calling a user compareTo exactly once (String's is java's).
+    // Twin of ktCompareTo in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kCompareTo(a, b) {
+        if (typeof a == "string" && typeof b == "string") { return kCmpText(a, b, false) }
+        var cf = lookupMethod(a, "compareTo")
+        if (cf != null) { return kNum(cf.apply(undefined, [a, b])) }
+        if (kKeyLess(a, b)) { return 0 - 1 }
+        return kKeyLess(b, a) ? 1 : 0
+    }
+    // compareValues: the same reference is 0, null sorts first, then compareTo.
     function kCmpValues(a, b) {
         if (a === null || a === undefined) { return (b === null || b === undefined) ? 0 : 0 - 1 }
         if (b === null || b === undefined) { return 1 }
-        if (typeof a == "string" && typeof b == "string") { return kCmpText(a, b, false) }
-        if (kKeyLess(a, b)) { return 0 - 1 }
-        return kKeyLess(b, a) ? 1 : 0
+        if (a === b && lookupMethod(a, "compareTo") != null) { return 0 }
+        return kCompareTo(a, b)
     }
     hostGlobals["compareValues"] = kCmpValues
     // The members of a Comparator (a function of two elements): compare, reversed,
@@ -6837,11 +6877,8 @@ NotMemberKw = :script(~~
         if (isRange(v)) { return rangeList(v) }
         // A SET iterates its elements; the handle itself is not an array (see kMakeSet).
         if (kIsSet(v)) { return v.keys }
-        if (kIsMap(v)) {
-            var out = []
-            for (var i = 0; i < v.keys.length; i++) { out.push(kMapEntry(v.keys[i], v.vals[i])) }
-            return out
-        }
+        // A MAP iterates its entry view's nodes (kMapNodes), a copy of the list.
+        if (kIsMap(v)) { return kMapViewOf(v, "entries").keys.slice(0) }
         fail("not a sequence: " + kstr(v))
     }
     // Kotlin's sumOf/sum take the WIDTH of what they sum: a Long selector sums to a
@@ -6934,9 +6971,6 @@ NotMemberKw = :script(~~
         return best
     }
     function kKeyEq(a, b) { return !kKeyLess(a, b) && !kKeyLess(b, a) }
-    // A stable insertion sort by an optional selector. Small on purpose: the two
-    // halves have to produce byte-identical orders, so the algorithm is spelled out
-    // rather than delegated to a host sort.
     // maxBy / minBy over a non-empty es: the first element whose selector value is
     // the greatest (least), es's iterator checked by n0 (kForNext). Twin of
     // ktBestBy in abnf/jsrtkotlin.go and k4BestBy in languages/lib/kotlin-rt.metajs.
@@ -6952,25 +6986,20 @@ NotMemberKw = :script(~~
         }
         return be
     }
+    // sorted / sortedDescending (sel null: compareTo, reversed by reverseOrder) and
+    // sortedBy / sortedByDescending (compareBy / compareByDescending over sel), each
+    // java's TimSort over a copy (toTypedArray), so the comparisons run in the JDK's
+    // order and the selector may change es. Twin of ktSortBy in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kSortBy(es, sel, desc) {
-        // The selector runs over a copy (toTypedArray), so it may change es.
+        var cmp = function(a, b) { return kCompareTo(a, b) }
+        if (sel != null) { cmp = kCmpBy([sel], desc) } else if (desc) { cmp = function(a, b) { return kCompareTo(b, a) } }
+        return kTimSort(es, cmp)
+    }
+    // A sorted copy of es under the comparator cmp (a function answering a number).
+    function kTimSort(es, cmp) {
         var out = es.slice()
-        var keys = []
-        for (var i = 0; i < out.length; i++) { keys.push(sel == null ? out[i] : sel(out[i])) }
-        for (var m = 1; m < out.length; m++) {
-            var v = anytype
-            var kk = anytype
-            v = out[m]
-            kk = keys[m]
-            var j = m - 1
-            while (j >= 0 && kKeyLess(kk, keys[j]) != desc && !kKeyEq(kk, keys[j])) {
-                out[j + 1] = out[j]
-                keys[j + 1] = keys[j]
-                j--
-            }
-            out[j + 1] = v
-            keys[j + 1] = kk
-        }
+        if (!jtsSort(out, cmp)) { kRaise("IllegalArgumentException", "Comparison method violates its general contract!") }
         return out
     }
     // A host array, whose own kind number says whether it is a List, an Array, a
@@ -7703,20 +7732,9 @@ NotMemberKw = :script(~~
         }
         if (name == "ifEmpty") { return {v: es.length == 0 ? f() : es} }
         // A COMPARATOR (compareBy / compareByDescending / a two-argument lambda) is a
-        // function of two elements answering an Int, so sortedWith is an insertion sort
-        // driven by that function rather than by kKeyLess.
-        if (name == "sortedWith") {
-            out = []
-            for (i = 0; i < es.length; i++) { out.push(es[i]) }
-            for (var si = 1; si < out.length; si++) {
-                var sv = anytype
-                sv = out[si]
-                var sj = si - 1
-                while (sj >= 0 && kNum(f(out[sj], sv)) > 0) { out[sj + 1] = out[sj]; sj-- }
-                out[sj + 1] = sv
-            }
-            return {v: out}
-        }
+        // function of two elements answering an Int, and sortedWith is java's TimSort
+        // driven by it.
+        if (name == "sortedWith") { return {v: kTimSort(es, function(a, b) { return kNum(f(a, b)) })} }
         if (name == "removeAt") {
             var ra = kNum(f)
             if (ra < 0 || ra >= es.length) { kIndexOob("IndexOutOfBoundsException", ra, es.length) }
@@ -8476,6 +8494,24 @@ NotMemberKw = :script(~~
         if (target !== null && target !== undefined && typeof target == "object" && target.__grouping === true) {
             var kgm = kGroupingMethod(target, name, args)
             if (kgm != null) { return kgm.v }
+        }
+        // MutableMap.MutableEntry.setValue answers the old value; a node still in its
+        // map writes through (see kMapNodes). Twin of ktEntrySet in abnf/jsrtkotlin.go
+        // and languages/lib/kotlin-rt.metajs.
+        if (name == "setValue" && kIsEntry(target)) {
+            var eold = anytype
+            eold = target.value
+            target.value = args[0]
+            target.second = args[0]
+            var em = target.__m
+            if (em !== undefined) {
+                var ei = kMapFind(em, target.key)
+                if (ei >= 0 && em.__vw.e.keys[ei] === target) {
+                    em.vals[ei] = args[0]
+                    kMapViewsPut(em, ei)
+                }
+            }
+            return eold
         }
         // A Pair / Triple: componentN, so `val (a, b) = 1 to 2` destructures.
         if (kIsPair(target)) {

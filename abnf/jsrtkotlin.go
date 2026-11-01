@@ -6652,20 +6652,10 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return o, true
 	// A COMPARATOR (compareBy / compareByDescending / a two-argument lambda) is a
-	// function of two elements answering an Int, so this is an insertion sort driven
-	// by that function rather than by ktKeyLess.
+	// function of two elements answering an Int, and sortedWith is java's TimSort
+	// driven by it.
 	case "sortedWith":
-		out := append([]interface{}{}, es...)
-		for i := 1; i < len(out); i++ {
-			v := out[i]
-			j := i - 1
-			for j >= 0 && rt.toNumber(rt.ktCall(f, out[j], v)) > 0 {
-				out[j+1] = out[j]
-				j--
-			}
-			out[j+1] = v
-		}
-		return arr(out), true
+		return rt.ktTimSort(es, func(a, b interface{}) int { return jsToInt(rt.toNumber(rt.ktCall(f, a, b))) }), true
 	case "removeAt":
 		ix := jsToInt(rt.toNumber(f))
 		if ix < 0 || ix >= len(o.elems) {
@@ -7191,12 +7181,12 @@ func ktElems(rt *jsrt, v interface{}) []interface{} {
 	if keys, ok := ktSetParts(v); ok {
 		return keys.elems
 	}
-	if keys, vals, ok := dictParts(v); ok {
-		out := make([]interface{}, len(keys.elems))
-		for i := range keys.elems {
-			out[i] = ktMapEntry(keys.elems[i], vals.elems[i])
+	// A MAP iterates its entry view's nodes (ktMapNodes), a copy of the list.
+	if m, isObj := v.(*jsObject); isObj {
+		if _, _, ok := dictParts(m); ok {
+			s, _ := ktSetParts(rt.ktMapViewOf(m, "entries"))
+			return append([]interface{}{}, s.elems...)
 		}
-		return out
 	}
 	rt.fail("not a sequence: %s", rt.ktpRender(v, 0))
 	return nil
@@ -7239,26 +7229,27 @@ func ktSetOfDistinct(es []interface{}) *jsObject {
 	return s
 }
 
-// ktSortBy is an insertion sort (stable, and small enough to keep the two halves
-// byte identical) by an optional selector, ascending or descending.
+// ktSortBy is sorted / sortedDescending (sel nil: compareTo, reversed by
+// reverseOrder) and sortedBy / sortedByDescending (compareBy / compareByDescending
+// over sel), each java's TimSort over a copy. Twin of kSortBy in
+// kotlin-interpreter.abnf and ktSortBy in languages/lib/kotlin-rt.metajs.
 func ktSortBy(rt *jsrt, es []interface{}, sel interface{}, desc bool) *jsArray {
-	out := append([]interface{}{}, es...)
-	keys := make([]interface{}, len(out))
-	for i, e := range out {
-		if sel != nil {
-			keys[i] = rt.call(sel, jsUndef, []interface{}{e})
-		} else {
-			keys[i] = e
-		}
+	cmp := func(a, b interface{}) int { return rt.ktCompareTo(a, b) }
+	if sel != nil {
+		sels := []interface{}{sel}
+		cmp = func(a, b interface{}) int { return rt.ktCmpByStep(sels, desc, a, b) }
+	} else if desc {
+		cmp = func(a, b interface{}) int { return rt.ktCompareTo(b, a) }
 	}
-	for i := 1; i < len(out); i++ {
-		v, k := out[i], keys[i]
-		j := i - 1
-		for j >= 0 && ktKeyLess(rt, k, keys[j]) != desc && !ktKeyEqual(rt, k, keys[j]) {
-			out[j+1], keys[j+1] = out[j], keys[j]
-			j--
-		}
-		out[j+1], keys[j+1] = v, k
+	return rt.ktTimSort(es, cmp)
+}
+
+// ktTimSort is a sorted copy of es under cmp. Twin of kTimSort in
+// kotlin-interpreter.abnf and ktTimSort in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktTimSort(es []interface{}, cmp func(a, b interface{}) int) *jsArray {
+	out := append([]interface{}{}, es...)
+	if !jtsSort(out, cmp) {
+		rt.ktRaise("IllegalArgumentException", "Comparison method violates its general contract!")
 	}
 	return &jsArray{elems: out}
 }
@@ -8297,10 +8288,62 @@ func (rt *jsrt) ktMapViewOf(m *jsObject, name string) interface{} {
 	case "values":
 		v = ktViewOf(&jsArray{elems: append([]interface{}{}, vals.elems...), kind: ktArrVals}, m)
 	default:
-		v = ktMapView(ktSetOfDistinct(ktElems(rt, m)), m, "Entry")
+		v = ktMapView(ktSetOfDistinct(rt.ktMapNodes(m, nil)), m, "Entry")
 	}
 	vw.set(name, v)
 	return v
+}
+
+// ktMapNodes is the entry view's entries, java's map nodes: one object per
+// mapping, kept across changes (old is the view's previous list, in map order),
+// its value updated in place by a put and written through by setValue (__m is the
+// map); a removed mapping's entry keeps its last value. Twin of kMapNodes in
+// kotlin-interpreter.abnf and ktMapNodes in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktMapNodes(m *jsObject, old []interface{}) []interface{} {
+	keys, vals, _ := dictParts(m)
+	out := make([]interface{}, len(keys.elems))
+	p := 0
+	for i, k := range keys.elems {
+		q := p
+		for q < len(old) && !rt.strictEq(old[q].(*jsObject).props["key"], k) {
+			q++
+		}
+		if q < len(old) {
+			out[i] = old[q]
+			p = q + 1
+		} else {
+			out[i] = ktMapNode(m, k, vals.elems[i])
+		}
+	}
+	return out
+}
+
+func ktMapNode(m *jsObject, k, v interface{}) *jsObject {
+	e := ktMapEntry(k, v)
+	e.set("__m", m)
+	return e
+}
+
+// ktEntrySet is MutableMap.MutableEntry.setValue, answering the old value; a node
+// still in its map writes through (see ktMapNodes). Twin of the setValue arm in
+// kotlin-interpreter.abnf's mcall and ktEntrySet in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktEntrySet(e *jsObject, v interface{}) interface{} {
+	old := e.props["value"]
+	e.set("value", v)
+	e.set("second", v)
+	m, ok := e.props["__m"].(*jsObject)
+	if !ok {
+		return old
+	}
+	keys, vals, _ := dictParts(m)
+	if i := rt.ktMapFind(keys, e.props["key"]); i >= 0 {
+		vw, _ := m.props["__vw"].(*jsObject)
+		if s, ok := ktSetParts(vw.props["entries"]); ok && s.elems[i] == e {
+			vals.elems[i] = v
+			rt.ktMapViewsPut(m, vw, i)
+		}
+	}
+	return old
 }
 
 func (rt *jsrt) ktMapViewsSync(m *jsObject, vw *jsObject) {
@@ -8315,7 +8358,7 @@ func (rt *jsrt) ktMapViewsSync(m *jsObject, vw *jsObject) {
 	}
 	if s, ok := ktSetParts(vw.props["entries"]); ok {
 		s.dropIdx()
-		s.elems = ktElems(rt, m)
+		s.elems = rt.ktMapNodes(m, s.elems)
 	}
 }
 
@@ -8345,10 +8388,12 @@ func (rt *jsrt) ktMapViewsPut(m *jsObject, vw *jsObject, i int) {
 	}
 	if s, ok := ktSetParts(vw.props["entries"]); ok {
 		s.dropIdx()
-		if e := ktMapEntry(keys.elems[at], vals.elems[at]); i < 0 {
-			s.elems = append(s.elems, e)
+		if i < 0 {
+			s.elems = append(s.elems, ktMapNode(m, keys.elems[at], vals.elems[at]))
 		} else {
-			s.elems[at] = e
+			e := s.elems[at].(*jsObject)
+			e.set("value", vals.elems[at])
+			e.set("second", vals.elems[at])
 		}
 	}
 }
@@ -9353,9 +9398,9 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jsHostFunc("comparator", func(rt *jsrt, this uint64, ab []interface{}) interface{} {
 				if rev {
-					return float64(rt.ktCmpValues(argAt(ab, 1), argAt(ab, 0)))
+					return float64(rt.ktCompareTo(argAt(ab, 1), argAt(ab, 0)))
 				}
-				return float64(rt.ktCmpValues(argAt(ab, 0), argAt(ab, 1)))
+				return float64(rt.ktCompareTo(argAt(ab, 0), argAt(ab, 1)))
 			})
 		})
 	case "Comparator":
@@ -9724,6 +9769,10 @@ func (rt *jsrt) ktPairMethod2(o *jsObject, name string, args []interface{}) (int
 		return float64(int32(ktElemHash(rt, o))), true
 	case "equals":
 		return rt.ktEqVals(o, argAt(args, 0)), true
+	case "setValue":
+		if ktIsEntry(o) {
+			return rt.ktEntrySet(o, argAt(args, 0)), true
+		}
 	}
 	return ktPairMethod(o, name)
 }
@@ -9763,29 +9812,47 @@ func (rt *jsrt) ktCmpValues(a, b interface{}) int {
 	if isUndefOrNull(b) {
 		return 1
 	}
+	if ao, isObj := a.(*jsObject); isObj && a == b && ktClassChainHas(ao, "compareTo") {
+		return 0
+	}
+	return rt.ktCompareTo(a, b)
+}
+
+// ktCompareTo is a.compareTo(b), calling a user compareTo exactly once (String's
+// is java's). Twin of kCompareTo in kotlin-interpreter.abnf and ktCompareTo in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktCompareTo(a, b interface{}) int {
 	if as, ok := a.(string); ok {
 		if bs, ok := b.(string); ok {
 			return ktCmpText(strUnits(as), strUnits(bs), false)
 		}
 	}
+	if ao, isObj := a.(*jsObject); isObj && ktMemberCall != nil && ktClassChainHas(ao, "compareTo") {
+		return jsToInt(rt.toNumber(ktMemberCall(a, "compareTo", []interface{}{b})))
+	}
 	return ktCmpKeys(rt, a, b, false)
 }
 
 // ktCmpBy is compareBy / compareByDescending over one or more selectors: the first
-// whose keys differ under compareValues decides. Twin of kCmpBy in
-// kotlin-interpreter.abnf and k4CmpBy in languages/lib/kotlin-rt.metajs.
+// whose keys differ under compareValues decides. The descending form is
+// compareValuesBy(b, a, selector), so each selector sees b before a. Twin of kCmpBy
+// in kotlin-interpreter.abnf and k4CmpBy in languages/lib/kotlin-rt.metajs.
 func ktCmpBy(sels []interface{}, desc bool) *hostFunc {
 	return jsHostFunc("comparator", func(rt *jsrt, this uint64, ab []interface{}) interface{} {
-		for _, sel := range sels {
-			if c := rt.ktCmpValues(rt.ktCall(sel, argAt(ab, 0)), rt.ktCall(sel, argAt(ab, 1))); c != 0 {
-				if desc {
-					c = -c
-				}
-				return float64(c)
-			}
-		}
-		return float64(0)
+		return float64(rt.ktCmpByStep(sels, desc, argAt(ab, 0), argAt(ab, 1)))
 	})
+}
+
+func (rt *jsrt) ktCmpByStep(sels []interface{}, desc bool, a, b interface{}) int {
+	if desc {
+		a, b = b, a
+	}
+	for _, sel := range sels {
+		if c := rt.ktCmpValues(rt.ktCall(sel, a), rt.ktCall(sel, b)); c != 0 {
+			return c
+		}
+	}
+	return 0
 }
 
 // ktCmpMethod is the member surface of a Comparator (a function of two elements):

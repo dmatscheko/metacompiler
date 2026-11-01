@@ -87,6 +87,8 @@ import "./fdlibm.js"
 // ClassCastException's text is the JVM's.
 import "./java-cce.js"
 import "./kotlin-math.js"
+// sorted / sortedBy / sortedWith / sortWith are java.util.TimSort.
+import "./java-timsort.js"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return k1JStr(v) }
@@ -542,15 +544,63 @@ function ktMapViewOf(m, name) {
     if (v !== undefined) { return v }
     if (name == "keys") { v = ktMapView(k3SetOfDistinct(ktMapKeys(m)), m, "Key") }
     else if (name == "values") { v = k4ViewOf(arrKindSet(k3Copy(ktMapVals(m)), 3), m) }
-    else { v = ktMapView(k3SetOfDistinct(ktElems(m)), m, "Entry") }
+    else { v = ktMapView(k3SetOfDistinct(ktMapNodes(m, [])), m, "Entry") }
     vw[name] = v
     return v
+}
+// ktMapNodes (jsrtkotlin.go, which has the rule): the entry view's entries, one
+// node per mapping kept across changes, __m naming the map.
+function ktMapNodes(m, old) {
+    var keys = ktMapKeys(m)
+    var vals = ktMapVals(m)
+    var out = []
+    var p = 0
+    var i = 0
+    while (i < keys.length) {
+        var q = p
+        while (q < old.length && old[q]["key"] !== keys[i]) { q = q + 1 }
+        if (q < old.length) {
+            out.push(old[q])
+            p = q + 1
+        } else {
+            out.push(ktMapNode(m, keys[i], vals[i]))
+        }
+        i = i + 1
+    }
+    return out
+}
+function ktMapNode(m, k, v) {
+    var e = ktMapEntry(k, v)
+    e["__m"] = m
+    return e
+}
+// ktEntrySet (jsrtkotlin.go): MutableEntry.setValue, answering the old value; a
+// node still in its map writes through.
+function ktEntrySet(e, v) {
+    var old = anytype
+    old = e["value"]
+    e["value"] = v
+    e["second"] = v
+    var m = anytype
+    m = e["__m"]
+    if (m === undefined) { return old }
+    var i = ktMapFind(ktMapKeys(m), e["key"])
+    if (i >= 0) {
+        if (ktSetElems(m["__vw"]["entries"])[i] === e) {
+            ktMapVals(m)[i] = v
+            ktMapViewsPut(m, i)
+        }
+    }
+    return old
 }
 function ktMapViewsSync(m) {
     var vw = m["__vw"]
     if (vw["keys"] !== undefined) { k3Replace(ktSetElems(vw["keys"]), ktMapKeys(m)) }
     if (vw["values"] !== undefined) { k3Replace(vw["values"], ktMapVals(m)) }
-    if (vw["entries"] !== undefined) { k3Replace(ktSetElems(vw["entries"]), ktElems(m)) }
+    if (vw["entries"] !== undefined) {
+        var es = ktSetElems(vw["entries"])
+        k3Replace(es, ktMapNodes(m, k3Copy(es)))
+    }
 }
 function ktMapViewsPut(m, i) {
     if (i < 0 && m["__jc"] === "java.util.TreeMap") {
@@ -570,7 +620,12 @@ function ktMapViewsPut(m, i) {
     }
     if (vw["entries"] !== undefined) {
         var es = ktSetElems(vw["entries"])
-        if (i < 0) { es.push(ktMapEntry(keys[at], vals[at])) } else { es[at] = ktMapEntry(keys[at], vals[at]) }
+        if (i < 0) {
+            es.push(ktMapNode(m, keys[at], vals[at]))
+        } else {
+            es[at]["value"] = vals[at]
+            es[at]["second"] = vals[at]
+        }
     }
 }
 
@@ -1459,6 +1514,20 @@ function ktCmpKeys(a, b, desc) {
 // ktKeyLess semantics above.
 function ktCmpVals(a, b) { return ktCmpKeys(a, b, false) }
 
+// ktCompareTo (jsrtkotlin.go): a.compareTo(b), calling a user compareTo exactly
+// once (String's is java's).
+function ktCompareTo(a, b) {
+    if (typeof a == "string") {
+        if (typeof b == "string") { return k2CmpText(a, b, false) }
+    }
+    if (k0IsRec(a)) {
+        if (ktClassChainHas(a, "compareTo")) {
+            return ktNum(ktCall2(k0FindMember(a, "compareTo"), a, b))
+        }
+    }
+    return ktCmpKeys(a, b, false)
+}
+
 // ===================================================== iteration ============
 
 // ktElems (jsrtkotlin.go 4483): the element ARRAY of any iterable - a list as
@@ -1470,17 +1539,8 @@ function ktElems(v) {
     if (typeof v == "string") { return k0Chars(v) }
     var se = ktSetElems(v)
     if (se !== undefined) { return se }
-    if (rtIsDictObj(v)) {
-        var ks = ktMapKeys(v)
-        var vs = ktMapVals(v)
-        var out = []
-        var i = 0
-        while (i < ks.length) {
-            out.push(ktMapEntry(ks[i], vs[i]))
-            i = i + 1
-        }
-        return out
-    }
+    // A map iterates its entry view's nodes (ktMapNodes), a copy of the list.
+    if (rtIsDictObj(v)) { return k3Copy(ktSetElems(ktMapViewOf(v, "entries"))) }
     fail("not a sequence: " + ktRender(v))
     return []
 }
@@ -4546,44 +4606,25 @@ function k3KeyEqual(a, b) {
     return !k3KeyLess(b, a)
 }
 
-// ktSortBy is jsrtkotlin.go:4545 -- an insertion sort (stable, and small enough
-// to keep the two halves byte identical) by an optional selector.
+// ktSortBy (jsrtkotlin.go): sorted / sortedDescending (no sel: compareTo,
+// reversed by reverseOrder) and sortedBy / sortedByDescending (compareBy /
+// compareByDescending over sel), each java's TimSort over a copy.
 function ktSortBy(es, sel, desc) {
-    var out = k3Copy(es)
-    var keys = []
-    var i = 0
-    var j = 0
-    var v = anytype
-    var k = anytype
     var d = desc === true
-    var more = false
-    var hasSel = true
-    if (sel === null) { hasSel = false }
-    if (sel === undefined) { hasSel = false }
-    for (i = 0; i < out.length; i = i + 1) {
-        if (hasSel) { keys.push(ktCall1(sel, out[i])) } else { keys.push(out[i]) }
+    var cmp = function (a, b) { return ktCompareTo(a, b) }
+    if (sel !== null && sel !== undefined) {
+        var sels = [sel]
+        cmp = function (a, b) { return k4CmpStep(sels, d, a, b) }
+    } else if (d) {
+        cmp = function (a, b) { return ktCompareTo(b, a) }
     }
-    for (i = 1; i < out.length; i = i + 1) {
-        v = out[i]
-        k = keys[i]
-        j = i - 1
-        more = true
-        while (more) {
-            more = false
-            if (j >= 0) {
-                if ((k3KeyLess(k, keys[j]) === true) !== d) {
-                    if (!k3KeyEqual(k, keys[j])) {
-                        out[j + 1] = out[j]
-                        keys[j + 1] = keys[j]
-                        j = j - 1
-                        more = true
-                    }
-                }
-            }
-        }
-        out[j + 1] = v
-        keys[j + 1] = k
-    }
+    return ktTimSort(es, cmp)
+}
+
+// ktTimSort (jsrtkotlin.go): a sorted copy of es under cmp.
+function ktTimSort(es, cmp) {
+    var out = k3Copy(es)
+    if (!jtsSort(out, cmp)) { ktRaise("IllegalArgumentException", "Comparison method violates its general contract!") }
     return out
 }
 
@@ -5485,8 +5526,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         return arr
     }
     // A COMPARATOR (compareBy / compareByDescending / a two-argument lambda) is
-    // a function of two elements answering an Int, so this is an insertion sort
-    // driven by that function rather than by k3KeyLess.
+    // a function of two elements answering an Int, and sortedWith is java's
+    // TimSort driven by it.
     if (name == "sortedWith") { return k3SortedWith(es, f) }
     if (name == "removeAt") {
         k = k3Int(f)
@@ -5805,28 +5846,7 @@ function k3LastWhileCut(es, f, ck) {
 }
 
 function k3SortedWith(es, f) {
-    var out = k3Copy(es)
-    var i = 0
-    var j = 0
-    var v = anytype
-    var more = false
-    for (i = 1; i < out.length; i = i + 1) {
-        v = out[i]
-        j = i - 1
-        more = true
-        while (more) {
-            more = false
-            if (j >= 0) {
-                if (ktNum(ktCall2(f, out[j], v)) > 0) {
-                    out[j + 1] = out[j]
-                    j = j - 1
-                    more = true
-                }
-            }
-        }
-        out[j + 1] = v
-    }
-    return out
+    return ktTimSort(es, function (a, b) { return ktNum(ktCall2(f, a, b)) })
 }
 
 // ============================================================================
@@ -8049,25 +8069,37 @@ function k4CmpValues(a, b) {
         return -1
     }
     if (rtIsNil(b)) { return 1 }
-    if (typeof a == "string" && typeof b == "string") { return k2CmpText(a, b, false) }
-    return k4CmpKeys(a, b, false)
+    if (a === b) {
+        if (k0IsRec(a)) {
+            if (ktClassChainHas(a, "compareTo")) { return 0 }
+        }
+    }
+    return ktCompareTo(a, b)
 }
 
 // k4CmpBy is ktCmpBy (jsrtkotlin.go): compareBy over one or more selectors, the
-// first whose keys differ under compareValues deciding.
+// first whose keys differ under compareValues deciding; descending, each
+// selector sees b before a.
 function k4CmpBy(sels, desc) {
-    return function (a, b) {
-        var i = 0
-        while (i < sels.length) {
-            var c = k4CmpValues(ktCall1(sels[i], a), ktCall1(sels[i], b))
-            if (c != 0) {
-                if (desc) { return -c }
-                return c
-            }
-            i = i + 1
-        }
-        return 0
+    return function (a, b) { return k4CmpStep(sels, desc, a, b) }
+}
+
+function k4CmpStep(sels, desc, a0, b0) {
+    var a = anytype
+    var b = anytype
+    a = a0
+    b = b0
+    if (desc) {
+        a = b0
+        b = a0
     }
+    var i = 0
+    while (i < sels.length) {
+        var c = k4CmpValues(ktCall1(sels[i], a), ktCall1(sels[i], b))
+        if (c != 0) { return c }
+        i = i + 1
+    }
+    return 0
 }
 
 // k4CmpMethod is ktCmpMethod (jsrtkotlin.go): a Comparator's compare, reversed and
@@ -8440,6 +8472,9 @@ function ktJobMethod(j, name) {
 function k4PairMethod2(o, name, args) {
     if (name == "hashCode") { return k4I32(ktElemHash(o)) }
     if (name == "equals") { return ktEqVals(o, k4At(args, 0)) }
+    if (name == "setValue") {
+        if (ktIsEntry(o)) { return ktEntrySet(o, k4At(args, 0)) }
+    }
     return ktPairMethod(o, name)
 }
 
@@ -9152,10 +9187,10 @@ function ktGlobalFn(name) {
         }
     }
     if (name == "naturalOrder") {
-        return function () { return function (a, b) { return k4CmpValues(a, b) } }
+        return function () { return function (a, b) { return ktCompareTo(a, b) } }
     }
     if (name == "reverseOrder") {
-        return function () { return function (a, b) { return k4CmpValues(b, a) } }
+        return function () { return function (a, b) { return ktCompareTo(b, a) } }
     }
     if (name == "Comparator") {
         return function (f) { return f }

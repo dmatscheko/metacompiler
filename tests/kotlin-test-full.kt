@@ -6620,6 +6620,54 @@ fun s148() {
     check("nl148b", q == 7 && s + c == "(((")
 }
 
+// ===== SECTION 149: sorting is java's TimSort, and map entries are live =====
+// The selector / comparator call sequence is the JDK's (run detection, binary
+// insertion below 32 elements, galloping merges above), observable through side
+// effects; compareValues calls compareTo once. A held Map.Entry sees later puts,
+// and setValue writes through (kotlinc 2.2.21 on java 24).
+class V149(val n: Int) : Comparable<V149> {
+    override fun compareTo(other: V149): Int { cnt149++; return n.compareTo(other.n) }
+}
+var cnt149 = 0
+fun s149() {
+    var n = 0
+    val a = listOf(3, 1, 2).sortedBy { n++; it }
+    var n2 = 0
+    val b = listOf(3, 1, 2).sortedWith(compareBy { n2++; it })
+    val log = mutableListOf<Int>()
+    val c = listOf(3, 1, 2).sortedByDescending { log.add(it); it }
+    check("sort149a", a == listOf(1, 2, 3) && n == 8 && n2 == 8 && c == listOf(3, 2, 1) &&
+        log == listOf(3, 1, 1, 2, 1, 2, 3, 2))
+    val xs = (0 until 70).map { (it * 37) % 23 }
+    var k = 0
+    val d = xs.sortedBy { k++; it }
+    var k2 = 0
+    val e = xs.sortedWith { p, q -> k2++; (p % 5).compareTo(q % 5) }
+    cnt149 = 0
+    val f = xs.map { V149(it) }.sortedDescending()
+    check("sort149b", d == xs.sorted() && k == 692 && k2 == 328 && cnt149 == 345 &&
+        e.take(6) == listOf(0, 5, 10, 15, 20, 0) && f.first().n == 22)
+    val ml = xs.toMutableList()
+    var k3 = 0
+    ml.sortWith(compareBy<Int> { k3++; it % 3 }.thenByDescending { k3++; it })
+    check("sort149c", k3 == 1170 && ml.take(5) == listOf(21, 21, 21, 18, 18))
+    var msg = ""
+    var cc = 0
+    val ys = (0 until 100).map { (it * 37) % 101 }
+    try { ys.sortedWith { p, q -> cc++; if ((p * 31 + q * 17 + cc) % 5 == 0) 1 else -1 } }
+    catch (x: IllegalArgumentException) { msg = "" + x.message }
+    check("sort149d", cc == 191 && msg == "Comparison method violates its general contract!")
+    val m = mutableMapOf(1 to "a", 2 to "b", 3 to "c")
+    val e1 = m.entries.first()
+    val e2 = m.entries.elementAt(1)
+    m[1] = "z"
+    m.remove(2)
+    m[2] = "q"
+    val old = m.entries.last().setValue("w")
+    for (en in m) en.setValue(en.value + "!")
+    check("entry149", "$e1 $e2 $old $m" == "1=z! 2=b q {1=z!, 3=c!, 2=w!}")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6765,6 +6813,7 @@ fun main() {
     sec146() // SECTION-CALL 146
     sec147() // SECTION-CALL 147
     s148() // SECTION-CALL 148
+    s149() // SECTION-CALL 149
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
