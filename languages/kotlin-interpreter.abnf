@@ -1022,7 +1022,7 @@ NewStmtLine = :script(~~ "pure";
 // initializing lambda a lambda-with-receiver: its first argument becomes `this`, so it
 // can be called both as dot(recv, arg) and, through the receiver-call fallback, as
 // recv.dot(arg). Any other type annotation is parsed and dropped as before.
-Decl        <~~ ktAt = up.start; push(makeDecl(takeAll(), up.in)) ~~>
+Decl        <~~ ktAt = up.start; push(makeDecl(takeAll(), up.in, c.srcSlice(up.start, up.pos))) ~~>
             = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression [ ";" ] ;
 // The declared type is pushed as {dty}: an INTEGRAL one retypes the initializer.
 // RecvFnType and DeclTypeName each push exactly ONE item, so makeDecl's item count
@@ -1074,7 +1074,7 @@ ForIn       <~~ ktNoteForVar(c.srcSlice(up.start, up.pos), up.start, up.pos); pu
             = KwFor "(" KId <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 // A destructuring for-loop, for ((px, py) in points): the element is decomposed with
 // the same componentN protocol as a destructuring declaration, once per iteration.
-ForDestruct <~~ push(makeForDestruct(takeAll())) ~~>
+ForDestruct <~~ ktNoteForVar(c.srcSlice(up.start, up.pos), up.start, up.pos); push(makeForDestruct(takeAll())) ~~>
             = KwFor "(" ( ( "val" | "var" ) KwEnd { AnnNoArgs } DTuple | { AnnNoArgs } DTupleKwV | { AnnNoArgs } DTuple ) KwIn Expression ")" Statement ;
 DTuple      <~~ push({dnames: takeAll()}) ~~>
             = "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ;
@@ -1802,7 +1802,7 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
 // over a Pair/data-class/Triple argument, whose names makeLambda binds through
 // componentN.
 LParam      = { Annotation } ( DestructLParam | KId <~~ ktNoteLamParam(up.in, up.start); push(up.in) ~~> [ ":" Type ] ) ;
-DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>
+DestructLParam <~~ ktNoteLamDestruct(up.start, up.pos); push({destruct: takeAll(), pos: up.pos}) ~~>
             = ( "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwVB { "," DNameKwVB } [ "," ] "]"
               | "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ) [ ":" Type ] ;
 // No `val` / `var` on an entry. Kotlin's name-based destructuring forbids it in every
@@ -2378,7 +2378,7 @@ PropAccessor <~~ registerTopProp(takeAll()) ~~>
 // matching componentN() of the initializer value (a data class's generated ones, a
 // user `operator fun componentN`, a Pair's first/second, or a list element); the
 // blank name `_` simply binds a variable nothing reads.
-Destructure <~~ push(makeDestructure(takeAll())) ~~>
+Destructure <~~ ktNoteValDestruct(c.srcSlice(up.start, up.pos), up.start); push(makeDestructure(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd { Annotation } DPattern [ ":" Type ] "=" Expression [ ";" ] ;
 DPattern    = "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ;
 // The keyword-carrying pattern, used by the outer-keyword-LESS assignment form only.
@@ -8570,6 +8570,7 @@ NotMemberKw = :script(~~ "pure";
             if (name == "isInstance") { return kIsType(args.length > 0 ? args[0] : null, target.kname) }
             if (name == "toString") { return kstr(target) }
             if (name == "equals") { return kEq(target, args.length > 0 ? args[0] : null, false) }
+            if (name == "hashCode") { return kKClassHash(target) }
             fail("method ." + name + "() of a class literal")
         }
         // A class descriptor: a nested type constructor, a companion member or an enum
@@ -8982,6 +8983,7 @@ NotMemberKw = :script(~~ "pure";
         // java.util.Map.Entry.hashCode is key.hashCode() XOR value.hashCode(), which is
         // what makes the entry SET hash to the same value as the map itself.
         if (kIsEntry(v)) { return (kHash(v.key) ^ kHash(v.value)) | 0 }
+        if (kIsClassLit(v)) { return kKClassHash(v) }
         // Pair/Triple are data classes in Kotlin, so they hash by the same 31-fold their
         // components would get from __dataProps - which they have no descriptor for.
         if (kIsPair(v)) {
@@ -9968,7 +9970,8 @@ NotMemberKw = :script(~~ "pure";
     // conversions, so the only value a declared type can ever retype is an integer
     // LITERAL typed by its expectation (`val x: Long = 1` is legal, `val y: Int = 1;
     // val x: Long = y` is not) - but that one case is the whole story.
-    function makeDecl(items, txt) {
+    // src is the declaration's source text, when the rule has it (ktSrcInit).
+    function makeDecl(items, txt, src) {
         var name = items[0]
         var recvFn = false
         var dw = 0
@@ -9994,7 +9997,7 @@ NotMemberKw = :script(~~ "pure";
         // function type the function's results.
         var itxt = ktInitText(txt, name, dty)
         if (dty != "") { plan = kPlanOf(dty) }
-        ktNoteDecl(name, i == 2 ? dty : ktExprType(itxt), dty == "" ? ktStaticTy(itxt) : "")
+        ktNoteDecl(name, i == 2 ? dty : ktExprType(itxt), dty == "" ? ktStaticTy(src == undefined ? itxt : ktSrcInit(src)) : "")
         return function() {
             var v = anytype // A declaration binds a value of any type.
             // A BareDecl (`val f1: String`, filled in by a later definite assignment)
@@ -12319,16 +12322,39 @@ NotMemberKw = :script(~~ "pure";
     // languages/lib/kotlin-rt.metajs.
     function kKClassJava(co, wrapper) {
         if (co.jname !== undefined) { return co.anon === true ? kJavaClass(co.jname) : co }
+        if (!wrapper && co.rbox !== true) {
+            var p = anytype
+            p = kKClassPrim(co)
+            if (p !== null) { return p }
+        }
+        for (var i = 0; i < kPrimKNames.length; i++) {
+            if (kPrimKNames[i] == co.kname) { return kJavaClass("java.lang." + kPrimWrappers[i]) }
+        }
+        var jt = kJavaOfType["$" + co.kname]
+        return jt !== undefined ? kJavaClass(jt) : co
+    }
+    // KClass.javaPrimitiveType: a primitive type's primitive java class (marked
+    // jprim), a reified type argument's too; null for every other KClass. Twin of
+    // ktKClassPrim in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kKClassPrim(co) {
+        if (co.jname !== undefined) { return null }
         for (var i = 0; i < kPrimKNames.length; i++) {
             if (kPrimKNames[i] == co.kname) {
-                if (wrapper || co.rbox === true) { return kJavaClass("java.lang." + kPrimWrappers[i]) }
                 var o = kJavaClass(kJvmPrimNames[i])
                 o.jprim = true
                 return o
             }
         }
-        var jt = kJavaOfType["$" + co.kname]
-        return jt !== undefined ? kJavaClass(jt) : co
+        return null
+    }
+    // KClass.hashCode is its java object class's (kotlin.jvm.internal.ClassReference),
+    // here the hash of that class's name, so Int::class and Int::class.javaObjectType
+    // agree and every equal pair (kEq) hashes alike. Twin of ktKClassHash in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kKClassHash(co) {
+        var j = anytype
+        j = kKClassJava(co, true)
+        return strHash(j.jname !== undefined ? j.jname : j.kname)
     }
     // The java class of a builtin kotlin type that has no value-level JVM class here
     // (kotlinc 2.2.21: `UInt::class.java` is kotlin.UInt, `List::class.java`
@@ -12734,6 +12760,7 @@ NotMemberKw = :script(~~ "pure";
             if (name == "qualifiedName") { return kKClassFq(o) }
             if (name == "simpleName" || name == "qualifiedName" || name == "name") { return o.kname }
             if (name == "java" || name == "javaObjectType") { return kKClassJava(o, name == "javaObjectType") }
+            if (name == "javaPrimitiveType") { return kKClassPrim(o) }
             if (name == "javaClass") { return o }
             fail("member ." + name + " of a class literal")
         }

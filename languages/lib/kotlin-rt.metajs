@@ -1395,6 +1395,8 @@ function ktEqVals(a, b) {
             }
         }
     }
+    // A class literal is equal to one naming the same class (k4RefEq).
+    if (ktIsClassLit(a)) { return k4RefEq(a, b) }
     var s = anytype
     s = ktStructEq(a, b)
     if (!ktMiss(s)) { return s }
@@ -1630,6 +1632,7 @@ function ktElemHash(v) {
     // java.util.Map.Entry.hashCode is key.hashCode() XOR value.hashCode(), which
     // is what makes the entry SET hash to the same value as the map itself.
     if (ktIsEntry(v)) { return ktElemHash(v["key"]) ^ ktElemHash(v["value"]) }
+    if (ktIsClassLit(v)) { return ktKClassHash(v) }
     // Pair/Triple are data classes in Kotlin: the same 31-fold their components
     // would get from a generated hashCode.
     if (ktIsPair(v)) {
@@ -7381,22 +7384,38 @@ function ktKClassJava(co, wrapper) {
         if (co["anon"] === true) { return ktJavaClass(co["jname"]) }
         return co
     }
+    if (!wrapper && co["rbox"] !== true) {
+        var p = anytype
+        p = ktKClassPrim(co)
+        if (p !== null) { return p }
+    }
     var kn = co["kname"]
-    var knames = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"]
-    var wrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
-    var i = 0
-    while (i < knames.length) {
-        if (knames[i] == kn) {
-            if (wrapper || co["rbox"] === true) { return ktJavaClass("java.lang." + wrappers[i]) }
-            var o = ktJavaClass(ktJvmPrimName("IJDFCZBS".charAt(i)))
-            o["jprim"] = true
-            return o
-        }
-        i = i + 1
+    var i = ktPrimKNames.indexOf(kn)
+    if (i >= 0) {
+        var wrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
+        return ktJavaClass("java.lang." + wrappers[i])
     }
     var jt = ktJavaOfType["$" + kn]
     if (jt !== undefined) { return ktJavaClass(jt) }
     return co
+}
+var ktPrimKNames = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"]
+// KClass.javaPrimitiveType (jsrtkotlin.go ktKClassPrim): a primitive type's
+// primitive java class (marked jprim), a reified type argument's too; null else.
+function ktKClassPrim(co) {
+    if (co["jname"] !== undefined) { return null }
+    var i = ktPrimKNames.indexOf(co["kname"])
+    if (i < 0) { return null }
+    var o = ktJavaClass(ktJvmPrimName("IJDFCZBS".charAt(i)))
+    o["jprim"] = true
+    return o
+}
+// KClass.hashCode (jsrtkotlin.go ktKClassHash): the hash of its java object
+// class's name.
+function ktKClassHash(co) {
+    var j = ktKClassJava(co, true)
+    if (j["jname"] !== undefined) { return k0StrHash(j["jname"]) }
+    return k0StrHash(j["kname"])
 }
 // The java class of a builtin kotlin type that has no value-level JVM class here.
 // Twin of ktJavaOfType in abnf/jsrtkotlin.go, which has the rules.
@@ -9787,6 +9806,7 @@ function ktSmcall(recv, name, args) {
         if (name == "isInstance") { return k4IsType(k4At(as, 0), ktRender(rv["kname"])) }
         if (name == "toString") { return ktRender(rv) }
         if (name == "equals") { return k4RefEq(rv, k4At(as, 0)) }
+        if (name == "hashCode") { return ktKClassHash(rv) }
         fail("method ." + name + "() of a class literal")
         return undefined
     }
@@ -10999,6 +11019,7 @@ function js_ktfget(o, name) {
             return o["kname"]
         }
         if (name == "java") { return ktKClassJava(o, false) }
+        if (name == "javaPrimitiveType") { return ktKClassPrim(o) }
         if (name == "javaClass") { return o }
         if (name == "javaObjectType") { return ktKClassJava(o, true) }
         fail("member ." + name + " of a class literal")

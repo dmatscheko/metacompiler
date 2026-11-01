@@ -225,9 +225,10 @@ function ktLamOneParamTy(at, n) {
     var comma = post.indexOf(",")
     if (arrow < 0) { return "" }
     if (comma >= 0 && comma < arrow) {
-        // The first of two: the second is a plain name.
+        // The first of two: the second is a plain name or a destructuring pattern.
         var j = ktSkipWs(post, comma + 1)
-        while (j < post.length && ktIdChar(post.charAt(j))) { j++ }
+        if (post.charAt(j) == "(") { j = ktMatchClose(post, j, "(", ")") + 1 }
+        while (j > 0 && j < post.length && ktIdChar(post.charAt(j))) { j++ }
         if (pi >= 0 || i != comma || ktSkipWs(post, j) != arrow) { return "" }
         pi = 0
     }
@@ -1010,6 +1011,10 @@ function ktStaticTy(t) {
         var lt = ktStaticTy(s.substring(0, ops[w].at))
         var rt = s.substring(ops[w].at + wo.length)
         if (wo == "as") { return ops.length == 1 ? stripWs(rt) : "" }
+        if (wo == "to") {
+            var rtt = ktStaticTy(rt)
+            return (lt != "" && rtt != "") ? "Pair<" + lt + "," + rtt + ">" : "Pair"
+        }
         if (wo == "until") { return ktRangeTy(lt, ktStaticTy(rt), "Range") }
         if (wo == "downTo") { return ktRangeTy(lt, ktStaticTy(rt), "Progression") }
         if (wo == "step") {
@@ -1290,25 +1295,33 @@ function ktChainTy(s) {
 }
 // The type a call `name(...)` (its text t) yields: a class's constructor, a
 // declared function's result, a builder's collection - typed by its explicit type
-// arguments, else by its arguments when they all have one static type.
+// arguments, else by its arguments when they all have one static type (a map
+// builder's are Pairs) - and a Pair or Triple of its arguments' types.
 var ktOfBuilders = {"$listOf": true, "$mutableListOf": true, "$arrayListOf": true, "$setOf": true,
                     "$mutableSetOf": true, "$hashSetOf": true, "$linkedSetOf": true, "$arrayOf": true,
-                    "$sequenceOf": true}
+                    "$sequenceOf": true, "$mapOf": true, "$mutableMapOf": true, "$hashMapOf": true,
+                    "$linkedMapOf": true}
 function ktCallResTy(name, t) {
     if (ktClassExt["$" + name] != undefined) { return name }
     if (ktFunRets["$" + name] != undefined) { return ktFunRet(name) }
     var bt = ktCallType(stripWs(t))
-    if (bt != "" || ktOfBuilders["$" + name] != true) { return bt }
+    var tup = name == "Pair" || name == "Triple"
+    if (bt != "" || (ktOfBuilders["$" + name] != true && !tup)) { return bt }
     var lp = t.indexOf("(")
     if (lp != name.length || ktMatchClose(t, lp, "(", ")") != t.length - 1) { return "" }
     var args = ktSplitTop(t.substring(lp + 1, t.length - 1), ",")
     var el = ""
+    var tys = []
     for (var i = 0; i < args.length; i++) {
         var at = ktStaticTy(args[i])
-        if (at == "" || (el != "" && at != el)) { return "" }
+        if (at == "" || (el != "" && at != el && !tup)) { return "" }
         el = at
+        tys.push(at)
     }
-    return ktBuilderKind["$" + name] + "<" + el + ">"
+    if (tup) { return tys.length == (name == "Pair" ? 2 : 3) ? name + "<" + tys.join(",") + ">" : "" }
+    var kind = ktBuilderKind["$" + name]
+    if (!ktIsMapTy(kind)) { return kind + "<" + el + ">" }
+    return (ktBaseName(el) == "Pair" && el.indexOf("<") > 0) ? kind + el.substring(el.indexOf("<")) : ""
 }
 // The type method `name` of a value of type ty returns: a declared class's own
 // function's result (ktFunRet), a list of the same elements from a collection
@@ -1338,6 +1351,13 @@ function ktPropTy(ty, name) {
               ktPrimArrElem["$" + base] != undefined || base == "String" || base == "StringBuilder"
     if (!seq || base == "Pair" || base == "Iterable" || base == "Sequence") { return "" }
     var isMap = ktTwoArgColl["$" + base] != undefined
+    // A map's views: its entries, keys and values.
+    var kv = (isMap && ty.indexOf("<") > 0) ? ktSplitTArgs(ty.substring(ty.indexOf("<") + 1, ty.length - 1)) : []
+    if (kv.length == 2) {
+        if (name == "entries") { return "Set<Map.Entry<" + kv[0] + "," + kv[1] + ">>" }
+        if (name == "keys") { return "Set<" + kv[0] + ">" }
+        if (name == "values") { return "Collection<" + kv[1] + ">" }
+    }
     if (name == "size") { return (base == "String" || base == "StringBuilder") ? "" : "Int" }
     if (name == "length") { return (base == "String" || base == "StringBuilder") ? "Int" : "" }
     if (name == "lastIndex" && !isMap) { return "Int" }
@@ -1435,22 +1455,24 @@ function ktFunRet(name) {
     return f.ty
 }
 
-// A for-loop's variable, typed (lty) by the elements of what it iterates
-// (ktElemOfTy) and scoped to the loop. raw is the loop's source text, from..to its
+// A for-loop's variable or destructuring pattern, typed (lty) by the elements of
+// what it iterates (ktIterElemTy) and scoped to the loop. raw is the loop's source text, from..to its
 // extent.
 function ktNoteForVar(raw, from, to) {
     var p = raw.indexOf("(")
     var i = ktSkipWs(raw, p + 1)
     var n0 = i
+    var dp = raw.charAt(i) == "(" ? ktMatchClose(raw, i, "(", ")") : -1
+    if (dp > 0) { i = dp + 1 }
     while (i < raw.length && ktIdChar(raw.charAt(i))) { i++ }
     var close = ktMatchClose(raw, p, "(", ")")
     var k = ktSkipWs(raw, i)
     if (p < 0 || i == n0 || close < 0 || raw.substring(k, k + 2) != "in" || ktIdChar(raw.charAt(k + 2))) { return }
     var saved = ktAt
     ktAt = from + k
-    var el = ktElemOfTy(ktStaticTy(raw.substring(k + 2, close)))
+    var el = ktIterElemTy(ktStaticTy(raw.substring(k + 2, close)))
     ktAt = from + n0
-    ktNoteDecl(raw.substring(n0, i), "", el)
+    if (dp > 0) { ktNoteDestruct(raw.substring(n0, dp + 1), from + n0, el) } else { ktNoteDecl(raw.substring(n0, i), "", el) }
     ktAt = saved
     ktNoteBody(from, to)
 }
@@ -1513,9 +1535,160 @@ function ktLamParamTy(lb, pi) {
     if (k == re || (k == 0 && w0 > 0)) { return "" }
     var saved = ktAt
     ktAt = w0 + k
-    var ty = ktStaticTy(w.substring(k, re))
+    var rtxt = w.substring(k, re)
+    var ty = ktStaticTy(rtxt)
     ktAt = saved
-    return ktLamSelfFns[m] == true ? ty : ktElemOfTy(ty)
+    if (ktLamSelfFns[m] != true) { return ktIterElemTy(ty) }
+    var sc = ktSmartCastTy(rtxt, w0 + k)
+    return sc != "" ? sc : ty
+}
+// The type of the elements a for loop or a collection lambda sees in a value of
+// type ty: a map's entries, else ktElemOfTy's.
+function ktIterElemTy(ty) {
+    if (!ktIsMapTy(ty) || ty.indexOf("<") < 0) { return ktElemOfTy(ty) }
+    var kv = ktSplitTArgs(ty.substring(ty.indexOf("<") + 1, ty.length - 1))
+    return kv.length == 2 ? "Map.Entry<" + kv[0] + "," + kv[1] + ">" : ""
+}
+// The type a plain local `name` is smart-cast to at offset `at` by an earlier
+// unconditional `name as T` (not `as?`) in a block still open there, "" when
+// there is none; a reassignment `name = ...` ends it. The source is scanned
+// from the name's declaration on.
+function ktSmartCastTy(name, at) {
+    for (var n = 0; n < name.length; n++) { if (!ktIdChar(name.charAt(n))) { return "" } }
+    var saved = ktAt
+    ktAt = at
+    var d = ktDeclAt(name)
+    ktAt = saved
+    if (d == null || d.at >= at) { return "" }
+    var s = c.srcSlice(d.at, at)
+    var ty = ""
+    var tyDepth = -1
+    var depth = 0
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == "/" && s.charAt(i + 1) == "/") {
+            while (i < s.length && s.charAt(i) != "\n") { i++ }
+            continue
+        }
+        if (ch == "\"" || ch == "'") {
+            var q = ktQuoteEnd(s, i)
+            if (q < 0) { return "" }
+            i = q + 1
+            continue
+        }
+        if (ch == "{") { depth++ }
+        if (ch == "}") {
+            depth--
+            if (depth < tyDepth) { ty = ""; tyDepth = -1 }
+        }
+        if (!ktIdChar(ch)) { i++; continue }
+        var j = i
+        while (j < s.length && ktIdChar(s.charAt(j))) { j++ }
+        if (s.substring(i, j) == name && (i == 0 || s.charAt(i - 1) != ".")) {
+            var k = ktSkipWs(s, j)
+            if (s.substring(k, k + 2) == "as" && !ktIdChar(s.charAt(k + 2)) && s.charAt(k + 2) != "?" && ktCastUncond(s, i)) {
+                var t0 = ktSkipWs(s, k + 2)
+                var t1 = t0
+                while (t1 < s.length && (ktIdChar(s.charAt(t1)) || s.charAt(t1) == ".")) { t1++ }
+                if (t1 > t0 && s.charAt(t1) != "<" && s.charAt(t1) != "?") { ty = s.substring(t0, t1); tyDepth = depth }
+            } else if (s.charAt(k) == "=" && s.charAt(k + 1) != "=") {
+                ty = ""
+                tyDepth = -1
+            }
+        }
+        i = j
+    }
+    return ty
+}
+// Whether the expression starting at offset i of s runs whenever the code after
+// it does: not the branch of a brace-less if / else / when arm.
+function ktCastUncond(s, i) {
+    var k = i
+    while (k > 0 && ktIsWs(s.charAt(k - 1))) { k-- }
+    if (k > 0 && s.charAt(k - 1) == ")") { return false }
+    if (k > 1 && s.substring(k - 2, k) == "->") { return false }
+    return !(k > 3 && s.substring(k - 4, k) == "else" && (k == 4 || !ktIdChar(s.charAt(k - 5))))
+}
+// The component types a destructuring of a value of type ty binds: a Pair's, a
+// Triple's and a map entry's type arguments; none for any other type.
+function ktComponentTys(ty) {
+    var base = ktBaseName(ty)
+    var n = base == "Triple" ? 3 : ((base == "Pair" || base == "Map.Entry") ? 2 : 0)
+    var lt = ty.indexOf("<")
+    if (n == 0 || lt < 0 || ty.charAt(ty.length - 1) != ">") { return [] }
+    var ts = ktSplitTArgs(ty.substring(lt + 1, ty.length - 1))
+    return ts.length == n ? ts : []
+}
+// The names of a destructuring pattern `(a, b: T, _)` (raw, at offset from),
+// declared as vals typed (lty) by the component of ty they bind, which the JVM
+// local keeps under a wider written type too (kotlinc 2.2.21: `val (u: Number, _)
+// = 1 to 2` holds an int), else by the written type. A name-based entry
+// (`(x = first)`) is left untyped.
+function ktNoteDestruct(raw, from, ty) {
+    var p = ktSkipWs(raw, 0)
+    if (raw.charAt(p) != "(") { return }
+    var close = ktMatchClose(raw, p, "(", ")")
+    if (close < 0) { return }
+    var comps = ktComponentTys(ty)
+    var parts = ktSplitTop(raw.substring(p + 1, close), ",")
+    var off = p + 1
+    var saved = ktAt
+    for (var i = 0; i < parts.length; i++) {
+        var part = parts[i]
+        var j = ktSkipWs(part, 0)
+        var n0 = j
+        while (j < part.length && ktIdChar(part.charAt(j))) { j++ }
+        var nm = part.substring(n0, j)
+        var r = ktSkipWs(part, j)
+        var wt = part.charAt(r) == ":" ? stripWs(ktSplitTop(part.substring(r + 1), "=")[0]) : ""
+        if (nm != "" && nm != "_" && ktSplitTop(part, "=").length == 1) {
+            ktAt = from + off + n0
+            ktNoteDecl(nm, "", (i < comps.length && comps[i] != "") ? comps[i] : wt)
+        }
+        off = off + part.length + 1
+    }
+    ktAt = saved
+}
+// A lambda's destructured parameter at from..to: typed by its only parameter's
+// type, or by the second one of an indexed operation's two (ktLamParamTy).
+function ktNoteLamDestruct(from, to) {
+    var w0 = from > 80 ? from - 80 : 0
+    var pre = c.srcSlice(w0, from)
+    var k = pre.length
+    while (k > 0 && ktIsWs(pre.charAt(k - 1))) { k-- }
+    var pi = -1
+    if (k > 0 && pre.charAt(k - 1) == ",") {
+        k--
+        while (k > 0 && ktIsWs(pre.charAt(k - 1))) { k-- }
+        var e = k
+        while (k > 0 && ktIdChar(pre.charAt(k - 1))) { k-- }
+        while (k > 0 && ktIsWs(pre.charAt(k - 1))) { k-- }
+        if (k == e) { return }
+        pi = 1
+    } else {
+        var post = c.srcSlice(to, to + 40)
+        var a = ktSkipWs(post, 0)
+        if (post.substring(a, a + 2) != "->") { return }
+    }
+    if (k == 0 || pre.charAt(k - 1) != "{") { return }
+    ktNoteDestruct(c.srcSlice(from, to), from, ktLamParamTy(w0 + k - 1, pi))
+}
+// A destructuring declaration `val (a, b) = e` (raw, at offset from): its names
+// typed by the components of e's static type.
+function ktNoteValDestruct(raw, from) {
+    var p = raw.indexOf("(")
+    var close = p < 0 ? -1 : ktMatchClose(raw, p, "(", ")")
+    if (close < 0) { return }
+    var eq = ktSkipWs(raw, close + 1)
+    if (raw.charAt(eq) != "=") { return }
+    var init = ktTrimWs(raw.substring(eq + 1))
+    if (init.charAt(init.length - 1) == ";") { init = init.substring(0, init.length - 1) }
+    var saved = ktAt
+    ktAt = from + eq + 1
+    var ty = ktStaticTy(init)
+    ktAt = saved
+    ktNoteDestruct(raw.substring(p, close + 1), from + p, ty)
 }
 // The index of the bracket opening the one closing at `at`, scanning back, or -1.
 function ktMatchOpen(s, at, open, close) {
@@ -1559,6 +1732,15 @@ function ktLeadType(t, sep) {
 }
 // A declaration's initializer text: what follows `val`/`var`, the name, the
 // declared type when there is one and `=`, without a trailing `;`.
+// The initializer of a declaration's source text `val x: T = e;` with its
+// whitespace, which an infix call (`1 to 2`) needs, or "" without one.
+function ktSrcInit(src) {
+    var head = ktSplitTop(src, "=")[0]
+    if (head.length >= src.length) { return "" }
+    var t = ktTrimWs(src.substring(head.length + 1))
+    if (t.charAt(t.length - 1) == ";") { t = t.substring(0, t.length - 1) }
+    return t
+}
 function ktInitText(dtext, name, dtype) {
     if (dtext == undefined) { return "" }
     var t = dtext.substring(4 + name.length + (dtype == "" ? 0 : 1 + dtype.length))

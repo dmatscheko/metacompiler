@@ -1827,6 +1827,8 @@ func init() {
 				case "equals":
 					eq, _ := ktRefEq(recv, argAt(arr.elems, 0))
 					return boolH(eq)
+				case "hashCode":
+					return rt.wrap(float64(ktKClassHash(rt, co)))
 				}
 				rt.fail("method .%s() of a class literal", mname)
 			}
@@ -3029,6 +3031,8 @@ func init() {
 					return w(ktKClassFq(co))
 				case "java", "javaObjectType":
 					return w(ktKClassJava(co, name == "javaObjectType"))
+				case "javaPrimitiveType":
+					return w(ktKClassPrim(co))
 				case "javaClass":
 					return w(co)
 				}
@@ -5060,6 +5064,12 @@ func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 			}
 		}
 	}
+	// A class literal is equal to one naming the same class (ktRefEq), the half of
+	// the contract ktKClassHash keeps.
+	if _, isCls := ktIsClassLit(a); isCls {
+		eq, _ := ktRefEq(a, b)
+		return eq
+	}
 	if v, decided := rt.ktStructEq(a, b); decided {
 		return v
 	}
@@ -7072,6 +7082,9 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 		// is what makes the entry SET hash to the same value as the map itself.
 		if ktIsEntry(t) {
 			return int64(int32(ktElemHash(rt, t.props["key"])) ^ int32(ktElemHash(rt, t.props["value"])))
+		}
+		if co, isCls := ktIsClassLit(t); isCls {
+			return int64(ktKClassHash(rt, co))
 		}
 		// Pair/Triple are data classes in Kotlin: the same 31-fold their components
 		// would get from a generated hashCode.
@@ -11215,21 +11228,52 @@ func ktKClassJava(co *jsObject, wrapper bool) *jsObject {
 		}
 		return co
 	}
+	if rb, _ := co.props["rbox"].(bool); !wrapper && !rb {
+		if p, isPrim := ktKClassPrim(co).(*jsObject); isPrim {
+			return p
+		}
+	}
 	kn, _ := co.props["kname"].(string)
 	for i, p := range ktPrimKNames {
 		if p == kn {
-			if rb, _ := co.props["rbox"].(bool); wrapper || rb {
-				return ktJavaClass("java.lang." + ktPrimWrappers[i])
-			}
-			o := ktJavaClass(ktJvmPrimNames[i])
-			o.set("jprim", true)
-			return o
+			return ktJavaClass("java.lang." + ktPrimWrappers[i])
 		}
 	}
 	if jt, has := ktJavaOfType[kn]; has {
 		return ktJavaClass(jt)
 	}
 	return co
+}
+
+// ktKClassPrim is KClass.javaPrimitiveType: a primitive type's primitive java class
+// (marked jprim), a reified type argument's too; null for every other KClass. Twin
+// of kKClassPrim in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktKClassPrim(co *jsObject) interface{} {
+	if _, has := co.props["jname"]; has {
+		return jsNull
+	}
+	kn, _ := co.props["kname"].(string)
+	for i, p := range ktPrimKNames {
+		if p == kn {
+			o := ktJavaClass(ktJvmPrimNames[i])
+			o.set("jprim", true)
+			return o
+		}
+	}
+	return jsNull
+}
+
+// ktKClassHash is KClass.hashCode: the hash of its java object class's name, so
+// Int::class and Int::class.javaObjectType agree and every equal pair hashes
+// alike. Twin of kKClassHash in kotlin-interpreter.abnf and
+// languages/lib/kotlin-rt.metajs.
+func ktKClassHash(rt *jsrt, co *jsObject) int32 {
+	j := ktKClassJava(co, true)
+	n, has := j.props["jname"].(string)
+	if !has {
+		n, _ = j.props["kname"].(string)
+	}
+	return ktStrHash(rt, n)
 }
 
 // ktJavaOfType is the java class of a builtin kotlin type that has no value-level

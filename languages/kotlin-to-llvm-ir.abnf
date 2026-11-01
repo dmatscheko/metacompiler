@@ -942,7 +942,7 @@ NewStmtLine = :script(~~ "pure";
 ~~) ;
 
 
-Decl        <~~ ktAt = up.start; push(makeDecl(takeAll(), up.in)) ~~>
+Decl        <~~ ktAt = up.start; push(makeDecl(takeAll(), up.in, c.srcSlice(up.start, up.pos))) ~~>
             = ( "val" | "var" ) KwEnd NotHardKw KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression [ ";" ] ;
 // `val x: Int` / `var r` with no initializer. Kotlin's PARSER accepts this - the
 // missing initializer is a later, semantic error ("must either have a type annotation
@@ -1006,7 +1006,7 @@ ForList     <~~ ktNoteForVar(c.srcSlice(up.start, up.pos), up.start, up.pos); pu
 // A destructuring for-loop, for ((px, py) in points): genuine. Each element is
 // destructured with the componentN convention (the same one val (a, b) = e uses), so
 // data classes and hand-written component1/component2 both work.
-ForDestruct <~~ push(makeForDestruct(takeAll(), up.pos)) ~~>
+ForDestruct <~~ ktNoteForVar(c.srcSlice(up.start, up.pos), up.start, up.pos); push(makeForDestruct(takeAll(), up.pos)) ~~>
             = KwFor "(" DTuple KwIn Expression ")" Statement ;
 DTuple      <~~ push({dnames: takeAll()}) ~~>
             = DPat ;
@@ -1787,7 +1787,7 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
 // over a Pair/data-class/Triple argument, whose names makeLambda binds through the
 // componentN convention.
 LParam      = DestructLParam | KId <~~ ktNoteLamParam(up.in, up.start); push(up.in) ~~> [ ":" Type ] ;
-DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>   // Each entry pushes {dn, dprop}.
+DestructLParam <~~ ktNoteLamDestruct(up.start, up.pos); push({destruct: takeAll(), pos: up.pos}) ~~>   // Each entry pushes {dn, dprop}.
             = DPat [ ":" Type ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
@@ -2354,7 +2354,7 @@ UnsupAccessor <~~ push(notImplStmt("property accessor", up.pos)) ~~>
 // what a data class synthesizes and what any class can declare by hand. A name of `_`
 // discards its component and its componentN() is not called, as in Kotlin.
 Destructure = DestructKw | DestructPat ;
-DestructKw  <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
+DestructKw  <~~ ktNoteValDestruct(c.srcSlice(up.start, up.pos), up.start); push(makeDestructure(takeAll(), up.pos)) ~~>
             = ( "val" | "var" ) KwEnd DPat [ ":" Type ] "=" Expression [ ";" ] ;
 // The keyword-less form, where the entries carry their own val/var: (val a, var b) = x
 // and [val a, val b] = x. See DPatLead for why the parenthesized case demands one.
@@ -6002,7 +6002,8 @@ KwContract  = "contract" KwEnd ;
         if (w == undefined) { return {w: 0, u: false, flo: false} }
         return {w: w, u: ktDeclUns["$" + t] == true, flo: false}
     }
-    function makeDecl(items, txt) {
+    // src is the declaration's source text, when the rule has it (ktSrcInit).
+    function makeDecl(items, txt, src) {
         var name = items[0]
         var typed = items[1] != undefined && items[1].dtype != undefined
         var dt = typed ? items[1].dtype : ""
@@ -6014,7 +6015,7 @@ KwContract  = "contract" KwEnd ;
         var itxt = ktInitText(txt, name, dt)
         var sp = anytype
         sp = typed ? ktAdoptPlan(dt) : null
-        ktNoteDecl(name, typed ? dt : ktExprType(itxt), typed ? "" : ktStaticTy(itxt))
+        ktNoteDecl(name, typed ? dt : ktExprType(itxt), typed ? "" : ktStaticTy(src == undefined ? itxt : ktSrcInit(src)))
         return function(b) {
             var r = init(b)
             b = r.b

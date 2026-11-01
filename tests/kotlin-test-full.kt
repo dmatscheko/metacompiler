@@ -7110,6 +7110,52 @@ fun s161() {
     check("fwd161e", b.early(7) && !b.early("w") && b.earlyCls() == "Double")
 }
 
+// ===== SECTION 162: KClass javaPrimitiveType and hashCode, javaClass of destructured and smart-cast values =====
+// KClass.javaPrimitiveType is a primitive type's primitive java class (a reified
+// T's too), null for any other class; KClass.hashCode is its java object class's,
+// so equal class literals hash alike and key sets and maps. A destructured name -
+// of a lambda parameter, a for loop or a val - is a local of its component's static
+// type, unboxed when that is primitive, as is the `it` of `a.let` after an
+// unconditional `a as Int` (while `a.javaClass` itself and an entry's `key` stay
+// boxed) (kotlinc 2.2.21 on java 24).
+inline fun <reified T : Any> kc162() = T::class
+class B162(val v: Int)
+fun cast162(a: Any): String {
+    a as Int
+    return a.let { it.javaClass.name } + " " + a.javaClass.name
+}
+fun cond162(a: Any, c: Boolean): String {
+    if (c) a as Int
+    return a.let { it.javaClass.name }
+}
+fun s162() {
+    check("kprim162a", Long::class.javaPrimitiveType.toString() == "long" && Int::class.javaPrimitiveType == Int::class.java &&
+        kc162<Int>().javaPrimitiveType.toString() == "int" && String::class.javaPrimitiveType == null &&
+        B162::class.javaPrimitiveType == null && Int::class.javaPrimitiveType != Int::class.javaObjectType)
+    check("khash162b", kc162<Int>().hashCode() == Int::class.hashCode() && Int::class.hashCode() != Long::class.hashCode() &&
+        String::class.hashCode() == String::class.java.hashCode() &&
+        Int::class.hashCode() == Int::class.javaObjectType.hashCode() && B162::class.hashCode() == B162(1)::class.hashCode())
+    check("kkey162c", setOf(Int::class, kc162<Int>(), Long::class).size == 2 &&
+        mapOf(Int::class to 1, String::class to 2)[kc162<Int>()] == 1 && listOf(Int::class).contains(kc162<Int>()))
+    val sb = StringBuilder()
+    mapOf(1 to 2).forEach { (k, v) -> sb.append(k.javaClass.name + v.javaClass.name + " ") }
+    mapOf("a" to 2L).entries.forEach { (k, v) -> sb.append(k.javaClass.name + v.javaClass.name + " ") }
+    listOf(1 to 'c').forEachIndexed { i, (a, b) -> sb.append(i.javaClass.name + a.javaClass.name + b.javaClass.name + " ") }
+    listOf(Triple(1, 2L, 'x')).forEach { (a, b, c) -> sb.append(a.javaClass.name + b.javaClass.name + c.javaClass.name) }
+    check("dstr162d", "" + sb == "intint java.lang.Stringlong intintchar intlongchar")
+    val l = listOf(1 to 'c')
+    val m = mutableMapOf<String, Long>("a" to 1L)
+    val fb = StringBuilder()
+    for ((a, b) in l) fb.append(a.javaClass.name + b.javaClass.name + " ")
+    for ((k, v) in m) fb.append(k.javaClass.name + v.javaClass.name + " ")
+    for (e in mapOf(1 to 2)) fb.append(e.key.javaClass.name + " ")
+    val (p, q) = 1 to 2L
+    val (u: Number, _) = 1 to 2
+    fb.append(p.javaClass.name + q.javaClass.name + u.javaClass.name)
+    check("dstr162e", "" + fb == "intchar java.lang.Stringlong java.lang.Integer intlongint")
+    check("smart162f", cast162(3) == "int java.lang.Integer" && cond162(4, true) == "java.lang.Integer")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7268,6 +7314,7 @@ fun main() {
     s159() // SECTION-CALL 159
     s160() // SECTION-CALL 160
     s161() // SECTION-CALL 161
+    s162() // SECTION-CALL 162
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
