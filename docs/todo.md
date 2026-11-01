@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1052 ruby: Array </>/<=/>= should be NoMethodError; blockless/lazy Enumerators over a user #each run eagerly · P3 · RB · OPEN [V]
+### T-1052 ruby: Array </>/<=/>= should be NoMethodError; blockless/lazy Enumerators over a user #each run eagerly · P3 · RB · IN PROGRESS (RB worker, round 44) [V]
 ruby 2.6 (found by RB r43), all three engines:
 - `[1] < 2` (also >, <=, >=; likely nil/true on the left) → NoMethodError "undefined method `<' for [1]:Array" (Array is not Comparable); ours ArgumentError "comparison of Array with 2 failed" (binOps["<"] → rcmp path and compiled twins).
 - user Enumerable (each logs before yield): `C.new(log).find` with no block → Enumerator, log []; ours runs #each eagerly: [1, 2, 3, :end].
