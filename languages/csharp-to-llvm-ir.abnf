@@ -3893,11 +3893,11 @@ KwLet       = "let" KwEnd ;
                         callExt(b, "js_set", [eo, emitStr(b, "Message"),
                                               callExt(b, "js_csargmsg",
                                                       [emitStr(b, csExcDefMsg(clsName)), rm.v])])
-                    } else if (m == 0 && clsName == "ArgumentException") {
-                        // ArgumentException(message) is (message, paramName: null), which
-                        // also gives a null message the type's default.
+                    } else if (m == 0) {
+                        // (message) stores what (message, null) stores, including the
+                        // message a null one stands for (js_csexc2).
                         callExt(b, "js_csexc2", [eo, emitStr(b, clsName), rm.v, hNull])
-                    } else if (m == 0) { callExt(b, "js_set", [eo, emitStr(b, "Message"), rm.v]) }
+                    }
                 }
                 return {b: b, v: eo}
             }
@@ -5846,8 +5846,12 @@ KwLet       = "let" KwEnd ;
     // own slot on the receiver and a property with accessor bodies is not, which is
     // exactly the rule core.getField and makeAssign use in the interpreter half. Every
     // other name keeps the direct call.
+    //
+    // Message is declared plain from the start: every exception without an override
+    // of it stores its message in an own slot (a BCL one, and a user one through
+    // js_csexc2), so a program that overrides it still needs the probe.
     var csAccNames = {}
-    var csPlainNames = {}
+    var csPlainNames = {Message: true}
     function csNoteAccName(name) { csAccNames[name] = true }
     function csNotePlainName(name) { csPlainNames[name] = true; csDataNames[name] = true }
     // ----- method groups: the two name sets that gate them -----
@@ -6436,27 +6440,23 @@ KwLet       = "let" KwEnd ;
                     callExt(b, "js_set", [thisEV, emitStr(b, "ParamName"), er.v])
                     callExt(b, "js_set", [thisEV, emitStr(b, "Message"),
                                           callExt(b, "js_csargmsg", [emitStr(b, csExcDefMsg(excBase)), er.v])])
-                } else if (excBase == "ArgumentException") {
-                    callExt(b, "js_csexc2", [thisEV, emitStr(b, excBase), er.v, hNull])
-                } else { callExt(b, "js_set", [thisEV, emitStr(b, "Message"), er.v]) }
+                } else { callExt(b, "js_csexc2", [thisEV, emitStr(b, excBase), er.v, hNull]) }
             } else if (csExcDefMsgOf(excBase) != "") {
                 // The implicit ': base()' runs the BASE's parameterless constructor, so
                 // the message is the BASE's own SR string. Bakeable.
                 callExt(b, "js_set", [thisEV, emitStr(b, "Message"), emitStr(b, csExcDefMsgOf(excBase))])
             } else {
                 // System.Exception stores no message, so Exception.Message generates
-                // "Exception of type 'T' was thrown." from the RUNTIME type T. Not
-                // bakeable: `this` here is the most derived instance even when this
-                // constructor belongs to a class in the middle of the chain, so the
-                // name is read off this.__class.__name at run time. (A user type has no
-                // namespace in this subset, so __name IS its full name.) The twin is
-                // initBase in csharp-interpreter.abnf.
-                var ecV = callExt(b, "js_get", [thisEV, emitStr(b, "__class")])
-                var enV = callExt(b, "js_get", [ecV, emitStr(b, "__name")])
-                var e1V = callExt(b, "js_csadd", [emitStr(b, "Exception of type '"), enV])
-                var e2V = callExt(b, "js_csadd", [e1V, emitStr(b, "' was thrown.")])
-                callExt(b, "js_set", [thisEV, emitStr(b, "Message"), e2V])
+                // "Exception of type 'T' was thrown." from the RUNTIME type T - the
+                // null-message rule of js_csexc2. Not bakeable: `this` here is the
+                // most derived instance even when this constructor belongs to a class
+                // in the middle of the chain. The twin is initBase in
+                // csharp-interpreter.abnf.
+                callExt(b, "js_csexc2", [thisEV, emitStr(b, excBase), hNull, hNull])
             }
+            // An override of the virtual Message property drops the stored message
+            // (js_csexcvirt).
+            callExt(b, "js_csexcvirt", [thisEV])
         }
         var savedYield = sawYield
         sawYield = false

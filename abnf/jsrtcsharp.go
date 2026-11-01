@@ -373,6 +373,29 @@ func csExcCtor2(eo *jsObject, n string, a0, a1 interface{}) {
 	eo.set("Message", ms)
 }
 
+// csExcNullMsg gives a constructed exception whose Message is null the sentence
+// System.Exception.Message generates from the runtime type. Twin of csxExcNullMsg
+// in languages/lib/csharp-strings.js, which holds the specification comment.
+func (rt *jsrt) csExcNullMsg(eo *jsObject) {
+	if jvmNullish(eo.props["Message"]) {
+		full, _ := rt.csTypeOfVal(eo).props["FullName"].(string)
+		eo.set("Message", "Exception of type '"+full+"' was thrown.")
+	}
+}
+
+// csExcMsg reads an exception's Message as the virtual property it is: the stored
+// message, else a user override in the class chain. Twin of csExcMsg in
+// languages/lib/csharp-rt.metajs; the interpreter reads it through core.getField.
+func (rt *jsrt) csExcMsg(o *jsObject) interface{} {
+	if v, ok := o.props["Message"]; ok {
+		return v
+	}
+	if g, ok := cspFindMethod(o, "__get_Message"); ok {
+		return rt.call(g, jsUndef, []interface{}{o})
+	}
+	return nil
+}
+
 // csxExcParam is the ParamName a runtime-raised ArgumentException carries: the name
 // in its Message's " (Parameter '...')" clause, "" for none. Twin of csxExcParam in
 // languages/lib/csharp-strings.js, which holds the specification comment.
@@ -765,7 +788,7 @@ func (rt *jsrt) csharpExcTopLine(v interface{}) string {
 			name = f
 		}
 	}
-	msg := o.props["Message"]
+	msg := rt.csExcMsg(o)
 	if jvmNullish(msg) {
 		return head + name
 	}
@@ -1763,6 +1786,7 @@ func init() {
 		m["js_csexc2"] = func(a []uint64) uint64 {
 			if eo, ok := u(a[0]).(*jsObject); ok {
 				csExcCtor2(eo, rt.toString(u(a[1])), u(a[2]), u(a[3]))
+				rt.csExcNullMsg(eo)
 			}
 			return a[0]
 		}
@@ -1785,6 +1809,20 @@ func init() {
 				}
 			default:
 				eo.set("Message", a0)
+				rt.csExcNullMsg(eo)
+			}
+			return a[0]
+		}
+		// js_csexcvirt(eo): the end of System.Exception's constructor on an instance
+		// of a user class. An override of the virtual Message property in its chain
+		// must answer every read of Message, and an own slot would win over the
+		// accessor, so the stored message is dropped. Twin of the same step in
+		// initBase in languages/csharp-interpreter.abnf, where it is explained.
+		m["js_csexcvirt"] = func(a []uint64) uint64 {
+			if eo, ok := u(a[0]).(*jsObject); ok {
+				if _, has := cspFindMethod(eo, "__get_Message"); has {
+					eo.del("Message")
+				}
 			}
 			return a[0]
 		}
@@ -1890,16 +1928,16 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 				full = f
 			}
 		}
-		msg := o.props["Message"]
-		switch msg.(type) {
-		case nil, jsUndefT, jsNullT:
-			return full, true
+		s := full
+		if msg := rt.csExcMsg(o); !jvmNullish(msg) {
+			if ms := rt.cspRender(msg, depth+1); ms != "" {
+				s += ": " + ms
+			}
 		}
-		ms := rt.cspRender(msg, depth+1)
-		if ms == "" {
-			return full, true
+		if inner := o.props["InnerException"]; !jvmNullish(inner) {
+			s += "\n ---> " + rt.cspRender(inner, depth+1) + "\n   --- End of inner exception stack trace ---"
 		}
-		return full + ": " + ms, true
+		return s, true
 	}
 	if rt.csIsRecVal(o) {
 		return rt.cspRecStr(o, depth), true

@@ -142,6 +142,7 @@ namespace Demo
     {
         public MyEx() { }
         public MyEx(string m) : base(m) { }
+        public MyEx(string m, Exception inner) : base(m, inner) { }
     }
 
     class BareEx : Exception { }
@@ -182,6 +183,18 @@ namespace Demo
     {
         public OverEx() { }
         public override string ToString() { return "over!"; }
+    }
+
+    class MsgOverEx : Exception
+    {
+        string tag;
+        public MsgOverEx(string m, string t) : base(m) { this.tag = t; }
+        public override string Message => "msg:" + this.tag;
+    }
+
+    class MsgOverSub : MsgOverEx
+    {
+        public MsgOverSub() : base("x", "sub") { }
     }
 
     class Program
@@ -971,6 +984,46 @@ namespace Demo
             // A user ToString() override still wins over System.Exception's, exactly
             // as the virtual dispatch says.
             Program.Check("exc-tostring-override", new OverEx().ToString() == "over!");
+            // A NULL message is not stored as "": Exception.Message is `_message ??
+            // SR.Format(SR.Exception_WasThrown, GetClassName())`, so (message) and
+            // (message, inner) with a null one give the generated sentence over the
+            // runtime type - except on the Argument* family, whose constructors put
+            // their own default in. An EMPTY message stays empty. Read out of an array
+            // so no constant folder can answer.
+            string[] nmsg = { null, "", "hi", "outer" };
+            Program.Check("exc-null-msg-bcl",
+                          new Exception(nmsg[0]).Message == "Exception of type 'System.Exception' was thrown."
+                          && new InvalidOperationException(nmsg[0]).Message
+                             == "Exception of type 'System.InvalidOperationException' was thrown."
+                          && new KeyNotFoundException(nmsg[0]).Message
+                             == "Exception of type 'System.Collections.Generic.KeyNotFoundException' was thrown."
+                          && new Exception(nmsg[0], new Exception(nmsg[2])).Message
+                             == "Exception of type 'System.Exception' was thrown.");
+            Program.Check("exc-null-msg-user",
+                          new MyEx(nmsg[0]).Message == "Exception of type 'MyEx' was thrown."
+                          && new MyEx(nmsg[0]).ToString() == "MyEx: Exception of type 'MyEx' was thrown.");
+            Program.Check("exc-null-msg-arg-family",
+                          new ArgumentException(nmsg[0]).Message == "Value does not fall within the expected range.");
+            Program.Check("exc-empty-msg-kept",
+                          new Exception(nmsg[1]).Message == "" && new Exception(nmsg[1]).ToString() == "System.Exception");
+            // ToString() of an inner exception: NewLine + " ---> " + inner.ToString() +
+            // NewLine + "   --- End of inner exception stack trace ---" (NewLine is "\n"
+            // off Windows), nested once per level.
+            Program.Check("exc-tostring-inner",
+                          new Exception(nmsg[3], new InvalidOperationException(nmsg[2])).ToString()
+                          == "System.Exception: outer\n ---> System.InvalidOperationException: hi\n   --- End of inner exception stack trace ---");
+            Program.Check("exc-tostring-inner-nested",
+                          new MyEx(nmsg[3], new MyEx(nmsg[0], new Exception(nmsg[1]))).ToString()
+                          == "MyEx: outer\n ---> MyEx: Exception of type 'MyEx' was thrown.\n ---> System.Exception"
+                             + "\n   --- End of inner exception stack trace ---\n   --- End of inner exception stack trace ---");
+            // Message is VIRTUAL: an override answers every read of it, ToString()'s
+            // included, through a base reference and in a derived class; a BCL
+            // exception's Message in the same program is still its stored one.
+            Exception mo = new MsgOverEx(nmsg[2], nmsg[3]);
+            Program.Check("exc-msg-override",
+                          mo.Message == "msg:outer" && mo.ToString() == "MsgOverEx: msg:outer"
+                          && new MsgOverSub().Message == "msg:sub"
+                          && new Exception(nmsg[2]).Message == "hi");
 
             // ----- the one argument of ArgumentNullException is a PARAM NAME --------
             //

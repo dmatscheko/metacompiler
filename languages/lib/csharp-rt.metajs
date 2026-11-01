@@ -837,36 +837,24 @@ function cpObjStr(o, depth) {
     var m = rtFindMethod(o["__class"], "ToString")
     if (m !== undefined) { return cpRender(m.apply(undefined, [o]), depth + 1) }
     // SYSTEM.EXCEPTION.ToString(), which is an override of System.Object's and so
-    // wins over the bare type name below.
-    //
-    // .NET's, from dotnet/runtime, src/libraries/System.Private.CoreLib/src/System/
-    // Exception.cs:
-    //     public override string ToString() => ToString(true, true);
-    //     ... string s = GetClassName();                       // GetType().ToString()
-    //         if (!string.IsNullOrEmpty(message)) s += ": " + message;
-    //         if (_innerException != null) s += " ---> " + ...
-    //         if (stackTrace != null) s += Environment.NewLine + stackTrace;
-    //
-    // WHERE THIS STOPS AND WHY. The class name and the message are exact, and for an
-    // exception that has not been THROWN yet .NET's stack trace is null and the
-    // two-part form is the entire answer - `new Exception("m").ToString()` really is
-    // "System.Exception: m". The "   at Program.Main() in Program.cs:line 8" frames of
-    // a thrown one are not reproducible in any engine here (no call-site line table -
-    // manual 7.9), and inner exceptions are not reproduced because the value model
-    // has no inner slot: `new Exception(msg, inner)` keeps the message only. Both
-    // omissions can only SHORTEN the answer; neither makes the part that is produced
-    // disagree.
-    //
-    // The twins are csExcToStr in languages/csharp-interpreter.abnf and the same arm
-    // of cspObjStr in abnf/jsrtcsharp.go.
+    // wins over the bare type name below: the full type name, ": " and the message
+    // unless it is null or empty, then for an inner exception "\n ---> " + its
+    // ToString() + "\n   --- End of inner exception stack trace ---". A thrown one's
+    // stack-trace frames are not reproduced (manual 7.9). The citation is at the
+    // twin, csExcToStr in languages/csharp-interpreter.abnf; the other twin is the
+    // same arm of cspObjStr in abnf/jsrtcsharp.go.
     if (csExcBase(o) != "") {
-        var full = csTypeOfVal(o)["FullName"]
-        var em = o["Message"]
-        if (em === undefined) { return full }
-        if (em === null) { return full }
-        var es = cpRender(em, depth + 1)
-        if (es == "") { return full }
-        return full + ": " + es
+        var xs = csTypeOfVal(o)["FullName"]
+        var em = csExcMsg(o)
+        if (em !== undefined && em !== null) {
+            var es = cpRender(em, depth + 1)
+            if (es != "") { xs = xs + ": " + es }
+        }
+        var inner = o["InnerException"]
+        if (inner !== undefined && inner !== null) {
+            xs = xs + "\n ---> " + cpRender(inner, depth + 1) + "\n   --- End of inner exception stack trace ---"
+        }
+        return xs
     }
     if (csIsRecVal(o)) { return cpRecStr(o, depth) }
     // The type descriptor itself.
@@ -1105,7 +1093,7 @@ function csExcTopLine(v) {
     if (v === null || v === undefined) { return head + cpStr(v) }
     if (typeof v != "object") { return head + cpStr(v) }
     var name = csTypeOfVal(v)["FullName"]
-    var msg = v["Message"]
+    var msg = csExcMsg(v)
     if (msg === undefined) { return head + name }
     if (msg === null) { return head + name }
     if (msg == "") { return head + name }
@@ -2412,6 +2400,24 @@ function js_csexc3(eo, n, a0, a1, a2) {
     var avs = ""
     if (n == "ArgumentOutOfRangeException") { avs = cpStr(a1) }
     return csxExcCtor3(eo, n, a0, a1, a2, avs)
+}
+// The end of System.Exception's constructor on an instance of a user class: an
+// override of the virtual Message property in its chain must answer every read of
+// Message, and an own slot would win over the accessor, so the stored message is
+// dropped. Twins: js_csexcvirt in abnf/jsrtcsharp.go and the same step in initBase
+// in languages/csharp-interpreter.abnf, where it is explained.
+function js_csexcvirt(eo) {
+    if (rtFindMethod(eo["__class"], "__get_Message") !== undefined) { delKey(eo, "Message") }
+    return eo
+}
+// An exception's Message read as the virtual property it is: the stored message,
+// else a user override in the class chain. Twin of csExcMsg in abnf/jsrtcsharp.go.
+function csExcMsg(o) {
+    var v = o["Message"]
+    if (v !== undefined) { return v }
+    var g = rtFindMethod(o["__class"], "__get_Message")
+    if (g === undefined) { return undefined }
+    return g.apply(undefined, [o])
 }
 
 // The rendering step of a string CONVERSION, used by '+', by an interpolation hole

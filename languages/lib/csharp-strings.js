@@ -517,12 +517,25 @@ function csxExcParam(msg) {
 // and ArgumentOutOfRangeException pass `message ?? SR.<their default>` to base(),
 // and ArgumentException.Message substitutes SR.Arg_ArgumentException for a null
 // _message (SetMessageField) - dotnet/runtime 10, System/Argument*Exception.cs.
-// "" for any other type, whose null message stays null.
+// "" for any other type, whose null message is generated (csxExcNullMsg).
 function csxArgNullMsg(n) {
     if (n == "ArgumentException") { return "Value does not fall within the expected range." }
     if (n == "ArgumentNullException") { return "Value cannot be null." }
     if (n == "ArgumentOutOfRangeException") { return "Specified argument was out of the range of valid values." }
     return ""
+}
+
+// System.Exception.Message for a null _message: `_message ?? SR.Format(
+// SR.Exception_WasThrown, GetClassName())`, i.e. "Exception of type '<T>' was
+// thrown." with T the full name of the RUNTIME type (dotnet/runtime,
+// System/Exception.cs). This value model stores Message instead of computing it, so
+// the rule is applied once the constructor has stored a null one. Twin of
+// csExcNullMsg in abnf/jsrtcsharp.go.
+function csxExcNullMsg(eo) {
+    var m = eo["Message"]
+    if (m === null || m === undefined) {
+        eo["Message"] = "Exception of type '" + csTypeOfVal(eo)["FullName"] + "' was thrown."
+    }
 }
 
 // The TWO-argument constructor of BCL exception n on the object eo (dotnet/runtime,
@@ -534,13 +547,15 @@ function csxArgNullMsg(n) {
 // string overload; a null one is either (a null literal is ambiguous, and both
 // overloads leave the other slot null). ArgumentException.Message appends
 // " (Parameter '<name>')" for a non-empty name; a null message on the Argument*
-// family is the type's default (csxArgNullMsg). The caller has already set
-// ParamName to null on the Argument* family. Twin of js_csexc2 in abnf/jsrtcsharp.go.
+// family is the type's default (csxArgNullMsg), on any other type the generated
+// sentence (csxExcNullMsg). The caller has already set ParamName to null on the
+// Argument* family. Twin of js_csexc2 in abnf/jsrtcsharp.go.
 function csxExcCtor2(eo, n, a0, a1) {
     var dm = csxArgNullMsg(n)
     if (dm == "" || (a1 !== null && a1 !== undefined && typeof a1 != "string")) {
         eo["Message"] = a0
         if (dm != "" && (a0 === null || a0 === undefined)) { eo["Message"] = dm }
+        csxExcNullMsg(eo)
         eo["InnerException"] = a1
         return eo
     }
@@ -571,6 +586,7 @@ function csxExcCtor3(eo, n, a0, a1, a2, avs) {
     }
     if (n != "ArgumentOutOfRangeException") {
         eo["Message"] = a0
+        csxExcNullMsg(eo)
         return eo
     }
     csxExcCtor2(eo, n, a0, a2)
