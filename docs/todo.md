@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-991** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-993** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -82,12 +82,17 @@ Found by the RB worker, round 33 (oracle /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8):
 
 # JS — JavaScript and TypeScript
 
-### T-965 ts/js: `\p{…}` property escapes under the u flag; decorator `context.metadata`; `[1].a++` in the js compiler · P3 · JS · IN PROGRESS (JS worker, round 37) [V]
-Left from T-915 and found by the JS worker, round 36 (oracle node 24 / tsc 6). `/\p{L}/u.test("é")` → node true; ours does not
-support property escapes (the tables exist behind java-regex.js's jxPropCls knob; JS needs its own knob with ECMAScript's
-property-name grammar and the Go-twin wiring). A class decorator's context lacks `metadata` (node/tsc give an object). `[1].a++`
-(postfix update on a non-name, non-parenthesised base) does not parse in the js compiler (a perf trade documented at IncDec;
-re-measure with a guard like ParenUpdAhead).
+### T-991 js: member store on a primitive base; `(this).x++`; compiler parse of `println("s".x = 5)` · P3 · JS · OPEN [V]
+Found by the JS worker, round 37 (oracle node 24). `"s".x = 5` / `"s".length++` raise "member assignment 'x' on s" in both engines;
+node (sloppy) ignores the store (`"s".length++` → 1). `(this).x++` fails in both engines (inner Target rejects bare `this`; node
+NaN). js compiler only: `println("s".x = 5)` and `println(new RegExp("\p{l}","u").test(..))` do not parse as an argument though
+the same expression parses as a statement.
+
+### T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case folding under `iu`; private brand check in decorator access · P3 · JS · OPEN [V]
+Found by the JS worker, round 37 (oracle node 24). Script_Extensions and the ES binary properties without a Java table (Dash, Math,
+ID_Start, ID_Continue, ...) raise "unsupported character property" (needs Unicode tables). Under `iu` case folding is ASCII-only:
+`/é/iu.test("É")` → node true. Decorator `context.access.get/set` do not brand-check private names (tsc's obj.#x throws on a
+foreign object).
 
 # JV — Java
 
@@ -1110,6 +1115,7 @@ T-978 bash: `type`, `declare -f`/`-F`, `command -V` of a function — DONE - typ
 T-979 bash: diagnostics lack bash's "file: line N:" prefix (incl. `${!v}` bad substitution) — DONE - $0: line N: prefix on diagnostics in both engines
 T-980 bash: nameref limits and function definitions leaking out of subshells — DONE - nameref element targets, chains, cycle diagnostics; subshell function definitions end with the subshell
 T-981 bash: "command not found" aborts the script with 127; bash continues — DONE - command not found prints, sets 127 and continues
+T-965 ts/js: `\p{…}` property escapes under the u flag; decorator `context.metadata`; `[1].a++` in the js compiler — DONE - update of any based member place (both forms, all JS/TS engines), decorator context access/metadata as tsc+node 24, \p{..}/\P{..} under u
 
 # Settled — do not re-open
 
