@@ -356,30 +356,30 @@ gh17101 - parsed in July, lost); `xor` / `and` / `or` in a const expression (`co
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-908 bash: the `builtin` and `command` builtins are missing · P2 · SH · OPEN [V]
+### T-908 bash: the `builtin` and `command` builtins are missing · P2 · SH · IN PROGRESS (SH worker, round 20) [V]
 `x=9 builtin echo hi`, `x=3 command eval 'echo $x'` → bash `hi`, `3`; every engine "command not found: builtin/command", exit
 127. Both are common in real scripts (`command -v`, wrapping a builtin in a same-named function). Files: builtin dispatch in both
 bash grammars, lib/bash-rt.c.
 
-### T-933 bash compiled: a computed `eval` silently does nothing; its assignment form keeps the comment · P1 · SH · OPEN [V]
+### T-933 bash compiled: a computed `eval` silently does nothing; its assignment form keeps the comment · P1 · SH · IN PROGRESS (SH worker, round 20) [V]
 `for c in "${cmds[@]}"; do eval "$c"; done` over `('echo a' 'echo b # tail' … 'x=5 # t; echo no')`, then `echo "x=$x"` → bash
 and interp print a, b, c, `d # not`, e and `x=5`; run and native print none of the echoes and `x=5 # t; echo no`;
 -warn-unsupported says nothing. The grammar documents that a computed eval is lowered only for NAME=VALUE: anything else must at
 least be a loud compile error, and the NAME=VALUE form must stop at the first unquoted `#`, `;` or newline. Files:
 bash-to-llvm-ir.abnf (rt_eval_assign).
 
-### T-934 bash: backslash removal inside backtick command substitution · P1 · SH · OPEN [V]
+### T-934 bash: backslash removal inside backtick command substitution · P1 · SH · IN PROGRESS (SH worker, round 20) [V]
 POSIX 2.6.3: inside backticks `\\` → `\`, `\$` → `$`, `` \` `` → backtick (and `\"` inside double quotes). ``echo "[2 `echo \\ `]"`` →
 bash `[2  ]`, all legs `[2 \]`. ``echo "2 `echo \\(`"`` → bash `2 (`, all legs a parse error; `` `echo \ ` `` and `` `echo \\\\ ` ``
 fail to parse at EOF (bash `[1  ]` / `[3 \]`). Corpus: command-sub/017, 021, 022, 023, 024 (022 and 024 parsed in July).
 
-### T-935 bash: declaration builtins refuse a computed or quoted operand and `+attr` · P2 · SH · OPEN [V]
+### T-935 bash: declaration builtins refuse a computed or quoted operand and `+attr` · P2 · SH · IN PROGRESS (SH worker, round 20) [V]
 `declare ${names[0]}='hello there'`, `readonly "$binding"`, `local "$1"`, `declare 'q=1'`, `typeset +x e=E2`, `declare +i n` →
 "Not everything could be parsed" in both halves; bash `foo=hello there`, `bar=7`, `x=y`, `q=1`, `e=E2`, `n=2+3`. 16 of the 19
 oils must-parse files lost since the July sweep are this (append/015, assign-extended/033 034 035 036, assign/017 032 035 038,
 builtin-printf/006 007, nameref/005, nix-idioms/005, tilde/003, type-compat/005 006).
 
-### T-936 bash: an `eval` / `trap` string that does not parse aborts the program; `${ cmd;}` · P2 · SH · OPEN [V finder only]
+### T-936 bash: an `eval` / `trap` string that does not parse aborts the program; `${ cmd;}` · P2 · SH · IN PROGRESS (SH worker, round 20) [V finder only]
 `eval '# only a comment'` and `eval '   '` abort the interpreter (run and native are right); `trap '# comment' EXIT; echo done`
 fails to parse in both halves (bash `done`); a snippet with a real syntax error (`eval 'echo z ${(m)foo} z'`) must report "bad
 substitution", set status 1 and continue - ours aborts in both halves. Corpus: builtin-trap/015, zsh-idioms/003 (lost since July),
