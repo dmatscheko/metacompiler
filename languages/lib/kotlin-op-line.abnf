@@ -1,0 +1,95 @@
+// OpSameLine: the guard in front of a binary `+ - * / %` and a postfix `++`/`--`.
+// Kotlin ends a statement at a newline unless the newline sits inside `( )`, `[ ]`
+// or a `${ }` template, where its parser disables newlines (braces turn them back
+// on). So `i++` followed by `--j` on the next line is two statements, while
+// `f(1` followed by `- 3)` on the next line is the one argument `1 - 3`.
+// The guard succeeds when no newline (or `//` comment) comes before the next
+// token. Otherwise it fails at once unless that token starts with an operator
+// character, and only then lexes the source from its start - skipping comments,
+// strings, raw strings, char literals and backquoted names - to find the
+// innermost open bracket; inside `(`, `[` or `${` it succeeds.
+// Returns the impossible token to FAIL, undefined to succeed.
+
+OpSameLine = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01newline-ends-statement", 0)
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (!(cc === 10 || cc === 13 || (cc === 47 && c.peek(i + 1) === 47))) { return undefined }
+        while (true) {
+            if (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (cc >= 0 && cc !== 10) { i = i + 1; cc = c.peek(i) }
+                continue
+            }
+            break
+        }
+        if (!(cc === 43 || cc === 45 || cc === 42 || cc === 47 || cc === 37)) { return no }
+        var n = 0
+        while (c.peek(-n - 1) >= 0) { n = n + 1 }
+        // Stack entries: 0 brace, 1 paren or bracket, 2 template in a "..." string,
+        // 3 template in a """...""" string. mode: 0 code, 1 "...", 2 """...""".
+        var st = []
+        var mode = 0
+        var p = -n
+        while (p < 0) {
+            var ch = c.peek(p)
+            if (mode === 1) {
+                if (ch === 92) { p = p + 2; continue }
+                if (ch === 34) { mode = 0; p = p + 1; continue }
+                if (ch === 36 && c.peek(p + 1) === 123) { st.push(2); mode = 0; p = p + 2; continue }
+                p = p + 1
+                continue
+            }
+            if (mode === 2) {
+                if (ch === 34 && c.peek(p + 1) === 34 && c.peek(p + 2) === 34) {
+                    p = p + 3
+                    while (c.peek(p) === 34) { p = p + 1 }
+                    mode = 0
+                    continue
+                }
+                if (ch === 36 && c.peek(p + 1) === 123) { st.push(3); mode = 0; p = p + 2; continue }
+                p = p + 1
+                continue
+            }
+            if (ch === 47 && c.peek(p + 1) === 47) {
+                while (p < 0 && c.peek(p) !== 10) { p = p + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(p + 1) === 42) {
+                var depth = 1
+                p = p + 2
+                while (p < 0 && depth > 0) {
+                    if (c.peek(p) === 47 && c.peek(p + 1) === 42) { depth = depth + 1; p = p + 2; continue }
+                    if (c.peek(p) === 42 && c.peek(p + 1) === 47) { depth = depth - 1; p = p + 2; continue }
+                    p = p + 1
+                }
+                continue
+            }
+            if (ch === 34) {
+                if (c.peek(p + 1) === 34 && c.peek(p + 2) === 34) { mode = 2; p = p + 3 } else { mode = 1; p = p + 1 }
+                continue
+            }
+            if (ch === 39 || ch === 96) {
+                p = p + 1
+                while (p < 0 && c.peek(p) !== ch) {
+                    if (ch === 39 && c.peek(p) === 92) { p = p + 1 }
+                    p = p + 1
+                }
+                p = p + 1
+                continue
+            }
+            if (ch === 40 || ch === 91) { st.push(1) }
+            if (ch === 123) { st.push(0) }
+            if ((ch === 41 || ch === 93 || ch === 125) && st.length > 0) {
+                var top = st.pop()
+                if (top === 2) { mode = 1 }
+                if (top === 3) { mode = 2 }
+            }
+            p = p + 1
+        }
+        if (st.length > 0 && st[st.length - 1] > 0) { return undefined }
+        return no
+    })()
+~~) ;

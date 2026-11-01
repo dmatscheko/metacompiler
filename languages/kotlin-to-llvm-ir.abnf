@@ -123,6 +123,7 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :include("lib/ident.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
+:include("lib/kotlin-op-line.abnf") ;
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
@@ -662,9 +663,9 @@ SDeleg      <~~ push({sdeleg: pop()}) ~~> = DelegAdd ;
 // returns a single operand unchanged, so `by base` is byte-identical to what it was.
 // The twin of NoLamAdd / NoLamMul in kotlin-interpreter.abnf.
 DelegAdd    <~~ push(foldBinary(takeAll())) ~~>
-            = DelegMul { ( "+" | "-" ) <~~ push(up.in) ~~> DelegMul } ;
+            = DelegMul { OpSameLine ( "+" | "-" ) <~~ push(up.in) ~~> DelegMul } ;
 DelegMul    <~~ push(foldBinary(takeAll())) ~~>
-            = DelegChain { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> DelegChain } ;
+            = DelegChain { OpSameLine ( "*" | "/" | "%" ) <~~ push(up.in) ~~> DelegChain } ;
 DelegChain  <~~ push(foldCallMember(takeAll())) ~~>
             = ( "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | ObjectExpr | DelegCall | VarRef ) { DelegMSfx | FieldSfx | IndexSfx } ;
 DelegCall   <~~ push(makeCall(takeAll())) ~~>
@@ -1369,10 +1370,10 @@ RangeInfix  = ( "..<" | ".." ) <~~ push({rop: up.in}) ~~>
             | KwStep <~~ push({rop: "step"}) ~~> ;
 
 AddExpr     <~~ push(foldBinary(ktAdoptPlus(takeAll(), up.in, up.start))) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { OpSameLine ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = AsExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> AsExpr } ;
+            = AsExpr { OpSameLine ( "*" | "/" | "%" ) <~~ push(up.in) ~~> AsExpr } ;
 
 // The cast level: x as T / x as? T. Kotlin's asExpression binds tighter than every
 // binary operator and looser than the prefix unary, so `a + b as Int` is
@@ -1423,7 +1424,7 @@ Not         <~~ push(makeNot(pop())) ~~>
 
 PostfixExpr = IncDec | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = Target OpSameLine ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // Counter(5) is a constructor call, this.m() and list.add() are method calls,
 // p.x is a property read, list[i] an indexed read. The ?. variants yield null
@@ -1435,7 +1436,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // kotlin-interpreter.abnf.
 CallMember  <~~ ktAt = up.start; push(kFoldPostfix(takeAll(), up.in, up.pos)) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | NnSfx }
-              [ SameLine ( "++" | "--" ) <~~ push({incdec: up.in}) ~~> ] ;
+              [ OpSameLine ( "++" | "--" ) <~~ push({incdec: up.in}) ~~> ] ;
 // A callable reference or class literal whose RECEIVER is an arbitrary expression:
 // `X()::class`, `object {}::class`, `foo()::bar`. CallableRef in Primary covers only a
 // dotted NAME on the left (`a.b::c`), so these three lines of psi/DoubleColon.kt need

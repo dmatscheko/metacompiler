@@ -275,6 +275,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 :include("lib/ident.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
+:include("lib/kotlin-op-line.abnf") ;
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
@@ -1397,10 +1398,10 @@ RangeInfix  = ( "..<" | ".." "<" ) <~~ push({rop: "..<"}) ~~>
             | KwStep <~~ push({rop: "step"}) ~~> ;
 
 AddExpr     <~~ push(foldBinary(kAdoptPlus(takeAll(), up.in, up.start))) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { OpSameLine ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+            = UnaryExpr { OpSameLine ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = { Annotation } ( PreIncDec | PreCallIncDec | PreIncRef | Neg | Not | PostfixExpr ) ;
 // PREFIX ++x / --x. Kotlin has both fixities and they differ in their VALUE: the postfix
@@ -1441,7 +1442,7 @@ Not         <~~ push(makeNot(pop())) ~~>
 
 PostfixExpr = IncDec | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = Target OpSameLine ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // Counter(5) is a constructor call, this.m() and list.add() are method calls,
 // p.x is a property read, list[i] an indexed read. The ?. variants yield null
@@ -1453,7 +1454,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // IncDec's Target cannot root (kFoldPostfix hands it to makeCallAssign).
 CallMember  <~~ ktAt = up.start; push(kFoldPostfix(takeAll(), up.in, up.pos)) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | NnSfx }
-              [ SameLine ( "++" | "--" ) <~~ push({incdec: up.in}) ~~> ] ;
+              [ OpSameLine ( "++" | "--" ) <~~ push({incdec: up.in}) ~~> ] ;
 NnSfx       <~~ push({kind: "nn"}) ~~>
             = "!!" ;
 // A callable reference or class literal whose RECEIVER is an arbitrary expression:
@@ -2187,9 +2188,9 @@ DelegExpr   <~~ push({deleg: pop()}) ~~>
 // same while the class body still cannot be read as a trailing lambda. foldBinary
 // returns a single operand unchanged, so `by base` is byte-identical to what it was.
 NoLamAdd    <~~ push(foldBinary(takeAll())) ~~>
-            = NoLamMul { ( "+" | "-" ) <~~ push(up.in) ~~> NoLamMul } ;
+            = NoLamMul { OpSameLine ( "+" | "-" ) <~~ push(up.in) ~~> NoLamMul } ;
 NoLamMul    <~~ push(foldBinary(takeAll())) ~~>
-            = NoLamExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> NoLamExpr } ;
+            = NoLamExpr { OpSameLine ( "*" | "/" | "%" ) <~~ push(up.in) ~~> NoLamExpr } ;
 NoLamExpr   <~~ push(foldCallMember(takeAll())) ~~>
             = NoLamPrim { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx } ;
 // `class A : b by object { ... } { ... }` (psi/ByClauses.kt line 21) delegates to an

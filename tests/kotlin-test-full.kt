@@ -6580,6 +6580,46 @@ fun sec147() {
     check("view147e", "$tk $tv ${t.entries}" == "[0, 2, 3] [o, b, c] [0=o, 2=b, 3=c]")
 }
 
+// ===== SECTION 148: a newline ends a statement before a binary operator =====
+// `i++` then `--j` on the next line is two statements, not `i++ - (-j)`; the same
+// newline inside ( ), [ ] or ${ } continues the expression, and inside braces it
+// does not (kotlinc 2.2.21).
+fun id148(x: Int) = x
+fun s148() {
+    var i = 0; var j = 5
+    i++
+    --j
+    val r = mutableListOf("$i $j")
+    val a = (1
+        + 2)
+    r.add("$a")
+    r.add("" + listOf(1
+        - 3, 4))
+    val b = 10
+    -3
+    r.add("$b")
+    val xs = intArrayOf(1, 2)
+    r.add("" + xs[0
+        + 1])
+    val f = { 7
+        - 2 }
+    r.add("" + f())
+    var k = 3
+    val m = k
+    ++k
+    r.add("$m $k")
+    r.add("${id148(1
+        * 2)}")
+    check("nl148a", r.joinToString(" ") == "1 4 3 [-2, 4] 10 2 -2 3 4 2")
+    // A paren in a string, a char literal or a comment does not open a group.
+    val s = "(("   // ((
+    val c = '('
+    var q = 7
+    q
+    -1
+    check("nl148b", q == 7 && s + c == "(((")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6724,6 +6764,7 @@ fun main() {
     sec145() // SECTION-CALL 145
     sec146() // SECTION-CALL 146
     sec147() // SECTION-CALL 147
+    s148() // SECTION-CALL 148
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
