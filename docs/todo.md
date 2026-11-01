@@ -105,7 +105,7 @@ Found by CS r4 + master probe.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPTY · P3 · KT · OPEN [V]
+### T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPTY · P3 · KT · IN PROGRESS (KT worker, round 19) [V]
 kotlinc 2.2.21 (found by KT r18):
 - `val big = 18446744073709551613uL..ULong.MAX_VALUE`: kotlinc prints `18446744073709551613..18446744073709551615`, toList → 3 elements, `18446744073709551612uL in big` → false. Ours: `18446744073709551615..18446744073709551615`, toList hangs, `in` true (bounds held as doubles; needs an unsigned twin of the exact Long-range path lf/lt/ls in all engines; endExclusive MAX test too).
 - `class P(val x: Int); println(P(4).x::class.simpleName)` → Int; ours prints the source text `p.x` (any member-access receiver of ::class, e.g. `r.first::class`).
