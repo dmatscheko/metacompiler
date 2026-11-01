@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1019** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1020** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -125,10 +125,11 @@ not modelled" error; the method group must convert to Comparison<string> (C# spe
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1004 kotlin: string `<`/`>`, sorted, sortedDescending, maxOf, toSortedSet order by code point instead of UTF-16 · P3 · KT · IN PROGRESS (KT worker, round 14) [V]
-Found by the CORE worker, round 16 (oracle JVM). compareTo is right, but the operators and the sort/max family use code-point order in
-all three legs: strings starting with chars 97, 55357 (surrogate), 57344, 65377, 65535 sort ours `[97, 57344, 65377, 65535, 55357]`,
-JVM `[97, 55357, 57344, 65377, 65535]`. Route them through the UTF-16 comparison (str_cmp16).
+### T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; String coerceAtLeast/AtMost/In · P3 · KT · OPEN [V]
+Found by the KT worker, round 14 (oracle kotlinc 2.2.21). `xs.toSortedSet(reverseOrder())` → descending; ours ascending (all engines);
+toSortedSet() builds a plain set from the sorted list, not a TreeSet, so a later add() may not keep order. `("" .. "￿").contains(s)`
+and `s in "a".."z"` → llvm.Run only "js runtime error: range bound is not a number" (interpreter and native right). `"b".coerceAtLeast("c")`,
+coerceAtMost, coerceIn → "unknown String method" in all engines.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1089,6 +1090,7 @@ T-925 parse time grows exponentially with bracket nesting in seven grammars, bot
 T-1013 java: protected receiver rule, package-private constructors, untyped receivers escape the access check — DONE - protected receiver rule, constructor access (incl. protected via super/anonymous), enclosing-class call results typed; javac messages, both halves
 T-1012 bash compiled: computed `read "$n"` and computed declare operands are compile-time limitations — PARTIAL - compiled computed read/declare operands (run-time attributes via refAttrs), declare -f of brace loop bodies, function-body redirections; computed operand + attribute option filed
 T-1011 ruby: `compare_by_identity`; `default_proc=` type check; nested `for` destructure; value of `for`; `lazy.class` — DONE - for-loop targets destructure and the loop has a value, compare_by_identity (string keys by content, deliberate), default_proc= TypeError, Enumerator::Lazy class
+T-1004 kotlin: string `<`/`>`, sorted, sortedDescending, maxOf, toSortedSet order by code point instead of UTF-16 — DONE - String <,>,<=,>= and the natural-order key compare (max/min/maxOf/TreeSet/PriorityQueue) use UTF-16 order in all engines; kotlinc-verified
 
 # Settled — do not re-open
 
