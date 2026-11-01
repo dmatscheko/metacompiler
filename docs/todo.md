@@ -108,7 +108,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1076 csharp: compound assignment evaluates the right side before reading the left · P3 · CS · OPEN [V]
+### T-1076 csharp: compound assignment evaluates the right side before reading the left · P3 · CS · IN PROGRESS (CS worker, round 14) [V]
 Spec-only (ECMA-334 12.21.4 + 12.4.1 left-to-right). `static int x = 1; static int Bump() { x = 100; return 5; }` then `x += Bump(); Console.WriteLine(x);` -> 6 (x read before Bump runs); all three legs print 105. Same with `c.F += BumpF()`, properties (`c.P += ...`: getter before RHS), indexers (`a[i()] += j()`: a, i(), get, j(), set), and ++/-- operands. Interpreter makeAssign evaluates valT() before applyOp(op, csGetVar(...)); csQualWrite's mk reads the old value afterwards; the compiler matches.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
