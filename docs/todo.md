@@ -283,20 +283,20 @@ assign-extended/021, var-ref/013. Also bash 5.3 function substitution `${ cmd;}`
 
 # C — C subset
 
-### T-906 c: `u"…"` holds an astral character as one unit; non-ASCII character constants do not parse · P1 · C · OPEN [V]
+### T-906 c: `u"…"` holds an astral character as one unit; non-ASCII character constants do not parse · P1 · C · IN PROGRESS (C worker, round 13) [V]
 Neighbour of T-758. `pl(u"\U0001F600"[0]); pl(u"\U0001F600"[1]); pl(sizeof(u"\U0001F600"))` (pl = putchar-based print) → cc
 `55357 56832 6`; all legs `128512 0 8` (a char16_t string must hold a UTF-16 surrogate pair). Indexing `u"😀"[2]` crashes the
 interpreter with "invalid load at address 16". `U"😀"`, `L"€"`, `u"é"`, `u8"é"` are right. Loud companion: `L'é'`, `u'€'`,
 `U'😀'` do not parse in either half (cc 233, 8364, 128512). Files: languages/lib/c-literals.js (u-prefix encoding, character
 constants), CharConst in both C grammars.
 
-### T-907 c: `&function` is rejected - "variable not defined" · P2 · C · OPEN [V]
+### T-907 c: `&function` is rejected - "variable not defined" · P2 · C · IN PROGRESS (C worker, round 13) [V]
 Neighbour of T-755. `int md(int a,int b){return a%b;}` / `int (*single)(int,int) = &md;` at file scope → every leg fails with
 "variable not defined: md" (cc prints 1 for `single(9,4)`); inside a function the interpreter accepts it, run and native fail
 the same way. Without the `&` it works. Files: makeAddr in c-to-llvm-ir.abnf (local and global), the global initializer in
 c-interpreter.abnf.
 
-### T-940 c: array dimensions and enumerators accept only + - * / % << >> - no `sizeof`, `?:`, comparisons, `| & ^`, char constants · P2 · C · OPEN [V]
+### T-940 c: array dimensions and enumerators accept only + - * / % << >> - no `sizeof`, `?:`, comparisons, `| & ^`, char constants · P2 · C · IN PROGRESS (C worker, round 13) [V]
 `int b[1 | 2]; int c[2 ? 3 : 1]; int d[(3 > 1) + 1]; int f[4 == 4];` → cc `12 12 8 8 4`; both halves fail at the first.
 Finder, same cause: `int s[sizeof(int)];`, `char u['A' - 60];`, `enum { A = 1 | 4, B = (3 > 1) ? 7 : 2 };`. `sizeof` in a dimension
 is ordinary C. The DimShift chain in c-interpreter.abnf (and the compiler's) should be the full integer constant expression.
