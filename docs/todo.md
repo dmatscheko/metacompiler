@@ -108,7 +108,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter · P3 · CS · OPEN [V]
+### T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter · P3 · CS · IN PROGRESS (CS worker, round 12) [V]
 Spec-only (ECMA-334 12.21.5). `class C { string s = "init"; public int Sets = 0; public string P { get { return s; } set { Sets++; s = value; } } }` then `C c = new C(); string r = c.P ??= "other"; Console.WriteLine(r + " " + c.P + " " + c.Sets);` -> spec `init init 0`; all three legs `other other 1`. makeRefRead (both C# grammars) uses hasOwn/js_get; route the qualified read through the getter dispatch csQualWrite already uses. Check indexers (`d[k] ??= v`, user `this[]`) and static properties too.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
