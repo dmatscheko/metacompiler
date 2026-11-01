@@ -160,7 +160,7 @@ ForWords    <~~ push({words: takeAll()}) ~~>
             = { CWord } ;
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
-FuncDef     <~~ push(makeFuncDef(takeAll())) ~~>
+FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos))) ~~>
             = FuncDefHead OptSep FuncBody ;
 // A function body may be any compound command; { LIST; } and ( LIST ) are the two that
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
@@ -1119,6 +1119,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // $LINENO inside a $( ) (see atLine).
     include("lib/bash-lines.js")
+    include("lib/bash-deparse.js")
 
     // ===================================================================================
     //  Stack / string helpers (self contained, no shared core).
@@ -1600,6 +1601,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             // during the walk, so a call emitted before a definition sees it)
     var defFuncs = {}       // "$"+name+"#"+k -> the IR function of the k-th definition
     var declaredFuncList = []  // the names of funcDefs, in an enumerable order
+    var funcTexts = {}      // "$"+name+"#"+k -> the k-th definition as bash prints it (bashDeparse)
     var fnCount = 0
 
     function bashFnParams() { return [] }
@@ -3653,10 +3655,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lower = (flags.indexOf("l") >= 0)
         var integer = (flags.indexOf("i") >= 0)
         var global = (flags.indexOf("g") >= 0)
-        // -p/-f/-F are QUERIES, not declarations. They are not modelled (nothing is printed),
-        // but they must not be read as `declare NAME`, which below would make the name a
-        // fresh unset local.
+        // -p/-f/-F are QUERIES, not declarations: -p with names prints, -f/-F print functions
+        // (emitDeclFuncs). None of them may be read as `declare NAME`, which below would make
+        // the name a fresh unset local.
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
+        var fnQuery = (flags.indexOf("F") >= 0) ? "F" : ((flags.indexOf("f") >= 0) ? "f" : "")
+        var fqi
+        for (fqi = 0; fnQuery != "" && fqi < flags.length; fqi++) {
+            if (flags.charAt(fqi) != "-" && flags.charAt(fqi) != "f" && flags.charAt(fqi) != "F") { fail(kw + " " + flags + " is not supported") }
+        }
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
         var isRef = kw != "export" && flags.indexOf("n") >= 0
@@ -3860,6 +3867,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeStatusI(b, 1)
                 return b
             }
+            if (fnQuery != "") { return emitDeclFuncs(b, fnQuery, names) }
             if (query) {
                 // `declare -p NAME` PRINTS. The attribute letter is decided HERE because -i/-u/-l are
                 // compile-time facts in this grammar; rt_declp asks the runtime for array-ness and the value.
@@ -5367,12 +5375,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     // `command -v NAME...` / `command -V NAME...` (the forms wrapperWords leaves): -v prints
-    // each NAME that is a builtin, a keyword or a defined function, -V says which of keyword
-    // or builtin it is or that it is not found; the status is 1 when no NAME is anything.
-    // bash's -V reprints a function's body, which is not modelled: a literal function name
-    // is refused, and so is a computed NAME in a program that defines functions. A computed
-    // NAME after the bare wrapper is dispatched at run time. Twin of runWrapper in
-    // bash-interpreter.abnf.
+    // each NAME that is a builtin, a keyword or a defined function, -V says what it is as
+    // `type` does (emitDescribe) or that it is not found; the status is 1 when no NAME is
+    // anything. A computed NAME after the bare wrapper is dispatched at run time. Twin of
+    // runWrapper in bash-interpreter.abnf.
     function emitWrapper(b, cmd, argTs, subs) {
         var i = 0
         var query = ""
@@ -5386,40 +5392,126 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (i >= argTs.length) { storeStatusI(b, 0); return b }
         if (query == "") { return emitComputedCommand(b, argTs[i], argTs.slice(i + 1), subs, true) }
-        var kwWords = gepStr(b, "\n" + shellKwWords.join("\n") + "\n")
-        var bltWords = gepStr(b, "\n" + shellKnownWords.join("\n") + "\n")
         var st = one
         for (; i < argTs.length; i++) {
             var lit = argTs[i].c
-            if (query == "V" && ((lit != undefined && funcFor(lit) != null) || (lit == undefined && declaredFuncList.length > 0))) {
-                fail("command -V of a function is not supported")
-            }
             var r = evalWord(b, argTs[i])
             b = r.b
-            var isKw = b.NewCall(rtInWords, [r.v, kwWords])
-            var isBl = b.NewCall(rtInWords, [r.v, bltWords])
-            var hit = b.NewOr(isKw, isBl)
-            if (query == "v") {
-                var rf = emitIsFnName(b, r.v, lit)
-                b = rf.b
-                hit = b.NewOr(hit, rf.v)
-            }
+            var kd = emitKind(b, r.v, lit)
+            b = kd.b
             var yes = curF.NewBlock(""), next = curF.NewBlock("")
             var no = (query == "V") ? curF.NewBlock("") : next
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, hit, zero), yes, no)
-            var line = r.v
-            if (query == "V") {
-                line = yes.NewCall(rtStrcat, [r.v, yes.NewSelect(yes.NewICmp(llvm.enum.IPredNE, isKw, zero),
-                                                                gepStr(yes, " is a shell keyword"), gepStr(yes, " is a shell builtin"))])
-            }
-            yes.NewCall(rtPrints, yes.NewCall(rtStrcat, [line, gepStr(yes, "\n")]))
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, kd.any, zero), yes, no)
+            var line = (query == "V") ? emitDescribe(yes, r.v, lit, kd, false) : yes.NewCall(rtStrcat, [r.v, gepStr(yes, "\n")])
+            yes.NewCall(rtPrints, line)
             yes.NewBr(next)
             if (query == "V") {
                 emitDiag(no, no.NewCall(rtStrcat, [no.NewCall(rtStrcat, [gepStr(no, "command: "), r.v]), gepStr(no, ": not found\n")]))
                 no.NewBr(next)
             }
             b = next
-            st = b.NewAnd(st, b.NewXor(hit, one))
+            st = b.NewAnd(st, b.NewXor(kd.any, one))
+        }
+        storeStatus(b, st)
+        return b
+    }
+    // `type [-t] NAME...`: what each NAME is, looked up as bash does - keyword, function,
+    // builtin (emitKind). A function is "NAME is a function" and its definition as bash prints
+    // it; -t prints only the kind. A NAME that is none is "type: NAME: not found" (nothing
+    // with -t) and makes the status 1. Twin of typeCmd in bash-interpreter.abnf.
+    function emitType(b, argTs) {
+        var i = 0
+        var terse = false
+        while (i < argTs.length && argTs[i].c != undefined && argTs[i].c.length > 1 && argTs[i].c.charAt(0) == "-") {
+            var opt = argTs[i].c
+            i = i + 1
+            if (opt == "--") { break }
+            if (opt != "-t") { fail("type " + opt + " is not supported") }
+            terse = true
+        }
+        var st = zero
+        for (; i < argTs.length; i++) {
+            var lit = argTs[i].c
+            var r = evalWord(b, argTs[i])
+            b = r.b
+            var kd = emitKind(b, r.v, lit)
+            b = kd.b
+            var yes = curF.NewBlock(""), no = curF.NewBlock(""), next = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, kd.any, zero), yes, no)
+            yes.NewCall(rtPrints, emitDescribe(yes, r.v, lit, kd, terse))
+            yes.NewBr(next)
+            if (!terse) { emitDiag(no, no.NewCall(rtStrcat, [no.NewCall(rtStrcat, [gepStr(no, "type: "), r.v]), gepStr(no, ": not found\n")])) }
+            no.NewBr(next)
+            b = next
+            st = b.NewOr(st, b.NewXor(kd.any, one))
+        }
+        storeStatus(b, st)
+        return b
+    }
+    // What nameV is, in bash's lookup order: i32 flags kw, fn (a function, not a keyword),
+    // and any (one of keyword, function, builtin). lit: the name when it is a literal word.
+    function emitKind(b, nameV, lit) {
+        var isKw = b.NewCall(rtInWords, [nameV, gepStr(b, "\n" + shellKwWords.join("\n") + "\n")])
+        var isBl = b.NewCall(rtInWords, [nameV, gepStr(b, "\n" + shellKnownWords.join("\n") + "\n")])
+        var rf = emitIsFnName(b, nameV, lit)
+        b = rf.b
+        return {b: b, kw: isKw, fn: b.NewAnd(rf.v, b.NewXor(isKw, one)), any: b.NewOr(b.NewOr(isKw, rf.v), isBl)}
+    }
+    // The line `type` prints for nameV, which is something (kd from emitKind): the kind alone
+    // when terse, else "NAME is a shell keyword", "NAME is a function" and the definition in
+    // force, or "NAME is a shell builtin".
+    function emitDescribe(b, nameV, lit, kd, terse) {
+        var isKw = b.NewICmp(llvm.enum.IPredNE, kd.kw, zero)
+        var isFn = b.NewICmp(llvm.enum.IPredNE, kd.fn, zero)
+        if (terse) { return b.NewSelect(isKw, gepStr(b, "keyword\n"), b.NewSelect(isFn, gepStr(b, "function\n"), gepStr(b, "builtin\n"))) }
+        var fnPart = b.NewCall(rtStrcat, [gepStr(b, " is a function\n"), b.NewCall(rtStrcat, [emitFnTextOf(b, nameV, lit), gepStr(b, "\n")])])
+        var tail = b.NewSelect(isKw, gepStr(b, " is a shell keyword\n"), b.NewSelect(isFn, fnPart, gepStr(b, " is a shell builtin\n")))
+        return b.NewCall(rtStrcat, [nameV, tail])
+    }
+    // The definition in force of the function nameV names, as bash prints it, or "" when none
+    // is. lit: the name when it is a literal word; a computed one is compared with every name
+    // the program defines.
+    function emitFnTextOf(b, nameV, lit) {
+        var acc = gepStr(b, "")
+        var i
+        for (i = 0; i < declaredFuncList.length; i++) {
+            var fn = declaredFuncList[i]
+            if (lit != undefined && fn != lit) { continue }
+            var hit = b.NewAnd(b.NewCall(rtStreq, [nameV, gepStr(b, fn)]), b.NewZExt(fnIsDefined(b, fn), i32))
+            acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, hit, zero), emitFnText(b, fn), acc)
+        }
+        return acc
+    }
+    // The definition of fn in force (fnk_fn picks it) as bash prints it. A definition the
+    // printer does not model is refused here, where printing it is compiled.
+    function emitFnText(b, fn) {
+        var nd = funcDefs["$" + fn]
+        var k = (nd > 1) ? b.NewLoad(i32, fnSlot(fn)) : null
+        var t = null
+        var j
+        for (j = nd; j >= 1; j--) {
+            var d = funcTexts["$" + fn + "#" + j]
+            if (d.err != undefined) { fail("printing a function body that holds " + d.err + " is not supported") }
+            var g = gepStr(b, d.text)
+            t = (t == null) ? g : b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, j)), g, t)
+        }
+        return t
+    }
+    // `declare -f [NAME...]` prints each function's definition, `declare -F [NAME...]` its
+    // name; with no NAME every function, sorted, -F as `declare -f NAME`. A NAME that is no
+    // function prints nothing and makes the status 1. Twin of declFuncs in
+    // bash-interpreter.abnf.
+    function emitDeclFuncs(b, q, names) {
+        var list = (names.length == 0) ? bashSortNames(declaredFuncList) : names
+        var st = zero
+        var k
+        for (k = 0; k < list.length; k++) {
+            var fn = list[k]
+            if (funcFor(fn) == null) { st = one; continue }
+            var def = fnIsDefined(b, fn)
+            var line = (q == "f") ? emitFnText(b, fn) : gepStr(b, ((names.length == 0) ? "declare -f " : "") + fn)
+            b.NewCall(rtPrints, b.NewSelect(def, b.NewCall(rtStrcat, [line, gepStr(b, "\n")]), gepStr(b, "")))
+            if (names.length > 0) { st = b.NewOr(st, b.NewXor(b.NewZExt(def, i32), one)) }
         }
         storeStatus(b, st)
         return b
@@ -5514,6 +5606,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return join
             }
             if (cmd == "builtin" || cmd == "command") { return emitWrapper(b, cmd, argTs, hasCmdSub(cmdT, argTs, asgs)) }
+            if (cmd == "type") { return emitType(b, argTs) }
             if (cmd == "echo") { return emitEcho(b, argTs) }
             if (cmd == "[" || cmd == "test") { return emitTest(b, cmd, argTs) }
             // `cmd &` already ran to completion (see mkAsync), so there is never anything
@@ -6587,14 +6680,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // items = [{fname}, bodyThunk]. Each definition is numbered (funcDefs) while the program
-    // is parsed; running it stores that number in fnk_NAME. The body is emitted the first time
-    // the definition is.
-    function makeFuncDef(items) {
+    // items = [{fname}, bodyThunk]; src is the definition's text. Each definition is numbered
+    // (funcDefs) while the program is parsed; running it stores that number in fnk_NAME. The
+    // body is emitted the first time the definition is.
+    function makeFuncDef(items, src) {
         var fname = items[0].fname
         var bodyT = items[1]
         var kdef = hasOwn(funcDefs, "$" + fname) ? funcDefs["$" + fname] + 1 : 1
         funcDefs["$" + fname] = kdef
+        funcTexts["$" + fname + "#" + kdef] = bashDeparse(src)
         // The same set as an ARRAY: the run-time command dispatch has to enumerate the names, and
         // keysOf is not bound for grammar scripts.
         if (kdef == 1) { declaredFuncList.push(fname) }

@@ -169,7 +169,7 @@ ForWords    <~~ push({words: takeAll()}) ~~>
             = { CWord } ;
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
-FuncDef     <~~ push(makeFuncDef(takeAll())) ~~>
+FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos))) ~~>
             = FuncDefHead OptSep FuncBody ;
 // A function body may be ANY compound command; { LIST; } and ( LIST ) are the two that
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
@@ -1200,6 +1200,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/exact-dec.js")
     include("lib/c-printf.js")
     include("lib/bash-lines.js")
+    include("lib/bash-deparse.js")
     function cpfExactDec(a) { return coreExactDec(a) }
     function cpfRoundHalfEven(ds, k) { return coreRoundHalfEven(ds, k) }
 
@@ -1311,6 +1312,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var varsHas = {}     // set-ness:   varsHas["$" + name] = true|false (unset keeps the key)
     var funcs = {}       // functions:  funcs["$" + name] = body thunk, null once unset
     var funcLn = {}      // and the lnCtx each was defined under
+    var funcSrc = {}     // and the source text of its definition
+    var funcNames = []   // every name ever defined, in definition order
     var posParams = []   // current positional parameters $1.. (an array of strings)
     var lastStatus = 0   // $? : exit status of the most recent command
 
@@ -3016,10 +3019,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lower = (flags.indexOf("l") >= 0)
         var integer = (flags.indexOf("i") >= 0)
         var global = (flags.indexOf("g") >= 0)
-        // -p/-f/-F are QUERIES, not declarations: -p with names prints (declLine), -f/-F are
-        // not modelled. None of them may be read as `declare NAME`, which below would make
-        // the name a fresh unset local.
+        // -p/-f/-F are QUERIES, not declarations: -p with names prints (declLine), -f/-F print
+        // functions (declFuncs). None of them may be read as `declare NAME`, which below would
+        // make the name a fresh unset local.
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
+        var fnQuery = (flags.indexOf("F") >= 0) ? "F" : ((flags.indexOf("f") >= 0) ? "f" : "")
+        var fqi
+        for (fqi = 0; fnQuery != "" && fqi < flags.length; fqi++) {
+            if (flags.charAt(fqi) != "-" && flags.charAt(fqi) != "f" && flags.charAt(fqi) != "F") { fail(kw + " " + flags + " is not supported") }
+        }
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
         var isRef = kw != "export" && flags.indexOf("n") >= 0
@@ -3121,9 +3129,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 setStatus(1)
                 return 1
             }
+            if (fnQuery != "") { return declFuncs(fnQuery, names) }
             if (query) {
-                // -p with names PRINTS; -p bare and -f/-F stay silent (declLine's comment
-                // says why), and a name that is not set is a diagnostic and status 1.
+                // -p with names PRINTS, -p bare stays silent (declLine's comment says why),
+                // and a name that is not set is a diagnostic and status 1.
                 if (isPrint && names.length > 0) {
                     var pst = 0
                     for (k = 0; k < names.length; k++) {
@@ -6659,6 +6668,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (cmd == "echo") { echoCmd(args); setStatus(0); return 0 }
         if (cmd == "builtin" || cmd == "command") { return runWrapper(cmd, args) }
+        if (cmd == "type") { return typeCmd(args) }
         if (cmd == "[" || cmd == "test") { var st = testBuiltin(cmd, args); setStatus(st); return st }
         if (cmd == "true" || cmd == ":") { setStatus(0); return 0 }
         // `cmd &` already ran to completion (see mkAsync), so there is never anything left
@@ -6711,12 +6721,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return 1
             }
             for (; ui < args.length; ui++) {
-                if (uf) { if (isFunc(args[ui])) { setFunc(args[ui], null, null) }; continue }
+                if (uf) { if (isFunc(args[ui])) { setFunc(args[ui], null, null, null) }; continue }
                 var sp = splitSubscript(args[ui])
                 // Without -n, unset acts on the variable a nameref names.
                 if (anyRef && sp.key == null && !un) { sp = splitSubscript(refTarget(sp.name)) }
                 if (!uv && sp.key == null && isFunc(sp.name) && !isSetVar(sp.name) && !isArr(sp.name) && !attrOn(dclVars, sp.name)) {
-                    setFunc(sp.name, null, null)
+                    setFunc(sp.name, null, null, null)
                     continue
                 }
                 if (un) { noRef = noRef + 1 }
@@ -6838,9 +6848,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (skipFuncs, read once by the next runCommand). No engine here runs external programs,
     // so `command` of a name that is not a builtin is not found, and `builtin` of one is
     // bash's "not a shell builtin" (status 1). `command -v NAME...` prints each NAME that is
-    // a builtin, a keyword or a function, and `command -V` says which one it is (bash's
-    // reprinted function body is not modelled) or that it is not found; the status is 1 when
-    // none is anything. Of -v and -V the last one given counts. Twin of wrapperWords and
+    // a builtin, a keyword or a function, and `command -V` says which one it is as `type`
+    // does (describeName) or that it is not found; the status is 1 when none is anything. Of -v and -V the last one given counts. Twin of wrapperWords and
     // emitWrapper in bash-to-llvm-ir.abnf.
     var skipFuncs = false
     var shellBuiltins = {}
@@ -6850,6 +6859,70 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var shellKeywords = {}
     var shellKwWords = "if then else elif fi case esac for select while until do done in function time { } ! [[ ]] coproc".split(" ")
     for (swi = 0; swi < shellKwWords.length; swi++) { shellKeywords["$" + shellKwWords[swi]] = true }
+    // `type [-t] NAME...`: what each NAME is, looked up as bash does - keyword, function,
+    // builtin. A function is "NAME is a function" and its definition as bash prints it
+    // (bashDeparse); -t prints only the kind. A NAME that is none is "type: NAME: not
+    // found" (nothing with -t) and makes the status 1. Twin of emitType in
+    // bash-to-llvm-ir.abnf.
+    function nameKind(name) {
+        var k = "$" + name
+        if (hasOwn(shellKeywords, k)) { return "keyword" }
+        if (isFunc(name)) { return "function" }
+        if (hasOwn(shellBuiltins, k)) { return "builtin" }
+        return ""
+    }
+    function describeName(name, kind) {
+        if (kind == "function") { return name + " is a function\n" + funcText(name) + "\n" }
+        return name + " is a shell " + kind + "\n"
+    }
+    function funcText(name) {
+        var d = bashDeparse(funcSrc["$" + name])
+        if (d.err != undefined) { fail("printing a function body that holds " + d.err + " is not supported") }
+        return d.text
+    }
+    function typeCmd(args) {
+        var i = 0
+        var terse = false
+        while (i < args.length && args[i].length > 1 && args[i].charAt(0) == "-") {
+            var opt = args[i]
+            i = i + 1
+            if (opt == "--") { break }
+            if (opt != "-t") { fail("type " + opt + " is not supported") }
+            terse = true
+        }
+        var st = 0
+        for (; i < args.length; i++) {
+            var kind = nameKind(args[i])
+            if (kind == "") {
+                if (!terse) { diagErr("type: " + args[i] + ": not found\n") }
+                st = 1
+            } else { emitOut(terse ? kind + "\n" : describeName(args[i], kind)) }
+        }
+        setStatus(st)
+        return st
+    }
+    // `declare -f [NAME...]` prints each function's definition, `declare -F [NAME...]` its
+    // name; with no NAME every function, sorted, -F as `declare -f NAME`. A NAME that is no
+    // function prints nothing and makes the status 1. Twin of emitDeclFuncs in
+    // bash-to-llvm-ir.abnf.
+    function declFuncs(q, names) {
+        var list = names
+        if (names.length == 0) {
+            list = []
+            var j
+            for (j = 0; j < funcNames.length; j++) { if (isFunc(funcNames[j])) { list.push(funcNames[j]) } }
+            list = bashSortNames(list)
+        }
+        var st = 0
+        var k
+        for (k = 0; k < list.length; k++) {
+            if (!isFunc(list[k])) { st = 1; continue }
+            if (q == "f") { emitOut(funcText(list[k]) + "\n") }
+            else { emitOut(((names.length == 0) ? "declare -f " : "") + list[k] + "\n") }
+        }
+        setStatus(st)
+        return st
+    }
     function runWrapper(cmd, args) {
         var i = 0
         var query = ""
@@ -6864,12 +6937,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (query != "") {
             var qst = 1
             for (; i < args.length; i++) {
-                var qk = "$" + args[i]
-                var kind = hasOwn(shellKeywords, qk) ? "a shell keyword" : (isFunc(args[i]) ? "f" : (hasOwn(shellBuiltins, qk) ? "a shell builtin" : ""))
+                var kind = nameKind(args[i])
                 if (kind == "") { if (query == "V") { diagErr("command: " + args[i] + ": not found\n") }; continue }
-                if (query == "v") { emitOut(args[i] + "\n") }
-                else if (kind == "f") { fail("command -V of a function is not supported") }
-                else { emitOut(args[i] + " is " + kind + "\n") }
+                emitOut((query == "v") ? args[i] + "\n" : describeName(args[i], kind))
                 qst = 0
             }
             setStatus(qst)
@@ -7132,6 +7202,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var fu = funcLog.pop()
             funcs[fu.k] = fu.b
             funcLn[fu.k] = fu.l
+            funcSrc[fu.k] = fu.s
         }
         subLevels = subLevels - 1
         sinkOut = st.so
@@ -7739,18 +7810,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // in bash-to-llvm-ir.abnf.
     var funcLog = []
     var subLevels = 0
-    function setFunc(name, body, ln) {
+    function setFunc(name, body, ln, src) {
         var k = "$" + name
-        if (subLevels > 0) { funcLog.push({k: k, b: hasOwn(funcs, k) ? funcs[k] : null, l: hasOwn(funcLn, k) ? funcLn[k] : null}) }
+        if (subLevels > 0) {
+            funcLog.push({k: k, b: hasOwn(funcs, k) ? funcs[k] : null, l: hasOwn(funcLn, k) ? funcLn[k] : null, s: hasOwn(funcSrc, k) ? funcSrc[k] : null})
+        }
+        if (!hasOwn(funcs, k)) { funcNames.push(name) }
         funcs[k] = body
         funcLn[k] = ln
+        funcSrc[k] = src
     }
-    // items = [{fname}, bodyThunk]. Registration happens when the statement runs.
-    function makeFuncDef(items) {
+    // items = [{fname}, bodyThunk]; src is the definition's text. Registration happens when
+    // the statement runs.
+    function makeFuncDef(items, src) {
         var fname = items[0].fname
         var bodyT = items[1]
         return function() {
-            setFunc(fname, bodyT, lnCtx)
+            setFunc(fname, bodyT, lnCtx, src)
             setStatus(0)
             return 0
         }

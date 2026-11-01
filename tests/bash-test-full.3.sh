@@ -1569,6 +1569,101 @@ s88() {
 sub
 outer"
 }
+# ===== SECTION 89: type, declare -f / -F and command -V of a function =====
+# bash keeps no source text of a function: `type NAME`, `command -V NAME` and `declare -f
+# NAME` print the definition in force as bash reprints its parsed body - `NAME () `, the
+# body in `{ ` ... `}`, one command a line indented four blanks a level and ended by ";"
+# unless it is the last of its list, blanks between words collapsed, comments gone, a
+# redirection as `> file` and a duplication with its descriptor. `type -t` prints only
+# the kind; a name that is nothing makes the status 1 (`type` also says "not found").
+# `declare -F` prints names, bare it lists every function sorted as `declare -f NAME`
+# (a bare `declare -f` here would print the functions that hold a here-document, which
+# no engine prints).
+# Every expected value is bash 5.3's.
+s89() {
+  local r
+  s89a() { echo   a   "b  c" ; }
+  r=$(type s89a); check ty1 "$r" "s89a is a function
+s89a () 
+{ 
+    echo a \"b  c\"
+}"
+  r=$(type -t if s89a echo s89nosuch); check ty2 "$?[$r]" "1[keyword
+function
+builtin]"
+  r=$(type s89nosuch 2>&1); check ty3 "$?|$r" "1|$0: line $LINENO: type: s89nosuch: not found"
+  r=$(command -V s89a); check ty4 "$r" "s89a is a function
+s89a () 
+{ 
+    echo a \"b  c\"
+}"
+  s89b() {
+    local v=$(echo  x;  echo y)   # a comment
+    if [[ $1 ]]; then echo one >&2; elif (( $# > 1 )); then :; else
+      for w in "$@"; do echo "$w" | cat >/dev/null; done
+    fi
+    case $v in x*|y) echo xy ;; *) ;; esac
+    while false; do break; done; true && echo t || echo f &
+  }
+  r=$(declare -f s89b); check df1 "$r" "s89b () 
+{ 
+    local v=\$(echo x; echo y);
+    if [[ -n \$1 ]]; then
+        echo one 1>&2;
+    else
+        if (( \$# > 1 )); then
+            :;
+        else
+            for w in \"\$@\";
+            do
+                echo \"\$w\" | cat > /dev/null;
+            done;
+        fi;
+    fi;
+    case \$v in 
+        x* | y)
+            echo xy
+        ;;
+        *)
+
+        ;;
+    esac;
+    while false; do
+        break;
+    done;
+    true && echo t || echo f &
+}"
+  r=$(declare -F s89a s89nosuch s89b); check df2 "$?[$r]" "1[s89a
+s89b]"
+  s89c() ( echo sub )
+  r=$(declare -F); [[ $r == *"declare -f s89a
+declare -f s89b
+declare -f s89c"* ]]; check df3 "$?" 0
+  r=$(declare -f s89c s89a); check df4 "$r" "s89c () 
+{ 
+    ( echo sub )
+}
+s89a () 
+{ 
+    echo a \"b  c\"
+}"
+  s89a() { echo two; }
+  r=$(type s89a); check df5 "$r" "s89a is a function
+s89a () 
+{ 
+    echo two
+}"
+  unset -f s89a
+  r=$(declare -f s89a; echo "st $?"; type -t s89a; echo "st $?"); check df6 "$r" "st 1
+st 1"
+  ( s89d() { :; } ); r=$(declare -F s89d); check df7 "$?[$r]" "1[]"
+  eval 's89e() { echo  ev  ; }'
+  r=$(type -- s89e); check df8 "$r" "s89e is a function
+s89e () 
+{ 
+    echo ev
+}"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1612,5 +1707,6 @@ s85   # SECTION-CALL 85
 s86   # SECTION-CALL 86
 s87   # SECTION-CALL 87
 s88   # SECTION-CALL 88
+s89   # SECTION-CALL 89
 echo "full: $checks checks, $fails failures"
 exit $fails
