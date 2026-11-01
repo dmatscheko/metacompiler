@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1099** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1101** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -117,11 +117,15 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1090 kotlin: class members / user extensions called inside builtin implicit receivers; List vs MutableList · P3 · KT · IN PROGRESS (KT worker, round 29) [V]
-Oracle kotlinc 2.2.21:
-- class member inside a nested builtin receiver: `class Q(val n:Int){ fun tag(x:Int)="q"+(x+n); fun go()=with(listOf(1,2,3)){ tag(size) } }; Q(5).go()` -> q8 (also `with(b) { with(listOf(3,4)) { bump(size) } }` -> 3); all engines "unknown list method: tag". Needs a complete positive member table per builtin kind, and the compiler's kt_barecall (sends classMethodNames to the innermost this) to pick the declaring receiver (e.g. js_ktrecvof).
-- user extension on an implicit builtin receiver, compiled half: `fun MutableList<Int>.twice(x:Int){add(x*2)}; with(ml){ twice(5) }` -> [1, 10]; interpreter right, run/native "unknown list method 'twice'". An extension shadowing a builtin-looking name (`fun MutableList<Int>.append(x:Int){add(x*100)}; with(ml){append(5)}`) -> [1, 500]; all legs now "unknown name: append".
-- List vs MutableList: the member table's list row is MutableList, so `mutableSetOf(1).apply { with(listOf(9)) { add(1) } }` binds add to the immutable list; Kotlin resolves it to the set.
+### T-1099 kotlin: class-property value read inside a builtin receiver returns a host function (compiled legs) · P3 · KT · OPEN [V]
+
+The interpreter matches kotlinc; llvm.Run and native do not. For `class K { val log = "L"; val items = "I"; val push = "P"; fun go() = with(listOf(9)) { log + items + push } }`, `K().go()` should print `LIP`. llvm.Run prints `[function]IP` and native prints `[function]I[function]`.
+
+The `kt_ktgetp` fast path probes the name on the list through `kt_fprobe` / `js_ktfget`, which returns the runtime's own method value. A bare property read should consult the builtin member table only for real Kotlin members of that kind, and only properties: `size`, `length`, `indices`, `lastIndex`, and so on. Mind the lookup's speed; it is the hottest name lookup (run tests/bench.sh kotlin --paired).
+
+### T-1100 kotlin: buildSet { } (and buildSet(capacity)) · P3 · KT · OPEN [V]
+
+`buildSet { add(3); add(size) }` prints `[3, 1]` under kotlinc 2.2.21. All three of our engines fail with "unknown name: buildSet". Model it on buildList: a MutableSet receiver that keeps insertion order (LinkedHashSet) and returns a read-only Set.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1194,6 +1198,7 @@ T-1089 kotlin: nested builtin receivers in scope functions; single-line when lam
 T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for — DONE r49 (af985019): suspendable Enumerator next/peek/rewind over user #each with ensure, map/lazy/each_slice .next, catch/throw across a suspended run; master-probed vs ruby 2.6, 4 legs agree
 T-1087 php: argument-type checks for PHP-written stdlib builtins; object casts; deprecations — PARTIAL→DONE r46 (a5c94976..aa8f2c1e): zpp arg checks for PHP-written builtins (types audited vs PHP-8.4 stubs), per-site strict_types incl. dynamic/callback calls, (int)/(float) of object = 1 + warning, null-arg and float-key-write deprecations, (integer)/(boolean) cast parse; master-probed. Remainder filed as follow-ups
 T-1088 bash: computed option words / nameref -A in compiled declare; local -p; residual stderr tokens — DONE r33 (b558bec5): computed declare -A/-a/-g/-x/-- at run time (rt_decl_opt), declare -A via nameref, local/local -p, $'..' in ${s:..}, $"..", arithmetic subscript quote rule (real stdout fixes); master-probed vs bash 5.3. Residual token cosmetics + found defects filed as follow-ups
+T-1090 kotlin: class members / user extensions called inside builtin implicit receivers; List vs MutableList — DONE r29 (9275b32d): complete builtin member table (14 kinds, kotlinc-tested), class members and bare extension calls routed to the innermost declaring implicit receiver, List vs MutableList rows, extensions named like builtin methods; master-probed vs kotlinc 2.2.21
 
 # Settled — do not re-open
 
