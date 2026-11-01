@@ -5428,29 +5428,35 @@ int rt_isassoc(char *nm) {
  * name the whole array and pass through. Twin of subKey in bash-interpreter.abnf. */
 char *rt_arr_key(char *nm, char *sub) {
     if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return sub;
-    return rt_arr_key1(nm, sub);
+    if (rt_isassoc(nm) != 0) return sub;
+    return rt_arr_ikey(nm, rt_arith(sub));
 }
 
 /* The same for a subscript that names an element whatever it expanded to:
- * x=@; "${m[$x]}" is the element of key @. Twin of subKeyAll in
- * bash-interpreter.abnf. */
+ * x=@; "${m[$x]}" is the element of key @. An associative array's subscript
+ * that expands to nothing is "NAME: bad array subscript", and no element. Twin
+ * of subKeyAll in bash-interpreter.abnf. */
 char *rt_arr_key1(char *nm, char *sub) {
-    if (rt_isassoc(nm) != 0) return sub;
+    if (rt_isassoc(nm) != 0) {
+        if (sub[0] == 0) rt_berr("", nm, "bad array subscript");
+        return sub;
+    }
     return rt_arr_ikey(nm, rt_arith(sub));
 }
 
 /* The key of the assignment NAME[SUB]=v, lbl being "NAME[SUB]" as written. An
  * indexed array's SUB is arithmetic even when it expands to @; a written @ or *
  * (whole 1) and an index still negative from the end are bash's "bad array
- * subscript", which abandons the command line, and an empty SUB (whole 2) is one
- * for an associative array too. Twin of asgKey in bash-interpreter.abnf. */
+ * subscript", which abandons the command line, and an empty SUB, written (whole
+ * 2) or expanded, is one for an associative array too. Twin of asgKey in
+ * bash-interpreter.abnf. */
 char *rt_arr_akey(char *nm, char *sub, char *lbl, int whole) {
     long k;
     char *key;
     sub_bad = 0;
-    if (whole != 2 && rt_isassoc(nm) != 0) return sub;
+    if (whole != 2 && rt_isassoc(nm) != 0 && sub[0] != 0) return sub;
     key = &bad_key[0];
-    if (whole != 0) rt_berr("", lbl, "bad array subscript");
+    if (whole != 0 || rt_isassoc(nm) != 0) rt_berr("", lbl, "bad array subscript");
     else {
         k = rt_arith(sub);
         if (arith_err == 0) key = rt_arr_ikeyl(nm, k, lbl);

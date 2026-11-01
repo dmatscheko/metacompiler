@@ -3613,7 +3613,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return emitAbortCheck(b)
         }
         if (a.idxT != null) {
-            var lit = a.isrc != "" && (assoc || (a.idxT.c != undefined && isIndexLit(a.idxT.c)))
+            // An associative key that may expand to nothing goes through rt_arr_akey.
+            var lit = a.isrc != "" && a.idxT.c != undefined && (assoc ? a.idxT.c != "" : isIndexLit(a.idxT.c))
             // A builtin's store (a.soft, an i32 slot: declare, local, read, printf -v): a
             // refused subscript sets the slot and stores nothing, where an assignment abandons
             // the line; the subscript's arithmetic errors carry no builtin's prefix. Twin of
@@ -4512,7 +4513,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var key = r.v
         var keyF = (elem == true) ? rtArrKey1 : rtArrKey
         if (nmv != null) { key = r.b.NewCall(keyF, [nmv, r.v]) }
-        else if (hasOwn(assocArrays, "$" + name)) { key = r.v }
+        else if (hasOwn(assocArrays, "$" + name)) {
+            if (elem != true || (w.c != undefined && w.c != "")) { return {b: r.b, v: r.v, k: r.v} }
+            // A key that expands to nothing is reported (rt_arr_key1).
+            var eb = r.b
+            var emB = curF.NewBlock(""), okB = curF.NewBlock("")
+            eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, eb.NewLoad(i8, r.v), llvm.constant.NewInt(i8, 0)), emB, okB)
+            emB.NewCall(rtArrKey1, [gepStr(emB, name), r.v])
+            emB.NewBr(okB)
+            return {b: okB, v: r.v, k: r.v}
+        }
         else if (w.c != undefined && isIndexLit(w.c)) { key = gepStr(r.b, w.c) }
         else if (w.c != undefined && isIdentText(w.c)) {
             // (a name declared associative later in the file is still a literal key)
@@ -6896,9 +6906,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return r
     }
     // NAME=VALUE... before a declaration builtin: a name the builtin lists takes the prefix
-    // value when the builtin keeps it (export, readonly, -x, -r, local, and declare/typeset
-    // in a function without -g); otherwise the prefix bindings last for the builtin only.
-    // Twin of makePrefixDecl in bash-interpreter.abnf, which has the cases.
+    // value, exported, when the builtin keeps it (export, readonly, -x, -r, local, and
+    // declare/typeset in a function without -g; not export -n or +x); otherwise the prefix
+    // bindings last for the builtin only, as exported scalars hiding the names' arrays and
+    // attributes. Twin of makePrefixDecl in bash-interpreter.abnf, which has the cases.
     function makePrefixDecl(items) {
         var asgs = []
         var decl = []
@@ -6910,12 +6921,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { decl.push(it) }
             else { reds.push(it) }
         }
+        // flags: the letters given with -, unset: those given with +.
         var flags = ""
-        for (i = 1; i < decl.length; i++) { if (decl[i].dflag != undefined) { flags = flags + decl[i].dflag } }
+        var unset = ""
+        for (i = 1; i < decl.length; i++) {
+            if (decl[i].dflag == undefined) { continue }
+            if (decl[i].dflag.charAt(0) == "+") { unset = unset + decl[i].dflag } else { flags = flags + decl[i].dflag }
+        }
         var kw = decl[0].dkw
         var query = flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0
-        var keeps = !query && (kw == "export" || kw == "readonly" || kw == "local" || flags.indexOf("x") >= 0 || flags.indexOf("r") >= 0)
-        var inFn = !query && !keeps && flags.indexOf("g") < 0
+        var keeps = !query && unset.indexOf("x") < 0 && ((kw == "export" && flags.indexOf("n") < 0) || kw == "readonly" || kw == "local" || flags.indexOf("x") >= 0 || flags.indexOf("r") >= 0)
+        var inFn = !query && !keeps && kw != "export" && flags.indexOf("g") < 0
         // The prefix values, computed at emit time and read by the listed names' assignments.
         var cell = {}
         var taken = [decl[0]]
@@ -6945,13 +6961,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = emitAbortCheck(b)
             // A refused (readonly) prefix name leaves the declaration as written.
             if (!whole || (!keeps && !(inFn && curFrame != null))) {
+                // -g reaches past the bindings to the global variables.
+                var hid = []
+                for (k = 0; k < asgs.length && flags.indexOf("g") < 0; k++) {
+                    var hn = asgs[k].aname
+                    if (asgs[k].bad != null || attrOn(roVars, hn)) { continue }
+                    b.NewCall(rtArrClear, gepStr(b, hn))
+                    hid.push({n: "$" + hn, i: attrOn(intVars, hn), u: attrOn(upVars, hn), l: attrOn(loVars, hn)})
+                    intVars["$" + hn] = false; upVars["$" + hn] = false; loVars["$" + hn] = false
+                }
                 b = plain(b)
+                for (k = hid.length - 1; k >= 0; k--) { intVars[hid[k].n] = hid[k].i; upVars[hid[k].n] = hid[k].u; loVars[hid[k].n] = hid[k].l }
                 b.NewCall(rtPopLocals, b.NewLoad(i32, depth))
                 return b
             }
             b.NewCall(rtPopLocals, b.NewLoad(i32, depth))
-            return bound(b)
+            b = bound(b)
+            for (k = 0; k < asgs.length; k++) {
+                if (asgs[k].bad == null && unset.indexOf("x") < 0 && prefixListed(decl, asgs[k].aname)) { b.NewCall(rtXmark, [gepStr(b, asgs[k].aname), one]) }
+            }
+            return b
         }
+    }
+    function prefixListed(decl, nm) {
+        var k
+        for (k = 1; k < decl.length; k++) { if (decl[k].dname == nm) { return true } }
+        return false
     }
     function prefixHas(asgs, nm) {
         var k

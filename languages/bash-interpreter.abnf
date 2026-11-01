@@ -4203,10 +4203,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // arithmetic (bash 5.3: x=@; "${m[$x]}" is m's element @). null (a subscript that is
     // text already) decides by the text itself. Twin of subKeyOf's elem in
     // bash-to-llvm-ir.abnf.
+    // An associative array's subscript that expands to nothing is bash's "NAME: bad array
+    // subscript", and no element.
     function subKeyAll(name, sub, all) {
         if (all == null) { return subKey(name, sub) }
         if (all != "") { return all }
-        if (assocFact(name, false)) { return sub }
+        if (assocFact(name, false)) {
+            if (sub == "") { diagErr(name + ": bad array subscript\n") }
+            return sub
+        }
         return arrIdxKey(name, arEval(sub), name)
     }
     function idxAllItem(it) { return (it.idxAll != undefined) ? it.idxAll : null }
@@ -5576,12 +5581,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The key NAME[SUB]=v stores under, w being SUB expanded and lbl the "NAME[SUB]" an error
     // quotes as written. An indexed array's SUB is arithmetic even when it expands to @; a
     // written @ or * (whole) and an index still negative from the end are bash's "bad array
-    // subscript", which abandons the command line. Twin of rt_arr_akey.
+    // subscript", which abandons the command line; so is an associative array's SUB that
+    // expands to nothing. Twin of rt_arr_akey.
     function arrAkey(name, w, lbl, isAs, whole) {
         subBad = false
-        if (isAs || arithErr || abortSignal != null) { return w }
+        if (arithErr || abortSignal != null || (isAs && w != "")) { return w }
         var key = BAD_KEY
-        if (whole) { diagErr(lbl + ": bad array subscript\n") }
+        if (whole || isAs) { diagErr(lbl + ": bad array subscript\n") }
         else { var k = arEval(w); if (!arithErr) { key = arrIdxKey(name, k, lbl) } }
         if (key == BAD_KEY && !arithErr) { arithErr = true; subBad = true }
         return key
@@ -7866,10 +7872,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return r
     }
     // NAME=VALUE... before a declaration builtin, bash 5.3. A builtin that gives a name it
-    // lists an attribute outliving the command (export, readonly, -x, -r) or a local binding
-    // (local, and declare/typeset in a function without -g) takes the prefix value for that
-    // name as if assigned there: `x=5 export x` keeps x=5, `x=6 local x` is a local holding 6.
-    // Every other prefix binding lasts for the builtin only (`x=8 declare x` leaves x alone).
+    // lists an attribute outliving the command (export, readonly, -x, -r; not export -n or
+    // +x) or a local binding (local, and declare/typeset in a function without -g) takes the
+    // prefix value for that name as if assigned there, exported: `x=5 export x` keeps x=5,
+    // `x=6 local x` is a local -x holding 6. Every other prefix binding lasts for the builtin
+    // only (`x=8 declare x` leaves x alone), as a plain exported scalar that hides the name's
+    // array and attributes (`a=5 declare -p a` prints declare -x a="5").
     // Twin of makePrefixDecl in bash-to-llvm-ir.abnf.
     function makePrefixDecl(items, ln) {
         var asgs = []
@@ -7882,12 +7890,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { decl.push(it) }
             else { reds.push(it) }
         }
+        // flags: the letters given with -, unset: those given with +.
         var flags = ""
-        for (i = 1; i < decl.length; i++) { if (decl[i].dflag != undefined) { flags = flags + decl[i].dflag } }
+        var unset = ""
+        for (i = 1; i < decl.length; i++) {
+            if (decl[i].dflag == undefined) { continue }
+            if (decl[i].dflag.charAt(0) == "+") { unset = unset + decl[i].dflag } else { flags = flags + decl[i].dflag }
+        }
         var kw = decl[0].dkw
         var query = flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0
-        var keeps = !query && (kw == "export" || kw == "readonly" || kw == "local" || flags.indexOf("x") >= 0 || flags.indexOf("r") >= 0)
-        var inFn = !query && !keeps && flags.indexOf("g") < 0
+        var keeps = !query && unset.indexOf("x") < 0 && ((kw == "export" && flags.indexOf("n") < 0) || kw == "readonly" || kw == "local" || flags.indexOf("x") >= 0 || flags.indexOf("r") >= 0)
+        var inFn = !query && !keeps && kw != "export" && flags.indexOf("g") < 0
         // The prefix values, computed in order (each sees the ones before it) and read back
         // by the listed names' assignments.
         var cell = {}
@@ -7905,19 +7918,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var saved = applyPrefix(asgs, true, false)
             var ab = takeAbort()
             if (ab != null) { restorePrefix(saved); return ab }
+            var k
             if (!keeps && !(inFn && localFrames.length > 0)) {
+                // -g reaches past the bindings to the global variables.
+                var hid = []
+                for (k = 0; k < saved.length && flags.indexOf("g") < 0; k++) {
+                    hid.push(bindingOf(saved[k].name))
+                    dropAttrs(saved[k].name)
+                    exVars["$" + saved[k].name] = true
+                    arrs[arrKey(saved[k].name)] = null
+                }
                 var r = anytype
                 r = plain()
+                for (k = hid.length - 1; k >= 0; k--) { restoreLocal(hid[k]) }
                 restorePrefix(saved)
                 return r
             }
-            var k
             for (k = 0; k < saved.length; k++) { cell["$" + saved[k].name] = saved[k].nv }
             restorePrefix(saved)
             // A refused (readonly) prefix name leaves the declaration as written.
             if (saved.length < asgs.length) { return plain() }
-            return bound()
+            var st = anytype
+            st = bound()
+            for (k = 0; k < saved.length; k++) { if (unset.indexOf("x") < 0 && prefixListed(decl, saved[k].name)) { exVars["$" + saved[k].name] = true } }
+            return st
         }
+    }
+    function prefixListed(decl, nm) {
+        var k
+        for (k = 1; k < decl.length; k++) { if (decl[k].dname == nm) { return true } }
+        return false
     }
     function prefixHas(asgs, nm) {
         var k

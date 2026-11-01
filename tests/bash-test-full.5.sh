@@ -107,10 +107,55 @@ st=1"
   check alw7 "$r" "$0: line $l: s97f: ''\\''a b'\\''': must use subscript when assigning associative array"
   declare -A s97g; s97g[x]=1; s97g+=(a); check alw8 "$(declare -p s97g)" 'declare -A s97g=([x]="1" [a]="" )'
 }
+# ===== SECTION 98: an associative key that expands to nothing =====
+# Storing under it is "NAME[SUB]: bad array subscript" quoting the subscript as written,
+# which abandons the line (a builtin's store fails instead); reading it is "NAME: bad
+# array subscript" and no element, and the line goes on. Every expected value is bash
+# 5.3's.
+s98() {
+  local r l k=''
+  declare -A s98m=([a]=1)
+  r=$( (s98m[$k]=v; echo "no") 2>&1; echo "st=$?"); l=$LINENO
+  check aek1 "$r" "$0: line $l: s98m[\$k]: bad array subscript
+st=1"
+  r=$( (s98m[$k]+=v; echo "no") 2>&1); check aek2 "$r" "$0: line $LINENO: s98m[\$k]: bad array subscript"
+  r=$( (echo "[${s98m[$k]}] st=$?"; echo "on") 2>&1); l=$LINENO
+  check aek3 "$r" "$0: line $l: s98m: bad array subscript
+[] st=0
+on"
+  r=$( (x=${s98m[$k]}; echo "st=$? [$x]") 2>&1); check aek4 "$r" "$0: line $LINENO: s98m: bad array subscript
+st=0 []"
+  r=$( (echo "[${s98m[""]}]") 2>&1); check aek5 "$r" "$0: line $LINENO: s98m: bad array subscript
+[]"
+  check aek6 "$(declare -p s98m)" 'declare -A s98m=([a]="1" )'
+}
+# ===== SECTION 99: prefix assignments before a declaration builtin =====
+# The binding is an exported scalar: for the builtin only it hides the name's array and
+# attributes, and a builtin that keeps it (export, readonly, -x, -r, a local) keeps it
+# exported; export -n does not keep it, and +x keeps no export. Every expected value is
+# bash 5.3's.
+s99() {
+  local r
+  r=$(declare -u s99u=x; s99u=b declare -p s99u; declare -p s99u); check pfd1 "$r" 'declare -x s99u="b"
+declare -u s99u="X"'
+  r=$(s99a=(1 2); s99a=5 declare -p s99a; s99a=5 declare -g s99a=7; declare -p s99a); check pfd2 "$r" 'declare -x s99a="5"
+declare -a s99a=([0]="7" [1]="2")'
+  r=$(declare -A s99m=([k]=v); s99m=5 declare -p s99m; declare -p s99m); check pfd3 "$r" 'declare -x s99m="5"
+declare -A s99m=([k]="v" )'
+  r=$(s99n=2+3 declare -p s99n); check pfd4 "$r" 'declare -x s99n="2+3"'
+  r=$(s99w=1; s99w=5 declare -r s99w; declare -p s99w); check pfd5 "$r" 'declare -rx s99w="5"'
+  r=$(s99y=1; s99y=5 export -n s99y; declare -p s99y); check pfd6 "$r" 'declare -- s99y="1"'
+  r=$(s99z=1; s99z=5 declare +x s99z; declare -p s99z); check pfd7 "$r" 'declare -- s99z="5"'
+  r=$(s99p=(1 2); s99p=5 export s99p; declare -p s99p); check pfd8 "$r" 'declare -ax s99p=([0]="5" [1]="2")'
+  g99() { local s99s=1; s99s=6 declare s99s; declare -p s99s; }
+  check pfd9 "$(g99)" 'declare -x s99s="6"'
+}
 # ===== END SECTIONS =====
 
 s95   # SECTION-CALL 95
 s96   # SECTION-CALL 96
 s97   # SECTION-CALL 97
+s98   # SECTION-CALL 98
+s99   # SECTION-CALL 99
 echo "full: $checks checks, $fails failures"
 exit $fails
