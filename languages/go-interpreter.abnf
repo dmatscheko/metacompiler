@@ -2421,7 +2421,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeMethodSfx(name, items, at) {
         var c = makeCallSfx(items)
         return {kind: "mcall", name: name, args: c.args, atys: c.atys, krs: c.krs, spread: c.spread, at: at, rc: null, dt: null, dtk: false,
-                pkg: curPkgName}
+                mx: false, pkg: curPkgName}
     }
     // at: the '[' (goRecvsC); sks: the bounds' goKRec records, in order.
     function makeSliceSfx(items, at) {
@@ -2484,7 +2484,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         goWalkPkg = s.pkg == null ? "" : s.pkg
         s.dt = goDtPlan(s.rc, s.name)
         if (s.kind == "field") { s.me = goDtMethExpr(s.rc, s.name) }
-        if (s.kind == "mcall") { s.nilc = goNilRecvOf(s.rc, s.name) }
+        if (s.kind == "mcall") { s.nilc = goNilRecvOf(s.rc, s.name); s.mx = goMethExprTy(s.rc) != "" }
         s.dtk = true
         goWalkPkg = sw
     }
@@ -2509,8 +2509,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
                     if (!s.dtk) { goSfxPlan(s) }
-                    if (s.nilc != "" && (cur === undefined || cur === null)) { cur = goNilRecvCall(s, callArgs(s)) }
-                    else { cur = s.dt === null ? mcall(cur, s.name, callArgs(s)) : goDtCall(cur, s, callArgs(s)) }
+                    var av = callArgs(s)
+                    // A method expression's call: its first argument is the receiver.
+                    // Twin of foldCallMember in go-to-llvm-ir.abnf.
+                    if (s.mx) { cur = av[0]; av = av.slice(1) }
+                    if (s.nilc != "" && (cur === undefined || cur === null)) { cur = goNilRecvCall(s, av) }
+                    else { cur = s.dt === null ? mcall(cur, s.name, av) : goDtCall(cur, s, av) }
                 }
                 else if (s.kind == "field") {
                     // A NIL POINTER DEREFERENCE IS A RECOVERABLE RUNTIME PANIC, not an

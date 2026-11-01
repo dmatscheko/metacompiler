@@ -2594,7 +2594,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
-                    var ea = emitArgs2(b, s.args, s.spread)
+                    var margs = s.args
+                    // A method expression's call: its first argument is the receiver.
+                    // Twin of foldCallMember in go-interpreter.abnf.
+                    if (margs.length > 0 && goMethExprTy(s.rc) != "") {
+                        var rr0 = margs[0](b)
+                        b = rr0.b
+                        cur = rr0.v
+                        margs = margs.slice(1)
+                    }
+                    var ea = emitArgs2(b, margs, s.spread)
                     var nilc = goNilRecvOf(s.rc, s.name)
                     var mc = nilc == "" ? emitMcall(ea.b, cur, s, ea.v) : emitNilRecvCall(ea.b, cur, s, ea.v, nilc)
                     b = mc.b

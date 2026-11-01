@@ -1859,6 +1859,70 @@ func s141() {
 	check("sendwait141", <-done == 10)
 }
 
+// ===== SECTION 142: array element types, generic inference, method expressions =====
+// An array keeps its element type in an interface even with no elements, or with
+// elements of an interface type; a slice expression has a static type a generic
+// call infers from; G[T] alone is the instantiated function; a method expression
+// of a promoted method takes the receiver as its first argument.
+type s142T []s142T
+
+func (*s142T) Count(args ...int) int { return len(args) }
+
+type s142U struct{ *s142T }
+
+type s142P struct{ n int }
+
+func (p *s142P) Add(a, b int) int { return p.n + a + b }
+
+type s142Q struct{ *s142P }
+
+func s142kind(v interface{}) string {
+	switch v.(type) {
+	case [0]string:
+		return "[0]string"
+	case [0]int:
+		return "[0]int"
+	case [2]interface{}:
+		return "[2]any"
+	}
+	return "other"
+}
+
+func s142max[T int | string](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func s142fold[E any](s []E, init E, f func(E, E) E) E {
+	r := init
+	for _, v := range s {
+		r = f(r, v)
+	}
+	return r
+}
+
+func s142smax[E int | string](s []E) E {
+	if len(s) == 0 {
+		var zero E
+		return zero
+	}
+	return s142fold(s[1:], s[0], s142max[E])
+}
+
+func s142() {
+	var e interface{} = [0]string{}
+	var a interface{} = [2]any{1, 2}
+	ty := fmt.Sprintf("%T %T %T %#v %#v", e, a, [1][0]int{}, e, a)
+	check("arrty142", ty == "[0]string [2]interface {} [1][0]int [0]string{} [2]interface {}{1, 2}")
+	_, ok := e.([0]string)
+	check("arrsw142", s142kind(e)+" "+s142kind([0]int{})+" "+s142kind(a) == "[0]string [0]int [2]any" && ok && e != interface{}([0]int{}))
+	ss := []string{"b", "dd", "a"}
+	check("geninf142", fmt.Sprintf("%q %q %d", s142smax(ss[:0]), s142smax(ss), s142smax([]int{3, 9, 4})) == `"" "dd" 9`)
+	check("mexpr142", (*s142U).Count(&s142U{}, 1, 2)+s142U.Count(s142U{}, 5) == 3 && (*s142Q).Add(&s142Q{&s142P{100}}, 1, 2) == 103 && s142Q.Add(s142Q{&s142P{7}}, 0, 1) == 8)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1906,6 +1970,7 @@ func main() {
 	s139()  // SECTION-CALL 139
 	s140()  // SECTION-CALL 140
 	s141()  // SECTION-CALL 141
+	s142()  // SECTION-CALL 142
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

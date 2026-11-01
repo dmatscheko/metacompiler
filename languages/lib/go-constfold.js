@@ -1895,8 +1895,8 @@ function stElemTy(t) {
 // name or a conversion to a defined type, then `.field`, `[index]` and `.m(args)`
 // steps, typed through the binding's type, the field types of the struct
 // declarations (goFieldTyHook, one per grammar), the element types and a method's
-// single result type. A plain call, a slice or an assertion anywhere ends it
-// unknown.
+// single result type, and a `[lo:hi]` step by stSliceTy. A plain call or an
+// assertion anywhere ends it unknown.
 function goChainC(t, text, pos) {
     var ty = stChainTy(text)
     // A package function as a value (`strconv.Itoa`) has its signature's type.
@@ -2034,12 +2034,25 @@ function stChainFrom(head, hty, loc, text) {
             i = j
         } else if (ch == "[") {
             var k = stClose(text, i)
-            if (k < 0) { return "" }
-            ty = stElemTy(ty)
+            if (k >= 0) { ty = stElemTy(ty) }
+            else {
+                k = stCloseAt(text, i, true)
+                if (k < 0) { return "" }
+                ty = stSliceTy(ty)
+            }
             i = k + 1
         } else { return "" }
     }
     return ty
+}
+// The type of x[lo:hi] for x of type t: a slice or a string keeps its type, an
+// array or a pointer to one gives a slice of its element type, "" otherwise.
+function stSliceTy(t) {
+    var b = stBare(t)
+    if (b == "string" || b.substring(0, 2) == "[]") { return b }
+    if (b.charAt(0) == "*") { b = b.substring(1) }
+    var et = goArrElemTy(b)
+    return et != "" ? "[]" + et : ""
 }
 // The result type of method nm of type sn. A receiver type that does not declare
 // it (an interface) takes the result type every declaring type agrees on.
@@ -2057,8 +2070,10 @@ function goMethRtyOf(sn, nm) {
     return t
 }
 // The index of the bracket that closes the one at text[i] ('(' or '['), or -1. A
-// ':' directly inside a '[' is a slice expression, which is not typed here.
-function stClose(text, i) {
+// ':' directly inside a '[' is a slice expression, which answers -1 too unless
+// slices is set.
+function stClose(text, i) { return stCloseAt(text, i, false) }
+function stCloseAt(text, i, slices) {
     var d = 0
     var k = i
     var q = 0
@@ -2068,7 +2083,7 @@ function stClose(text, i) {
         else if (c2 == 34 || c2 == 96 || c2 == 39) { q = c2 }
         else if (c2 == 91 || c2 == 40 || c2 == 123) { d = d + 1 }
         else if (c2 == 93 || c2 == 41 || c2 == 125) { d = d - 1; if (d == 0) { return k } }
-        else if (c2 == 58 && d == 1 && text.charCodeAt(i) == 91) { return 0 - 1 }
+        else if (!slices && c2 == 58 && d == 1 && text.charCodeAt(i) == 91) { return 0 - 1 }
         k = k + 1
     }
     return 0 - 1
@@ -2203,10 +2218,12 @@ function goIsIfaceTy(t) {
 var goDtWide = {"$int64": true, "$uint64": true, "$uintptr": true}
 function goDtBoxTy(sty) {
     var t = goWalkQual(stBare(sty))
-    // An array of such a type is boxed as a whole: a plain array records no element
-    // type, and %v, %T and a type test need it.
+    // A plain array records no element type, so %T and a type test read it off the
+    // elements. Where they cannot tell it - an array of such a type, one with no
+    // elements, one of an interface type (each element has its own dynamic type) -
+    // the array is boxed as a whole.
     var et = goArrElemTy(t)
-    if (et != "") { return goDtBoxTy(et) != "" ? t : "" }
+    if (et != "") { return (goDtBoxTy(et) != "" || t.substring(0, 3) == "[0]" || goIsIfaceTy(stBare(et))) ? t : "" }
     if (t.length > 1 && t.charAt(0) == "*") {
         var pt = goStructTyName(t.substring(1))
         return pt != "" ? "*" + pt : ""
@@ -3345,12 +3362,13 @@ function goTpUnifyList(p, a, tps, b) {
 }
 // A call chain `G[T1, T2](args)` of a generic top-level function G, with the type
 // arguments written out: its call suffix carries the instantiation (tpc). items are
-// the chain's [primary, suffix...], text its source with the whitespace out.
+// the chain's [primary, suffix...], text its source with the whitespace out. A
+// bare `G[T]` is the function value itself, generics being erased.
 function goTpChainC(items, text) {
     var h = stHeadLen(text)
-    if (h == 0 || h >= text.length || text.charAt(h) != "[" || goGenFns["$" + text.substring(0, h)] === undefined) { return items }
+    if (h == 0 || h >= text.length || text.charAt(h) != "[" || goGenFns["$" + text.substring(0, h)] === undefined || cIsLocal(text.substring(0, h))) { return items }
     var e = stClose(text, h)
-    if (e < 0 || e + 1 >= text.length || text.charAt(e + 1) != "(") { return items }
+    if (e < 0 || (e + 1 < text.length && text.charAt(e + 1) != "(")) { return items }
     // One type argument reads as an index, which would evaluate it: dropped.
     if (items.length > 1 && items[1] != null && typeof items[1] == "object" && items[1].kind == "index") { items = [items[0]].concat(items.slice(2)) }
     var i = 1
@@ -3898,6 +3916,15 @@ function goRecvC(start, at) {
     }
     var h = t.substring(0, stHeadLen(t))
     return {head: h, hty: h == "" ? "" : cTyLookup(h), loc: h != "" && cIsLocal(h), text: t}
+}
+// The type T of a method expression `T.M` or `(*T).M` whose receiver text is rc,
+// or "": its call T.M(r, args) is r.M(args) (Go spec "Method expressions").
+function goMethExprTy(rc) {
+    if (rc == null || rc.loc || rc.hty != "") { return "" }
+    var t = rc.text
+    if (t.length > 3 && t.substring(0, 2) == "(*" && t.charAt(t.length - 1) == ")") { t = t.substring(2, t.length - 1) }
+    if (t == "" || stHeadLen(t) != t.length) { return "" }
+    return (goStructTyName(t) != "" || goIsDefTy(t)) ? t : ""
 }
 // How rc.M() is called: null for an ordinary method call, else {fn: "T.M" (or ""
 // when several defined types declare M), ty: T, ptr, dyn}. dyn = the static type

@@ -568,7 +568,10 @@ function gfGoSyn(f, v, slot, depth) {
     var k = gfHKind(v)
     if (k == "struct" && gfHIsDt(v)) {
         var dv = gfHDtVal(v)
-        if (gfTypeName(v).charAt(0) == "*" && gfHKind(dv) == "struct") { return "&" + gfGoSyn(f, dv, slot, depth) }
+        var bt = gfTypeName(v)
+        if (bt.charAt(0) == "*" && gfHKind(dv) == "struct") { return "&" + gfGoSyn(f, dv, slot, depth) }
+        // An array boxed for its element type is spelled by the box's type.
+        if (bt.charAt(0) == "[" && gfHKind(dv) == "list" && gfHIsArray(dv)) { return gfGoSynList(f, dv, bt, depth) }
         return gfGoSyn(f, dv, slot, depth)
     }
     if (k == "nil") {
@@ -601,20 +604,7 @@ function gfGoSyn(f, v, slot, depth) {
         }
         return out + "}"
     }
-    if (k == "list") {
-        var arr = gfHIsArray(v)
-        if (!arr && gfHRef(v)[0] === null) { return (ty == "[]uint8" && depth == 0 ? "[]byte" : ty) + "(nil)" }
-        var et = ty.substring(ty.indexOf("]") + 1)
-        var outl = (ty == "[]uint8" && depth == 0 ? "[]byte" : ty) + "{"
-        var es = gfHElems(v)
-        var j = 0
-        while (j < es.length) {
-            if (j > 0) { outl = outl + ", " }
-            outl = outl + gfGoSyn(f, es[j], et, depth + 1)
-            j = j + 1
-        }
-        return outl + "}"
-    }
+    if (k == "list") { return gfGoSynList(f, v, ty, depth) }
     if (k == "map") {
         if (gfHRef(v)[0] === null) { return ty + "(nil)" }
         var kt = gfMapKeyTy(ty)
@@ -631,6 +621,21 @@ function gfGoSyn(f, v, slot, depth) {
     }
     if (gfHChanTy(v) != "") { return "(" + ty + ")(" + gfHStr(v) + ")" }
     return gfHStr(v)
+}
+
+// A slice or an array v of type ty under %#v.
+function gfGoSynList(f, v, ty, depth) {
+    if (!gfHIsArray(v) && gfHRef(v)[0] === null) { return (ty == "[]uint8" && depth == 0 ? "[]byte" : ty) + "(nil)" }
+    var et = ty.substring(ty.indexOf("]") + 1)
+    var outl = (ty == "[]uint8" && depth == 0 ? "[]byte" : ty) + "{"
+    var es = gfHElems(v)
+    var j = 0
+    while (j < es.length) {
+        if (j > 0) { outl = outl + ", " }
+        outl = outl + gfGoSyn(f, es[j], et, depth + 1)
+        j = j + 1
+    }
+    return outl + "}"
 }
 
 // A nil in a slot of the given type: interface {}(nil), (*main.T)(nil),

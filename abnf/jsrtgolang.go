@@ -663,13 +663,42 @@ func (rt *jsrt) gopFormat(format string, args []interface{}, wrap *[]int) string
 	return out.String()
 }
 
+// gopGoSynList is gfGoSynList in languages/lib/go-fmt.js: a slice or an array v
+// of type ty under %#v.
+func (rt *jsrt) gopGoSynList(f gopFlags, v interface{}, ty string, depth int) string {
+	es, _, isArr := rt.gopListParts(v)
+	et := ty[strings.IndexByte(ty, ']')+1:]
+	// A []byte operand spells its type []byte, an element or field []uint8.
+	if ty == "[]uint8" && depth == 0 {
+		ty = "[]byte"
+	}
+	if !isArr && giIsNilZero(v) {
+		return ty + "(nil)"
+	}
+	var b strings.Builder
+	b.WriteString(ty + "{")
+	for i, e := range es {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(rt.gopGoSyn(f, e, et, depth+1))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
 // gopGoSyn is gfGoSyn in languages/lib/go-fmt.js: %#v, v as a Go literal of its
 // type, slot being the type the enclosing composite declares for it.
 func (rt *jsrt) gopGoSyn(f gopFlags, v interface{}, slot string, depth int) string {
 	if dv, ok := goDtVal(v); ok {
 		dv = rt.goDtShown(v, dv)
-		if strings.HasPrefix(rt.gopTypeName(v), "*") && gopKind(dv) == "struct" {
+		bt := rt.gopTypeName(v)
+		if strings.HasPrefix(bt, "*") && gopKind(dv) == "struct" {
 			return "&" + rt.gopGoSyn(f, dv, slot, depth)
+		}
+		// An array boxed for its element type is spelled by the box's type.
+		if _, isArr := dv.(*jsArray); isArr && strings.HasPrefix(bt, "[") {
+			return rt.gopGoSynList(f, dv, bt, depth)
 		}
 		return rt.gopGoSyn(f, dv, slot, depth)
 	}
@@ -728,24 +757,7 @@ func (rt *jsrt) gopGoSyn(f gopFlags, v interface{}, slot string, depth int) stri
 		b.WriteByte('}')
 		return b.String()
 	case "list":
-		es, _, isArr := rt.gopListParts(v)
-		et := ty[strings.IndexByte(ty, ']')+1:]
-		// A []byte operand spells its type []byte, an element or field []uint8.
-		if ty == "[]uint8" && depth == 0 {
-			ty = "[]byte"
-		}
-		if !isArr && giIsNilZero(v) {
-			return ty + "(nil)"
-		}
-		b.WriteString(ty + "{")
-		for i, e := range es {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(rt.gopGoSyn(f, e, et, depth+1))
-		}
-		b.WriteByte('}')
-		return b.String()
+		return rt.gopGoSynList(f, v, ty, depth)
 	case "map":
 		if giIsNilZero(v) {
 			return ty + "(nil)"
