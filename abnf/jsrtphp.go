@@ -2743,35 +2743,82 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 	case string:
 		return pad + "string(" + strconv.Itoa(len(phpRaw(t))) + ") \"" + t + "\"\n"
 	}
-	if keys, vals, ok := phpArrParts(v); ok {
-		out := pad + "array(" + strconv.Itoa(len(keys.elems)) + ") {\n"
-		for i := range keys.elems {
-			out += rt.phpDumpKey(keys.elems[i], ind+2)
-			out += rt.phpDump(phpDeref(vals.elems[i]), ind+2)
+	keys, vals, isArr := phpArrParts(v)
+	if !isArr {
+		if fr := phpFnRec(v); fr != nil {
+			return phpCloDump(rt.phpStr(fr.props["fd"]), rt.phpFnID(fr), ind, nil, "")
 		}
-		return out + pad + "}\n"
 	}
-	if fr := phpFnRec(v); fr != nil {
-		return phpCloDump(rt.phpStr(fr.props["fd"]), rt.phpFnID(fr), ind, nil, "")
-	}
-	if phpIsObj(v) || phpLitRec(v) != nil || phpFakeRec(v) != nil {
+	if isArr || phpIsObj(v) || phpLitRec(v) != nil || phpFakeRec(v) != nil {
 		for _, d := range phpDumping[rt] {
 			if d == v {
 				return pad + "*RECURSION*\n"
 			}
 		}
 		phpDumping[rt] = append(phpDumping[rt], v)
-		out := rt.phpDumpObj(v, ind, pad)
+		var out string
+		if isArr {
+			out = pad + "array(" + strconv.Itoa(len(keys.elems)) + ") {\n"
+			for i := range keys.elems {
+				out += rt.phpDumpKey(keys.elems[i], ind+2)
+				out += rt.phpDumpSlot(vals.elems[i], ind+2)
+			}
+			out += pad + "}\n"
+		} else {
+			out = rt.phpDumpObj(v, ind, pad)
+		}
 		phpDumping[rt] = phpDumping[rt][:len(phpDumping[rt])-1]
 		return out
 	}
 	return pad + "NULL\n"
 }
 
-// phpDumping holds the objects (and closures) var_dump is inside of: one reached
-// again prints *RECURSION* (php_var_dump's Z_IS_RECURSIVE). Twin of dumping in
-// php-interpreter.abnf and phDumping in lib/php-rt.metajs.
+// phpDumping holds the arrays, objects and closures var_dump is inside of: one
+// reached again prints *RECURSION* (php_var_dump's GC_IS_RECURSIVE /
+// Z_IS_RECURSIVE). Twin of dumping in php-interpreter.abnf and phDumping in
+// lib/php-rt.metajs.
 var phpDumping = map[*jsrt][]interface{}{}
+
+// phpDumpShared counts the slots of the value being dumped that hold each
+// reference cell: one held by more than one prints as &value (php_var_dump's
+// COMMON, Z_REFCOUNT > 1), except as *RECURSION*. Twin of dumpSlot and
+// dumpSharedCells in php-interpreter.abnf, phDumpSlot / phDumpCells in
+// lib/php-rt.metajs.
+var phpDumpShared = map[*jsrt]map[*jsObject]int{}
+
+func (rt *jsrt) phpDumpSlot(x interface{}, ind int) string {
+	s := rt.phpDump(phpDeref(x), ind)
+	if c := phpCellOf(x); c != nil && phpDumpShared[rt][c] > 1 && s[ind] != '*' {
+		return s[:ind] + "&" + s[ind:]
+	}
+	return s
+}
+
+func phpDumpCells(v interface{}, cells map[*jsObject]int, seen map[interface{}]bool) {
+	var vals []interface{}
+	if _, vs, ok := phpArrParts(v); ok {
+		vals = vs.elems
+	} else if phpIsObj(v) {
+		o := v.(*jsObject)
+		for _, k := range o.keys {
+			if !phpHiddenProp(k) {
+				vals = append(vals, o.props[k])
+			}
+		}
+	} else {
+		return
+	}
+	if seen[v] {
+		return
+	}
+	seen[v] = true
+	for _, x := range vals {
+		if c := phpCellOf(x); c != nil {
+			cells[c]++
+		}
+		phpDumpCells(phpDeref(x), cells, seen)
+	}
+}
 
 func (rt *jsrt) phpDumpObj(v interface{}, ind int, pad string) string {
 	if phpIsObj(v) {
@@ -2808,7 +2855,7 @@ func (rt *jsrt) phpDumpObj(v interface{}, ind int, pad string) string {
 				out += pad + "  uninitialized(" + t + ")\n"
 				continue
 			}
-			out += rt.phpDump(phpDeref(o.props[k]), ind+2)
+			out += rt.phpDumpSlot(o.props[k], ind+2)
 		}
 		return out + pad + "}\n"
 	}
@@ -4716,7 +4763,11 @@ func init() {
 		}
 		m["js_phsetchk"] = propChk("assign")
 		m["js_phmodchk"] = propChk("modify")
-		m["js_phdump"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDump(u(a[0]), 0)) }
+		m["js_phdump"] = func(a []uint64) uint64 {
+			phpDumpShared[rt] = map[*jsObject]int{}
+			phpDumpCells(u(a[0]), phpDumpShared[rt], map[interface{}]bool{})
+			return rt.wrapStr(rt.phpDump(u(a[0]), 0))
+		}
 		// The slow halves of a property access, for a name some class restricts or
 		// types and for a miss with a magic method about: (o, key, scope[, ...]),
 		// scope being the running class (null outside one) or true for an access the

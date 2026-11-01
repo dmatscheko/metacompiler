@@ -1956,36 +1956,86 @@ function phDump(v, ind) {
     if (phIsInt(v)) { return pad + "int(" + phStr(v) + ")\n" }
     if (typeof v == "string") { return pad + "string(" + phsLen(v) + ") \"" + v + "\"\n" }
     var p = phArrParts(v)
-    if (p !== undefined) {
-        var out = pad + "array(" + p.k.length + ") {\n"
-        var i = 0
-        while (i < p.k.length) {
-            out = out + phDumpKey(p.k[i], ind + 2)
-            out = out + phDump(phDeref(p.v[i]), ind + 2)
-            i = i + 1
-        }
-        return out + pad + "}\n"
+    if (p === undefined) {
+        var fr = phFnRec(v)
+        if (fr !== undefined) { return phsCloDump(fr["fd"], phStr(phFnID(fr)), ind, [], "") }
     }
-    var fr = phFnRec(v)
-    if (fr !== undefined) { return phsCloDump(fr["fd"], phStr(phFnID(fr)), ind, [], "") }
-    if (phIsObj(v) || phCloRec(v) !== undefined || phFakeRec(v) !== undefined) {
+    if (p !== undefined || phIsObj(v) || phCloRec(v) !== undefined || phFakeRec(v) !== undefined) {
         var di = 0
         while (di < phDumping.length) {
             if (phDumping[di] === v) { return pad + "*RECURSION*\n" }
             di = di + 1
         }
         phDumping.push(v)
-        var dv = phDumpObj(v, ind, pad)
+        var dv = ""
+        if (p !== undefined) { dv = phDumpArr(p, ind, pad) } else { dv = phDumpObj(v, ind, pad) }
         phDumping.pop()
         return dv
     }
     return pad + "NULL\n"
 }
 
-// The objects (and closures) var_dump is inside of: one reached again prints
-// *RECURSION* (php_var_dump's Z_IS_RECURSIVE). Twin of dumping in
-// php-interpreter.abnf and phpDumping in abnf/jsrtphp.go.
+function phDumpArr(p, ind, pad) {
+    var out = pad + "array(" + p.k.length + ") {\n"
+    var i = 0
+    while (i < p.k.length) {
+        out = out + phDumpKey(p.k[i], ind + 2)
+        out = out + phDumpSlot(p.v[i], ind + 2)
+        i = i + 1
+    }
+    return out + pad + "}\n"
+}
+
+// The arrays, objects and closures var_dump is inside of: one reached again
+// prints *RECURSION* (php_var_dump's GC_IS_RECURSIVE / Z_IS_RECURSIVE). Twin of
+// dumping in php-interpreter.abnf and phpDumping in abnf/jsrtphp.go.
 var phDumping = []
+
+// An element or property slot: a reference held by more than one slot of the
+// dumped value prints as &value. Twin of dumpSlot in php-interpreter.abnf.
+function phDumpSlot(x, ind) {
+    var s = phDump(phDeref(x), ind)
+    if (phCellOf(x) === undefined || s.substring(ind, ind + 1) == "*") { return s }
+    var n = 0
+    var k = 0
+    while (k < phDumpShared.length) {
+        if (phDumpShared[k] === x) { n = n + 1 }
+        k = k + 1
+    }
+    if (n < 2) { return s }
+    return s.substring(0, ind) + "&" + s.substring(ind)
+}
+
+// The reference cells held by the slots of the value being dumped, each
+// container walked once. Twin of dumpSharedCells in php-interpreter.abnf.
+var phDumpShared = []
+
+function phDumpCells(v, cells, seen) {
+    var vals = []
+    var p = phArrParts(v)
+    if (p !== undefined) { vals = p.v }
+    else if (phIsObj(v)) {
+        var names = keysOf(v)
+        var j = 0
+        while (j < names.length) {
+            vals.push(v[names[j]])
+            j = j + 1
+        }
+    }
+    else { return }
+    var i = 0
+    while (i < seen.length) {
+        if (seen[i] === v) { return }
+        i = i + 1
+    }
+    seen.push(v)
+    var e = 0
+    while (e < vals.length) {
+        if (phCellOf(vals[e]) !== undefined) { cells.push(vals[e]) }
+        phDumpCells(phDeref(vals[e]), cells, seen)
+        e = e + 1
+    }
+}
 
 function phDumpObj(v, ind, pad) {
     if (phIsObj(v)) {
@@ -2018,7 +2068,7 @@ function phDumpObj(v, ind, pad) {
                 else if (vis != "") { mark = ":\"" + vis + "\":private" }
                 oout = oout + pad + "  [\"" + pname + "\"" + mark + "]=>\n"
                 if (raw === undefined) { oout = oout + pad + "  uninitialized(" + d["typ"] + ")\n" }
-                else { oout = oout + phDump(phDeref(raw), ind + 2) }
+                else { oout = oout + phDumpSlot(raw, ind + 2) }
             }
             j = j + 1
         }
@@ -3562,7 +3612,11 @@ function phPropChk(verb, o, k) {
 }
 function js_phsetchk(o, k) { return phPropChk("assign", o, k) }
 function js_phmodchk(o, k) { return phPropChk("modify", o, k) }
-function js_phdump(v) { return phDump(v, 0) }
+function js_phdump(v) {
+    phDumpShared = []
+    phDumpCells(v, phDumpShared, [])
+    return phDump(v, 0)
+}
 
 // method_exists over the __mlc lists of the class chain; v is an object, a class
 // descriptor or null. Twin of phpMethodExists in languages/php-interpreter.abnf.

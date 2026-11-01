@@ -7572,7 +7572,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "gettype": function(v) { return phpTypeName(v) },
         "get_debug_type": function(v) { return phpDebugType(v) },
         "var_dump": function() {
-            for (var i = 0; i < arguments.length; i++) { phsEcho(dumpOf(arguments[i], 0)) }
+            for (var i = 0; i < arguments.length; i++) {
+                dumpShared = dumpSharedCells(arguments[i])
+                phsEcho(dumpOf(arguments[i], 0))
+            }
             return null
         }
     }
@@ -8128,29 +8131,59 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isInt(v)) { return pad + "int(" + phpStr(v) + ")\n" }
         if (isFlo(v)) { return pad + "float(" + floDump(v.f) + ")\n" }
         if (typeof v == "string") { return pad + "string(" + phsLen(v) + ") \"" + v + "\"\n" }
-        if (isArr(v)) {
-            var out = pad + "array(" + v.keys.length + ") {\n"
-            for (var i = 0; i < v.keys.length; i++) {
-                out += dumpKey(v.keys[i], ind + 2)
-                out += dumpOf(deref(v.vals[i]), ind + 2)
-            }
-            return out + pad + "}\n"
-        }
-        if (isObj(v) || cloRecOf(v) != null || fnRecOf(v) != null || fakeRecOf(v) != null) {
+        if (isArr(v) || isObj(v) || cloRecOf(v) != null || fnRecOf(v) != null || fakeRecOf(v) != null) {
             for (var di = 0; di < dumping.length; di++) {
                 if (dumping[di] === v) { return pad + "*RECURSION*\n" }
             }
             dumping.push(v)
-            var dv = dumpObj(v, ind, pad)
+            var dv = isArr(v) ? dumpArr(v, ind, pad) : dumpObj(v, ind, pad)
             dumping.pop()
             return dv
         }
         return pad + "NULL\n"
     }
-    // The objects (and closures) var_dump is inside of: one reached again prints
-    // *RECURSION* (php_var_dump's Z_IS_RECURSIVE). Twin of phDumping in
-    // lib/php-rt.metajs and phpDumping in abnf/jsrtphp.go.
+    function dumpArr(v, ind, pad) {
+        var out = pad + "array(" + v.keys.length + ") {\n"
+        for (var i = 0; i < v.keys.length; i++) {
+            out += dumpKey(v.keys[i], ind + 2)
+            out += dumpSlot(v.vals[i], ind + 2)
+        }
+        return out + pad + "}\n"
+    }
+    // The arrays, objects and closures var_dump is inside of: one reached again
+    // prints *RECURSION* (php_var_dump's GC_IS_RECURSIVE / Z_IS_RECURSIVE). Twin
+    // of phDumping in lib/php-rt.metajs and phpDumping in abnf/jsrtphp.go.
     var dumping = []
+    // An element or property slot. A reference held by more than one slot prints
+    // as &value (php_var_dump's COMMON: Z_REFCOUNT > 1), but not *RECURSION*. No
+    // engine counts a reference's holders, so the count is taken over the dumped
+    // value alone (dumpSharedCells): a lower bound that misses a holder outside it.
+    function dumpSlot(x, ind) {
+        var s = dumpOf(deref(x), ind)
+        if (!isRef(x) || s.substring(ind, ind + 1) == "*") { return s }
+        var n = 0
+        for (var k = 0; k < dumpShared.length; k++) { if (dumpShared[k] === x) { n++ } }
+        return n < 2 ? s : s.substring(0, ind) + "&" + s.substring(ind)
+    }
+    // The reference cells held by the slots of v's arrays and objects, each
+    // container walked once. Twin of phDumpCells in lib/php-rt.metajs and
+    // phpDumpCells in abnf/jsrtphp.go.
+    var dumpShared = []
+    function dumpSharedCells(v) {
+        var cells = []
+        dumpCells(v, cells, [])
+        return cells
+    }
+    function dumpCells(v, cells, seen) {
+        var vals = isArr(v) ? v.vals : isObj(v) ? v.p.vals : null
+        if (vals == null) { return }
+        for (var i = 0; i < seen.length; i++) { if (seen[i] === v) { return } }
+        seen.push(v)
+        for (var j = 0; j < vals.length; j++) {
+            if (isRef(vals[j])) { cells.push(vals[j]) }
+            dumpCells(deref(vals[j]), cells, seen)
+        }
+    }
     function dumpObj(v, ind, pad) {
         if (isObj(v)) {
             var name = v.__class == null ? "stdClass" : v.__class.__name
@@ -8170,7 +8203,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (pv == "") { o2 += dumpKey(pn, ind + 2) }
                 else { o2 += dumpInd(ind + 2) + "[\"" + pn + "\":" + (pv == "*" ? "protected" : "\"" + pv + "\":private") + "]=>\n" }
                 if (v.p.vals[j] === undefined) { o2 += dumpInd(ind + 2) + "uninitialized(" + pd.typ + ")\n" }
-                else { o2 += dumpOf(deref(v.p.vals[j]), ind + 2) }
+                else { o2 += dumpSlot(v.p.vals[j], ind + 2) }
             }
             return o2 + pad + "}\n"
         }

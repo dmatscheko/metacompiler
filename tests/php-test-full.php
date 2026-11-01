@@ -4449,6 +4449,28 @@ function s80() {
     $z = null;
     check("ns1", $o?->{$s . "bar"} === 7 && $z?->{$s . "bar"} === null && $z?->{$s}() === null);
 }
+// var_dump of an array that holds a reference to itself prints *RECURSION* where
+// it re-enters that array, and a reference slot held twice prints &: the lines
+// below are php-src's tests/bug35163, bug35163_2 and bug35163_3 EXPECT blocks.
+function s80dump() {
+    $a = array(array(1));
+    $a[0][] =& $a[0];
+    $a[0][] =& $a[0];
+    $a[0][0] = 2;
+    var_dump($a);
+    $b = array(1);
+    $b[] =& $b;
+    $b[] =& $b;
+    $b[0] = 2;
+    var_dump($b);
+    $c = new stdClass;
+    $c->b = array(1);
+    $c->b[] =& $c->b;
+    $c->b[] =& $c->b;
+    $c->b[0] = 2;
+    var_dump($c);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -4540,6 +4562,7 @@ function main() {
     s78(); // SECTION-CALL 78
     s79(); // SECTION-CALL 79
     s80(); // SECTION-CALL 80
+    s80dump(); // SECTION-CALL 80
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
