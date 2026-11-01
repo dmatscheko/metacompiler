@@ -3152,13 +3152,17 @@ KwContract  = "contract" KwEnd ;
         // - `inline fun <reified T> Any.isA() = this is T`, then
         // `"x".isA<String>()`. makeCall appends the type names for the plain
         // call form; this is the same convention for the method-suffix form:
-        // per reified parameter, in declaration order, its name and its class (the
-        // class literals foldCallMember prepared where the call was walked).
-        var exr = reifiedExtra(s.name, s.targ)
-        for (var xi = 0; xi < exr.length; xi++) {
-            callExt(b, "js_arr_push", [eargsV, emitStr(b, exr[xi])])
-            var xk = (s.tkls != undefined && xi < s.tkls.length) ? s.tkls[xi] : reifiedKClass("Any")
-            var xkr = xk(b)
+        // per reified parameter, in declaration order, its name and its class (as
+        // foldCallMember prepared them where the call was walked). A callee with none
+        // contributes nothing.
+        var exr = reifiedFuns["$" + s.name]
+        var exn = exr == undefined ? 0 : exr.length
+        for (var xi = 0; xi < exn; xi++) {
+            var has = s.tkls != undefined && xi < s.tkls.length
+            var xnr = (has ? s.tisn[xi] : makeIsNameConst("Any"))(b)
+            b = xnr.b
+            callExt(b, "js_arr_push", [eargsV, xnr.v])
+            var xkr = (has ? s.tkls[xi] : reifiedKClass("Any"))(b)
             b = xkr.b
             callExt(b, "js_arr_push", [eargsV, xkr.v])
         }
@@ -3227,17 +3231,6 @@ KwContract  = "contract" KwEnd ;
         if (cut >= 0) { s = s.substring(0, cut) }
         return s
     }
-    // The trailing string arguments a callee's REIFIED type parameters want, in
-    // declaration order. A callee with none contributes nothing, so the emitted IR of a
-    // program that declares no reified function is unchanged.
-    function reifiedExtra(name, targText) {
-        var reified = reifiedFuns["$" + name]
-        if (reified == undefined) { return [] }
-        var targs = (targText == undefined || targText == null || targText == "") ? [] : typeArgNames(targText)
-        var out = []
-        for (var ri = 0; ri < reified.length; ri++) { out.push(targs.length > ri ? ktIsName(targs[ri]) : "Any") }
-        return out
-    }
     // The trailing string argument a method call's type arguments contribute, or null:
     // the type name as an `is` test judges it (ktIsName).
     function mcallTArg(s) {
@@ -3290,6 +3283,12 @@ KwContract  = "contract" KwEnd ;
     // The class is marked rbox: a reified type argument's class is the BOXED one on
     // the JVM, so `T::class.java` of T = Int is java.lang.Integer (ktKClassJava in
     // abnf/jsrtkotlin.go). Twin of kReifiedBoxed in kotlin-interpreter.abnf.
+    // A reified type argument's `is` name: the caller's own reified T hands on the
+    // name it received. Twin of kFwdIsNames in kotlin-interpreter.abnf.
+    function reifiedIsName(t) {
+        if (!isReifiedHere(t)) { return makeIsNameConst(t) }
+        return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, reifiedSlot(t))])} }
+    }
     function reifiedKClass(t) {
         var lit = makeQualRef(ktTArgBase(t), "class")
         return function(b) {
@@ -4524,15 +4523,21 @@ KwContract  = "contract" KwEnd ;
         } else if (suffixes[0].kind == "index") {
             ktAdoptIdxSfx(suffixes[0], ktLeadType(txt, "["))
         }
-        // A reified extension's type arguments as class literals, made here, where a
-        // type argument that is the enclosing function's reified T is still known.
+        // A reified extension's type arguments as `is` names and class literals, made
+        // here, where a type argument that is the enclosing function's reified T is
+        // still known.
         for (var tk = 0; tk < suffixes.length; tk++) {
             var tks = suffixes[tk]
             if (tks.kind != "mcall" || tks.targ == undefined || tks.targ == null || tks.targ == "") { continue }
             var tkn = typeArgNames(tks.targ)
             var tkl = []
-            for (var tki = 0; tki < tkn.length; tki++) { tkl.push(reifiedKClass(tkn[tki])) }
+            var tkis = []
+            for (var tki = 0; tki < tkn.length; tki++) {
+                tkis.push(reifiedIsName(tkn[tki]))
+                tkl.push(reifiedKClass(tkn[tki]))
+            }
             tks.tkls = tkl
+            tks.tisn = tkis
         }
         // A call or an index after a run of member reads - `b.xs.add(3)`, `b.m[1]` -
         // takes the last member's declared type, and a javaClass read judges its
@@ -5310,37 +5315,44 @@ KwContract  = "contract" KwEnd ;
         var targs = []
         if (items[at] != undefined && items[at].targs != undefined) { targs = typeArgNames(items[at].targs); at++ }
         var args = items.slice(at)
-        // A callee with reified type parameters gets each type argument appended twice,
-        // in declaration order: its name as an `is` test judges it, and its class.
-        var reified = reifiedFuns["$" + name]
-        if (reified != undefined) {
-            var inf = (targs.length == 0 && from !== undefined) ? ktInferTArgs(name, from, to) : null
-            for (var ri = 0; ri < reified.length; ri++) {
-                var rta = targs.length > ri ? targs[ri] : "Any"
-                if (inf != null) {
-                    var gtps = ktGenerics["$" + name].tps
-                    for (var gi = 0; gi < gtps.length; gi++) { if (gtps[gi] == reified[ri]) { rta = inf[gi] } }
-                }
-                args = args.concat([{at: makeIsNameConst(rta)}])
-                args = args.concat([{at: reifiedKClass(rta)}])
-            }
-        }
         // A builder call's static type, and its elements retyped by the explicit type
         // arguments (listOf<Long>(1, 2)).
         var bty = (classNames[name] == undefined && funNames["$" + name] != true) ? ktBuilderType(name, targs) : ""
-        var body = makeCallBody(name, args)
-        // A generic function or class called with explicit type arguments -
-        // ident<Long>(5) - retypes the literals its parameter types fix, read at emit
-        // time (the declaration may come later in the file).
-        if (targs.length > 0) {
-            var direct = body
-            var pending = true
-            body = function(b) {
-                if (pending) { ktAdoptGenericArgs(name, targs, args); pending = false }
-                return direct(b)
+        var direct = makeCallBody(name, args)
+        // The callee's reified type arguments, and a generic's literals retyped by its
+        // explicit type arguments - ident<Long>(5) - are read at emit time, because
+        // the declaration may come later in the file.
+        var rctx = reifiedTop()
+        var pending = true
+        var body = function(b) {
+            if (pending) {
+                ktReifiedArgs(name, targs, args, from, to, rctx)
+                if (targs.length > 0) { ktAdoptGenericArgs(name, targs, args) }
+                pending = false
             }
+            return direct(b)
         }
         return ktAdoptThunk(body, bty)
+    }
+    // A callee with reified type parameters gets each type argument appended to args
+    // twice, in declaration order: its name as an `is` test judges it, and its class.
+    // rctx is the reified context of the function the call sits in, so a type
+    // argument that is the caller's own reified T hands on what the caller received.
+    function ktReifiedArgs(name, targs, args, from, to, rctx) {
+        var reified = reifiedFuns["$" + name]
+        if (reified == undefined) { return }
+        reifiedStack.push(rctx)
+        var inf = (targs.length == 0 && from !== undefined) ? ktInferTArgs(name, from, to) : null
+        for (var ri = 0; ri < reified.length; ri++) {
+            var rta = targs.length > ri ? targs[ri] : "Any"
+            if (inf != null) {
+                var gtps = ktGenerics["$" + name].tps
+                for (var gi = 0; gi < gtps.length; gi++) { if (gtps[gi] == reified[ri]) { rta = inf[gi] } }
+            }
+            args.push({at: reifiedIsName(rta)})
+            args.push({at: reifiedKClass(rta)})
+        }
+        reifiedStack.pop()
     }
     function ktAdoptGenericArgs(name, targs, args) {
         var n = 0

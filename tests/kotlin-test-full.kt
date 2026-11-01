@@ -7077,6 +7077,39 @@ fun s160() {
         o::class.java.simpleName == "")
 }
 
+// ===== SECTION 161: reified calls of functions declared later =====
+// A reified callee may be declared after its caller: the call still hands over
+// its type arguments, explicit or inferred from the argument, for `is T` and
+// `T::class`, in the plain, extension and member forms. A type argument that is
+// the caller's own reified T is judged as the caller's type argument (kotlinc
+// 2.2.21 on java 24).
+inline fun <reified T : Any> out161(x: T) = in161<String>()
+inline fun <reified T : Any> fwd161(x: T) = in161<T>()
+inline fun <reified T : Any> inf161(x: T) = g161(listOf(x)) + "/" + g161(x)
+fun pl161(a: Any) = is161<Int>(a)
+inline fun <reified T> fis161(a: Any) = is161<T>(a)
+fun ext161(a: Any) = "" + a.isA161<Int>() + "/" + a.cls161<Long>()
+inline fun <reified T> efw161(a: Any) = a.isA161<T>()
+class B161 {
+    fun early(a: Any) = later<Int>(a)
+    fun earlyCls() = laterCls<Double>()
+    inline fun <reified T> later(a: Any) = a is T
+    inline fun <reified T : Any> laterCls() = T::class.simpleName
+}
+inline fun <reified T : Any> in161() = T::class.simpleName
+inline fun <reified T : Any> g161(x: T) = T::class.simpleName + " " + (x is T) + " " + ("q" is T)
+inline fun <reified T> is161(a: Any) = a is T
+inline fun <reified T> Any.isA161() = this is T
+inline fun <reified T : Any> Any.cls161() = T::class.simpleName
+fun s161() {
+    check("fwd161a", out161(1) == "String" && fwd161(1) == "Int" && fwd161("s") == "String")
+    check("fwd161b", inf161(2) == "List true false/Int true false" && inf161("a") == "List true false/String true true")
+    check("fwd161c", pl161(3) && !pl161("x") && fis161<Int>(4) && !fis161<String>(4))
+    check("fwd161d", ext161(5) == "true/Long" && ext161("y") == "false/Long" && efw161<String>("z") && !efw161<Int>("z"))
+    val b = B161()
+    check("fwd161e", b.early(7) && !b.early("w") && b.earlyCls() == "Double")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7234,6 +7267,7 @@ fun main() {
     s158() // SECTION-CALL 158
     s159() // SECTION-CALL 159
     s160() // SECTION-CALL 160
+    s161() // SECTION-CALL 161
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

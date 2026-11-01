@@ -9453,7 +9453,7 @@ NotMemberKw = :script(~~ "pure";
                     if (s.targ != undefined && s.targ != null && s.targ != "") {
                         if (s.tjudgedArgs === undefined) { s.tjudgedArgs = kIsNames(parseTypeArgs(s.targ), s.lex) }
                         if (s.tkinfo === undefined) { s.tkinfo = kTypeArgInfo(parseTypeArgs(s.targ), tpsW) }
-                        kTypeArgsPush(s.tjudgedArgs, s.tkinfo)
+                        kTypeArgsPush(kFwdIsNames(s.tjudgedArgs, s.tkinfo), s.tkinfo)
                         try { cur = mcall(cur, s.name, spec.pos, spec) } finally { kTypeArgsPop() }
                     } else {
                         cur = mcall(cur, s.name, spec.pos, spec)
@@ -10435,14 +10435,30 @@ NotMemberKw = :script(~~ "pure";
     function kTypeArgInfo(targs, tps) {
         var names = []
         var fwd = []
+        var anyFwd = false
         for (var i = 0; i < targs.length; i++) {
             var n = ktTArgBase(targs[i])
             var f = -1
             for (var j = 0; j < tps.length; j++) { if (tps[j] == n) { f = j } }
             names.push(n)
             fwd.push(f)
+            if (f >= 0) { anyFwd = true }
         }
-        return {names: names, fwd: fwd}
+        return {names: names, fwd: fwd, anyFwd: anyFwd}
+    }
+    // The `is` names a call site pushes (judged by kIsNames): a type argument that
+    // is the caller's own type parameter judges as the caller's type argument. Twin
+    // of reifiedIsName in kotlin-to-llvm-ir.abnf.
+    function kFwdIsNames(judged, info) {
+        if (info === null || info.anyFwd !== true) { return judged }
+        var top = kTypeArgsTop()
+        if (top === null) { return judged }
+        var out = []
+        for (var i = 0; i < judged.length; i++) {
+            var f = info.fwd[i]
+            out.push(f >= 0 && f < top.length ? top[f] : judged[i])
+        }
+        return out
     }
     // A reified type argument's class is the BOXED one on the JVM: `T::class.java` of
     // T = Int is java.lang.Integer where `Int::class.java` is int (kKClassJava). Twin
@@ -13331,11 +13347,9 @@ NotMemberKw = :script(~~ "pure";
             var rawT = items[1].targs
             targl = ktSplitTArgs(rawT.substring(1, rawT.length - 1))
             start = 2
-        } else if (at !== undefined) {
-            targs = ktInferTArgs(name, at, to)
         }
         var args = items.slice(start)
-        var body = makeCallBody(name, targs, args, kLexAt())
+        var body = makeCallBody(name, targs, args, kLexAt(), targs == null ? at : undefined, to)
         // A generic function or class called with explicit type arguments -
         // ident<Long>(5) - retypes the literals its parameter types fix, read when the
         // call first runs (the declaration may come later in the file).
@@ -13358,7 +13372,9 @@ NotMemberKw = :script(~~ "pure";
         if (tys == null) { return }
         for (var i = 0; i < tys.length; i++) { args[i] = kAdoptThunk(args[i], tys[i]) }
     }
-    function makeCallBody(name, targs, args, lex) {
+    // A call written without type arguments has them inferred (inferAt..inferTo is
+    // its source) when it first runs, because the callee may be declared later.
+    function makeCallBody(name, targs, args, lex, inferAt, inferTo) {
         var nkey = "$" + name
         var argc = args.length
         for (var ai = 0; ai < args.length; ai++) {
@@ -13366,8 +13382,15 @@ NotMemberKw = :script(~~ "pure";
         }
         var judgedT = anytype // targs resolved by kIsNames on the first call
         var tinfo = anytype // the reified `T::class` view of targs (kTypeArgInfo)
-        tinfo = targs == null ? null : kTypeArgInfo(targs, curTParams())
+        var tpsW = curTParams()
+        tinfo = targs == null ? null : kTypeArgInfo(targs, tpsW)
+        var inferPending = inferAt !== undefined
         return function() {
+            if (inferPending) {
+                targs = ktInferTArgs(name, inferAt, inferTo)
+                if (targs != null) { tinfo = kTypeArgInfo(targs, tpsW) }
+                inferPending = false
+            }
             var spec = kevalArgs(args)
             // THE SYNTACTIC POSITION. `first` is a PROPERTY of IntProgression and a
             // member FUNCTION of List, so the NAME cannot decide which read an
@@ -13401,7 +13424,7 @@ NotMemberKw = :script(~~ "pure";
             kNamedVals = spec.nvals
             if (targs == null) { return f.apply(undefined, spec.pos) }
             if (judgedT === undefined) { judgedT = kIsNames(targs, lex) }
-            kTypeArgsPush(judgedT, tinfo)
+            kTypeArgsPush(kFwdIsNames(judgedT, tinfo), tinfo)
             try { return f.apply(undefined, spec.pos) } finally { kTypeArgsPop() }
         }
     }
