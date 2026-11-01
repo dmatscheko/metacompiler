@@ -354,8 +354,11 @@ PatternAssign <~~ push(makePatternAssign(takeAll())) ~~>
 // errors here. Tried after every other assignment form, so it only sees what they could
 // not express.
 LhsAssign   <~~ push(makeLhsAssign(takeAll())) ~~>
-            = HasTopLevelAssign LhsHead LhsSuffixes ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
+            = HasTopLevelAssign LhsPlace ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
               | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+// Parentheses around the place are transparent ('([1].a) = v' assigns [1].a); they add
+// no item, so the builder sees the same head and suffixes as without them.
+LhsPlace    = LhsHead LhsSuffixes | "(" LhsPlace ")" [ LhsSuffixes ] ;
 LhsHead     <~~ push({lhsprim: pop(), ptxt: cpTxt(up.in, up.pos)}) ~~>
             = Primary ;
 // Zero or more calls, then a member, then optionally more of the same - so whatever the
@@ -650,9 +653,10 @@ NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
 // The callee of a 'new': anything a member expression can start with. 'new ["b"]' and
 // 'new function(){}' are as legal as 'new a.b()', so the literal and function forms
 // belong here too. The suffix chain belongs to the CALLEE and must not contain a call:
-// 'new f()' constructs f, it does not construct the result of calling f.
+// 'new f()' constructs f, it does not construct the result of calling f. A tagged
+// template IS part of the chain: 'new tag`x`' constructs what tag`x` returns.
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix | TaggedTemplate } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | "(" Expression ")" | FunctionExpr | ClassExpr
             | ArrayLit | ObjectLit | VarRef ;
 
@@ -3850,6 +3854,9 @@ NotFuncHead = :script(~~
         if (typeof v == "string") { return "[object String]" }
         if (typeof v == "boolean") { return "[object Boolean]" }
         if (typeof v == "function" || isClassDesc(v)) { return "[object Function]" }
+        // Symbol.prototype's and BigInt.prototype's own @@toStringTag.
+        if (jsIsSym(v)) { return "[object Symbol]" }
+        if (isBigInt(v)) { return "[object BigInt]" }
         // The objects node gives a @@toStringTag: an Error instance (its __errh mark),
         // a promise, a RegExp, and Math / JSON, which carry their tag in a hidden __strtag slot.
         if (typeof v == "object") {
@@ -4659,6 +4666,10 @@ NotFuncHead = :script(~~
     // The `Promise` global: a function value, so `new Promise(exec)` constructs one and
     // `typeof Promise` is "function". The executor runs SYNCHRONOUSLY.
     var jsPromiseFn = function(exec) {
+        // Only `new` arms new.target with Promise itself (ECMA-262 27.2.3.1 step 1).
+        // Twins: promiseGlobal in abnf/jsrt.go, js_jspromfn in languages/lib/js-rt.metajs.
+        if (pendingNewTarget !== jsPromiseFn) { biRaise("TypeError: Promise constructor cannot be invoked without 'new'") }
+        pendingNewTarget = undefined
         var p = jpNew()
         // biRaise, not fail: node THROWS this and a try/catch recovers it, where
         // fail is an engine abort no catch clause can see. The resolver's VALUE is
@@ -6696,7 +6707,7 @@ NotFuncHead = :script(~~
         // A class is a function, so Function.prototype's call and apply - node's
         // TypeError, a class being callable only through `new` - and bind, whose
         // bound function `new` constructs the class through (jsUnbind).
-        if (k == "call" || k == "apply") { return jsNativeFn(function() { jsClassCallErr(o) }, k, "") }
+        if (k == "call" || k == "apply") { return jsNativeFn(function() { return jsClassCall(o, jsClassShimArgs(k, arguments)) }, k, "") }
         if (k == "bind") { return jsNativeFn(fnBindShim(o), k, "") }
         // A class is a function, so its inherited `constructor` is Function.
         if (k == "constructor") { return jsFunctionFn }
@@ -7550,10 +7561,27 @@ NotFuncHead = :script(~~
             return callWithThis(fn, self, a)
         }
     }
-    // node's TypeError for a class called without `new`. Twin of js_jscallerr in
-    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
-    function jsClassCallErr(cls) {
+    // A class called without `new` (argv the arguments): node's TypeError, except for
+    // the builtins that are callable. An Error class constructs (ECMA-262 20.5.1.1
+    // step 1), and a class of lib/js-builtins.js answers through its OWN static
+    // __call, so a subclass of it is an ordinary class again. Twins: jsvClassCallNoNew in
+    // abnf/jsrtjsprint.go, jvClassCallNoNew in languages/lib/js-rt.metajs.
+    function jsClassCall(cls, argv) {
+        if (hasOwn(cls, "__errname")) { return jsConstructClass(cls, argv) }
+        var t = cls.__statics
+        if (t != undefined && hasOwn(t, "__call")) { return callWithThis(t.__call, undefined, argv) }
         biRaise("TypeError: Class constructor " + cls.__name + " cannot be invoked without 'new'")
+        return undefined
+    }
+    // The argument list of a class's own call / apply: (this, ...args) or (this, list).
+    function jsClassShimArgs(k, args) {
+        var a = []
+        if (k == "apply") {
+            if (args.length > 1 && Array.isArray(args[1])) { a = args[1] }
+        } else {
+            for (var i = 1; i < args.length; i++) { a.push(args[i]) }
+        }
+        return a
     }
     // bind() differs from call() in one way that matters here: the bound arguments are
     // PREPENDED to whatever the eventual call passes, and the receiver is remembered
@@ -7571,10 +7599,10 @@ NotFuncHead = :script(~~
             // the target's less the arguments already supplied, floored at 0 (node says
             // "bound f"/1 for `f.bind(null)` of `function f(a){}`).
             var bf = fnMetaPut(function() {
-                if (cd) { jsClassCallErr(fn) }
                 var a = []
                 for (var j = 0; j < pre.length; j++) { a.push(pre[j]) }
                 for (var k2 = 0; k2 < arguments.length; k2++) { a.push(arguments[k2]) }
+                if (cd) { return jsClassCall(fn, a) }
                 return callWithThis(fn, self, a)
             }, "bound " + (cd ? staticSideRead(fn, "name") : fnNameOf(fn)), bl)
             jsBoundK.push(bf)
@@ -8995,6 +9023,13 @@ NotFuncHead = :script(~~
         }
         return out
     }
+    // String#matchAll / #replaceAll given a RegExp without the g flag is a TypeError
+    // (ECMA-262 22.1.3.13 step 2.b). Twins: jsxNeedGlobal in abnf/jsrtregexjs.go,
+    // jxNeedGlobal in languages/lib/js-rt.metajs.
+    function reNeedGlobal(re, name) {
+        if (!re.global) { biRaise("TypeError: String.prototype." + name + " called with a non-global RegExp argument") }
+        return undefined
+    }
     // String#replace / #replaceAll: each match is replaced by the template's
     // substitution (jsReSubst) or by what the function answers for it.
     function reReplace(rv, s, repl, forceAll) {
@@ -9056,7 +9091,10 @@ NotFuncHead = :script(~~
                 var m = rxSearch(reProgOf(rv), target, 0)
                 return {v: (m == null) ? -1 : m.begin}
             }
-            if (name == "matchAll") { return {v: reMatchAll(rv, target, false)} }
+            if (name == "matchAll") {
+                if (isRegex(pat)) { reNeedGlobal(rv, name) }
+                return {v: reMatchAll(rv, target, false)}
+            }
             if (rv.global) {
                 var all = reMatchAll(rv, target, true)
                 return {v: (all.length == 0) ? null : all}
@@ -9065,7 +9103,10 @@ NotFuncHead = :script(~~
         }
         if (!isRegex(pat)) { return null }   // a plain-string argument keeps the host behaviour
         if (name == "replace") { return {v: reReplace(pat, target, args[1], false)} }
-        if (name == "replaceAll") { return {v: reReplace(pat, target, args[1], true)} }
+        if (name == "replaceAll") {
+            reNeedGlobal(pat, name)
+            return {v: reReplace(pat, target, args[1], true)}
+        }
         if (name == "split") {
             var lim = -1
             if (args.length > 1 && args[1] != undefined && args[1] != null) { lim = args[1] - 0 }
@@ -12274,8 +12315,9 @@ NotFuncHead = :script(~~
                 } else if (s.kind == "tagcall") {
                     // A tagged template: the tag gets the literal chunks first, then one
                     // argument per substitution.
-                    if (typeof cur != "function") { biRaise("TypeError: " + sTexts[i] + " is not a function") }
-                    cur = callWithThis(cur, curThis, tagArgs(s))
+                    if (cur != undefined && cur != null && isClassDesc(cur)) { cur = jsClassCall(cur, tagArgs(s)) }
+                    else if (typeof cur != "function") { biRaise("TypeError: " + sTexts[i] + " is not a function") }
+                    else { cur = callWithThis(cur, curThis, tagArgs(s)) }
                     curThis = undefined
                 } else {
                     var argv = evalArgs(s.args)
@@ -12311,10 +12353,10 @@ NotFuncHead = :script(~~
                     } else if (typeof cur == "function") {
                         cur = callWithThis(cur, curThis, argv)
                     } else {
-                        // A class called without `new` is node's own TypeError. Twin of
-                        // js_jscallerr in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
-                        if (cur != undefined && cur != null && isClassDesc(cur)) { jsClassCallErr(cur) }
-                        cur = mcall(curThis, lastKey, argv, sTexts[i])
+                        // A class called without `new` (jsClassCall). Twin of
+                        // jsvClassCallNoNew in abnf/jsrtjsprint.go and jvClassCallNoNew in languages/lib/js-rt.metajs.
+                        if (cur != undefined && cur != null && isClassDesc(cur)) { cur = jsClassCall(cur, argv) }
+                        else { cur = mcall(curThis, lastKey, argv, sTexts[i]) }
                     }
                     curThis = undefined
                 }
@@ -13029,7 +13071,7 @@ NotFuncHead = :script(~~
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
-            name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
+            name == "queueMicrotask" || name == "URIError" || name == "EvalError" || name == "encodeURIComponent" || name == "encodeURI" ||
             name == "decodeURIComponent" || name == "decodeURI" || name == "Uint8Array" || name == "ArrayBuffer") { jsbWant = true }
         if (name == "setTimeout" || name == "setInterval" || name == "clearTimeout" || name == "clearInterval") { jsTimerWant = true }
         if (name == "Date" || jsTimerWant) {

@@ -239,8 +239,7 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 	switch name {
 	case "call", "apply":
 		return rt.wrap(jsvNativeFn(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			rt.jsvClassCallErr(o)
-			return nil
+			return rt.jsvClassCallNoNew(o, jsvClassShimArgs(name, args))
 		}), name, 0))
 	case "bind":
 		return rt.wrap(jsvNativeFn(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -298,9 +297,15 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 		return "[object String]"
 	case bool:
 		return "[object Boolean]"
+	case *jsBigInt:
+		return "[object BigInt]"
 	}
 	if isCallable(v) || isClassDesc(v) {
 		return "[object Function]"
+	}
+	// Symbol.prototype's and BigInt.prototype's own @@toStringTag.
+	if jsvIsSym(v) {
+		return "[object Symbol]"
 	}
 	// The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
 	// promise, a RegExp, and Math / JSON, which carry their tag in a hidden __strtag slot.
@@ -754,6 +759,13 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 				p.set(key, dv)
 			}
 		} else {
+			// An array length must be a uint32 (ArraySetLength step 5): a catchable
+			// RangeError, as for `a.length = n` in js_jsmset.
+			if _, isArr := v.(*jsArray); isArr && key == "length" {
+				if n := rt.jsvToNum(dv); !(n >= 0 && n <= 4294967295 && n == math.Floor(n)) {
+					rt.bigRaise("RangeError: Invalid array length")
+				}
+			}
 			rt.setMember(v, key, dv)
 		}
 		return
@@ -1524,9 +1536,12 @@ func jsvAccHolder(o *jsObject, name string) (*jsObject, *jsAccessor) {
 			}
 			return nil, nil
 		}
-		if pv, hasView := c.props["__pview"].(*jsObject); hasView {
-			if acc, isAcc := pv.props[name].(*jsAccessor); isAcc {
-				return pv, acc
+		if pv, hasView := c.props["__pview"].(*jsObject); hasView && !jsvInternalKey(name) {
+			if v, found := pv.props[name]; found {
+				if acc, isAcc := v.(*jsAccessor); isAcc {
+					return pv, acc
+				}
+				return nil, nil
 			}
 		}
 		cls = c.props["__super"]
@@ -4281,10 +4296,11 @@ func (rt *jsrt) jsvBind(fn interface{}, args []interface{}) *hostFunc {
 	cls, isCls := fn.(*jsObject)
 	isCls = isCls && isClassDesc(cls)
 	bound := jsHostFunc("bound", func(rt *jsrt, this uint64, later []interface{}) interface{} {
+		all := append(append([]interface{}{}, pre...), later...)
 		if isCls {
-			rt.jsvClassCallErr(cls)
+			return rt.jsvClassCallNoNew(cls, all)
 		}
-		return rt.call(fn, self, append(append([]interface{}{}, pre...), later...))
+		return rt.call(fn, self, all)
 	})
 	// A bound function's own name is "bound " + the target's, and its length is the
 	// target's less the arguments already supplied, floored at 0 - node says
@@ -4303,11 +4319,37 @@ func (rt *jsrt) jsvBind(fn interface{}, args []interface{}) *hostFunc {
 	return bound
 }
 
-// jsvClassCallErr raises node's TypeError for a class called without `new`. Twins:
-// jsClassCallErr in both *-interpreter.abnf, js_jscallerr in languages/lib/js-rt.metajs.
-func (rt *jsrt) jsvClassCallErr(cls *jsObject) {
+// jsvClassCallNoNew is a class called without `new`: node's TypeError, except that an
+// Error class constructs and a class with an OWN static __call answers through it.
+// Twins: jsClassCall in both *-interpreter.abnf, jvClassCall in
+// languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvClassCallNoNew(cls *jsObject, args []interface{}) interface{} {
+	if _, has := cls.props["__errname"]; has {
+		return rt.jsvConstruct(cls, args)
+	}
+	if t := jsStaticsOf(cls, false); t != nil {
+		if f, has := t.props["__call"]; has {
+			return rt.call(f, jsUndef, args)
+		}
+	}
 	name, _ := cls.props["__name"].(string)
 	rt.bigRaise("TypeError: Class constructor %s cannot be invoked without 'new'", name)
+	return nil
+}
+
+// jsvClassShimArgs is the argument list of a class's own call / apply: (this,
+// ...args) or (this, list).
+func jsvClassShimArgs(name string, args []interface{}) []interface{} {
+	if name == "apply" {
+		if l, ok := argAt(args, 1).(*jsArray); ok {
+			return l.elems
+		}
+		return nil
+	}
+	if len(args) > 1 {
+		return args[1:]
+	}
+	return nil
 }
 
 // jsvMethod is the Go twin of `jsBuiltin` in languages/js-interpreter.abnf.
@@ -7649,15 +7691,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return m["js_jsmset"](a)
 	}
-	// The TypeError of a call of a value that is no function: (callee, site text).
-	// A class called without `new` has node's own words. Twins: js_jscallerr in
-	// languages/lib/js-rt.metajs, the call arm of both *-interpreter.abnf.
-	m["js_jscallerr"] = func(a []uint64) uint64 {
+	// A call of a value that is no function: (callee, site text, argument array).
+	// A class answers jsvClassCallNoNew; anything else is node's TypeError. Twins:
+	// js_jsbadcall in languages/lib/js-rt.metajs, the call arm of both
+	// *-interpreter.abnf.
+	m["js_jsbadcall"] = func(a []uint64) uint64 {
 		if cls, ok := u(a[0]).(*jsObject); ok && isClassDesc(cls) {
-			name, _ := cls.props["__name"].(string)
-			return w(rt.jsErrFromText("TypeError: Class constructor " + name + " cannot be invoked without 'new'"))
+			var args []interface{}
+			if l, isArr := u(a[2]).(*jsArray); isArr {
+				args = l.elems
+			}
+			return w(rt.jsvClassCallNoNew(cls, args))
 		}
-		return w(rt.jsErrFromText("TypeError: " + rt.toString(u(a[1])) + " is not a function"))
+		rt.bigRaise("TypeError: %s is not a function", rt.toString(u(a[1])))
+		return 0
 	}
 	// The AggregateError constructor body: (this, errors, message).
 	m["js_jsaggerrinit"] = func(a []uint64) uint64 {

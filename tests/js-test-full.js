@@ -610,6 +610,12 @@ function s20() {
     check("re23", "2024-05".replace(/(?<y>\d{4})-(?<m>\d{2})/, "$<m>/$<y>") === "05/2024")
     check("re24", "aXbXc".replace(/X/g, function (w, off) { return "(" + off + ")" }) === "a(1)b(3)c")
     check("re25", "aaa".replaceAll(/a/g, "b") === "bbb")
+    // Annex B: without u, an incomplete \x or \u escape is the letter itself.
+    var ab = [/^\x4$/, /^\u12$/, /^\u{3}$/, /^[\u{61}]+$/, /^\x$/, /\u{61}/u]
+    var abs = ["x4", "u12", "uuu", "{u61}", "x", "a"]
+    var abr = []
+    for (var abi = 0; abi < ab.length; abi++) { abr.push(ab[abi].test(abs[abi])) }
+    check("re25b", abr.join() === "true,true,true,true,true,true")
     // split with a pattern keeps the separator's capture groups.
     check("re26", "a,b,,c".split(/,/).length === 4)
     check("re27", "a-b_c".split(/([-_])/).length === 5)
@@ -1388,6 +1394,18 @@ function s126() {
         }
     }
     check("arrlen1", out.join("|") == "true:Invalid array length|true:Invalid array length|true:Invalid array length|true:Invalid array length|ok2")
+    // The same through Object.defineProperty (ArraySetLength step 5).
+    var dout = []
+    for (var j = 0; j < vals.length; j++) {
+        try {
+            var d = [1, 2, 3, 4]
+            Object.defineProperty(d, "length", { value: vals[j] })
+            dout.push("ok" + d.length)
+        } catch (e) {
+            dout.push((e instanceof RangeError) + ":" + e.message)
+        }
+    }
+    check("arrlen2", dout.join("|") == "true:Invalid array length|true:Invalid array length|true:Invalid array length|true:Invalid array length|ok2")
 }
 
 // ===== SECTION 127: an optional call of a class method =====
@@ -1409,6 +1427,16 @@ function s128() {
     check("repempty1", "abc".replaceAll(e, "_") == "_a_b_c_" && "abc".replace(e, "_") == "_abc" && "".replaceAll(e, "_") == "_")
     check("repempty2", "abc".replaceAll(e, (m, o) => "<" + o + ">") == "<0>a<1>b<2>c<3>" && "ab".replaceAll(e, "[$`|$']") == "[|ab]a[a|b]b[ab|]")
     check("repempty3", "x\u{1F600}".replaceAll(e, "_").length == 7)
+    // A RegExp argument of replaceAll or matchAll must have the g flag.
+    var res = [/a/, /a/y, /a/g]
+    var m = []
+    for (var i = 0; i < res.length; i++) {
+        try { m.push("aa".replaceAll(res[i], "b")) } catch (x) { m.push(x.name + ":" + x.message) }
+        try { m.push([..."aa".matchAll(res[i])].length) } catch (x) { m.push(x.name + ":" + x.message) }
+    }
+    var nr = "TypeError:String.prototype.replaceAll called with a non-global RegExp argument"
+    var nm = "TypeError:String.prototype.matchAll called with a non-global RegExp argument"
+    check("repglobal1", m.join("|") == [nr, nm, nr, nm, "bb", 2].join("|") && [..."aa".matchAll("a")].length == 2)
 }
 
 // ===== SECTION 129: AggregateError, and Promise.any's rejection =====
@@ -1563,6 +1591,30 @@ function s138() {
         try { f() } catch (e) { m.push((e instanceof TypeError) + ":" + e.message) }
     }
     check("classcall1", m.join("|") == "true:Class constructor Nn138 cannot be invoked without 'new'|true:f is not a function")
+    // The builtins callable without new: an Error class constructs, Date() is a
+    // string, and Map, Set, WeakMap, WeakSet and Promise have words of their own.
+    var bs = [Error, TypeError, RangeError, SyntaxError, URIError, EvalError, AggregateError]
+    var r = []
+    for (var j = 0; j < bs.length; j++) {
+        var B = bs[j]
+        var e = j == 6 ? B([1], "m6") : B("m" + j)
+        r.push(e.name + ":" + e.message + ":" + (e instanceof B) + (e instanceof Error))
+    }
+    check("classcall2", r.join("|") == "Error:m0:truetrue|TypeError:m1:truetrue|RangeError:m2:truetrue|SyntaxError:m3:truetrue|URIError:m4:truetrue|EvalError:m5:truetrue|AggregateError:m6:truetrue")
+    var ns = {Error: Error, D: Date}
+    check("classcall3", typeof Date() == "string" && typeof ns.D() == "string" && ns.Error("x").message == "x" &&
+        Error.call(null, "c").message == "c" && TypeError.apply(null, ["a"]).name == "TypeError" && Error.bind(null, "b")().message == "b")
+    var cs2 = [Map, Set, WeakMap, WeakSet, Promise, Nn138]
+    var w = []
+    for (var k = 0; k < cs2.length; k++) {
+        var C = cs2[k]
+        try { C(function () {}) } catch (e) { w.push(e.message) }
+    }
+    check("classcall4", w.join("|") == "Constructor Map requires 'new'|Constructor Set requires 'new'|Constructor WeakMap requires 'new'|Constructor WeakSet requires 'new'|Promise constructor cannot be invoked without 'new'|Class constructor Nn138 cannot be invoked without 'new'")
+    class Sub138 extends Error {}
+    var sm = ""
+    try { Sub138("s") } catch (e) { sm = e.message }
+    check("classcall5", sm == "Class constructor Sub138 cannot be invoked without 'new'" && new Promise(function (res) { res(1) }) instanceof Promise)
 }
 
 // ===== SECTION 139: a RegExp as a string, a method over an accessor, o?.#x =====
@@ -1843,6 +1895,28 @@ function s145() {
         e145(function () { return bc(1) }) == nc)
 }
 
+// ===== SECTION 146: line terminators, raw control characters, parenthesized targets =====
+// U+2028, U+2029 and a lone CR end a statement and a line comment as LF does, a string
+// may hold raw control characters, parentheses around an update or an assignment target
+// are transparent, and a tagged template belongs to the callee of a 'new'. Values read
+// off node 24.
+function tag146(s) { return function () { this.v = s[0] } }
+function s146() {
+    var a = 1 a++
+    var b = 1 b++
+    var c = 1 // c
+c++
+    var d = true // d d = 3
+    check("lt146a", a === 2 && b === 2 && c === 2 && d === 3)
+    var s = "xy"
+    check("ctl146b", s.length === 4 && s.charCodeAt(1) === 1 && s.charCodeAt(3) === 11 && 'q'.length === 2)
+    var o = {n: 1}, e = 1, x = [1];
+    (o.n)++; (o.n)++; (o.n)--; (e)++; ((e))--; (e)++; (o).n++;
+    ([1].b) = 6; (x.a) = 5; ((x)[0]) = 7;
+    check("paren146c", o.n === 3 && e === 2 && x.a === 5 && x[0] === 7)
+    check("newtag146d", (new tag146`hi`).v === "hi")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1905,6 +1979,7 @@ function main() {
     s143() // SECTION-CALL 143
     s144() // SECTION-CALL 144
     s145() // SECTION-CALL 145
+    s146() // SECTION-CALL 146
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

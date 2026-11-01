@@ -3134,6 +3134,22 @@ function s114() {
     o.only = vals[0]
     const t = Object.create({ set s(v) { this.got = v + 1 } })
     Object.assign(t, { s: 1 })
+    // A data property on a nearer prototype shadows a farther accessor, for a read and
+    // for a write (OrdinaryGet / OrdinarySet walk to the NEAREST level holding the key).
+    const pr = { get acc() { return "lit" }, set w(v) { this.hit = v } }
+    const mid = Object.create(pr)
+    Object.defineProperty(mid, "acc", { value: "mid" })
+    Object.defineProperty(mid, "w", { value: 0, writable: true })
+    const low = Object.create(mid)
+    low.w = vals[0]
+    class Ga114 { get acc() { return "A" } set acc(v) { this.log = "set" } }
+    class Gb114 extends Ga114 {}
+    Object.defineProperty(Gb114.prototype, "acc", { value: "mid3", writable: true })
+    const gb = new Gb114()
+    const gbr = gb.acc
+    gb.acc = "own"
+    check("pa114g", low.acc === "mid" && low.w === 5 && low.hit === undefined && Object.keys(low).join() === "w" &&
+        gbr === "mid3" && gb.acc === "own" && gb.log === undefined)
     check("pa114b", o.only === 3 && !o.hasOwnProperty("only") && t.got === 2 && Object.keys(t).join() === "got")
     check("pa114c", e114(function () { "use strict"; o.only = 1 }) === "Cannot set property only of #<Object> which has only a getter" &&
         e114(function () { "use strict"; Object.create(Object.create({ get g() { return 1 } })).g = 1 }) === "Cannot set property g of #<Object> which has only a getter" &&
@@ -3254,6 +3270,12 @@ function s116() {
     check("u8f116", tags.join() === "[object Map],[object Set],[object WeakMap],[object WeakSet],[object ArrayBuffer]," +
         "[object Uint8Array],[object Date],[object Function],[object Uint8Array]" && String(tagOf[0]) === "[object Map]" &&
         tagOf[1].toString === Object.prototype.toString)
+    // A symbol and a BigInt, and their wrappers, by Symbol.prototype's and
+    // BigInt.prototype's own tags.
+    const prims = [Symbol("q"), 1n, Object(2n), Object(Symbol("r"))]
+    const pt = []
+    for (let i = 0; i < prims.length; i++) { pt.push(Object.prototype.toString.call(prims[i])) }
+    check("u8g116", pt.join() === "[object Symbol],[object BigInt],[object BigInt],[object Symbol]")
 }
 
 function main() {

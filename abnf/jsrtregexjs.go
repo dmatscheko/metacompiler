@@ -526,6 +526,9 @@ func (rt *jsrt) jsxMethod(target interface{}, name string, args []interface{}) (
 			return float64(m.begin), true
 		}
 		if name == "matchAll" {
+			if rxIsRegexObj(argAt(args, 0)) {
+				rt.jsxNeedGlobal(re, name)
+			}
 			return rt.jsxMatchAll(re, s, false), true
 		}
 		if jsxBool(re, "global") {
@@ -545,6 +548,7 @@ func (rt *jsrt) jsxMethod(target interface{}, name string, args []interface{}) (
 		case "replace":
 			return rt.jsxReplace(re, s, argAt(args, 1), false), true
 		case "replaceAll":
+			rt.jsxNeedGlobal(re, name)
 			return rt.jsxReplace(re, s, argAt(args, 1), true), true
 		}
 		limit := -1
@@ -554,6 +558,16 @@ func (rt *jsrt) jsxMethod(target interface{}, name string, args []interface{}) (
 		return rt.jsxSplit(re, s, limit), true
 	}
 	return nil, false
+}
+
+// jsxNeedGlobal is the TypeError of String#matchAll / #replaceAll given a RegExp
+// without the g flag (ECMA-262 22.1.3.13 step 2.b, 22.1.3.20 step 2.b). Twins: the
+// same test in jsRegexMethod of both *-interpreter.abnf and jxMcall in
+// languages/lib/js-rt.metajs.
+func (rt *jsrt) jsxNeedGlobal(re *jsObject, name string) {
+	if !jsxBool(re, "global") {
+		rt.bigRaise("TypeError: String.prototype.%s called with a non-global RegExp argument", name)
+	}
 }
 
 // jsxCtorArgs is new RegExp(src, flags) / RegExp(src, flags): the same construction as a

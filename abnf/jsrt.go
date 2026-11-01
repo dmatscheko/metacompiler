@@ -1343,6 +1343,13 @@ func (rt *jsrt) promiseGlobal() *hostFunc {
 		return rt.promFn
 	}
 	rt.promFn = jsHostFunc("Promise", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		// Only js_call_new arms new.target with Promise itself (ECMA-262 27.2.3.1
+		// step 1). Twins: jsPromiseFn in both *-interpreter.abnf, js_jspromfn in
+		// languages/lib/js-rt.metajs.
+		if rt.pendingNewTarget != interface{}(rt.promFn) {
+			rt.bigRaise("TypeError: Promise constructor cannot be invoked without 'new'")
+		}
+		rt.pendingNewTarget = nil
 		p := promNew()
 		exec := argAt(args, 0)
 		if !isCallable(exec) {
@@ -4519,6 +4526,14 @@ func (rt *jsrt) findClassAccessor(o *jsObject, name string) *jsAccessor {
 				return acc
 			}
 			return nil
+		}
+		// A JavaScript prototype object (the level's __pview) is the same level: its
+		// own property, data or accessor, shadows everything further up.
+		if pv, hasView := clsObj.props["__pview"].(*jsObject); hasView && !jsvInternalKey(name) {
+			if v, found := pv.props[name]; found {
+				acc, _ := v.(*jsAccessor)
+				return acc
+			}
 		}
 		cls = clsObj.props["__super"]
 	}

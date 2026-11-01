@@ -1000,6 +1000,12 @@ check("regex-match-record-array", (function () {
         && Array.isArray(all[1]) && all[1].index === 3 && all[1][0] === "22";
 })());
 
+// ----- an anonymous decorated default export is the class named "default" -----
+var ddLog: string[] = [];
+function ddDeco(c: any, ctx: any): void { ddLog.push(ctx.kind + ":" + ctx.name + ":" + typeof c); }
+@ddDeco export default class { m(): number { return 1 } }
+check("deco-default-export-anon", ddLog.join() === "class:default:function");
+
 function main(): number {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;

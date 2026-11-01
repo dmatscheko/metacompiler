@@ -152,6 +152,10 @@ class __CollIter {
 // The iterable argument of Set and Map is optional, so it has a default: that is
 // what makes the constructor's length, and so Set.length / Map.length, 0.
 class Set extends __Coll {
+    // A call without `new`. The class-call check of every engine runs a class's OWN
+    // static __call instead of raising "Class constructor ... cannot be invoked"
+    // (jsClassCall in js-interpreter.abnf).
+    static __call() { throw new TypeError("Constructor Set requires 'new'") }
     constructor(items = undefined) {
         super()
         if (items !== undefined && items !== null) {
@@ -243,6 +247,7 @@ function __setRec(o, fn) {
 }
 
 class Map extends __Coll {
+    static __call() { throw new TypeError("Constructor Map requires 'new'") }
     constructor(entries = undefined) {
         super()
         if (entries !== undefined && entries !== null) {
@@ -523,6 +528,7 @@ class __Weak {
     }
 }
 class WeakMap extends __Weak {
+    static __call() { throw new TypeError("Constructor WeakMap requires 'new'") }
     constructor(entries = undefined) {
         super()
         if (entries !== undefined && entries !== null) {
@@ -545,6 +551,7 @@ class WeakMap extends __Weak {
     get ["__#@toStringTag"]() { return "WeakMap" }
 }
 class WeakSet extends __Weak {
+    static __call() { throw new TypeError("Constructor WeakSet requires 'new'") }
     constructor(items = undefined) {
         super()
         if (items !== undefined && items !== null) {
@@ -584,9 +591,19 @@ function queueMicrotask(f) {
 // UTF-8, is a URIError. encodeURI keeps, and decodeURI leaves encoded, the reserved
 // characters and '#'.
 class URIError extends Error {
+    static __call(m) { return new URIError(m) }
     constructor(m) {
         super(m)
         Object.defineProperty(this, "name", {value: "URIError", writable: true, configurable: true})
+    }
+}
+// EvalError (ECMA-262 20.5.5.1): no engine operation raises one, so it is URIError's
+// shape and loaded only when a program names it.
+class EvalError extends Error {
+    static __call(m) { return new EvalError(m) }
+    constructor(m) {
+        super(m)
+        Object.defineProperty(this, "name", {value: "EvalError", writable: true, configurable: true})
     }
 }
 var __uriKeep = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()"
@@ -1392,6 +1409,8 @@ function __dArgs(args, from, n, dflt) {
 }
 
 class Date {
+    // Date() without `new` is the current time as a string (ECMA-262 21.4.2.1 step 1).
+    static __call() { return new Date().toString() }
     constructor(...a) {
         var t = NaN
         if (a.length === 0) { t = Date.now() }

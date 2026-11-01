@@ -1402,10 +1402,15 @@ function jvFindClassAcc(o, name) {
             if (jvIsAcc(v)) { return v }
             return undefined
         }
+        // The level's prototype object: its own property, data or accessor, shadows
+        // everything further up.
         var pv = cls["__pview"]
-        if (pv !== undefined) {
+        if (pv !== undefined && !(name.length >= 2 && name.substring(0, 2) == "__")) {
             var pa = pv[name]
-            if (jvIsAcc(pa)) { return pa }
+            if (pa !== undefined) {
+                if (jvIsAcc(pa)) { return pa }
+                return undefined
+            }
         }
         cls = cls["__super"]
     }
@@ -1440,8 +1445,12 @@ function jvClassAccHolder(o, name) {
             return r
         }
         var pv = cls["__pview"]
-        if (pv !== undefined) {
-            if (jvIsAcc(pv[name])) { return pv }
+        if (pv !== undefined && !(name.length >= 2 && name.substring(0, 2) == "__")) {
+            var pa = pv[name]
+            if (pa !== undefined) {
+                if (jvIsAcc(pa)) { return pv }
+                return r
+            }
         }
         cls = cls["__super"]
     }
@@ -2322,7 +2331,7 @@ function jvStaticSideRead(o, k) {
     // A class is a function, so Function.prototype's call and apply - node's
     // TypeError, a class being callable only through `new` - and bind, whose bound
     // function `new` constructs the class through (js_jsunbind).
-    if (k == "call" || k == "apply") { return jvNativeFn(function () { jbRaise(jvClassCallMsg(o)) }, k, "") }
+    if (k == "call" || k == "apply") { return jvNativeFn(function () { return jvClassCallNoNew(o, jvClassShimArgs(k, arguments)) }, k, "") }
     if (k == "bind") { return jvNativeFn(jvBindShim(o), k, "") }
     // A class is a function, so its inherited `constructor` is Function.
     if (k == "constructor") { return js_jsfunctionfn() }
@@ -2497,7 +2506,6 @@ function jvApplyShim(f) {
 function jvBoundFn(f, self, pre) {
     var cd = jvIsClassDesc(f) // A bound class constructs only through `new`.
     var bf = function () {
-        if (cd) { jbRaise(jvClassCallMsg(f)) }
         var a = []
         var j = 0
         while (j < pre.length) {
@@ -2509,6 +2517,7 @@ function jvBoundFn(f, self, pre) {
             a.push(arguments[k])
             k = k + 1
         }
+        if (cd) { return jvClassCallNoNew(f, a) }
         return jvCallT(f, self, a)
     }
     jvBoundK.push(bf)
@@ -4688,14 +4697,35 @@ function js_jsfielddef(o, key, v) {
     }
     return js_jsmset(o, key, v)
 }
-// The TypeError of a call of a value that is no function: (callee, site text). A class
-// called without `new` has node's own words. Twin of js_jscallerr in
+// A call of a value that is no function: (callee, site text, argument array). A class
+// answers jvClassCallNoNew; anything else is node's TypeError. Twin of js_jsbadcall in
 // abnf/jsrtjsprint.go.
-function js_jscallerr(f, site) {
-    if (jvIsClassDesc(f)) { return jvErrFromText(jvClassCallMsg(f)) }
-    return jvErrFromText("TypeError: " + site + " is not a function")
+function js_jsbadcall(f, site, args) {
+    if (jvIsClassDesc(f)) { return jvClassCallNoNew(f, args) }
+    jbRaise("TypeError: " + site + " is not a function")
+    return undefined
 }
-function jvClassCallMsg(cls) { return "TypeError: Class constructor " + jvStr(cls["__name"]) + " cannot be invoked without 'new'" }
+// A class called without `new`: node's TypeError, except that an Error class
+// constructs and a class with an OWN static __call answers through it. Twin of
+// jsvClassCallNoNew in abnf/jsrtjsprint.go.
+function jvClassCallNoNew(cls, args) {
+    if (cls["__errname"] !== undefined) { return jvConstruct(cls, args) }
+    var t = anytype
+    t = cls["__statics"]
+    if (jvIsObj(t) && t["__call"] !== undefined) { return jvCallT(t["__call"], undefined, args) }
+    jbRaise("TypeError: Class constructor " + jvStr(cls["__name"]) + " cannot be invoked without 'new'")
+    return undefined
+}
+// The argument list of a class's own call / apply: (this, ...args) or (this, list).
+function jvClassShimArgs(k, args) {
+    var a = []
+    if (k == "apply") {
+        if (args.length > 1 && Array.isArray(args[1])) { a = args[1] }
+    } else {
+        for (var i = 1; i < args.length; i++) { a.push(args[i]) }
+    }
+    return a
+}
 // The AggregateError constructor body: (this, errors, message).
 function js_jsaggerrinit(self, errors, msg) {
     js_jserrinit(self, msg)
@@ -4855,6 +4885,9 @@ function jvProtoTag(v) {
     if (typeof v == "string") { return "[object String]" }
     if (typeof v == "boolean") { return "[object Boolean]" }
     if (jvIsCallable(v) || jvIsClassDesc(v)) { return "[object Function]" }
+    // Symbol.prototype's and BigInt.prototype's own @@toStringTag.
+    if (jvIsSym(v)) { return "[object Symbol]" }
+    if (jbIsBig(v)) { return "[object BigInt]" }
     // The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
     // promise, a RegExp, and Math / JSON, which carry their tag in a hidden __strtag slot.
     if (jvIsObj(v)) {
@@ -9239,6 +9272,12 @@ function jxRegexArg(v) {
 
 var jxMiss = {}
 
+// String#matchAll / #replaceAll given a RegExp without the g flag is a TypeError.
+// Twin of jsxNeedGlobal in abnf/jsrtregexjs.go.
+function jxNeedGlobal(re, name) {
+    if (!jxBool(re, "global")) { jbRaise("TypeError: String.prototype." + name + " called with a non-global RegExp argument") }
+    return undefined
+}
 function jxMcall(recv, name, args) {
     if (jxIsRe(recv)) {
         if (name == "test") { return jxTest(recv, jxToStr(jvArg(args, 0))) }
@@ -9254,7 +9293,11 @@ function jxMcall(recv, name, args) {
         if (sm === null) { return -1 }
         return sm["begin"]
     }
-    if (name == "matchAll") { return jxMatchAll(jxRegexArg(jvArg(args, 0)), recv, false) }
+    if (name == "matchAll") {
+        var are = jxRegexArg(jvArg(args, 0))
+        if (jxIsRe(jvArg(args, 0))) { jxNeedGlobal(are, name) }
+        return jxMatchAll(are, recv, false)
+    }
     if (name == "match") {
         var mre = jxRegexArg(jvArg(args, 0))
         if (jxBool(mre, "global")) {
@@ -9269,7 +9312,10 @@ function jxMcall(recv, name, args) {
         if (!jxIsRe(jvArg(args, 0))) { return jxMiss }
         var re = jvArg(args, 0)
         if (name == "replace") { return jxReplace(re, recv, jvArg(args, 1), false) }
-        if (name == "replaceAll") { return jxReplace(re, recv, jvArg(args, 1), true) }
+        if (name == "replaceAll") {
+            jxNeedGlobal(re, name)
+            return jxReplace(re, recv, jvArg(args, 1), true)
+        }
         var limit = -1
         var lv = jvArg(args, 1)
         if (!jvUndefOrNull(lv)) { limit = Math.trunc(jxToNum(lv)) }
@@ -9895,6 +9941,10 @@ function js_jsawaitv(v) {
 function js_jspromfn() {
     if (jpFn === undefined) {
         jpFn = fnMetaSet(function (exec) {
+            // Only js_call_new arms new.target with Promise itself (ECMA-262
+            // 27.2.3.1 step 1). Twin of promiseGlobal in abnf/jsrt.go.
+            if (jvNewTarget !== jpFn) { jbRaise("TypeError: Promise constructor cannot be invoked without 'new'") }
+            jvNewTarget = undefined
             var p = jpNew()
             // jbRaise, not fail: node throws this and a try/catch recovers it,
             // where fail is the floor's abort and a js_try deliberately does not

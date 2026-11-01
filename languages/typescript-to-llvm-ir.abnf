@@ -168,7 +168,8 @@ UniSpace    = "\u00a0" | "\u1680" | "\u2000"..."\u200a" | "\u2028" | "\u2029"
 Comment     = LineComment | BlockComment ;
 LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
-NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+// A line comment ends at any line terminator: LF, CR, U+2028 or U+2029.
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\u2027" | "\u202a"..."\U0010ffff" ;
 NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
 NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -192,7 +193,7 @@ Program     <~~ buildMain(takeAll()) ~~>
 // front of ClassDecl because the decorators sit before the 'class' keyword.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Block | ImportStmt | ImportAlias | ExportStmt | AmbientDecl | NamespaceDecl | Interface | TypeAlias | EnumDecl
-            | DecoratedDecl | ClassDecl | ClassDeclWidened | TryStmt | VarDecl | Destructure | If | While | Do | ForOf | For | Switch | Return | Break | Continue
+            | DecoratedDecl | DecoratedDefault | ClassDecl | ClassDeclWidened | TryStmt | UsingDecl | VarDecl | Destructure | If | While | Do | ForOf | For | Switch | Return | Break | Continue
             | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncOverload | FuncDecl | Labeled | Empty | ExprStmt ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -296,6 +297,11 @@ NsExport    <~~ push(makeNsExport(pop())); claimVars(up.start, up.pos) ~~>
 // auto-accessor (decoPhases). Decorators on a parameter are parsed and dropped.
 DecoratedDecl <~~ push(makeDecoratedClass(takeAll())) ~~>
             = Decorator { Decorator } [ KwExport [ KwDefault ] ] ClassCore ;
+// '@dec export default class {}': an anonymous default export binds nothing, so it is the
+// decorated class EXPRESSION; its name is "default", as the spec names such a class.
+// Twin of ClassDefaultName in typescript-interpreter.abnf.
+DecoratedDefault <~~ var t = makeDecoratedClassExpr(takeAll(), undefined); if (lastClassExprInfo.shown[0] === "") { lastClassExprInfo.shown[0] = "default" } push(makeExportDefault(t)) ~~>
+            = Decorator { Decorator } KwExport KwDefault ( ClassExprLowered | ClassExprWidened ) ;
 // A decorator that is spelled as a BARE NAME resolves SOFTLY: an unbound name yields
 // undefined instead of raising, and a decorator value that is not callable is skipped.
 // That is what keeps the purely declarative decorators - the ones a framework resolves
@@ -336,16 +342,20 @@ Type        = FuncType | CtorType | CondType ;
 FuncType    = [ TypeParams ] ParenAhead "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" "=>" RetType ;
 CtorType    = [ "abstract" KwEnd ] KwNew [ TypeParams ] "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" "=>" Type ;
 FnTypeParam = [ "..." ] ( Id | DPattern ) [ "?" ] TypeAnnot | Type ;
-// A conditional type: 'A extends B ? X : Y'. The 'extends' arm is a UnionType and not a
-// full Type, which is what keeps the '?' out of it.
-CondType    = UnionType [ KwExtends UnionType "?" Type ":" Type ] ;
+// A conditional type: 'A extends B ? X : Y'. The 'extends' arm is not a full Type, which
+// is what keeps the '?' out of it, but it may be a function or constructor type
+// ('T extends () => infer R ? R : never').
+CondType    = UnionType [ KwExtends ExtendsType "?" Type ":" Type ] ;
+ExtendsType = FuncType | CtorType | UnionType ;
 UnionType   = [ "|" ] IsectType { "|" IsectType } ;
 IsectType   = [ "&" ] OpType { "&" OpType } ;
 // The prefix type operators. They are contextual words, so a type that is merely NAMED
 // 'keyof' still parses: the operator alternative fails for want of an operand and the
 // PostfixType one picks the name up.
-OpType      = TypeOp OpType | PostfixType ;
-TypeOp      = ( "keyof" | "unique" | "readonly" | "infer" ) KwEnd ;
+// 'infer U' may carry its own constraint ('T extends [infer U extends string] ? ...').
+OpType      = TypeOp OpType | InferType | PostfixType ;
+TypeOp      = ( "keyof" | "unique" | "readonly" ) KwEnd ;
+InferType   = "infer" KwEnd Id [ KwExtends OpType ] ;
 // '[]' is the array suffix and '[K]' the indexed access; '[' with a type inside covers
 // both. A trailing '!' is the (long removed, still met) non-null type assertion.
 PostfixType = AtomType { ArraySfx } ;
@@ -366,8 +376,8 @@ ImportType  = KwImport "(" StringLit ")" { "." Id } [ TypeArgs ] ;
 NamedType   = Id [ TypeArgs ] { "." Id [ TypeArgs ] } ;
 TypeArgs    = "<" Type { "," Type } [ "," ] ">" ;
 LitType     = StrTypeLit | NumTypeLit ;
-StrTypeLit  = '"' :whitespace() { JsStrEsc | DqPlain } '"' :whitespace(Whitespace)
-            | "'" :whitespace() { JsStrEsc | SqPlain } "'" :whitespace(Whitespace) ;
+StrTypeLit  = '"' :whitespace() { JsStrEsc | JsDqPlain } '"' :whitespace(Whitespace)
+            | "'" :whitespace() { JsStrEsc | JsSqPlain } "'" :whitespace(Whitespace) ;
 NumTypeLit  = [ "-" ] NumTypeTok ;
 // The numeric literal forms of NumberLit, matched without a value.
 NumTypeTok  = ( "0x" | "0X" ) :whitespace() HexDigit { SepHexDigit } [ "n" ] KwEnd :whitespace(Whitespace)
@@ -440,6 +450,27 @@ NameDeclarator <~~ push(makeDecl(takeAll(), up.in, up.pos)) ~~>
 PatternDeclarator <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = DPattern [ TypeAnnot ] "=" AssignExpr ;
 
+// 'using x = res' / 'await using x = res' bind like 'let'; the automatic Symbol.dispose at
+// the end of the scope is not lowered. Twin of UsingDecl in typescript-interpreter.abnf.
+// UsingFollow keeps 'using(x)', 'using.p' and 'using = 1' expressions: a declaration
+// needs a plain name right behind the keyword.
+UsingDecl   = UsingDeclCore [ ";" ] ;
+UsingDeclCore <~~ push(makeVarSeq(takeAll())); declKinds.pop() ~~>
+            = UsingKw NameDeclarator { "," NameDeclarator } ;
+UsingKw     <~~ declKinds.push("using") ~~>
+            = [ KwAwait ] "using" KwEnd UsingFollow ;
+UsingFollow = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var ok = (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || cc >= 128
+        return ok ? undefined : abnf.newToken("\x01using-name", 0)
+    })()
+~~) ;
+
 // [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" IfBody [ KwElse IfBody ] ;
@@ -455,7 +486,7 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 For         <~~ push(makeFor(takeAll(), hoistLexNames(up.start, up.pos), hoistLexNames(up.start, up.pos, true), hoistLexKill(up.start, up.pos).tdz)) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
-ForVar      = VarDeclCore ;
+ForVar      = UsingDeclCore | VarDeclCore ;
 ForExpr     <~~ push(exprToClause(pop())) ~~> = Expression ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 ForPost     <~~ push({k:"post", t:exprToClause(pop())}) ~~> = Expression ;
@@ -839,7 +870,60 @@ CallHead    = SuperProp <~~ push({ptxt: up.in, supthis: true}) ~~>
 // See the twin of this comment in js-to-llvm-ir.abnf.
 CallPrimary = ParenExpr | Primary ;
 ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
-            = "(" Expression ")" NotArrow ;
+            = "(" Expression ")" NotArrow NotArrowAnnot ;
+// A parenthesized expression that is really an arrow's parameter list with a RETURN
+// TYPE: '(x): boolean => x > 1' would otherwise be read as '(x)' and then fail at the
+// ':'. Behind the ')' a ':' is followed by a type, and a '=>' at bracket depth 0 before
+// any ';', ',', '=' or closing bracket of the enclosing text makes it an arrow; the
+// ':' of a conditional ('c ? (x) : y') meets one of those first. Twin of NotArrowAnnot in
+// typescript-interpreter.abnf.
+NotArrowAnnot = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc !== 58 || c.peek(i + 1) === 58) { return undefined }
+        i = i + 1
+        var depth = 0
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            var ch = c.peek(i)
+            if (ch < 0 || ch === 59) { return undefined }
+            if (ch === 34 || ch === 39 || ch === 96) {
+                var q = ch
+                i = i + 1
+                while (true) {
+                    var sc = c.peek(i)
+                    if (sc < 0) { return undefined }
+                    if (sc === 92) { i = i + 2; continue }
+                    i = i + 1
+                    if (sc === q) { break }
+                }
+                continue
+            }
+            if (ch === 61) {
+                if (c.peek(i + 1) === 62) {
+                    if (depth === 0) { return abnf.newToken("\x01annotated-arrow", 0) }
+                    i = i + 2
+                    continue
+                }
+                if (depth === 0) { return undefined }
+            }
+            if (ch === 44 && depth === 0) { return undefined }
+            if (ch === 40 || ch === 91 || ch === 123 || ch === 60) { depth = depth + 1 }
+            if (ch === 41 || ch === 93 || ch === 125 || ch === 62) {
+                if (depth === 0) { return undefined }
+                depth = depth - 1
+            }
+            i = i + 1
+        }
+        return undefined
+    })()
+~~) ;
+
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
 NotArrow    = :script(~~
@@ -933,7 +1017,7 @@ NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
 // not contain a call: 'new f()' is the construction, not a call of f whose result is
 // constructed. Every seed therefore shares one member-only chain.
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix | TagSuffix } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | "(" Expression ")" | VarRef ;
 
 // super.x / super[i] as a VALUE (SuperCall above covers the call forms). Any further
@@ -1108,7 +1192,8 @@ ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
 // is parsed and dropped - the loop variable is rebound on every iteration anyway. The
 // spec parses it as AssignmentExpression[~In], so the initializer must be read at a level
 // that cannot consume the loop's own 'in': RelExpr sits directly below InExpr.
-ForOfDecl   = DeclKw NotBindName Id <~~ push(forDeclTarget({dtype: "id", name: idName(up.in)}, up.pos)) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
+ForOfDecl   = UsingKw NotBindName Id <~~ push(forDeclTarget({dtype: "id", name: idName(up.in)}, up.pos)) ~~> [ TypeAnnot ]
+            | DeclKw NotBindName Id <~~ push(forDeclTarget({dtype: "id", name: idName(up.in)}, up.pos)) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
 ForOfInit   <~~ pop() ~~> = "=" RelExpr ;
 // "Only a single variable declaration is allowed in a 'for...in' statement" (1091) is a
 // GRAMMAR CHECK TypeScript reports on a tree it has built, not a parse error: the suite
@@ -1476,9 +1561,9 @@ ExportBody  = AmbientDecl | NamespaceDecl | Interface | TypeAlias | EnumDecl | D
 // and 'export default <expr>' bind nothing either, but their expression IS emitted, so
 // its side effects happen.
 ExportAll   <~~ takeAll(); push(function(b) { return b }) ~~>
-            = "*" [ KwAs Id ] KwFrom StringLit [ ";" ] ;
+            = "*" [ KwAs Id ] KwFrom StringLit [ ImportAttrs ] [ ";" ] ;
 ExportNamed <~~ takeAll(); push(function(b) { return b }) ~~>
-            = [ KwType ] "{" [ ExportSpec { "," ExportSpec } [ "," ] ] "}" [ KwFrom StringLit ] [ ";" ] ;
+            = [ KwType ] "{" [ ExportSpec { "," ExportSpec } [ "," ] ] "}" [ KwFrom StringLit [ ImportAttrs ] ] [ ";" ] ;
 ExportSpec  = [ KwType ] ( Id | StringLit ) [ KwAs ( Id | StringLit ) ] ;
 ExportAssign <~~ push(makeExportDefault(pop())) ~~>
             = "=" AssignExpr [ ";" ] ;
@@ -1510,8 +1595,11 @@ VarRef      <~~ push(tsVarRef(jsbRef(idName(up.in)), up.start)) ~~>
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
 StringLit   = JsDqString | JsSqString ;
-JsDqString  = '"' :whitespace() { JsStrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
-JsSqString  = "'" :whitespace() { JsStrEsc | SqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
+JsDqString  = '"' :whitespace() { JsStrEsc | JsDqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
+JsSqString  = "'" :whitespace() { JsStrEsc | JsSqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
+// See the twin of this comment in js-to-llvm-ir.abnf.
+JsDqPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+JsSqPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 
 // The legacy OCTAL escapes ('\1', '\07', '\377') stay legal here: they are only
 // an error in STRICT mode, and which code is strict is a static-semantics
@@ -1888,10 +1976,25 @@ NotLegacyNumeric = :script(~~
 KwEnd = :script(~~
     (function() {
         var cc = c.peek(0)
-        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36
-                || (cc >= 97 && cc <= 122) || cc === 92 || cc >= 128)
-            ? abnf.newToken("\x01keyword-boundary", 0)
-            : undefined
+        if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36
+            || (cc >= 97 && cc <= 122) || cc === 92) {
+            return abnf.newToken("\x01keyword-boundary", 0)
+        }
+        if (cc < 128) { return undefined }
+        // A non-ASCII lead byte: the whitespace and line-separator code points end the
+        // keyword ('true<U+2028>var'), every other one may be an identifier letter.
+        // Twin of KwEnd in js-interpreter.abnf, which lists the UTF-8 sequences.
+        var b1 = c.peek(1), b2 = c.peek(2)
+        var space = false
+        if (cc === 194) { space = (b1 === 160) }
+        else if (cc === 225) { space = (b1 === 154 && b2 === 128) }
+        else if (cc === 226) {
+            if (b1 === 128) { space = (b2 >= 128 && b2 <= 138) || b2 === 168 || b2 === 169 || b2 === 175 }
+            else if (b1 === 129) { space = (b2 === 159) }
+        }
+        else if (cc === 227) { space = (b1 === 128 && b2 === 128) }
+        else if (cc === 239) { space = (b1 === 187 && b2 === 191) }
+        return space ? undefined : abnf.newToken("\x01keyword-boundary", 0)
     })()
 ~~) ;
 
@@ -2332,10 +2435,14 @@ NotFuncHead = :script(~~
         var okB = curF.NewBlock("")
         var badB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_jsfnp", [fnV]), handle(0)), okB, badB)
-        // js_jscallerr: node's TypeError, which names a class called without `new`.
-        callExt(badB, "js_throw", [callExt(badB, "js_jscallerr", [fnV, emitStr(badB, site)])])
-        badB.NewRet(hUndef) // Never reached: js_throw does not return.
-        return {b: okB, v: jsCall(okB, fnV, thisV, argsV)}
+        // js_jsbadcall: node's TypeError, or the answer of a builtin class that is
+        // callable without `new` (Error, Date, ...).
+        var badV = callExt(badB, "js_jsbadcall", [fnV, emitStr(badB, site), argsV])
+        var okV = jsCall(okB, fnV, thisV, argsV)
+        var joinB = curF.NewBlock("")
+        badB.NewBr(joinB)
+        okB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(okV, okB), llvm.ir.NewIncoming(badV, badB)])}
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var mcallMissGH = []
@@ -3635,9 +3742,13 @@ NotFuncHead = :script(~~
         var mBadB = curF.NewBlock("")
         elseB.NewCondBr(elseB.NewICmp(llvm.enum.IPredEQ, ev, elseB.NewLoad(i64, mcallMissGlob())),
                         mBadB, mOkB)
-        emitSiteThrow(mBadB, site + " is not a function")
+        // A member holding a class is called as a class (js_jsbadcall); anything else
+        // is node's TypeError.
+        var bv = callExt(mBadB, "js_jsbadcall", [callExt(mBadB, "js_jsvget", [objV, keyV]), emitStr(mBadB, site), argsV])
+        mBadB.NewBr(mergeB)
         mOkB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, mOkB)])}
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, mOkB),
+                                             llvm.ir.NewIncoming(bv, mBadB)])}
     }
     foldCallMember = function(items, txt) {
         items = flattenParen(items)
@@ -6397,7 +6508,8 @@ NotFuncHead = :script(~~
     // (decoPhases); the initializers they registered run last, at class definition
     // (static and class ones) or per instance (emitFieldInits).
     // The context object a decorator is handed: kind, name, static, private (a private
-    // name reads "#x") and addInitializer, which appends to listV. nameV, when given, is
+    // name reads "#x") and addInitializer, which appends to listV; a class's has no
+    // static or private (ClassDecoratorContext). nameV, when given, is
     // a computed key's value. Twin of the ctx in decoApply in typescript-interpreter.abnf.
     function emitDecoCtx(b, kind, name, statik, listV, nameV) {
         var o = callExt(b, "js_obj_new", [])
@@ -6412,8 +6524,10 @@ NotFuncHead = :script(~~
         if (nameV != null) { nv = nameV }
         callExt(b, memSetExt(), [o, emitStr(b, "kind"), emitStr(b, kind)])
         callExt(b, memSetExt(), [o, emitStr(b, "name"), nv])
-        callExt(b, memSetExt(), [o, emitStr(b, "static"), statik ? hTrue : hFalse])
-        callExt(b, memSetExt(), [o, emitStr(b, "private"), priv ? hTrue : hFalse])
+        if (kind != "class") {
+            callExt(b, memSetExt(), [o, emitStr(b, "static"), statik ? hTrue : hFalse])
+            callExt(b, memSetExt(), [o, emitStr(b, "private"), priv ? hTrue : hFalse])
+        }
         var asc = callExt(b, "js_scope_new", [curScopeV])
         callExt(b, "js_scope_decl", [asc, emitStr(b, "0dlist"), listV])
         callExt(b, memSetExt(), [o, emitStr(b, "addInitializer"), callExt(b, "js_closure", [handle(decoFnsGet().adder), asc])])

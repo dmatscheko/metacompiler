@@ -1113,12 +1113,20 @@ function rxEsc(st, inClass) {
     if (c == 120) { // \xHH
         var v = 0
         var got = 0
+        var x0 = st.i
         while (got < 2 && st.i < st.n) {
             var h = rxHexVal(p.charCodeAt(st.i))
             if (h < 0) { break }
             v = v * 16 + h
             st.i = st.i + 1
             got = got + 1
+        }
+        // JavaScript Annex B (o, not U): an incomplete \x or \u is an identity escape
+        // of the letter, and what follows is read again (B.1.2 IdentityEscape).
+        if (got < 2 && st.octal && !st.uni) {
+            st.i = x0
+            res.ch = c
+            return res
         }
         if (got == 0) { rxErr(st, "invalid hex escape") }
         res.ch = v
@@ -1133,12 +1141,18 @@ function rxEsc(st, inClass) {
     if (c == 117) { // \uHHHH
         var uv = 0
         var ugot = 0
+        var u0 = st.i
         while (ugot < 4 && st.i < st.n) {
             var uh = rxHexVal(p.charCodeAt(st.i))
             if (uh < 0) { break }
             uv = uv * 16 + uh
             st.i = st.i + 1
             ugot = ugot + 1
+        }
+        if (ugot < 4 && st.octal) {
+            st.i = u0
+            res.ch = c
+            return res
         }
         if (ugot == 0) { rxErr(st, "invalid unicode escape") }
         res.ch = uv

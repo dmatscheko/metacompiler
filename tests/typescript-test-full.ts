@@ -438,6 +438,15 @@ function s14() {
         }
     }
     check("nrw5", area({ kind: "c", r: 2 }) === 6 && area({ kind: "q", side: 3 }) === 9);
+    // An arrow with untyped parameters and a return type, or a type predicate, while a
+    // parenthesized operand of a conditional stays an expression.
+    function keep(vals: number[], f: (x: number) => boolean): number[] { return vals.filter(f); }
+    const lim = [4][0];
+    const isNum = (x): x is number => typeof x === "number";
+    const two = (a, b): number => a + b;
+    const sel = lim > 3 ? (lim) : (q: number) => q;
+    check("nrw6", keep([1, 4, 5], (x): boolean => x >= lim).join() === "4,5" && isNum(3) && !isNum("s") &&
+        two(1, 2) === 3 && sel === 4);
 }
 
 // ===== SECTION 15: namespaces =====
@@ -706,6 +715,12 @@ function s21() {
     check("re23", "2024-05".replace(/(?<y>\d{4})-(?<m>\d{2})/, "$<m>/$<y>") === "05/2024");
     check("re24", "aXbXc".replace(/X/g, function (w: string, off: number): string { return "(" + off + ")"; }) === "a(1)b(3)c");
     check("re25", "aaa".replaceAll(/a/g, "b") === "bbb");
+    // Annex B: without u, an incomplete \x or \u escape is the letter itself.
+    const ab: RegExp[] = [/^\x4$/, /^\u12$/, /^\u{3}$/, /^[\u{61}]+$/, /^\x$/, /\u{61}/u];
+    const abs: string[] = ["x4", "u12", "uuu", "{u61}", "x", "a"];
+    const abr: boolean[] = [];
+    for (let abi = 0; abi < ab.length; abi++) { abr.push(ab[abi].test(abs[abi])); }
+    check("re25b", abr.join() === "true,true,true,true,true,true");
     // split with a pattern keeps the separator's capture groups.
     check("re26", "a,b,,c".split(/,/).length === 4);
     check("re27", "a-b_c".split(/([-_])/).length === 5);
@@ -4983,6 +4998,21 @@ function s107(): void {
     const deep: any = Object.create(Object.create({ get d() { return "deep"; } }));
     check("pa107a", c.acc === 1 && c.got === 5 && !c.hasOwnProperty("acc") && f.g === 2 && f.seen === 7 &&
         !f.hasOwnProperty("g") && deep.d === "deep" && (B107.prototype as any).x === true);
+    // See the twin of this assertion in tests/js-test-full.3.js (pa114g).
+    const pr: any = { get acc() { return "lit"; }, set w(v: number) { (this as any).hit = v; } };
+    const mid: any = Object.create(pr);
+    Object.defineProperty(mid, "acc", { value: "mid" });
+    Object.defineProperty(mid, "w", { value: 0, writable: true });
+    const low: any = Object.create(mid);
+    low.w = vals[0];
+    class Ga107 { log: any; get acc(): any { return "A"; } set acc(v: any) { this.log = "set"; } }
+    class Gb107 extends Ga107 {}
+    Object.defineProperty(Gb107.prototype, "acc", { value: "mid3", writable: true });
+    const gb: any = new Gb107();
+    const gbr: any = gb.acc;
+    gb.acc = "own";
+    check("pa107g", low.acc === "mid" && low.w === 5 && low.hit === undefined && Object.keys(low).join() === "w" &&
+        gbr === "mid3" && gb.acc === "own" && gb.log === undefined);
     const o: any = Object.create({ get only() { return 3; } });
     const t: any = Object.create({ set s(v: number) { (this as any).got = v + 1; } });
     Object.assign(t, { s: 1 });
@@ -5326,6 +5356,18 @@ function s126(): void {
         }
     }
     check("arrlen1", out.join("|") == "true:Invalid array length|true:Invalid array length|true:Invalid array length|true:Invalid array length|ok2");
+    // The same through Object.defineProperty (ArraySetLength step 5).
+    const dout: string[] = [];
+    for (let j = 0; j < vals.length; j++) {
+        try {
+            const d: any[] = [1, 2, 3, 4];
+            Object.defineProperty(d, "length", { value: vals[j] });
+            dout.push("ok" + d.length);
+        } catch (e: any) {
+            dout.push((e instanceof RangeError) + ":" + e.message);
+        }
+    }
+    check("arrlen2", dout.join("|") == "true:Invalid array length|true:Invalid array length|true:Invalid array length|true:Invalid array length|ok2");
 }
 
 // ===== SECTION 127: an optional call of a class method =====
@@ -5347,6 +5389,16 @@ function s128(): void {
     check("repempty1", "abc".replaceAll(e, "_") == "_a_b_c_" && "abc".replace(e, "_") == "_abc" && "".replaceAll(e, "_") == "_");
     check("repempty2", "abc".replaceAll(e, (m: string, o: number) => "<" + o + ">") == "<0>a<1>b<2>c<3>" && "ab".replaceAll(e, "[$`|$']") == "[|ab]a[a|b]b[ab|]");
     check("repempty3", "x\u{1F600}".replaceAll(e, "_").length == 7);
+    // A RegExp argument of replaceAll or matchAll must have the g flag.
+    const res: RegExp[] = [/a/, /a/y, /a/g];
+    const m: any[] = [];
+    for (let i = 0; i < res.length; i++) {
+        try { m.push("aa".replaceAll(res[i], "b")); } catch (x: any) { m.push(x.name + ":" + x.message); }
+        try { m.push([..."aa".matchAll(res[i])].length); } catch (x: any) { m.push(x.name + ":" + x.message); }
+    }
+    const nr = "TypeError:String.prototype.replaceAll called with a non-global RegExp argument";
+    const nm = "TypeError:String.prototype.matchAll called with a non-global RegExp argument";
+    check("repglobal1", m.join("|") == [nr, nm, nr, nm, "bb", 2].join("|") && [..."aa".matchAll("a")].length == 2);
 }
 
 // ===== SECTION 129: AggregateError, and Promise.any's rejection =====
@@ -5533,6 +5585,30 @@ function s138(): void {
         try { f(); } catch (e: any) { m.push((e instanceof TypeError) + ":" + e.message); }
     }
     check("classcall1", m.join("|") == "true:Class constructor Nn138 cannot be invoked without 'new'|true:f is not a function");
+    // The builtins callable without new: an Error class constructs, Date() is a
+    // string, and Map, Set, WeakMap, WeakSet and Promise have words of their own.
+    var bs: any[] = [Error, TypeError, RangeError, SyntaxError, URIError, EvalError, AggregateError]
+    var r: string[] = []
+    for (var j = 0; j < bs.length; j++) {
+        var B = bs[j]
+        var e = j == 6 ? B([1], "m6") : B("m" + j)
+        r.push(e.name + ":" + e.message + ":" + (e instanceof B) + (e instanceof Error))
+    }
+    check("classcall2", r.join("|") == "Error:m0:truetrue|TypeError:m1:truetrue|RangeError:m2:truetrue|SyntaxError:m3:truetrue|URIError:m4:truetrue|EvalError:m5:truetrue|AggregateError:m6:truetrue");
+    var ns: any = {Error: Error, D: Date}
+    check("classcall3", typeof Date() == "string" && typeof ns.D() == "string" && ns.Error("x").message == "x" &&
+        Error.call(null, "c").message == "c" && TypeError.apply(null, ["a"]).name == "TypeError" && Error.bind(null, "b")().message == "b");
+    var cs2: any[] = [Map, Set, WeakMap, WeakSet, Promise, Nn138]
+    var w: string[] = []
+    for (var k = 0; k < cs2.length; k++) {
+        var C = cs2[k]
+        try { C(function () {}) } catch (e: any) { w.push(e.message) }
+    }
+    check("classcall4", w.join("|") == "Constructor Map requires 'new'|Constructor Set requires 'new'|Constructor WeakMap requires 'new'|Constructor WeakSet requires 'new'|Promise constructor cannot be invoked without 'new'|Class constructor Nn138 cannot be invoked without 'new'");
+    class Sub138 extends Error {}
+    var sm = ""
+    try { (Sub138 as any)("s") } catch (e: any) { sm = e.message }
+    check("classcall5", sm == "Class constructor Sub138 cannot be invoked without 'new'" && new Promise(function (res) { res(1) }) instanceof Promise);
 }
 
 // ===== SECTION 139: a decorator's context object =====
@@ -5547,6 +5623,14 @@ function cdec139(target: any, ctx: any): any {
     log139.push(ctx.kind + ":" + String(ctx.name));
     return target;
 }
+// A class's context has no static or private (ClassDecoratorContext).
+const clog139: string[] = [];
+function cctx139(target: any, ctx: any): any {
+    clog139.push(String(ctx.static) + ":" + String(ctx.private) + ":" + ("static" in ctx) + ":" + typeof ctx.addInitializer);
+    return target;
+}
+@cctx139
+class Dc139 {}
 @cdec139
 class Dk139 {
     @mdec139 m(): number { return 2; }
@@ -5557,6 +5641,7 @@ class Ds139 {
 function s139(): void {
     check("decoctx1", log139.join("|") == "object:m:method:false:false|class:Dk139|object:sm:method:true:false" &&
         new Dk139().m() == 4 && Ds139.sm() == 6);
+    check("decoctx2", clog139.join() == "undefined:undefined:false:function" && typeof Dc139 == "function");
 }
 
 // ===== SECTION 140: a RegExp as a string, a method over an accessor =====
@@ -5974,6 +6059,39 @@ function s149(): void {
     for (let i = 0; i < tagOf.length; i++) { tags.push(Object.prototype.toString.call(tagOf[i])) }
     check("tag149b", tags.join() === "[object Map],[object Set],[object WeakMap],[object WeakSet],[object ArrayBuffer]," +
         "[object Uint8Array],[object Date],[object Function]" && String(tagOf[0]) === "[object Map]")
+    // A symbol and a BigInt, and their wrappers, by Symbol.prototype's and
+    // BigInt.prototype's own tags.
+    const prims: any[] = [Symbol("q"), 1n, Object(2n), Object(Symbol("r"))]
+    const pt: string[] = []
+    for (let i = 0; i < prims.length; i++) { pt.push(Object.prototype.toString.call(prims[i])) }
+    check("tag149c", pt.join() === "[object Symbol],[object BigInt],[object BigInt],[object Symbol]")
+}
+
+// ===== SECTION 150: function types in a conditional's extends, using in for heads =====
+// A conditional type's extends arm may be a function or constructor type, and an 'infer'
+// may carry its own constraint. 'using' declares like 'let' in a for head and as a
+// statement, a string may hold raw control characters, an export-from may carry import
+// attributes, and a tagged template belongs to the callee of a 'new'. Values read off
+// node 24 (tsc 6 output).
+type Ret150<T> = T extends () => infer R ? R : never;
+type Fn150<T> = T extends (x: number) => string ? 1 : 2;
+type Inf150<T> = T extends [infer X extends string] ? X : never;
+type New150<T> = T extends new () => infer I ? I : never;
+export {} from './typescript-test-1' with { type: "json" };
+function tag150(s: any): any { return function (this: any) { this.v = s[0] } }
+function s150(): void {
+    const r: Ret150<() => number> = 3
+    const f: Fn150<(x: number) => string> = 1
+    const i: Inf150<["s"]> = "s"
+    check("cond150a", r + f === 4 && i === "s")
+    let n = 0
+    for (using x of [null, undefined]) { n++ }
+    for (using y = null; n < 4; n++) {}
+    using z = null, w = undefined
+    check("using150b", n === 4 && z === null && w === undefined)
+    const s = "ab"
+    check("ctl150c", s.length === 4 && s.charCodeAt(1) === 1 && s.charCodeAt(3) === 12 && 'q'.length === 2)
+    check("newtag150d", (new tag150`hi`).v === "hi")
 }
 
 // ===== END SECTIONS =====
@@ -6116,6 +6234,7 @@ function main(): number {
     s147(); // SECTION-CALL 147
     s148(); // SECTION-CALL 148
     s149(); // SECTION-CALL 149
+    s150(); // SECTION-CALL 150
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

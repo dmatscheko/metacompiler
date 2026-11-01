@@ -153,7 +153,8 @@ UniSpace    = "\u00a0" | "\u1680" | "\u2000"..."\u200a" | "\u2028" | "\u2029"
 Comment     = LineComment | BlockComment ;
 LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
-NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+// A line comment ends at any line terminator: LF, CR, U+2028 or U+2029.
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\u2027" | "\u202a"..."\U0010ffff" ;
 NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
 NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 // NOT lib/ident-dollar.abnf: that lib's Id is the ASCII identifier that Java, MetaJS
@@ -549,12 +550,14 @@ Await       <~~ push(makeAwait(pop())) ~~>
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 // Unary minus is js_jsneg in both engines: a BigInt negates, a symbol throws.
+// NotDoubled refuses '--1' and '++1', update expressions on a literal and so syntax
+// errors, which would otherwise parse as '-(-1)' and '+(+1)'; '- -1' is fine.
 Neg         <~~ push(makeUnary(pop(), "js_jsneg")) ~~>
-            = "-" UnaryExpr ;
+            = "-" NotDoubled UnaryExpr ;
 // Unary plus is ToNumber, not a no-op: '+"3"' is the number 3. It is tried after
 // PreIncDec so that '++x' stays an increment instead of '+(+x)'.
 Plus        <~~ push(makeUnary(pop(), "js_jstonumber")) ~~>
-            = "+" UnaryExpr ;
+            = "+" NotDoubled UnaryExpr ;
 Not         <~~ push(makeUnary(pop(), notExt())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
@@ -573,17 +576,66 @@ TypeofExpr  <~~ push(makeUnary(pop(), typeofExt())) ~~>
 
 // The postfix forms: i++ evaluates to the old value.
 PostfixExpr = IncDec | SuperCall | CallMember ;
-// The postfix target is the NAME form only, not the whole Target. IncDec is tried in front
-// of CallMember, so a wider target here would parse every primary expression twice - once
-// as a target that then finds no '++', once as the expression it really was - and that
-// doubles at every nesting level, which is what made '((((((...1...))))))' explode. The
-// forms this gives up, '(a)++' and '[1].a++', are assignable only in the same contrived way
-// as the rest of the parenthesized-target surface.
+// The postfix target is the NAME form, plus the PARENTHESIZED form behind ParenUpdAhead,
+// not the whole Target. IncDec is tried in front of CallMember, so a wider target here
+// would parse every primary expression twice - once as a target that then finds no '++',
+// once as the expression it really was - and that doubles at every nesting level, which
+// is what made '((((((...1...))))))' explode. ParenUpdAhead lets '(a)++' and '(o.n)--'
+// through only when the operator really follows the parenthesized operand. The form this
+// gives up, '[1].a++', is assignable only in the same contrived way.
 // A POSTFIX '++'/'--' is a restricted production too: no line terminator may sit between
 // the operand and the operator, so 'a' + newline + '--b' is 'a;' followed by the prefix
 // decrement of b, not 'a--' followed by 'b'.
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = TargetNamed SameLine ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = ( TargetNamed | ParenUpdAhead TargetParen ) SameLine ( "++" | "--" ) <~~ push(up.in) ~~> ;
+// Succeeds when the input is a parenthesized group, then any member/call suffixes, then
+// '++' or '--'. Strings inside the brackets are skipped whole; anything it cannot decide
+// (an unterminated bracket or string, a comment in front of the group) fails, which only
+// gives the operand back to CallMember.
+ParenUpdAhead = :script(~~
+    (function() {
+        // The pending whitespace in front of the operand has not been skipped yet.
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i = i + 1 }
+        if (c.peek(i) !== 40) { return abnf.newToken("\x01no-update", 0) }
+        var depth = 0
+        while (true) {
+            var cc = c.peek(i)
+            if (cc < 0) { return abnf.newToken("\x01no-update", 0) }
+            if (cc === 34 || cc === 39 || cc === 96) {
+                var q = cc
+                i = i + 1
+                while (true) {
+                    var sc = c.peek(i)
+                    if (sc < 0) { return abnf.newToken("\x01no-update", 0) }
+                    if (sc === 92) { i = i + 2; continue }
+                    if (sc === q) { i = i + 1; break }
+                    i = i + 1
+                }
+                continue
+            }
+            if (cc === 40 || cc === 91) { depth = depth + 1; i = i + 1; continue }
+            if (cc === 41 || cc === 93) {
+                depth = depth - 1
+                i = i + 1
+                if (depth > 0) { continue }
+                // '.name' suffixes are stepped over here, a bracket suffix by the outer loop.
+                while (true) {
+                    var ic = c.peek(i)
+                    if (ic === 32 || ic === 9 || ic === 46 || (ic >= 48 && ic <= 57) || (ic >= 65 && ic <= 90)
+                        || (ic >= 97 && ic <= 122) || ic === 95 || ic === 36 || ic === 35) { i = i + 1; continue }
+                    break
+                }
+                var oc = c.peek(i)
+                if (oc === 40 || oc === 91) { continue }
+                if ((oc === 43 || oc === 45) && c.peek(i + 1) === oc) { return undefined }
+                return abnf.newToken("\x01no-update", 0)
+            }
+            if (depth === 0) { return abnf.newToken("\x01no-update", 0) }
+            i = i + 1
+        }
+    })()
+~~) ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
@@ -760,9 +812,10 @@ NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
 //
 // The suffix chain belongs to the CALLEE ('new a.b.C()' constructs a.b.C), and it must
 // not contain a call: 'new f()' is the construction, not a call of f whose result is
-// constructed. Every seed therefore shares one member-only chain.
+// constructed. Every seed therefore shares one member-only chain. A tagged template IS
+// part of that chain ('new tag`x`' constructs what tag`x` returns).
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix | TagSuffix } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
             | ArrayLit | ObjectLit | VarRef ;
 
@@ -1348,13 +1401,18 @@ VarRef      <~~ push(jsVarRef(jsbRef(idName(up.in)), up.start)) ~~>
 // about which escapes exist, so its StrEsc is the catch-all "backslash followed
 // by any printable char". JavaScript's escape grammar is specific, and every
 // shape it does NOT have is a syntax ERROR rather than a stray character -
-// without spelling it out '\x', '\u{110000}' and '\9' all "parse". The
-// plain-char alternatives are still the lib's DqPlain / SqPlain, and ModPath
+// without spelling it out '\x', '\u{110000}' and '\9' all "parse". ModPath
 // above keeps using the lib's StrEsc: a module path is a file name, not a
 // JavaScript value, and its escapes are not JavaScript's problem.
 StringLit   = JsDqString | JsSqString ;
-JsDqString  = '"' :whitespace() { JsStrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
-JsSqString  = "'" :whitespace() { JsStrEsc | SqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
+JsDqString  = '"' :whitespace() { JsStrEsc | JsDqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
+JsSqString  = "'" :whitespace() { JsStrEsc | JsSqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
+// The plain characters of a string are everything EXCEPT the closing quote, the backslash
+// and a LINE BREAK (LF, CR). The lib's DqPlain/SqPlain start at \x20 and would reject the
+// raw control characters JavaScript allows (a literal NUL is legal), and U+2028/U+2029 are
+// allowed raw. Twin of JsDqPlain in js-interpreter.abnf.
+JsDqPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+JsSqPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 
 // The legacy OCTAL escapes ('\1', '\07', '\377') are legal in SLOPPY code only: a
 // 'use strict' directive turns them into syntax errors, which is what the NotStrict
@@ -1762,10 +1820,25 @@ IdEscape    = "\\" :whitespace() JsUniEsc ;
 KwEnd = :script(~~
     (function() {
         var cc = c.peek(0)
-        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36
-                || (cc >= 97 && cc <= 122) || cc === 92 || cc >= 128)
-            ? abnf.newToken("\x01keyword-boundary", 0)
-            : undefined
+        if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36
+            || (cc >= 97 && cc <= 122) || cc === 92) {
+            return abnf.newToken("\x01keyword-boundary", 0)
+        }
+        if (cc < 128) { return undefined }
+        // A non-ASCII lead byte: the whitespace and line-separator code points end the
+        // keyword ('true<U+2028>var'), every other one may be an identifier letter.
+        // Twin of KwEnd in js-interpreter.abnf, which lists the UTF-8 sequences.
+        var b1 = c.peek(1), b2 = c.peek(2)
+        var space = false
+        if (cc === 194) { space = (b1 === 160) }
+        else if (cc === 225) { space = (b1 === 154 && b2 === 128) }
+        else if (cc === 226) {
+            if (b1 === 128) { space = (b2 >= 128 && b2 <= 138) || b2 === 168 || b2 === 169 || b2 === 175 }
+            else if (b1 === 129) { space = (b2 === 159) }
+        }
+        else if (cc === 227) { space = (b1 === 128 && b2 === 128) }
+        else if (cc === 239) { space = (b1 === 187 && b2 === 191) }
+        return space ? undefined : abnf.newToken("\x01keyword-boundary", 0)
     })()
 ~~) ;
 
@@ -3404,10 +3477,14 @@ NotFuncHead = :script(~~
         var okB = curF.NewBlock("")
         var badB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_jsfnp", [fnV]), handle(0)), okB, badB)
-        // js_jscallerr: node's TypeError, which names a class called without `new`.
-        callExt(badB, "js_throw", [callExt(badB, "js_jscallerr", [fnV, emitStr(badB, site)])])
-        badB.NewRet(hUndef) // Never reached: js_throw does not return.
-        return {b: okB, v: jsCall(okB, fnV, thisV, argsV)}
+        // js_jsbadcall: node's TypeError, or the answer of a builtin class that is
+        // callable without `new` (Error, Date, ...).
+        var badV = callExt(badB, "js_jsbadcall", [fnV, emitStr(badB, site), argsV])
+        var okV = jsCall(okB, fnV, thisV, argsV)
+        var joinB = curF.NewBlock("")
+        badB.NewBr(joinB)
+        okB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(okV, okB), llvm.ir.NewIncoming(badV, badB)])}
     }
     // The MISS SENTINEL js_jsmcall answers when no arm claimed a method call. It is
     // one pinned object made in the boot block, so the same handle in both engines
@@ -3707,7 +3784,7 @@ NotFuncHead = :script(~~
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
-            name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
+            name == "queueMicrotask" || name == "URIError" || name == "EvalError" || name == "encodeURIComponent" || name == "encodeURI" ||
             name == "decodeURIComponent" || name == "decodeURI" || name == "Uint8Array" || name == "ArrayBuffer") { jsbWant = true }
         if (name == "setTimeout" || name == "setInterval" || name == "clearTimeout" || name == "clearInterval") { jsTimerWant = true }
         if (name == "Date" || jsTimerWant) {
@@ -5240,9 +5317,13 @@ NotFuncHead = :script(~~
         var mBadB = curF.NewBlock("")
         elseB.NewCondBr(elseB.NewICmp(llvm.enum.IPredEQ, ev, elseB.NewLoad(i64, mcallMissGlob())),
                         mBadB, mOkB)
-        emitSiteThrow(mBadB, site + " is not a function")
+        // A member holding a class is called as a class (js_jsbadcall); anything else
+        // is node's TypeError.
+        var bv = callExt(mBadB, "js_jsbadcall", [callExt(mBadB, "js_jsvget", [objV, keyV]), emitStr(mBadB, site), argsV])
+        mBadB.NewBr(mergeB)
         mOkB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, mOkB)])}
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, mOkB),
+                                             llvm.ir.NewIncoming(bv, mBadB)])}
     }
     foldCallMember = function(items, txt) {
         items = flattenParen(items)

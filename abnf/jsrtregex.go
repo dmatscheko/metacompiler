@@ -1145,7 +1145,7 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 			return rxEscRes{ch: 8}
 		}
 	case 'x':
-		v, got := 0, 0
+		v, got, x0 := 0, 0, st.i
 		for got < 2 && st.i < st.n {
 			h := rxHexVal(st.p[st.i])
 			if h < 0 {
@@ -1154,6 +1154,12 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 			v = v*16 + h
 			st.i++
 			got++
+		}
+		// JavaScript Annex B (o, not U): an incomplete \x or \u is an identity escape
+		// of the letter, and what follows is read again (B.1.2 IdentityEscape).
+		if got < 2 && st.octal && !st.uni {
+			st.i = x0
+			return rxEscRes{ch: rune(c)}
 		}
 		if got == 0 {
 			st.fail("invalid hex escape")
@@ -1167,7 +1173,7 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 			}
 			return rxEscRes{ch: rune(v)}
 		}
-		v, got := 0, 0
+		v, got, u0 := 0, 0, st.i
 		for got < 4 && st.i < st.n {
 			h := rxHexVal(st.p[st.i])
 			if h < 0 {
@@ -1176,6 +1182,10 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 			v = v*16 + h
 			st.i++
 			got++
+		}
+		if got < 4 && st.octal {
+			st.i = u0
+			return rxEscRes{ch: rune(c)}
 		}
 		if got == 0 {
 			st.fail("invalid unicode escape")

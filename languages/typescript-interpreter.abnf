@@ -373,8 +373,11 @@ PatternAssign <~~ push(makePatternAssign(takeAll())) ~~>
 
 // See the twin of this comment in js-interpreter.abnf.
 LhsAssign   <~~ push(makeLhsAssign(takeAll())) ~~>
-            = HasTopLevelAssign LhsHead LhsSuffixes ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
+            = HasTopLevelAssign LhsPlace ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
               | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+// Parentheses around the place are transparent ('([1].a) = v' assigns [1].a); they add
+// no item, so the builder sees the same head and suffixes as without them.
+LhsPlace    = LhsHead LhsSuffixes | "(" LhsPlace ")" [ LhsSuffixes ] ;
 LhsHead     <~~ push({lhsprim: pop(), ptxt: cpTxt(up.in, up.pos)}) ~~>
             = Primary ;
 // Zero or more calls, then a member, then optionally more of the same - so whatever the
@@ -586,7 +589,60 @@ CallHead    = SuperProp <~~ push({ptxt: up.in, supthis: true}) ~~>
 // See the twin of this comment in js-interpreter.abnf.
 CallPrimary = ParenExpr | Primary ;
 ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
-            = "(" Expression ")" NotArrow ;
+            = "(" Expression ")" NotArrow NotArrowAnnot ;
+// A parenthesized expression that is really an arrow's parameter list with a RETURN
+// TYPE: '(x): boolean => x > 1' would otherwise be read as '(x)' and then fail at the
+// ':'. Behind the ')' a ':' is followed by a type, and a '=>' at bracket depth 0 before
+// any ';', ',', '=' or closing bracket of the enclosing text makes it an arrow; the
+// ':' of a conditional ('c ? (x) : y') meets one of those first. Twin of NotArrowAnnot in
+// typescript-to-llvm-ir.abnf.
+NotArrowAnnot = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc !== 58 || c.peek(i + 1) === 58) { return undefined }
+        i = i + 1
+        var depth = 0
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            var ch = c.peek(i)
+            if (ch < 0 || ch === 59) { return undefined }
+            if (ch === 34 || ch === 39 || ch === 96) {
+                var q = ch
+                i = i + 1
+                while (true) {
+                    var sc = c.peek(i)
+                    if (sc < 0) { return undefined }
+                    if (sc === 92) { i = i + 2; continue }
+                    i = i + 1
+                    if (sc === q) { break }
+                }
+                continue
+            }
+            if (ch === 61) {
+                if (c.peek(i + 1) === 62) {
+                    if (depth === 0) { return abnf.newToken("\x01annotated-arrow", 0) }
+                    i = i + 2
+                    continue
+                }
+                if (depth === 0) { return undefined }
+            }
+            if (ch === 44 && depth === 0) { return undefined }
+            if (ch === 40 || ch === 91 || ch === 123 || ch === 60) { depth = depth + 1 }
+            if (ch === 41 || ch === 93 || ch === 125 || ch === 62) {
+                if (depth === 0) { return undefined }
+                depth = depth - 1
+            }
+            i = i + 1
+        }
+        return undefined
+    })()
+~~) ;
+
 TypeArgsSuffix = TypeArgs TypeArgsFollow ;
 NonNullSuffix = "!" NotTouchingEq ;
 // The non-null '!' is followed by anything but an '=' TOUCHING it: 'x! = 1' assigns to
@@ -662,7 +718,7 @@ NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
             = KwNew NewCallee <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
 // See the twin of this comment in js-interpreter.abnf.
 NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
-            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix } ;
+            = NewSeed <~~ push({ptxt: cpTxt(up.in, up.pos)}) ~~> { DotSuffix | IndexSuffix | TaggedTemplate } ;
 NewSeed     = NewTarget | NewWidened | SuperProp | ImportCall | "(" Expression ")" | FunctionExpr | ClassExpr
             | TemplateLit | ArrayLit | ObjectLit | VarRef ;
 
@@ -974,10 +1030,14 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // 'implements' clause (which is pure type information - nothing is inherited from it).
 ClassDecl   <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
             = ClassDecorators ClassDeclCore ;
-ClassDeclCore = [ KwAbstract ] KwClass [ NotBindName Id <~~ push({cname: idName(up.in)}) ~~> ] [ TypeParams ]
+ClassDeclCore = [ KwAbstract ] KwClass ( NotBindName Id <~~ push({cname: idName(up.in)}) ~~> | ClassDefaultName ) [ TypeParams ]
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> [ TypeArgs ] ]
               [ KwImplements TypeList ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
+// A declaration without a name only parses behind 'export default', and the spec names
+// that class "default". Twin of DecoratedDefault in typescript-to-llvm-ir.abnf.
+ClassDefaultName <~~ push({cname: "default"}) ~~>
+            = :script(~~ undefined ~~) ;
 // The decorators may also stand IN FRONT OF the 'export' ('@dec export default class C
 // {}' is as legal as 'export @dec class C {}'), which is why the core of the declaration
 // is a production of its own: here the decorator list is picked up before the keyword and
@@ -2785,6 +2845,9 @@ NotFuncHead = :script(~~
         if (typeof v == "string") { return "[object String]" }
         if (typeof v == "boolean") { return "[object Boolean]" }
         if (typeof v == "function" || isClassDesc(v)) { return "[object Function]" }
+        // Symbol.prototype's and BigInt.prototype's own @@toStringTag.
+        if (jsIsSym(v)) { return "[object Symbol]" }
+        if (isBigInt(v)) { return "[object BigInt]" }
         // See the twin of this comment in js-interpreter.abnf.
         if (typeof v == "object") {
             // A string [Symbol.toStringTag], own or inherited, names the object: a
@@ -3488,6 +3551,9 @@ NotFuncHead = :script(~~
     // The `Promise` global: a function value, so `new Promise(exec)` constructs one and
     // `typeof Promise` is "function". The executor runs SYNCHRONOUSLY.
     var jsPromiseFn = function(exec) {
+        // See the twin of this comment in js-interpreter.abnf.
+        if (pendingNewTarget !== jsPromiseFn) { biRaise("TypeError: Promise constructor cannot be invoked without 'new'") }
+        pendingNewTarget = undefined
         var p = jpNew()
         // See the twin of this comment in js-interpreter.abnf.
         if (typeof exec != "function") { biRaise("TypeError: Promise resolver " + jsStr(exec) + " is not a function") }
@@ -5317,7 +5383,7 @@ NotFuncHead = :script(~~
         if (k == "name") { return o.__name }
         if (k == "length") { return fnLenOf(o.__ctor) }
         // See the twin of this comment in js-interpreter.abnf.
-        if (k == "call" || k == "apply") { return jsNativeFn(function() { jsClassCallErr(o) }, k, "") }
+        if (k == "call" || k == "apply") { return jsNativeFn(function() { return jsClassCall(o, jsClassShimArgs(k, arguments)) }, k, "") }
         if (k == "bind") { return jsNativeFn(fnBindShim(o), k, "") }
         if (k == "constructor") { return jsFunctionFn }
         // A class object inherits Object.prototype's methods too.
@@ -6016,9 +6082,22 @@ NotFuncHead = :script(~~
     // bind() differs from call() in one way that matters here: the bound arguments are
     // PREPENDED to whatever the eventual call passes, and the receiver is remembered
     // rather than taken at the call site.
-    // Twin of jsClassCallErr in js-interpreter.abnf.
-    function jsClassCallErr(cls) {
+    // Twin of jsClassCall in js-interpreter.abnf.
+    function jsClassCall(cls, argv) {
+        if (hasOwn(cls, "__errname")) { return jsConstructClass(cls, argv) }
+        var t = cls.__statics
+        if (t != undefined && hasOwn(t, "__call")) { return callWithThis(t.__call, undefined, argv) }
         biRaise("TypeError: Class constructor " + cls.__name + " cannot be invoked without 'new'")
+        return undefined
+    }
+    function jsClassShimArgs(k, args) {
+        var a = []
+        if (k == "apply") {
+            if (args.length > 1 && Array.isArray(args[1])) { a = args[1] }
+        } else {
+            for (var i = 1; i < args.length; i++) { a.push(args[i]) }
+        }
+        return a
     }
     function fnBindShim(fn) {
         return function() {
@@ -6033,10 +6112,10 @@ NotFuncHead = :script(~~
             // the target's less the arguments already supplied, floored at 0 (node says
             // "bound f"/1 for `f.bind(null)` of `function f(a){}`).
             var bf = fnMetaPut(function() {
-                if (cd) { jsClassCallErr(fn) }
                 var a = []
                 for (var j = 0; j < pre.length; j++) { a.push(pre[j]) }
                 for (var k2 = 0; k2 < arguments.length; k2++) { a.push(arguments[k2]) }
+                if (cd) { return jsClassCall(fn, a) }
                 return callWithThis(fn, self, a)
             }, "bound " + (cd ? staticSideRead(fn, "name") : fnNameOf(fn)), bl)
             jsBoundK.push(bf)
@@ -7244,6 +7323,11 @@ NotFuncHead = :script(~~
         }
         return out
     }
+    // Twin of reNeedGlobal in js-interpreter.abnf.
+    function reNeedGlobal(re, name) {
+        if (!re.global) { biRaise("TypeError: String.prototype." + name + " called with a non-global RegExp argument") }
+        return undefined
+    }
     // String#replace / #replaceAll: each match is replaced by the template's
     // substitution (jsReSubst) or by what the function answers for it.
     function reReplace(rv, s, repl, forceAll) {
@@ -7305,7 +7389,10 @@ NotFuncHead = :script(~~
                 var m = rxSearch(reProgOf(rv), target, 0)
                 return {v: (m == null) ? -1 : m.begin}
             }
-            if (name == "matchAll") { return {v: reMatchAll(rv, target, false)} }
+            if (name == "matchAll") {
+                if (isRegex(pat)) { reNeedGlobal(rv, name) }
+                return {v: reMatchAll(rv, target, false)}
+            }
             if (rv.global) {
                 var all = reMatchAll(rv, target, true)
                 return {v: (all.length == 0) ? null : all}
@@ -7314,7 +7401,10 @@ NotFuncHead = :script(~~
         }
         if (!isRegex(pat)) { return null }   // a plain-string argument keeps the host behaviour
         if (name == "replace") { return {v: reReplace(pat, target, args[1], false)} }
-        if (name == "replaceAll") { return {v: reReplace(pat, target, args[1], true)} }
+        if (name == "replaceAll") {
+            reNeedGlobal(pat, name)
+            return {v: reReplace(pat, target, args[1], true)}
+        }
         if (name == "split") {
             var lim = -1
             if (args.length > 1 && args[1] != undefined && args[1] != null) { lim = args[1] - 0 }
@@ -9129,7 +9219,8 @@ NotFuncHead = :script(~~
     // decorators answer {get, set, init}: a get or a set replaces the cell's, an init
     // is an initializer of the hidden field. ctx.addInitializer appends to extras. The
     // context carries kind, name, static, private (a private name reads "#x") and
-    // addInitializer. Twin of decoApplyAll in typescript-to-llvm-ir.abnf.
+    // addInitializer; a class's has no static or private (ClassDecoratorContext).
+    // Twin of decoApplyAll in typescript-to-llvm-ir.abnf.
     function decoApply(vals, value, kind, name, statik, extras) {
         var v = anytype // The decorated value: a class descriptor, a function or an accessor cell.
         v = value
@@ -9138,9 +9229,12 @@ NotFuncHead = :script(~~
         for (var i = vals.length - 1; i >= 0; i--) {
             var priv = typeof name == "string" && isPrivateKey(name)
             var ctx = {kind: kind, name: priv ? privShown(name) : name, addInitializer: adder,
-                       __keys: ["kind", "name", "static", "private", "addInitializer"]}
-            ctx["static"] = statik == true
-            ctx["private"] = priv
+                       __keys: ["kind", "name", "addInitializer"]}
+            if (kind != "class") {
+                ctx["__keys"] = ["kind", "name", "static", "private", "addInitializer"]
+                ctx["static"] = statik == true
+                ctx["private"] = priv
+            }
             var d = anytype // The decorator.
             d = vals[i]
             if (typeof d != "function") fail("decorator is not a function")
@@ -10738,8 +10832,9 @@ NotFuncHead = :script(~~
                 } else if (s.kind == "tagcall") {
                     // A tagged template: the tag gets the literal chunks first, then one
                     // argument per substitution.
-                    if (typeof cur != "function") { biRaise("TypeError: " + sTexts[i] + " is not a function") }
-                    cur = callWithThis(cur, curThis, tagArgs(s))
+                    if (cur != undefined && cur != null && isClassDesc(cur)) { cur = jsClassCall(cur, tagArgs(s)) }
+                    else if (typeof cur != "function") { biRaise("TypeError: " + sTexts[i] + " is not a function") }
+                    else { cur = callWithThis(cur, curThis, tagArgs(s)) }
                     curThis = undefined
                 } else {
                     var argv = evalArgs(s.args)
@@ -10768,8 +10863,8 @@ NotFuncHead = :script(~~
                         cur = callWithThis(cur, curThis, argv)
                     } else {
                         // See the twin of this comment in js-interpreter.abnf.
-                        if (cur != undefined && cur != null && isClassDesc(cur)) { jsClassCallErr(cur) }
-                        cur = mcall(curThis, lastKey, argv, sTexts[i])
+                        if (cur != undefined && cur != null && isClassDesc(cur)) { cur = jsClassCall(cur, argv) }
+                        else { cur = mcall(curThis, lastKey, argv, sTexts[i]) }
                     }
                     curThis = undefined
                 }
