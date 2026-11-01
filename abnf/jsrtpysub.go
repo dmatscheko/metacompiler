@@ -548,6 +548,87 @@ func pyIsTup(v interface{}) bool {
 	return ok && a.kind == pyTupKind
 }
 
+// pyRangeKind is the jsArray.kind a Python RANGE carries: the materialized
+// array of its elements, its [start, stop, step] kept in props for the repr,
+// slicing and the three attributes. Indexing, len, iteration and == treat it as
+// any sequence; what differs - type, repr, immutability, +, * and ordering -
+// asks the kind. Twin of pyRangeOf / isRange in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+const pyRangeKind = 20
+
+func pyRangeOf(a *jsArray, start, stop, step float64) *jsArray {
+	a.kind = pyRangeKind
+	a.props = [3]float64{start, stop, step}
+	return a
+}
+
+func pyRangeParts(a *jsArray) [3]float64 {
+	p, _ := a.props.([3]float64)
+	return p
+}
+
+// pyImmSeq says whether a is an immutable sequence: a tuple, bytes or a range.
+func pyImmSeq(a *jsArray) bool {
+	return a.kind == pyTupKind || a.kind == pyBytesKind || a.kind == pyRangeKind
+}
+
+// pyRangeSlice is r[lo:hi:st], the range of the selected elements: the clamped
+// slice bounds (CPython's PySlice_AdjustIndices) scaled onto r's start and step.
+func (rt *jsrt) pyRangeSlice(o *jsArray, loV, hiV, stV interface{}) *jsArray {
+	n := len(o.elems)
+	st := 1
+	if !isUndefOrNull(stV) {
+		if st = rt.pySliceArg(stV); st == 0 {
+			rt.pyRaise("ValueError", "slice step cannot be zero")
+		}
+	}
+	lo, hi := 0, n
+	if st < 0 {
+		lo, hi = n-1, -1
+	}
+	if !isUndefOrNull(loV) {
+		lo = rt.pyClampIndex(rt.pySliceArg(loV), n, st)
+	}
+	if !isUndefOrNull(hiV) {
+		hi = rt.pyClampIndex(rt.pySliceArg(hiV), n, st)
+	}
+	out := &jsArray{}
+	for i := lo; (st > 0 && i < hi) || (st < 0 && i > hi); i += st {
+		out.elems = append(out.elems, o.elems[i])
+	}
+	p := pyRangeParts(o)
+	return pyRangeOf(out, p[0]+float64(lo)*p[2], p[0]+float64(hi)*p[2], p[2]*float64(st))
+}
+
+// pyRevKind is the CPython type name of reversed(v)'s cursor: a list, a range
+// and a dict or its views have their own reverse iterators, anything else is
+// the generic reversed. Twin of pyRevKind in languages/python-interpreter.abnf
+// and lib/python-rt.metajs.
+func pyRevKind(v interface{}) string {
+	if a, ok := v.(*jsArray); ok {
+		switch a.kind {
+		case 0:
+			return "list_reverseiterator"
+		case pyRangeKind:
+			return "range_iterator"
+		}
+		return "reversed"
+	}
+	if _, kind, ok := pyDView(v); ok {
+		switch kind {
+		case "keys":
+			return "dict_reversekeyiterator"
+		case "values":
+			return "dict_reversevalueiterator"
+		}
+		return "dict_reverseitemiterator"
+	}
+	if _, _, ok := dictParts(v); ok {
+		return "dict_reversekeyiterator"
+	}
+	return "reversed"
+}
+
 // pyValDunder is the delegate through which a builtin VALUE answers the dunder
 // name - (5).__add__, "s".__add__, [].__len__ - for the receiver sites only: a
 // type object's own dunders stay delegates, which unwrap a subclass instance.
@@ -790,7 +871,7 @@ func (rt *jsrt) pyUserIter(v interface{}) (interface{}, bool) {
 			return rt.call(m, jsUndef, []interface{}{v}), true
 		}
 		if gi := pySeqGetitem(v); gi != nil {
-			return rt.pySeqIter(v, gi), true
+			return rt.pySeqIter(v, gi, "iterator", 0, 1), true
 		}
 	}
 	return nil, false
@@ -816,19 +897,24 @@ func pySeqGetitem(v interface{}) interface{} {
 	return nil
 }
 
-// pySeqIter is the lazy cursor (CPython's type "iterator") over __getitem__(0),
-// (1), ... that ends at the first IndexError or StopIteration. Twin of
-// pySeqIterOf in python-interpreter.abnf and pyASeqIter in lib/python-rt.metajs.
-func (rt *jsrt) pySeqIter(v, gi interface{}) interface{} {
-	i, done := 0, false
+// pySeqIter is the lazy cursor of type name over __getitem__(i), (i + d), ...
+// that ends at the first IndexError or StopIteration, or below index 0: the
+// legacy protocol from 0 up (CPython's type "iterator"), reversed() from
+// len - 1 down. Twin of pySeqCursor in python-interpreter.abnf and pyASeqIter
+// in lib/python-rt.metajs.
+func (rt *jsrt) pySeqIter(v, gi interface{}, name string, i, d int) interface{} {
+	done := false
 	ad := newJSObject()
-	ad.set("__pyit", "iterator")
+	ad.set("__pyit", name)
 	ad.set("next", jsHostFunc("pyseq.next", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		out := newJSObject()
 		var val interface{} = jsUndef
+		if i < 0 {
+			done = true
+		}
 		if !done {
 			val, done = rt.pySeqItem(gi, v, i)
-			i++
+			i += d
 		}
 		if done {
 			val = jsUndef

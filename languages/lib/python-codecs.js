@@ -14,8 +14,8 @@
 
 // The codec an encoding name selects: lower-cased, every run of characters
 // other than ASCII letters, digits and "." collapsed to one "_" (CPython's
-// normalize_encoding), then looked up among the codecs' names and aliases
-// (encodings.aliases). "" for a codec not implemented here.
+// normalize_encoding), then looked up among the codecs' module names and
+// aliases (encodings.aliases) by pycdNameIs. "" for a codec not implemented here.
 function pycdLookup(enc) {
     var n = ""
     var punct = false
@@ -36,19 +36,24 @@ function pycdLookup(enc) {
     }
     var names = pycdNames
     for (var k = 0; k < names.length; k = k + 2) {
-        var al = names[k + 1]
-        for (var m = 0; m < al.length; m++) {
-            if (al[m] == n || al[m] == d) { return names[k] }
-        }
+        if (pycdNameIs(names[k + 1], n, d)) { return names[k] }
     }
     var maps = pycdCharmaps
     for (var q = 0; q < maps.length; q = q + 3) {
-        var al2 = maps[q + 1]
-        for (var w = 0; w < al2.length; w++) {
-            if (al2[w] == n || al2[w] == d) { return maps[q] }
-        }
+        if (pycdNameIs(maps[q + 1], n, d)) { return maps[q] }
     }
     return ""
+}
+// Does the normalized name n (d: its dots made underscores) select the codec
+// whose module name is al[0] and whose aliases are the rest? An alias matches n
+// or d, the module name only n (encodings.search_function). Twin of pycdNameIs
+// in abnf/jsrtpycodecs.go.
+function pycdNameIs(al, n, d) {
+    if (al[0] == n) { return true }
+    for (var m = 1; m < al.length; m++) {
+        if (al[m] == n || al[m] == d) { return true }
+    }
+    return false
 }
 // "binary" stands for the bytes-to-bytes and str-to-str codecs, which
 // str.encode and bytes.decode refuse.
@@ -56,8 +61,8 @@ var pycdNames = [
     "utf-8", ["utf_8", "u8", "utf", "utf8", "utf8_ucs2", "utf8_ucs4", "cp65001"],
     "utf-8-sig", ["utf_8_sig"],
     "utf-7", ["utf_7", "u7", "unicode_1_1_utf_7", "utf7"],
-    "ascii", ["ascii", "646", "ansi_x3_4_1968", "ansi_x3_4_1986", "cp367", "csascii", "ibm367", "iso646_us",
-        "iso_646_irv_1991", "iso_ir_6", "us", "us_ascii"],
+    "ascii", ["ascii", "646", "ansi_x3.4_1968", "ansi_x3_4_1968", "ansi_x3.4_1986", "cp367", "csascii", "ibm367",
+        "iso646_us", "iso_646.irv_1991", "iso_ir_6", "us", "us_ascii"],
     "latin-1", ["latin_1", "8859", "cp819", "csisolatin1", "ibm819", "iso8859", "iso8859_1", "iso_8859_1",
         "iso_8859_1_1987", "iso_ir_100", "l1", "latin", "latin1"],
     "utf-16", ["utf_16", "u16", "utf16"],
@@ -71,9 +76,13 @@ var pycdNames = [
     "raw-unicode-escape", ["raw_unicode_escape"],
     "punycode", ["punycode"],
     "idna", ["idna"],
-    "binary", ["base64_codec", "base64", "base_64", "bz2_codec", "bz2", "hex_codec", "hex", "quopri_codec",
-        "quopri", "quoted_printable", "quotedprintable", "rot_13", "rot13", "uu_codec", "uu", "zlib_codec",
-        "zip", "zlib"]]
+    "binary", ["base64_codec", "base64", "base_64"],
+    "binary", ["bz2_codec", "bz2"],
+    "binary", ["hex_codec", "hex"],
+    "binary", ["quopri_codec", "quopri", "quoted_printable", "quotedprintable"],
+    "binary", ["rot_13", "rot13"],
+    "binary", ["uu_codec", "uu"],
+    "binary", ["zlib_codec", "zip", "zlib"]]
 
 // The single-byte charmap codecs: name, names and aliases, and the table of
 // what bytes 0..255 decode to, as runs - each a code point in base 36, then

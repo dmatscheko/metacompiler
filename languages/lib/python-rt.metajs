@@ -149,6 +149,62 @@ function pyIsArr(v) { return Array.isArray(v) }
 // floor's array cell, which a copy does not inherit).
 function pyTup(a) { return arrKindSet(a, 16) }
 function pyIsTup(v) { return arrKind(v) == 16 }
+// Go: pyRangeKind / pyRangeOf / pyRangeSlice in abnf/jsrtpysub.go. A RANGE is
+// the materialized array of its elements carrying kind 20, its [start, stop,
+// step] kept as the array's named property __rng (arrProps / arrPropsSet, host
+// ids 106/107: field e of the floor's array cell).
+function pyRangeOf(a, start, stop, step) {
+    arrPropsSet(a, {__rng: [start, stop, step]})
+    return arrKindSet(a, 20)
+}
+function pyIsRange(v) { return arrKind(v) == 20 }
+function pyRangeP(v) { return arrProps(v)["__rng"] }
+// An immutable sequence: a tuple, bytes or a range.
+function pyImmSeq(v) {
+    var k = arrKind(v)
+    return k == 16 || k == 17 || k == 20
+}
+function pyRangeSlice(o, loV, hiV, stV) {
+    var n = o.length
+    var st = 1
+    if (!rtIsNil(stV)) {
+        st = pySliceArg(stV)
+        if (st == 0) { pyRaiseExc("ValueError", "slice step cannot be zero") }
+    }
+    var lo = 0
+    var hi = n
+    if (st < 0) {
+        lo = n - 1
+        hi = 0 - 1
+    }
+    if (!rtIsNil(loV)) { lo = pyClampIndex(pySliceArg(loV), n, st) }
+    if (!rtIsNil(hiV)) { hi = pyClampIndex(pySliceArg(hiV), n, st) }
+    var out = []
+    var i = lo
+    while ((st > 0 && i < hi) || (st < 0 && i > hi)) {
+        out.push(o[i])
+        i = i + st
+    }
+    var p = pyRangeP(o)
+    return pyRangeOf(out, p[0] + lo * p[2], p[0] + hi * p[2], p[2] * st)
+}
+// Go: pyRevKind. The CPython type name of reversed(v)'s cursor.
+function pyRevKind(v) {
+    if (pyIsArr(v)) {
+        var k = arrKind(v)
+        if (k == 0) { return "list_reverseiterator" }
+        if (k == 20) { return "range_iterator" }
+        return "reversed"
+    }
+    if (pyIsDView(v)) {
+        var dk = v["__dview"]
+        if (dk == "keys") { return "dict_reversekeyiterator" }
+        if (dk == "values") { return "dict_reversevalueiterator" }
+        return "dict_reverseitemiterator"
+    }
+    if (pyIsDict(v)) { return "dict_reversekeyiterator" }
+    return "reversed"
+}
 // Go: pyBytesKind / pyIsBytes / pySeqCls / pySeqTName / pySeqLike in
 // abnf/jsrtpybytes.go. bytes and bytearray are arrays of byte values carrying
 // kind 17 and 18; == compares kinds by pySeqCls, so bytes equals a bytearray
@@ -167,6 +223,7 @@ function pySeqTName(v) {
     if (k == 16) { return "tuple" }
     if (k == 17) { return "bytes" }
     if (k == 18) { return "bytearray" }
+    if (k == 20) { return "range" }
     return "list"
 }
 function pySeqLike(o, out) {
@@ -340,7 +397,7 @@ function pyKeyEq(a, b) {
 // bytearray is not.
 function pyHashName(v) {
     if (Array.isArray(v)) {
-        if (arrKind(v) == 17) { return "" }
+        if (arrKind(v) == 17 || pyIsRange(v)) { return "" }
         if (!pyIsTup(v)) { return pySeqTName(v) }
         var i = 0
         while (i < v.length) {
@@ -828,6 +885,12 @@ function pyStr(v) {
         return "<class '" + cn + "'>"
     }
     if (pyIsBytes(v)) { return pyBytesRepr(v) }
+    if (pyIsRange(v)) {
+        var rp = pyRangeP(v)
+        var rs = "range(" + pyStr(rp[0]) + ", " + pyStr(rp[1])
+        if (rp[2] != 1) { rs = rs + ", " + pyStr(rp[2]) }
+        return rs + ")"
+    }
     if (Array.isArray(v)) {
         var sr = pyReprNest(v, false)
         if (sr !== null) { return sr }
@@ -1842,7 +1905,7 @@ function pyAUserIter(v) {
     if (pyLookupHas(cls, "__iter__")) { return pyCallSelf(pyLookupVal(cls, "__iter__"), v, []) }
     var gi = pyASeqGetitem(v, cls)
     if (gi === undefined) { return undefined }
-    return pyASeqIter(v, gi)
+    return pyASeqIter(v, gi, "iterator", 0, 1)
 }
 
 // Go: pySeqGetitem. The __getitem__ the legacy sequence protocol iterates by:
@@ -1852,15 +1915,17 @@ function pyASeqGetitem(v, cls) {
     return pyLookupVal(cls, "__getitem__")
 }
 
-// Go: rt.pySeqIter. The lazy cursor (CPython's type "iterator") over
-// __getitem__(0), (1), ... that ends at the first IndexError or StopIteration.
-function pyASeqIter(v, gi) {
-    var ad = {__pyit: "iterator", __i: 0, __done: false}
+// Go: rt.pySeqIter. The lazy cursor of type name over __getitem__(i0),
+// (i0 + d), ... that ends at the first IndexError or StopIteration, or below
+// index 0.
+function pyASeqIter(v, gi, name, i0, d) {
+    var ad = {__pyit: name, __i: i0, __d: d, __done: false}
     ad["next"] = function() { return pyASeqStep(ad, v, gi) }
     return ad
 }
 
 function pyASeqStep(ad, v, gi) {
+    if (ad["__i"] < 0) { ad["__done"] = true }
     if (ad["__done"]) { return {value: undefined, done: true} }
     var r = anytype
     try { r = pyCallSelf(gi, v, [ad["__i"]]) }
@@ -1869,7 +1934,7 @@ function pyASeqStep(ad, v, gi) {
         ad["__done"] = true
         return {value: undefined, done: true}
     }
-    ad["__i"] = ad["__i"] + 1
+    ad["__i"] = ad["__i"] + ad["__d"]
     return {value: r, done: false}
 }
 
@@ -2240,6 +2305,7 @@ function pyGetAttrRaw(obj, name) {
     // were readable. Placed before the bound-builtin arm because a module's own
     // data slots (math.pi) must win.
     if (pyIsSlice(obj) && pySliceField(name) >= 0) { return obj["__pyslice"][pySliceField(name)] }
+    if (pyIsRange(obj) && pySliceField(name) >= 0) { return pyRangeP(obj)[pySliceField(name)] }
     // gi_running: True only while the generator's own body executes (Go:
     // rt.pyGetAttrRaw).
     if (name == "gi_running" && isGenerator(obj)) { return genState(obj) == 3 }
@@ -4034,6 +4100,7 @@ var PY_IDX_MAX = rtABigSub(rtABigFromNum(Math.pow(2, 63)), rtABigFromNum(1))
 var PY_IDX_MIN = rtABigNeg(rtABigFromNum(Math.pow(2, 63)))
 function pyASeqRepeat(seq, n) {
     if (typeof seq != "string" && !Array.isArray(seq)) { return null }
+    if (pyIsRange(seq)) { return null }
     var cnt = 0
     var exact = anytype
     exact = null
@@ -4652,8 +4719,8 @@ function pyABinTypeErr(op, l, r, a, b) {
     if (op == "|" && pyIsDict(a) && pyIsDict(b) && pySetElemsOf(a) === null && pySetElemsOf(b) === null) { return "" }
     if (op == "*") {
         if (nums) { return "" }
-        var sa = typeof a == "string" || pyIsArr(a)
-        var sb = typeof b == "string" || pyIsArr(b)
+        var sa = typeof a == "string" || (pyIsArr(a) && !pyIsRange(a))
+        var sb = typeof b == "string" || (pyIsArr(b) && !pyIsRange(b))
         if ((sa && nb == "int") || (sb && na == "int")) { return "" }
         if (sa) { return "can't multiply sequence by non-int of type '" + pyTypeName(r) + "'" }
         if (sb) { return "can't multiply sequence by non-int of type '" + pyTypeName(l) + "'" }
@@ -4721,6 +4788,7 @@ function pySeqKindCh(v) {
     var k = pySeqCls(v)
     if (k == 16) { return "u" }
     if (k == 17) { return "b" }
+    if (k == 20) { return "" }
     return "l"
 }
 // Go: rt.pyAddCheck.
@@ -4784,7 +4852,7 @@ function pyAAug(op, l, r) {
             }
         }
     }
-    if (op == "+" && pyIsArr(l) && !pyIsTup(l) && arrKind(l) != 17) {
+    if (op == "+" && pyIsArr(l) && !pyImmSeq(l)) {
         if (arrKind(l) == 18) { return pyBArrExtend(l, r) }
         var ext = pyElemsOf(r)
         var en = ext.length
@@ -4796,7 +4864,7 @@ function pyAAug(op, l, r) {
         return l
     }
     // `xs *= n` writes the repetition back into xs.
-    if (op == "*" && pyIsArr(l) && !pyIsTup(l) && arrKind(l) != 17) {
+    if (op == "*" && pyIsArr(l) && !pyImmSeq(l)) {
         var rep = js_pybin("*", l, r)
         while (l.length > 0) { l.pop() }
         var ri = 0
@@ -5048,7 +5116,7 @@ function js_pybin(opv, l, r) {
         // what jsAdd does. The floor's concat copies both in one call; a push per
         // element would be a method call, and an argument array, per element.
         if (pyIsArr(l) && pyIsArr(r)) {
-            if (pySeqCls(l) != pySeqCls(r)) { pyAAddCheck(l, r) }
+            if (pySeqCls(l) != pySeqCls(r) || pyIsRange(l)) { pyAAddCheck(l, r) }
             return pySeqLike(l, l.concat(r))
         }
         if (typeof l == "number" && typeof r == "number") {
@@ -5793,6 +5861,17 @@ function pyHashW(v0) {
         var sb = v["__pyslice"]
         return pynHashSlice([pyHashW(sb[0]), pyHashW(sb[1]), pyHashW(sb[2])])
     }
+    // Go: the range arm of rt.pyHashW (CPython's range_hash).
+    if (pyIsRange(v)) {
+        var rp = pyRangeP(v)
+        var rstart = anytype
+        rstart = null
+        var rstep = anytype
+        rstep = null
+        if (v.length > 0) { rstart = rp[0] }
+        if (v.length > 1) { rstep = rp[2] }
+        return pynHashTuple([pyHashW(v.length), pyHashW(rstart), pyHashW(rstep)])
+    }
     if (pySetElemsOf(v) !== null && pySetFrozen(v)) {
         var fl = []
         var els = pySetElemsOf(v)
@@ -6123,7 +6202,7 @@ function js_pymax(args) { return pyAMinMax(args, 1) }
 function js_pymin(args) { return pyAMinMax(args, -1) }
 
 // Go: js_pyrange. range(stop) / range(start, stop[, step]) as a MATERIALIZED
-// list. Only a genuinely missing argument takes its default, as Go tests jsUndefT.
+// range (pyRangeOf). Only a genuinely missing argument takes its default, as Go tests jsUndefT.
 function js_pyrange(a, b, c) {
     var from = 0
     var to = pyListIdx(a)
@@ -6147,7 +6226,7 @@ function js_pyrange(a, b, c) {
             i = i + step
         }
     }
-    return out
+    return pyRangeOf(out, from, to, step)
 }
 
 // ord(c) / chr(n); the same builtins live in languages/python-interpreter.abnf
@@ -6662,13 +6741,17 @@ function js_pymapfn(args) {
 function js_pyfilterfn(f, src) { return pyALazyIter("filter", [pyAStepper(src)], f, false) }
 
 // Go: js_pyreversed. A class's own __reversed__ answers; a set, a generator,
-// an iterator or a user class without __len__ and __getitem__ is not reversible.
+// an iterator or a user class without __len__ and __getitem__ is not reversible,
+// and any other user class is read lazily from __getitem__(len - 1) down.
 function js_pyreversed(v) {
     var cls = pyInstClassOf(v)
     if (cls !== null) {
         if (pyLookupHas(cls, "__reversed__")) { return pyCall(pyLookupVal(cls, "__reversed__"), [v]) }
         if (!pyLookupHas(cls, "__len__") || !pyLookupHas(cls, "__getitem__")) {
             pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object is not reversible")
+        }
+        if (v["__val"] === undefined) {
+            return pyASeqIter(v, pyLookupVal(cls, "__getitem__"), "reversed", js_pylenof(v) - 1, 0 - 1)
         }
     } else if (pySetElemsOf(v) !== null || pyIsGen(v) || pyIsIter(v)) {
         pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object is not reversible")
@@ -6680,7 +6763,10 @@ function js_pyreversed(v) {
         out.push(a[i])
         i = i - 1
     }
-    return pyMkIter("reversed", out)
+    var rv = anytype
+    rv = v
+    if (cls !== null) { rv = v["__val"] }
+    return pyMkIter(pyRevKind(rv), out)
 }
 
 // Go: js_pysorted. sorted(iterable, /, *, key=None, reverse=False): list.sort
@@ -8226,6 +8312,7 @@ function js_pyidx(c, k) {
         if (idx < 0 || idx >= c.length) {
             var itn = pySeqTName(c) + " "
             if (itn == "bytes ") { itn = "" }
+            if (itn == "range ") { itn = "range object " }
             pyRaiseExc("IndexError", itn + "index out of range")
         }
         return c[idx]
@@ -8303,7 +8390,7 @@ function pyNoItemOp(c, del) {
     var tn = pyTypeName(c)
     if (!del) { pyRaiseExc("TypeError", "'" + tn + "' object does not support item assignment") }
     var how = "does not"
-    if (typeof c == "string" || pySetElemsOf(c) !== null || pyInstClassOf(c) !== null || pyIsTup(c) || arrKind(c) == 17) { how = "doesn't" }
+    if (typeof c == "string" || pySetElemsOf(c) !== null || pyInstClassOf(c) !== null || pyImmSeq(c)) { how = "doesn't" }
     pyRaiseExc("TypeError", "'" + tn + "' object " + how + " support item deletion")
 }
 
@@ -8333,7 +8420,7 @@ function js_pyset(c, k, v) {
             return js_pysetslice(c, sk[0], sk[1], sk[2], v)
         }
     }
-    if (!pyIsArr(c) || pyIsTup(c) || arrKind(c) == 17) { pyNoItemOp(c, false) }
+    if (!pyIsArr(c) || pyImmSeq(c)) { pyNoItemOp(c, false) }
     var idx = pySeqIdx(c, k)
     if (idx < 0) { idx = idx + c.length }
     if (idx < 0 || idx >= c.length) { pyRaiseExc("IndexError", pySeqTName(c) + " assignment index out of range") }
@@ -8633,6 +8720,7 @@ function js_pyslice3(c0, lo, hi, step) {
     if (pyInstClassOf(c0) !== null) { return js_pyidx(c0, pySliceOf(lo, hi, step)) }
     var c = anytype
     c = c0
+    if (pyIsRange(c)) { return pyRangeSlice(c, lo, hi, step) }
     if (pyIsArr(c)) {
         var idx = pySliceIndices(c.length, lo, hi, step)
         var out = []
@@ -8669,7 +8757,7 @@ function js_pysetslice(arr0, lo, hi, step, values) {
     var arr = anytype
     arr = arr0
     if (!pyIsArr(arr)) { pyNoItemOp(arr, false) }
-    if (pyIsTup(arr) || arrKind(arr) == 17) { pyNoItemOp(arr, false) }
+    if (pyImmSeq(arr)) { pyNoItemOp(arr, false) }
     var vals = pySeqElems(values)
     if (arrKind(arr) == 18) {
         var vb = []
@@ -8733,7 +8821,7 @@ function js_pydelslice(arr0, lo, hi, step) {
     var arr = anytype
     arr = arr0
     if (!pyIsArr(arr)) { pyNoItemOp(arr, true) }
-    if (pyIsTup(arr) || arrKind(arr) == 17) { pyNoSliceDel(arr) }
+    if (pyImmSeq(arr)) { pyNoSliceDel(arr) }
     var idx = pySliceIndices(arr.length, lo, hi, step)
     var drop = []
     var d = 0
@@ -8825,7 +8913,7 @@ function js_pydel_item(c, k) {
             return js_pydelslice(c, sk[0], sk[1], sk[2])
         }
     }
-    if (!pyIsArr(c) || pyIsTup(c) || arrKind(c) == 17) { pyNoItemOp(c, true) }
+    if (!pyIsArr(c) || pyImmSeq(c)) { pyNoItemOp(c, true) }
     var ai = pySeqIdx(c, k)
     if (ai < 0) { ai = ai + c.length }
     if (ai < 0 || ai >= c.length) { pyRaiseExc("IndexError", pySeqTName(c) + " assignment index out of range") }
@@ -10453,8 +10541,8 @@ function pyDMethodCall(target, name, args, kw) {
     if (pyIsSlice(target) && name == "indices") { return pySliceIndicesOf(target["__pyslice"], pyEArgAt(args, 0)) }
     if (pyIsArr(target)) {
         if (pyIsListMethod(name)) {
-            if (pyIsTupleMethod(name) || !pyIsTup(target)) { return pyListMethod(target, name, args, kw) }
-            throw pyExcInstance("AttributeError", "'tuple' object has no attribute '" + name + "'")
+            if (pyIsTupleMethod(name) || !(pyIsTup(target) || pyIsRange(target))) { return pyListMethod(target, name, args, kw) }
+            throw pyExcInstance("AttributeError", "'" + pySeqTName(target) + "' object has no attribute '" + name + "'")
         }
     }
     // conjugate() of a complex flips the sign of its imaginary part.
@@ -10610,6 +10698,7 @@ function pyListMethod(xs, name, args, kw) {
             xi = xi + 1
         }
         if (pyIsTup(xs)) { throw pyExcInstance("ValueError", "tuple.index(x): x not in tuple") }
+        if (pyIsRange(xs)) { throw pyExcInstance("ValueError", "range.index(x): x not in range") }
         throw pyExcInstance("ValueError", "list.index(x): x not in list")
     }
     if (name == "sort") {
@@ -11096,6 +11185,7 @@ function pyDBuiltinAttr(obj, name) {
     if (pyIsSlice(obj)) { return name == "indices" }
     if (pyIsArr(obj)) {
         if (pyIsBytes(obj)) { return pyIsBytesMethod(name, arrKind(obj)) }
+        if (pyIsRange(obj)) { return pyIsTupleMethod(name) || pySliceField(name) >= 0 }
         if (pyIsTup(obj)) { return pyIsTupleMethod(name) }
         return pyIsListMethod(name)
     }
@@ -11709,6 +11799,12 @@ function pyDIsInstance(v, target) {
         var tn = pyBuiltinClsName(target)
         if (tn == "type" || tn == "object") { return true }
         return pyIsClass(target) && pyIsSubclass(vm, target)
+    }
+    // Go: the render-code arm of rt.pyIsInstance - range, enumerate, zip, map,
+    // filter and reversed are builtin functions here and types to CPython.
+    var bcode = rtPairGet(pyBBFnObjs, pyBBFnCodes, target)
+    if (bcode !== undefined && bcode.charAt(0) == "*") {
+        return pyInstClassOf(v) === null && pyTypeName(v) == bcode.substring(1, bcode.length)
     }
     var cls = pyInstClassOf(v)
     if (cls === null) {

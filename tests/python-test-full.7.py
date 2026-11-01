@@ -1,9 +1,9 @@
-# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-206 and
+# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-207 and
 # 152: the data model's bound-method equality, three-argument pow's operand
 # protocol, list.sort's timsort, the codecs with the surrogateescape handler,
 # statistics' paired measures, a generator's gi_running and dir(), the
 # attributes an iterator or a builtin refuses, and the escape, punycode and
-# idna codecs. A file of its own
+# idna codecs, and range as a type of its own. A file of its own
 # because tests/python-test-full.py is close to the step brake (-max-steps, 100M
 # per call) of the -frozen interpreter leg; see tests/python-test-full.py for
 # the conventions.
@@ -325,6 +325,88 @@ def s206():
     check("cdempty", b"".decode("nonexistent") == "" and b"".decode("punycode", "bogus") == ""
           and err(lambda: "".encode("nonexistent")) == "LookupError: unknown encoding: nonexistent")
 
+# ===== SECTION 207: range is a type of its own; the reverse iterators =====
+# A range iterates, indexes and compares by value like a sequence, but is its
+# own immutable type: repr range(a, b[, s]), slices that are ranges, start /
+# stop / step, no + or * or ordering, and the hash of (len, start, step).
+# iter and reversed answer CPython's per-source cursor types, and reversed of a
+# user sequence reads __getitem__ lazily from len - 1 down. A dotted codec
+# name matches an alias with its dots made underscores, never a module name.
+# Rows from CPython 3.14.
+class S207Seq:
+    def __init__(self):
+        self.got = []
+    def __len__(self):
+        return 3
+    def __getitem__(self, i):
+        self.got.append(i)
+        if i == 0:
+            raise IndexError("first")
+        return i * 10
+
+def s207():
+    def err(f):
+        try:
+            f()
+        except Exception as e:
+            return type(e).__name__ + ": " + str(e)
+        return "none"
+    args = [(3,), (1, 10, 2), (5, 2), (10, 0, -3)]
+    rs = [range(*a) for a in args]
+    check("rng1", [repr(r) for r in rs] == ["range(0, 3)", "range(1, 10, 2)", "range(5, 2)", "range(10, 0, -3)"]
+          and str(rs[0]) == "range(0, 3)" and f"{[rs[1]]}" == "[range(1, 10, 2)]"
+          and [(r.start, r.stop, r.step) for r in rs] == [(0, 3, 1), (1, 10, 2), (5, 2, 1), (10, 0, -3)]
+          and [len(r) for r in rs] == [3, 5, 0, 4] and list(rs[3]) == [10, 7, 4, 1] and rs[1][2] == 5
+          and hasattr(rs[0], "step") and not hasattr(rs[0], "append"))
+    check("rng2", [type(r).__name__ for r in [rs[0], iter(rs[0]), reversed(rs[0])]] == ["range", "range_iterator", "range_iterator"]
+          and isinstance(rs[0], range) and not isinstance(rs[0], list) and not isinstance(rs[0], tuple)
+          and isinstance(enumerate([]), enumerate) and not isinstance(reversed([1]), reversed)
+          and str(type(rs[1])) == "<class 'range'>")
+    check("rng3", [repr(rs[1][1:]), repr(rs[1][::-1]), repr(rs[3][5:]), repr(rs[2][::-1]), repr(rs[3][::2])]
+          == ["range(3, 11, 2)", "range(9, -1, -2)", "range(-2, -2, -3)", "range(4, 4, -1)", "range(10, -2, -6)"])
+    check("rng4", rs[0] == range(0, 3, 1) and rs[0] != [0, 1, 2] and rs[0] != (0, 1, 2) and range(0) == range(5, 2)
+          and range(0, 5, 3) == range(0, 6, 3) and hash(rs[0]) == hash((3, 0, 1)) and hash(range(5, 6, 7)) == hash((1, 5, None))
+          and hash(rs[2]) == hash((0, None, None)) and {rs[0]: 1}[range(0, 3)] == 1
+          and rs[1].index(5) == 2 and rs[1].count(4) == 0)
+    def setit():
+        rs[0][0] = 5
+    def delit():
+        del rs[0][0]
+    def delsl():
+        del rs[0][0:1]
+    def aug():
+        r = rs[0]
+        r += [1]
+    check("rng5", [err(lambda: rs[0] + rs[0]), err(lambda: [1] + rs[0]), err(lambda: rs[0] * 2), err(lambda: rs[0] < rs[1]),
+                   err(setit), err(delit), err(delsl), err(aug), err(lambda: rs[0][5]), err(lambda: rs[0].index(9)),
+                   err(lambda: rs[0].append(1))]
+          == ["TypeError: unsupported operand type(s) for +: 'range' and 'range'",
+              "TypeError: can only concatenate list (not \"range\") to list",
+              "TypeError: unsupported operand type(s) for *: 'range' and 'int'",
+              "TypeError: '<' not supported between instances of 'range' and 'range'",
+              "TypeError: 'range' object does not support item assignment",
+              "TypeError: 'range' object doesn't support item deletion",
+              "TypeError: 'range' object does not support item deletion",
+              "TypeError: unsupported operand type(s) for +=: 'range' and 'list'",
+              "IndexError: range object index out of range", "ValueError: range.index(x): x not in range",
+              "AttributeError: 'range' object has no attribute 'append'"])
+    d = {1: 2}
+    check("rng6", [type(reversed(v)).__name__ for v in [[1], (1,), "ab", b"a", d, d.keys(), d.values(), d.items()]]
+          == ["list_reverseiterator", "reversed", "reversed", "reversed", "dict_reversekeyiterator",
+              "dict_reversekeyiterator", "dict_reversevalueiterator", "dict_reverseitemiterator"]
+          and [type(iter(v)).__name__ for v in [[1], (1,), b"a", bytearray(b"a")]]
+          == ["list_iterator", "tuple_iterator", "bytes_iterator", "bytearray_iterator"])
+    sq = S207Seq()
+    rv = reversed(sq)
+    first = sq.got == []
+    check("rng7", first and type(rv).__name__ == "reversed" and list(rv) == [20, 10] and sq.got == [2, 1, 0])
+    names = ["unicode.escape", "utf.8", "latin.1", "us.ascii", "iso.8859.2", "windows.1252", "ansi_x3.4_1968",
+             "ansi_x3_4_1968", "iso_646.irv_1991", "iso_646_irv_1991", "rot.13", "kz.1048"]
+    check("rng8", [err(lambda: "x".encode(n)) for n in names]
+          == ["LookupError: unknown encoding: unicode.escape", "LookupError: unknown encoding: utf.8",
+              "LookupError: unknown encoding: latin.1", "none", "none", "none", "none", "none", "none",
+              "LookupError: unknown encoding: iso_646_irv_1991", "LookupError: unknown encoding: rot.13", "none"])
+
 def main():
     s199() # SECTION-CALL 199
     s200() # SECTION-CALL 200
@@ -335,5 +417,6 @@ def main():
     s204() # SECTION-CALL 204
     s205() # SECTION-CALL 205
     s206() # SECTION-CALL 206
+    s207() # SECTION-CALL 207
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

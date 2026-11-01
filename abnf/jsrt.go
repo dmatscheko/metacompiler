@@ -4359,6 +4359,14 @@ func (rt *jsrt) pyString(v interface{}) string {
 		if pyIsBytes(t) {
 			return pyBytesRepr(t)
 		}
+		if t.kind == pyRangeKind {
+			p := pyRangeParts(t)
+			out := "range(" + rt.pyString(p[0]) + ", " + rt.pyString(p[1])
+			if p[2] != 1 {
+				out += ", " + rt.pyString(p[2])
+			}
+			return out + ")"
+		}
 		// A tuple is parenthesized, and a one-element one keeps its comma.
 		tup := t.kind == pyTupKind
 		if !rt.pyReprEnter(t) {
@@ -17156,6 +17164,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					kind := pySeqTName(o) + " "
 					if kind == "bytes " {
 						kind = ""
+					} else if kind == "range " {
+						kind = "range object "
 					}
 					panic(&jsThrown{value: rt.pyExcInstance("IndexError", kind+"index out of range")})
 				}
@@ -17232,7 +17242,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return 0
 			}
 			arr, ok := u(a[0]).(*jsArray)
-			if !ok || arr.kind == pyTupKind || arr.kind == pyBytesKind {
+			if !ok || pyImmSeq(arr) {
 				rt.pyNoItemOp(u(a[0]), false)
 			}
 			idx := rt.pySeqIdx(arr, u(a[1]))
@@ -18049,7 +18059,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			for i := from; (step > 0 && i < to) || (step < 0 && i > to); i += step {
 				arr.elems = append(arr.elems, i)
 			}
-			return w(arr)
+			return w(pyRangeOf(arr, from, to, step))
 		},
 		"js_pyin": func(a []uint64) uint64 { // Python 'x in y' for lists, strings and dict keys.
 			switch c := u(a[1]).(type) {
@@ -18553,6 +18563,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			switch o := u(a[0]).(type) {
 			case *jsArray:
+				if o.kind == pyRangeKind {
+					return w(rt.pyRangeSlice(o, u(a[1]), u(a[2]), u(a[3])))
+				}
 				idx := rt.pySliceIndices(len(o.elems), u(a[1]), u(a[2]), u(a[3]))
 				out := &jsArray{}
 				for _, i := range idx {
@@ -18583,7 +18596,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !isArr {
 				rt.pyNoItemOp(u(a[0]), false)
 			}
-			if arr.kind == pyTupKind || arr.kind == pyBytesKind {
+			if pyImmSeq(arr) {
 				rt.pyNoItemOp(arr, false)
 			}
 			vals := rt.pySeqElems(u(a[4]))
@@ -18629,7 +18642,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !isArr {
 				rt.pyNoItemOp(u(a[0]), true)
 			}
-			if arr.kind == pyTupKind || arr.kind == pyBytesKind {
+			if pyImmSeq(arr) {
 				rt.pyNoSliceDel(arr)
 			}
 			idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
@@ -19020,7 +19033,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// is not what the JavaScript + of the shared runtime does with two
 				// arrays.
 				if la, ok := l.(*jsArray); ok {
-					if ra, ok2 := r.(*jsArray); ok2 && pySeqCls(la) == pySeqCls(ra) {
+					if ra, ok2 := r.(*jsArray); ok2 && pySeqCls(la) == pySeqCls(ra) && la.kind != pyRangeKind {
 						out := &jsArray{}
 						out.elems = append(out.elems, la.elems...)
 						out.elems = append(out.elems, ra.elems...)
@@ -19238,7 +19251,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return 0
 			}
 			arr, ok := u(a[0]).(*jsArray)
-			if !ok || arr.kind == pyTupKind || arr.kind == pyBytesKind {
+			if !ok || pyImmSeq(arr) {
 				rt.pyNoItemOp(u(a[0]), true)
 			}
 			i := rt.pySeqIdx(arr, u(a[1]))
@@ -19956,8 +19969,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}))
 		},
 		// reversed(seq): a class's own __reversed__ answers; otherwise the value
-		// must be a sequence (a user class needs __len__ and __getitem__) - a
-		// set, a generator or an iterator is CPython's TypeError. Twin of
+		// must be a sequence (a user class needs __len__ and __getitem__, and is
+		// read lazily from __getitem__(len - 1) down) - a set, a generator or an
+		// iterator is CPython's TypeError. Twin of
 		// hostGlobals["reversed"] in python-interpreter.abnf and
 		// lib/python-rt.metajs.
 		"js_pyreversed": func(a []uint64) uint64 {
@@ -19970,9 +19984,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(m, jsUndef, []interface{}{v}))
 				}
 				_, hasLen := pyLookup(cls, "__len__")
-				_, hasItem := pyLookup(cls, "__getitem__")
+				gi, hasItem := pyLookup(cls, "__getitem__")
 				if !hasLen || !hasItem {
 					notRev()
+				}
+				if o, _, _ := pyInstance(v); !hasKey(o, "__val") {
+					n := int(rt.toNumber(rt.pyExt("js_pylenof", v)))
+					return w(rt.pySeqIter(v, gi, "reversed", n-1, -1))
 				}
 			} else if _, isSet := pySetElems(v); isSet || pyIsGenerator(v) || pyIterName(rt, v) != "" {
 				notRev()
@@ -19982,7 +20000,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			for i := len(src) - 1; i >= 0; i-- {
 				out = append(out, src[i])
 			}
-			return w(rt.pyMkIter("reversed", out))
+			rv := v
+			if o, _, ok := pyInstance(v); ok {
+				rv = o.props["__val"]
+			}
+			return w(rt.pyMkIter(pyRevKind(rv), out))
 		},
 		// sorted(iterable, /, *, key=None, reverse=False): list.sort on a new
 		// list, bound by its signature as [positionals, keywords].
@@ -21085,14 +21107,14 @@ func (rt *jsrt) pyAugBin(op string, l, r interface{}) interface{} {
 			}
 		}
 	}
-	if la, ok := l.(*jsArray); ok && op == "+" && la.kind != pyTupKind && la.kind != pyBytesKind {
+	if la, ok := l.(*jsArray); ok && op == "+" && !pyImmSeq(la) {
 		if la.kind == pyBArrKind {
 			return rt.pyBArrExtend(la, r)
 		}
 		la.elems = append(la.elems, rt.pyElemsOf(r)...)
 		return l
 	}
-	if la, ok := l.(*jsArray); ok && op == "*" && la.kind != pyTupKind && la.kind != pyBytesKind {
+	if la, ok := l.(*jsArray); ok && op == "*" && !pyImmSeq(la) {
 		rep := rt.pyExt("js_pybin", "*", l, r)
 		if ra, isArr := rep.(*jsArray); isArr {
 			la.elems = append(la.elems[:0:0], ra.elems...)
@@ -21839,7 +21861,7 @@ func (rt *jsrt) pyUnhashName(v interface{}) string {
 		if !rt.pyLang {
 			return ""
 		}
-		if t.kind == pyBytesKind {
+		if t.kind == pyBytesKind || t.kind == pyRangeKind {
 			return ""
 		}
 		if t.kind != pyTupKind {
@@ -23129,6 +23151,9 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	if sl, ok := pySliceParts(obj); ok && pySliceField(name) >= 0 {
 		return sl[pySliceField(name)]
 	}
+	if ra, ok := obj.(*jsArray); ok && ra.kind == pyRangeKind && pySliceField(name) >= 0 {
+		return pyRangeParts(ra)[pySliceField(name)]
+	}
 	// gi_running: True only while the generator's own body executes. Twin of
 	// pyattr in languages/python-interpreter.abnf.
 	if g, ok := obj.(*jsGenerator); ok && name == "gi_running" {
@@ -24204,10 +24229,10 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		return rt.pySliceIndicesOf(sl, argAt(args, 0))
 	}
 	if arr, isArr := target.(*jsArray); isArr && pyIsListMethod(name) {
-		if arr.kind != pyTupKind || pyIsTupleMethod(name) {
+		if (arr.kind != pyTupKind && arr.kind != pyRangeKind) || pyIsTupleMethod(name) {
 			return rt.pyListMethod(arr, name, args, kw)
 		}
-		rt.pyRaise("AttributeError", "'tuple' object has no attribute '"+name+"'")
+		rt.pyRaise("AttributeError", "'"+pySeqTName(arr)+"' object has no attribute '"+name+"'")
 	}
 	// conjugate() of a complex flips the sign of its imaginary part.
 	if name == "conjugate" {
@@ -24362,6 +24387,9 @@ func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw i
 		}
 		if arr.kind == pyTupKind {
 			rt.pyRaise("ValueError", "tuple.index(x): x not in tuple")
+		}
+		if arr.kind == pyRangeKind {
+			rt.pyRaise("ValueError", "range.index(x): x not in range")
 		}
 		panic(&jsThrown{value: rt.pyExcInstance("ValueError", "list.index(x): x not in list")})
 	case "sort":
@@ -24975,6 +25003,9 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 		if pyIsBytes(arr) {
 			return pyIsBytesMethod(name, arr.kind)
 		}
+		if arr.kind == pyRangeKind {
+			return pyIsTupleMethod(name) || pySliceField(name) >= 0
+		}
 		if arr.kind == pyTupKind {
 			return pyIsTupleMethod(name)
 		}
@@ -25243,6 +25274,13 @@ func (rt *jsrt) pyIsInstance(v interface{}, target interface{}) bool {
 			}
 			return pyIsSubclass(m, tc)
 		}
+	}
+	// range, enumerate, zip, map, filter and reversed are builtin functions here
+	// and types to CPython: their values are named by the cursor or array they
+	// make (the "*" render code js_pybfn keeps marks the six).
+	if code, isB := rt.pyBuiltinRender[target]; isB && strings.HasPrefix(code, "*") {
+		_, _, inst := pyInstance(v)
+		return !inst && pyTypeName(rt, v) == code[1:]
 	}
 	_, cls, ok := pyInstance(v)
 	if !ok {
@@ -25885,7 +25923,7 @@ func (rt *jsrt) pyNoItemOp(c interface{}, del bool) {
 	_, isStr := c.(string)
 	_, isSet := pySetElems(c)
 	_, _, isInst := pyInstance(c)
-	if ca, isArr := c.(*jsArray); isStr || isSet || isInst || (isArr && (ca.kind == pyTupKind || ca.kind == pyBytesKind)) {
+	if ca, isArr := c.(*jsArray); isStr || isSet || isInst || (isArr && pyImmSeq(ca)) {
 		how = "doesn't"
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError", "'"+tn+"' object "+how+" support item deletion")})
@@ -28469,6 +28507,9 @@ func pyModuleScope(s *jsScope) *jsScope {
 // when seq is not a sequence or n is not an int, so the caller falls back to
 // numeric multiplication.
 func (rt *jsrt) pySeqRepeat(seq, n interface{}) (interface{}, bool) {
+	if a, ok := seq.(*jsArray); ok && a.kind == pyRangeKind {
+		return nil, false
+	}
 	var cnt float64
 	var exact *big.Int
 	switch c := n.(type) {

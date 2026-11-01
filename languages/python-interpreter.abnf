@@ -1213,7 +1213,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // list(x): a fresh list from any iterable (lists copy, dicts give their keys).
     hostGlobals["list"] = function(x) { return iterToList(x).slice(0) }
-    // range(stop) / range(start, stop[, step]), materialized. Twin of js_pyrange
+    // range(stop) / range(start, stop[, step]), materialized (pyRangeOf). Twin of js_pyrange
     // in abnf/jsrt.go and lib/python-rt.metajs.
     hostGlobals["range"] = function(a, b, c) {
         var from = 0
@@ -1228,7 +1228,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         } else {
             for (var j = from; j > to; j += step) out.push(j)
         }
-        return out
+        return pyRangeOf(out, from, to, step)
     }
     // The builtin TYPE objects. They are class descriptors like any other, so
     // isinstance(x, str), type(x) is Dog and the class patterns of `match` all go
@@ -1247,6 +1247,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // pyIsTup in abnf/jsrt.go and lib/python-rt.metajs.
     function pyTup(a) { return arrKindSet(a, 16) }
     function isTup(v) { return arrKind(v) == 16 }
+    // A RANGE is the materialized array of its elements carrying kind 20, with
+    // its [start, stop, step] kept as the array's named property __rng
+    // (arrProps) for the repr, slicing and the three attributes. Indexing, len,
+    // iteration and == treat it as any sequence; what differs - type, repr,
+    // immutability, +, * and ordering - asks isRange. Twin of pyRangeOf /
+    // pyIsRange in abnf/jsrtpysub.go and lib/python-rt.metajs.
+    function pyRangeOf(a, start, stop, step) {
+        arrPropsSet(a, {__rng: [start, stop, step]})
+        return arrKindSet(a, 20)
+    }
+    function isRange(v) { return arrKind(v) == 20 }
+    // r[lo:hi:st] is the range of the selected elements: the clamped slice
+    // bounds (CPython's PySlice_AdjustIndices) scaled onto r's start and step.
+    function pyRangeSlice(o, lo0, hi0, st0) {
+        var n = o.length
+        var st = st0 === undefined || st0 === null ? 1 : pySliceArg(st0)
+        if (st === 0) { pyListErr("ValueError", "slice step cannot be zero") }
+        var lo = pyRangeBound(lo0, n, st, st < 0 ? n - 1 : 0)
+        var hi = pyRangeBound(hi0, n, st, st < 0 ? -1 : n)
+        var out = []
+        for (var i = lo; st > 0 ? i < hi : i > hi; i += st) { out.push(o[i]) }
+        var p = arrProps(o).__rng
+        return pyRangeOf(out, p[0] + lo * p[2], p[0] + hi * p[2], p[2] * st)
+    }
+    function pyRangeBound(v, n, st, dflt) {
+        if (v === undefined || v === null) { return dflt }
+        var b = pySliceArg(v)
+        if (b < 0) {
+            b += n
+            if (b < 0) { b = st < 0 ? -1 : 0 }
+        } else if (b >= n) { b = st < 0 ? n - 1 : n }
+        return b
+    }
+    function pyRangeRepr(v) {
+        var p = arrProps(v).__rng
+        return "range(" + pstr(p[0]) + ", " + pstr(p[1]) + (p[2] == 1 ? "" : ", " + pstr(p[2])) + ")"
+    }
     // bytes and bytearray are arrays of byte values carrying kind 17 and 18 the
     // same way: indexing, len and iteration are the list machinery's, and what
     // differs asks isBytes. pySeqCls is the kind == compares, so bytes equals a
@@ -1263,6 +1300,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (k == 16) { return "tuple" }
         if (k == 17) { return "bytes" }
         if (k == 18) { return "bytearray" }
+        if (k == 20) { return "range" }
         return "list"
     }
     // type(v): the class of a user instance, else the builtin type object.
@@ -1278,7 +1316,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isFlo(v)) { return hostGlobals["float"] }
         if (bigIsBig(v)) { return hostGlobals["int"] }
         if (isCplx(v)) { return hostGlobals["complex"] }
-        if (Array.isArray(v)) { return hostGlobals[pySeqTName(v)] }
+        if (Array.isArray(v)) { return isRange(v) ? pyBuiltinTypeObj("range") : hostGlobals[pySeqTName(v)] }
         if (isSet(v)) { return hostGlobals[v.__frozen === true ? "frozenset" : "set"] }
         if (isDict(v)) { return hostGlobals["dict"] }
         if (isView(v)) { return pyBuiltinTypeObj("dict_" + v.__dview) }
@@ -2066,6 +2104,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sb = v.__pyslice
             return pynHashSlice([pyHashW(sb[0]), pyHashW(sb[1]), pyHashW(sb[2])])
         }
+        // A range hashes as the tuple (len, start, step), start None when empty
+        // and step None below two elements: CPython's range_hash.
+        if (isRange(v)) {
+            var rp = arrProps(v).__rng
+            return pynHashTuple([pyHashW(v.length), pyHashW(v.length == 0 ? null : rp[0]), pyHashW(v.length < 2 ? null : rp[2])])
+        }
         // bytes hash like the str of the same code units, as CPython's do.
         if (arrKind(v) == 17) { return pynHashUnits(v.slice(0)) }
         if (isSet(v) && v.__frozen === true) {
@@ -2242,13 +2286,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pySeqIterOf(v) {
         var gi = pySeqGetitem(v)
         if (gi == null) { return null }
-        var it = pyMkIter("iterator", [])
+        return pySeqCursor("iterator", gi, v, 0, 1)
+    }
+    // A lazy cursor calling gi(v, i) from index i0 in steps of d: forward for the
+    // legacy protocol, backward from len - 1 for reversed() of a sequence, which
+    // ends below index 0.
+    function pySeqCursor(name, gi, v, i0, d) {
+        var it = pyMkIter(name, [])
         it.__g = gi
         it.__s = v
+        it.__i = i0
+        it.__d = d
         return it
     }
     function pySeqStep(it) {
         if (it.__g === null) { return {value: undefined, done: true} }
+        if (it.__i < 0) {
+            it.__g = null
+            return {value: undefined, done: true}
+        }
         var saved = scopes
         var v = anytype
         try { v = it.__g(it.__s, it.__i) }
@@ -2261,7 +2317,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             throw e
         }
-        it.__i = it.__i + 1
+        it.__i = it.__i + it.__d
         return {value: v, done: false}
     }
     function isPyIt(v) {
@@ -2360,15 +2416,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // js_pyiterargs in abnf/jsrt.go and lib/python-rt.metajs.
     function pyCallIter(f, sentinel) {
         if (!hostGlobals["callable"](f)) { pyListErr("TypeError", "iter(v, w): v must be callable") }
-        var it = pyMkIter("callable_iterator", [])
-        it.__s = undefined
-        it.__g = function(s, i) {
+        return pySeqCursor("callable_iterator", function(s, i) {
             var v = anytype
             v = pyCall(f, [], null)
             if (pyEq(v, sentinel)) { pyRaise(pyStopIter(undefined)) }
             return v
-        }
-        return it
+        }, undefined, 0, 1)
     }
     hostGlobals["iter"] = function(v, sentinel) {
         if (arguments.length == 2) { return pyCallIter(v, sentinel) }
@@ -2505,23 +2558,36 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // case for a None function.
     hostGlobals["filter"] = function(f, v) { return pyMkLazy("filter", [pyStepper(v)], f, false) }
     // reversed(seq): a class's own __reversed__ answers; otherwise the value must
-    // be a sequence (a user class needs __len__ and __getitem__) - a set, a
-    // generator or an iterator is CPython's TypeError. Twin of js_pyreversed in
-    // abnf/jsrt.go and lib/python-rt.metajs.
+    // be a sequence (a user class needs __len__ and __getitem__, and is read
+    // lazily from __getitem__(len - 1) down, an IndexError ending it early) - a
+    // set, a generator or an iterator is CPython's TypeError. Twin of
+    // js_pyreversed in abnf/jsrt.go and lib/python-rt.metajs.
     hostGlobals["reversed"] = function(v) {
         if (pyUser(v)) {
             var rv = clsFind(v.__class, "__reversed__")
             if (rv != null) { return rv(v) }
-            if (clsFind(v.__class, "__len__") == null || clsFind(v.__class, "__getitem__") == null) {
+            var rg = clsFind(v.__class, "__getitem__")
+            if (clsFind(v.__class, "__len__") == null || rg == null) {
                 pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object is not reversible")
             }
+            if (v.__val === undefined) { return pySeqCursor("reversed", rg, v, hostGlobals["len"](v) - 1, -1) }
         } else if (isGen(v) || isPyIt(v) || isSet(v)) {
             pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object is not reversible")
         }
         var a = iterToList(v)
         var out = []
         for (var i = a.length - 1; i >= 0; i--) { out.push(a[i]) }
-        return pyMkIter("reversed", out)
+        return pyMkIter(pyRevKind(pyBDelSelf(v)), out)
+    }
+    // The CPython type name of reversed(v)'s cursor: a list, a range and a dict
+    // or its views have their own reverse iterators, anything else is the
+    // generic reversed. Twin of pyRevKind in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyRevKind(v) {
+        if (Array.isArray(v) && arrKind(v) == 0) { return "list_reverseiterator" }
+        if (isRange(v)) { return "range_iterator" }
+        if (isDict(v)) { return "dict_reversekeyiterator" }
+        if (isView(v)) { return v.__dview == "keys" ? "dict_reversekeyiterator" : (v.__dview == "values" ? "dict_reversevalueiterator" : "dict_reverseitemiterator") }
+        return "reversed"
     }
     // sorted(iterable, /, *, key=None, reverse=False): list.sort on a new list.
     // Twin of js_pysorted in abnf/jsrt.go and lib/python-rt.metajs.
@@ -3004,7 +3070,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The BUILT-IN methods of str / list / dict / set, and
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
-        if (isSlice(o) && pySliceField(name) >= 0) { return true }
+        if ((isSlice(o) || isRange(o)) && pySliceField(name) >= 0) { return true }
         if (name == "gi_running" && isGen(o)) { return true }
         if ((pyIsStatic(o) || pyIsClsM(o)) && pyDescAttrHas(name)) { return true }
         if (pyIsUnion(o) && name == "__args__") { return true }
@@ -3055,6 +3121,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "string") { return pySIsStrMethod(name) }
         if (isSlice(o)) { return name == "indices" }
         if (isBytes(o)) { return pyIsBytesMethod(name, arrKind(o)) }
+        if (isRange(o)) { return pyIsTupleMethod(name) || pySliceField(name) >= 0 }
         if (Array.isArray(o)) { return isTup(o) ? pyIsTupleMethod(name) : pyIsListMethod(name) }
         // A set is a dict whose keys are its members, so it is asked FIRST.
         if (isSet(o)) { return pyIsSetMethod(name) && !(o.__frozen === true && pySetMutator(name)) }
@@ -3398,7 +3465,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === null || v === undefined) { return "" }
         if (typeof v != "object") { return "" }
         if (Array.isArray(v)) {
-            if (arrKind(v) == 17) { return "" }
+            if (arrKind(v) == 17 || isRange(v)) { return "" }
             if (!isTup(v)) { return pySeqTName(v) }
             for (var i = 0; i < v.length; i++) {
                 var inner = pyHashName(v[i])
@@ -3862,6 +3929,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                    + prepr(rxGroup(v.prog, v.string, v.m, 0)) + ">"
         }
         if (isBytes(v)) { return pyBytesRepr(v) }
+        if (isRange(v)) { return pyRangeRepr(v) }
         if (Array.isArray(v)) {
             var sr = pyReprNest(v, pySeqRepr)
             if (sr === null) { return isTup(v) ? "(...)" : "[...]" }
@@ -4548,6 +4616,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The IndexError text of a sequence subscript out of range.
     function pySeqIdxErr(o) {
         var tn = pySeqTName(o)
+        if (tn == "range") { return "range object index out of range" }
         return (tn == "bytes" ? "" : tn + " ") + "index out of range"
     }
     // An object whose class defines __index__ is the int it answers, which must
@@ -4583,7 +4652,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyNoItemOp(o, del) {
         var tn = pyTypeOf(o).__name
         if (!del) { pyListErr("TypeError", "'" + tn + "' object does not support item assignment") }
-        var seq = typeof o == "string" || isSet(o) || pyUser(o) || isTup(o) || arrKind(o) == 17
+        var seq = typeof o == "string" || isSet(o) || pyUser(o) || isTup(o) || arrKind(o) == 17 || isRange(o)
         pyListErr("TypeError", "'" + tn + "' object " + (seq ? "doesn't" : "does not") + " support item deletion")
     }
     // del of a slice of an immutable sequence: CPython's mapping-protocol text,
@@ -4594,6 +4663,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Slicing with Python bounds: open ends, negative wrap around, clamping.
     function pySlice(o, lo, hi) {
+        if (isRange(o)) { return pyRangeSlice(o, lo, hi, undefined) }
         var n = o.length
         if (lo === undefined) { lo = 0 } else { if (lo < 0) lo += n; if (lo < 0) lo = 0; if (lo > n) lo = n }
         if (hi === undefined) { hi = n } else { if (hi < 0) hi += n; if (hi < 0) hi = 0; if (hi > n) hi = n }
@@ -6899,7 +6969,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(target)) {
             // THE WHOLE LIST METHOD SURFACE. The twins are pyListMethod in
             // abnf/jsrt.go and pyListMethod in languages/lib/python-rt.metajs.
-            if (pyIsListMethod(name) && (!isTup(target) || pyIsTupleMethod(name))) { return pyListMethod(target, name, args, kw) }
+            if (pyIsListMethod(name) && (!(isTup(target) || isRange(target)) || pyIsTupleMethod(name))) { return pyListMethod(target, name, args, kw) }
             var ldel = pyValDunder(target, name)
             if (ldel != null) { return ldel.apply(undefined, [target].concat(args)) }
             pyAttrErr(target, name)
@@ -7462,6 +7532,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (pyIdEq(xs[xi], pyArgAt(args, 0))) { return xi }
             }
             if (isTup(xs)) { pyListErr("ValueError", "tuple.index(x): x not in tuple") }
+            if (isRange(xs)) { pyListErr("ValueError", "range.index(x): x not in range") }
             pyListErr("ValueError", "list.index(x): x not in list")
         }
         if (name == "sort") { pySortList(xs, args, kw); return undefined }
@@ -9430,7 +9501,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // then keeps "99..." out of the box, and it is paid only on the rare side.
         if (op == "+") {
             if (Array.isArray(l) && Array.isArray(r)) {
-                if (pySeqCls(l) != pySeqCls(r)) { pyAddCheck(l, r) }
+                if (pySeqCls(l) != pySeqCls(r) || isRange(l)) { pyAddCheck(l, r) }
                 return pySeqLike(l, l.concat(r))
             }
             var sadd = l + r
@@ -9559,11 +9630,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isSlice(v)) { return "c" }
         return ""
     }
-    // The kind letter of an array: l a list, u a tuple, b bytes or a bytearray.
+    // The kind letter of an array: l a list, u a tuple, b bytes or a bytearray;
+    // a range neither concatenates nor orders.
     function pySeqKindCh(v) {
         var k = pySeqCls(v)
         if (k == 16) { return "u" }
         if (k == 17) { return "b" }
+        if (k == 20) { return "" }
         return "l"
     }
     function pyOrdCheck(op, l, r) {
@@ -9602,8 +9675,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "|" && isDict(a) && isDict(b) && !isSet(a) && !isSet(b)) { return "" }
         if (op == "*") {
             if (nums) { return "" }
-            var sa = typeof a == "string" || Array.isArray(a)
-            var sb = typeof b == "string" || Array.isArray(b)
+            var sa = typeof a == "string" || (Array.isArray(a) && !isRange(a))
+            var sb = typeof b == "string" || (Array.isArray(b) && !isRange(b))
             if ((sa && nb == "int") || (sb && na == "int")) { return "" }
             if (sa) { return "can't multiply sequence by non-int of type '" + pyTypeOf(r).__name + "'" }
             if (sb) { return "can't multiply sequence by non-int of type '" + pyTypeOf(l).__name + "'" }
@@ -11475,6 +11548,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < ixs.length; i++) { s2 += cs[ixs[i]] }
             return s2
         }
+        if (isRange(o)) { return pyRangeSlice(o, lo, hi, st) }
         var ix = sliceIdx(o.length, lo, hi, st)
         var out = []
         for (var j = 0; j < ix.length; j++) { out.push(o[ix[j]]) }
@@ -11728,7 +11802,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (ss != null) { ss(o, pySliceOf(lo, hi, st), v); return }
                 pyNoItemOp(o, false)
             }
-            if (isTup(o) || arrKind(o) == 17 || !Array.isArray(o)) { pyNoItemOp(o, false) }
+            if (isTup(o) || arrKind(o) == 17 || isRange(o) || !Array.isArray(o)) { pyNoItemOp(o, false) }
             var vals = iterToList(v)
             // xs[a:b] = xs copies the source first: the target changes under the copy.
             if (vals === o) { vals = o.slice(0) }
@@ -11765,7 +11839,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o.__owner != undefined) { pyInstDictPush(o) }
             return
         }
-        if (!Array.isArray(o) || isTup(o) || arrKind(o) == 17) { pyNoItemOp(o, false) }
+        if (!Array.isArray(o) || isTup(o) || arrKind(o) == 17 || isRange(o)) { pyNoItemOp(o, false) }
         var pos = pySeqIdx(o, idx)
         if (pos < 0) pos += o.length
         if (pos < 0 || pos >= o.length) { pyListErr("IndexError", pySeqTName(o) + " assignment index out of range") }
@@ -11926,7 +12000,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // del xs[a:b:c]: every selected element dropped.
     function pyDelSlice(o, lo, hi, st) {
-        if (isTup(o) || arrKind(o) == 17) { pyNoSliceDel(o) }
+        if (isTup(o) || arrKind(o) == 17 || isRange(o)) { pyNoSliceDel(o) }
         var ix = sliceIdx(o.length, lo, hi, st)
         var drop = newSet()
         for (var d = 0; d < ix.length; d++) { setAdd(drop, ix[d]) }
@@ -11998,7 +12072,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o.__owner != undefined) { pyInstDictPush(o) }
             return
         }
-        if (!Array.isArray(o) || isTup(o) || arrKind(o) == 17) { pyNoItemOp(o, true) }
+        if (!Array.isArray(o) || isTup(o) || arrKind(o) == 17 || isRange(o)) { pyNoItemOp(o, true) }
         var pos = pySeqIdx(o, idx)
         if (pos < 0) { pos += o.length }
         if (pos < 0 || pos >= o.length) { pyListErr("IndexError", pySeqTName(o) + " assignment index out of range") }
@@ -12058,14 +12132,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (iv !== pyNotImpl) { return iv }
             }
         }
-        if (bop == "+" && Array.isArray(a) && !isTup(a) && arrKind(a) != 17) {
+        if (bop == "+" && Array.isArray(a) && !isTup(a) && arrKind(a) != 17 && !isRange(a)) {
             if (isBytes(a)) { return pyBArrExtend(a, b) }
             var src = pyIterOrTypeErr(b).slice(0)
             for (var i = 0; i < src.length; i++) { a.push(src[i]) }
             return a
         }
         // `xs *= n` writes the repetition back into xs.
-        if (bop == "*" && Array.isArray(a) && !isTup(a) && arrKind(a) != 17) {
+        if (bop == "*" && Array.isArray(a) && !isTup(a) && arrKind(a) != 17 && !isRange(a)) {
             var rep = binOp("*", a, b)
             while (a.length > 0) { a.pop() }
             for (var ri = 0; ri < rep.length; ri++) { a.push(rep[ri]) }
@@ -13374,6 +13448,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // hands out, so `[].__class__ is list` holds.
         if (pyIsUnion(o) && name == "__args__") { return pyTup(o.__pyunion.slice(0)) }
         if (isSlice(o) && pySliceField(name) >= 0) { return o.__pyslice[pySliceField(name)] }
+        if (isRange(o) && pySliceField(name) >= 0) { return arrProps(o).__rng[pySliceField(name)] }
         // gi_running: True only while the generator's own body executes. Twins:
         // rt.pyGetAttrRaw in abnf/jsrt.go and pyGetAttrRaw in lib/python-rt.metajs.
         if (name == "gi_running" && isGen(o)) { return o.running === true && o.st.done !== true }
@@ -14508,6 +14583,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pyUser(v) && clsIsSub(v.__class, cls)) { return true }
             return pyBuiltinSub(pyTypeOf(v).__name, cls.__name)
         }
+        // range, enumerate, zip, map, filter and reversed are builtin functions
+        // here and types to CPython: their values are named by the cursor or
+        // array they make.
+        var bc = typeof cls == "function" ? bfnCode(cls) : undefined
+        if (bc !== undefined && bc.charAt(0) == "*") { return !pyUser(v) && pyTypeOf(v).__name == bc.substring(1) }
         if (!pyUser(v)) { return false }
         return clsIsSub(v.__class, cls)
     }

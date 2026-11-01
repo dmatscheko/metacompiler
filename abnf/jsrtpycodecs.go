@@ -19,8 +19,8 @@ var pycdNames = []struct {
 	{"utf-8", []string{"utf_8", "u8", "utf", "utf8", "utf8_ucs2", "utf8_ucs4", "cp65001"}},
 	{"utf-8-sig", []string{"utf_8_sig"}},
 	{"utf-7", []string{"utf_7", "u7", "unicode_1_1_utf_7", "utf7"}},
-	{"ascii", []string{"ascii", "646", "ansi_x3_4_1968", "ansi_x3_4_1986", "cp367", "csascii", "ibm367", "iso646_us",
-		"iso_646_irv_1991", "iso_ir_6", "us", "us_ascii"}},
+	{"ascii", []string{"ascii", "646", "ansi_x3.4_1968", "ansi_x3_4_1968", "ansi_x3.4_1986", "cp367", "csascii", "ibm367",
+		"iso646_us", "iso_646.irv_1991", "iso_ir_6", "us", "us_ascii"}},
 	{"latin-1", []string{"latin_1", "8859", "cp819", "csisolatin1", "ibm819", "iso8859", "iso8859_1", "iso_8859_1",
 		"iso_8859_1_1987", "iso_ir_100", "l1", "latin", "latin1"}},
 	{"utf-16", []string{"utf_16", "u16", "utf16"}},
@@ -34,9 +34,13 @@ var pycdNames = []struct {
 	{"raw-unicode-escape", []string{"raw_unicode_escape"}},
 	{"punycode", []string{"punycode"}},
 	{"idna", []string{"idna"}},
-	{"binary", []string{"base64_codec", "base64", "base_64", "bz2_codec", "bz2", "hex_codec", "hex", "quopri_codec",
-		"quopri", "quoted_printable", "quotedprintable", "rot_13", "rot13", "uu_codec", "uu", "zlib_codec",
-		"zip", "zlib"}},
+	{"binary", []string{"base64_codec", "base64", "base_64"}},
+	{"binary", []string{"bz2_codec", "bz2"}},
+	{"binary", []string{"hex_codec", "hex"}},
+	{"binary", []string{"quopri_codec", "quopri", "quoted_printable", "quotedprintable"}},
+	{"binary", []string{"rot_13", "rot13"}},
+	{"binary", []string{"uu_codec", "uu"}},
+	{"binary", []string{"zlib_codec", "zip", "zlib"}},
 }
 
 // pycdCharmaps is the single-byte charmap codecs: name, names and aliases, and
@@ -248,20 +252,33 @@ func pycdLookup(enc string) string {
 	norm := n.String()
 	dotless := strings.ReplaceAll(norm, ".", "_")
 	for _, c := range pycdNames {
-		for _, a := range c.names {
-			if a == norm || a == dotless {
-				return c.codec
-			}
+		if pycdNameIs(c.names, norm, dotless) {
+			return c.codec
 		}
 	}
 	for _, c := range pycdCharmaps {
-		for _, a := range c.names {
-			if a == norm || a == dotless {
-				return c.codec
-			}
+		if pycdNameIs(c.names, norm, dotless) {
+			return c.codec
 		}
 	}
 	return ""
+}
+
+// pycdNameIs says whether a normalized name selects the codec whose module
+// name is names[0] and whose aliases are the rest: an alias matches the name
+// or the name with its dots made underscores, the module name only the name
+// itself (encodings.search_function). Twin of pycdNameIs in
+// languages/lib/python-codecs.js.
+func pycdNameIs(names []string, norm, dotless string) bool {
+	if names[0] == norm {
+		return true
+	}
+	for _, a := range names[1:] {
+		if a == norm || a == dotless {
+			return true
+		}
+	}
+	return false
 }
 
 // pycdRefuse is the error a codec raises before coding anything, "" if none.

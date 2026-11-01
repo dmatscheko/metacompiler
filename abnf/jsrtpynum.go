@@ -531,6 +531,20 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 	if sl, ok := pySliceParts(v); ok {
 		return pyHashTuple([]uint64{rt.pyHashW(sl[0]), rt.pyHashW(sl[1]), rt.pyHashW(sl[2])}, true)
 	}
+	// A range hashes as the tuple (len, start, step), start None when empty and
+	// step None below two elements: CPython's range_hash.
+	if arr, ok := v.(*jsArray); ok && arr.kind == pyRangeKind {
+		p := pyRangeParts(arr)
+		n := len(arr.elems)
+		var start, step interface{} = jsNull, jsNull
+		if n > 0 {
+			start = p[0]
+		}
+		if n > 1 {
+			step = p[2]
+		}
+		return pyHashTuple([]uint64{rt.pyHashW(float64(n)), rt.pyHashW(start), rt.pyHashW(step)}, false)
+	}
 	if els, ok := pySetElems(v); ok && pySetFrozen(v) {
 		lanes := make([]uint64, len(els.elems))
 		for i, e := range els.elems {

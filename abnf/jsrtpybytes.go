@@ -40,18 +40,23 @@ func pySeqTName(a *jsArray) string {
 		return "bytes"
 	case pyBArrKind:
 		return "bytearray"
+	case pyRangeKind:
+		return "range"
 	}
 	return "list"
 }
 
 // pySeqKindCh is the kind letter + and the comparisons pair operands by: l a
-// list, u a tuple, b bytes or a bytearray.
+// list, u a tuple, b bytes or a bytearray; a range neither concatenates nor
+// orders.
 func pySeqKindCh(a *jsArray) byte {
 	switch pySeqCls(a) {
 	case pyTupKind:
 		return 'u'
 	case pyBytesKind:
 		return 'b'
+	case pyRangeKind:
+		return 0
 	}
 	return 'l'
 }
