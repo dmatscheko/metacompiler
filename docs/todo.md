@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1046** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1047** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -74,8 +74,8 @@ ruby 2.6 (found by RB r41), all three engines: `s=[]; [1,2,3].any?{|x| s<<x; tru
 
 # JS — JavaScript and TypeScript
 
-### T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)` modifiers · P3 · JS · IN PROGRESS (JS worker, round 40) [V]
-node 24: `/\{1}n/v` → SyntaxError "Lone quantifier brackets"; ours accepts (v-mode class-set syntax and its stricter rules are unimplemented — 212 of 6000 random v-flag patterns differ). Lookbehind `(?<=a)b` / `(?<!a)b` and ES2025 modifiers `(?i:a)b` are accepted at construction but abort when matched; node matches them. Found by JS r39.
+### T-1046 js: regex properties of strings (`\p{RGI_Emoji}` etc.) under v · P4 · JS · OPEN [V] · NEEDS DATA
+node 24: `/^\p{RGI_Emoji}$/v.test("👍🏽")` → true (and the other six properties of strings: Basic_Emoji, Emoji_Keycap_Sequence, RGI_Emoji_Modifier_Sequence, RGI_Emoji_Flag_Sequence, RGI_Emoji_Tag_Sequence, RGI_Emoji_ZWJ_Sequence). Ours: parsed and counted for MayContainStrings but "unsupported" when matched — needs the Unicode emoji-sequence tables (emoji-sequences.txt / emoji-zwj-sequences.txt for Unicode 17), not on this machine. Found by JS r40.
 
 # JV — Java
 
@@ -1091,6 +1091,7 @@ T-1040 python: `type(x) is range` (and enumerate/zip/map/filter/reversed) is Fal
 T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-value yields; zip/method(:map) on a user Enumerable — DONE (RB r41, d270d298): member?/grep/grep_v/minmax_by/slice_before/slice_after/chunk/chain; each_slice/each_cons block → nil (2.6); multi-value yields per-method (13 unpack, rest pack); zip via to_a; each-less Enumerable fails on each; method(:map)/instance_method/UnboundMethod. Master probe vs ruby 2.6 (27 lines): 4 legs agree.
 T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed declare -A — PARTIAL→split (SH r27, 92e1b3da): prefix-binding export through local, read -n/-N, empty-subscript diagnostics (unset/${b[]}/+=/assoc literal/let/((...))), assoc @/* keys via read/printf -v, nameref value checks, declare +a/+A refusal. Master probe vs bash 5.3: 4 legs agree (external-command pipelines excluded). Per-scope assoc kind and compiler computed declare -A/array literal filed as follow-up.
 T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null — DONE (CS r5, 61eb7cf3): integral Parse overflow per type (format errors win, -0 ok for unsigned, .NET IsWhite set); two-arg Argument*/inner-exception ctors incl. : base(a,b); undefined == null in C# equality. Master spec probe (ctor messages, field/member == null, overflow, bounds): 3 legs agree.
+T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)` modifiers — DONE (JS r40, 680aacaa): lookbehind (backward emission, node-identical captures), (?ims-ims:) modifiers, v-flag class sets/strictness with V8 texts; also \r/U+2028/9 line terminators, \P{} under i, v-mode surrogate advancement. Properties of strings declined (no emoji-sequence data). Master probe vs node 24 (22 lines): 4 legs agree; dart+js rows green.
 
 # Settled — do not re-open
 
