@@ -6083,6 +6083,14 @@ NotMemberKw = :script(~~ "pure";
         }
         return true
     }
+    // "Pair" or "Triple" for a tuple (kIsPair), "" for any other value - a map
+    // entry too, which is pair-shaped but no Pair: the simple name of its class,
+    // kotlin.Pair / kotlin.Triple. Twin of ktTupleName in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kTupleName(v) {
+        if (!kIsPair(v) || kIsEntry(v)) { return "" }
+        return v.third !== undefined ? "Triple" : "Pair"
+    }
     function kPair(a, b) { return {first: a, second: b} }
 
     // let / run / apply / also / takeIf / takeUnless: extensions on ANY receiver, so no
@@ -6954,14 +6962,8 @@ NotMemberKw = :script(~~ "pure";
             for (var i = 0; i < v.length; i++) { if (v[i] !== null && v[i] !== undefined) { ecs.push(jxkClass(v[i])) } }
             return ktaRefClass(ecs)
         }
-        // A set or map builder that is not a LinkedHashSet / LinkedHashMap records its
-        // class (kJvmTagged).
-        if ((kIsSet(v) || kIsMap(v)) && v.__jc !== undefined) { return v.__jc }
-        if (kIsSet(v)) { return "java.util.LinkedHashSet" }
-        if (kIsMap(v)) { return "java.util.LinkedHashMap" }
-        var rjc = kRangeClass(v)
-        if (rjc != "") { return rjc }
-        if (kIsPair(v)) { return v.third !== undefined ? "kotlin.Triple" : "kotlin.Pair" }
+        var cjc = kCollJvmClass(v)
+        if (cjc != "") { return cjc }
         var n = kSimpleName(v)
         if (szIs(v) && v.u) { return "kotlin." + n }
         if (n == "Int") { return "java.lang.Integer" }
@@ -11974,10 +11976,13 @@ NotMemberKw = :script(~~ "pure";
             var hv = hasVar(baseName)
             var base = anytype // A type name resolves to a descriptor, a value to anything.
             base = hv ? getVar(baseName) : null
-            var isCls = kIsTypeName(baseName) || (hv && base !== null && base !== undefined && typeof base == "object" && base.__isclass === true)
+            // Pair / Triple name kotlin's tuple classes unless a declaration shadows
+            // their builders.
+            var isTup = hv && (baseName == "Pair" || baseName == "Triple") && base === hostGlobals[baseName]
+            var isCls = kIsTypeName(baseName) || isTup || (hv && base !== null && base !== undefined && typeof base == "object" && base.__isclass === true)
             if (name == "class") {
                 if (!hv && baseName.indexOf(".") >= 0) { return kClassLitDotted(baseName) }
-                if (!hv || kIsTypeName(baseName)) { return kClassLitNamed(baseName) }
+                if (!hv || kIsTypeName(baseName) || isTup) { return kClassLitNamed(baseName) }
                 return isCls ? kClassOfDesc(base) : kClassOf(base)
             }
             // String::length - the base names a builtin type this value model has no
@@ -12080,8 +12085,13 @@ NotMemberKw = :script(~~ "pure";
     // `expr::class` / `Type::class`. KClass renders as "class Box" (java.lang.Class does
     // too, which is why .java answers the same value here), and for a top-level class in
     // the default package qualifiedName IS the simple name. A qualified `Outer.Inner`
-    // is the class of that nested descriptor.
+    // is the class of that nested descriptor. The stdlib classes of kStdJvm are the
+    // java classes it names (kJavaClass), as the class of such a value is
+    // (kCollJvmClass).
+    var kStdJvm = {"$Pair": "kotlin.Pair", "$Triple": "kotlin.Triple",
+                   "$StringBuilder": "java.lang.StringBuilder", "$Regex": "kotlin.text.Regex"}
     function kClassLitNamed(n) {
+        if (kStdJvm["$" + n] !== undefined) { return kJavaClass(kStdJvm["$" + n]) }
         if (n.indexOf(".") >= 0) {
             var d = anytype
             d = kQualDesc(n)
@@ -12131,7 +12141,11 @@ NotMemberKw = :script(~~ "pure";
     }
     var kBuiltinFq = {"$Int": true, "$Long": true, "$Short": true, "$Byte": true, "$Double": true,
                       "$Float": true, "$Boolean": true, "$Char": true, "$Unit": true, "$Nothing": true,
-                      "$Number": true, "$CharSequence": true, "$Comparable": true}
+                      "$Number": true, "$CharSequence": true, "$Comparable": true,
+                      "$UInt": true, "$ULong": true, "$UByte": true, "$UShort": true, "$Array": true,
+                      "$IntArray": true, "$LongArray": true, "$DoubleArray": true, "$FloatArray": true,
+                      "$CharArray": true, "$BooleanArray": true, "$ByteArray": true, "$ShortArray": true,
+                      "$UIntArray": true, "$ULongArray": true, "$UByteArray": true, "$UShortArray": true}
     // The KClass of a declared type: the java class its binary name names
     // (kJavaClass). A nested one has simpleName `Inner`, qualifiedName `Outer.Inner`
     // and renders "class Outer$Inner"; a builtin throwable's is package-qualified
@@ -12169,10 +12183,14 @@ NotMemberKw = :script(~~ "pure";
         return {__kclass: true, kname: sn, jname: jc}
     }
     var kJvmPrimNames = ["int", "long", "double", "float", "char", "boolean", "byte", "short"]
-    // The JVM class of a List, a Set, a Map, a values view or a range, "" for any
-    // other value. Twin of ktCollJvmClass in abnf/jsrtkotlin.go and
-    // languages/lib/kotlin-rt.metajs.
+    // The JVM class of a List, a Set, a Map, a values view, a range, a Pair /
+    // Triple, a map entry, a StringBuilder or a Regex, "" for any other value. Twin
+    // of ktCollJvmClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kCollJvmClass(v) {
+        if (v !== null && v !== undefined && typeof v == "object") {
+            if (v.__sb === true) { return "java.lang.StringBuilder" }
+            if (v.__krx === true) { return "kotlin.text.Regex" }
+        }
         if (isRange(v) || kIsCRange(v)) { return kRangeClass(v) }
         if (Array.isArray(v)) {
             var ak = arrKind(v)
@@ -12180,7 +12198,20 @@ NotMemberKw = :script(~~ "pure";
         }
         if (kIsSet(v)) { return v.__jc !== undefined ? v.__jc : "java.util.LinkedHashSet" }
         if (kIsMap(v)) { return v.__jc !== undefined ? v.__jc : "java.util.LinkedHashMap" }
-        return ""
+        var tup = kTupleName(v)
+        return tup != "" ? "kotlin." + tup : kEntryJvmClass(v)
+    }
+    // The JVM class of a map entry, "" for any other value: the node class of the
+    // class of its map (__m; a LinkedHashMap without one). Twin of ktEntryJvmClass
+    // in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kEntryJvmClass(v) {
+        if (!kIsEntry(v)) { return "" }
+        var jc = anytype
+        if (v.__m !== undefined && v.__m !== null) { jc = v.__m.__jc }
+        if (jc === "java.util.HashMap") { return "java.util.HashMap$Node" }
+        if (jc === "java.util.TreeMap") { return "java.util.TreeMap$Entry" }
+        if (jc === "java.util.Collections$SingletonMap") { return "java.util.AbstractMap$SimpleImmutableEntry" }
+        return "java.util.LinkedHashMap$Entry"
     }
     // The simple name of a value's class. The twin is ktSimpleName in abnf/jsrtkotlin.go.
     function kSimpleName(v) {
@@ -12880,6 +12911,8 @@ NotMemberKw = :script(~~ "pure";
             return t == rk + "Range" && plain
         }
         if (kIsCRange(v)) { return t == "Any" || t == (v.open ? "OpenEndRange" : "ClosedRange") }
+        var tup = kTupleName(v)
+        if (tup != "" && t == tup) { return true }
         var ci = kCollIsType(v, t)
         if (ci !== undefined) { return ci }
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {

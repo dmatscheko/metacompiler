@@ -879,6 +879,14 @@ function ktIsPair(v) {
     return true
 }
 
+// ktTupleName (jsrtkotlin.go): "Pair" / "Triple" for a tuple, "" otherwise.
+function ktTupleName(v) {
+    if (!ktIsPair(v)) { return "" }
+    if (ktIsEntry(v)) { return "" }
+    if (v["third"] !== undefined) { return "Triple" }
+    return "Pair"
+}
+
 // ===================================================== the descriptor walks =
 
 // ktClsFind (jsrtkotlin.go 2842): walk a descriptor's __super chain for a
@@ -4165,19 +4173,8 @@ function jxkClass(v) {
         }
         return ktaRefClass(ecs)
     }
-    // A set or map builder that is not a LinkedHashSet / LinkedHashMap records its
-    // class (ktJvmTagged).
-    if (ktIsSet(v) || rtIsDictObj(v)) {
-        if (typeof v["__jc"] == "string") { return v["__jc"] }
-    }
-    if (ktIsSet(v)) { return "java.util.LinkedHashSet" }
-    if (rtIsDictObj(v)) { return "java.util.LinkedHashMap" }
-    var rjc = ktRangeClass(v)
-    if (rjc != "") { return rjc }
-    if (ktIsPair(v)) {
-        if (v["third"] !== undefined) { return "kotlin.Triple" }
-        return "kotlin.Pair"
-    }
+    var cjc = ktCollJvmClass(v)
+    if (cjc != "") { return cjc }
     var n = k4bSimpleName(v)
     if (sintIs(v) && sintUns(v)) { return "kotlin." + n }
     if (n == "Int") { return "java.lang.Integer" }
@@ -6887,6 +6884,10 @@ function ktIsType(v, tname) {
         // List - the shared js_is_type has no arm for it.
         if (ktIsRange(v)) { return k4RangeIsType(v, tname) }
         if (ktIsCRange(v)) { return bt == "Any" || bt == k4CRangeType(v) }
+        var tup = ktTupleName(v)
+        if (tup != "") {
+            if (bt == tup) { return true }
+        }
         var ci = ktCollIsType(v, bt)
         if (ci !== undefined) { return ci }
         if (js_is_type(v, tname) === true) { return true }
@@ -7308,13 +7309,20 @@ function ktClassLit(name) {
 
 // KClass.qualifiedName. Twin of ktKClassFq in abnf/jsrtkotlin.go, which has the
 // rules.
+var ktBuiltinFq = {"$Int": true, "$Long": true, "$Short": true, "$Byte": true, "$Double": true,
+    "$Float": true, "$Boolean": true, "$Char": true, "$Unit": true, "$Nothing": true,
+    "$Number": true, "$CharSequence": true, "$Comparable": true,
+    "$UInt": true, "$ULong": true, "$UByte": true, "$UShort": true, "$Array": true,
+    "$IntArray": true, "$LongArray": true, "$DoubleArray": true, "$FloatArray": true,
+    "$CharArray": true, "$BooleanArray": true, "$ByteArray": true, "$ShortArray": true,
+    "$UIntArray": true, "$ULongArray": true, "$UByteArray": true, "$UShortArray": true}
 function ktKClassFq(o) {
     var jn = o["jname"]
     if (jn === undefined) {
         var kn = o["kname"]
-        if (kn === "Int" || kn === "Long" || kn === "Short" || kn === "Byte" || kn === "Double" ||
-            kn === "Float" || kn === "Boolean" || kn === "Char" || kn === "Unit" || kn === "Nothing" ||
-            kn === "Number" || kn === "CharSequence" || kn === "Comparable") { return "kotlin." + kn }
+        if (typeof kn == "string") {
+            if (ktBuiltinFq["$" + kn] === true) { return "kotlin." + kn }
+        }
         return kn
     }
     if (jn == "java.lang.String") { return "kotlin.String" }
@@ -7356,9 +7364,12 @@ function ktJvmPrimName(c) {
     return names["IJDFCZBS".indexOf(c)]
 }
 
-// The JVM class of a List, a Set, a Map, a values view or a range, "" for any
-// other value. Twin of ktCollJvmClass in abnf/jsrtkotlin.go.
+// The JVM class of a List, a Set, a Map, a values view, a range, a Pair / Triple,
+// a map entry, a StringBuilder or a Regex, "" for any other value. Twin of
+// ktCollJvmClass in abnf/jsrtkotlin.go.
 function ktCollJvmClass(v) {
+    if (ktIsSb(v)) { return "java.lang.StringBuilder" }
+    if (ktRxIsRegex(v)) { return "kotlin.text.Regex" }
     if (ktIsArr(v)) {
         var ak = arrKind(v)
         if (ak <= 0 || ak == 3 || ak == 4) { return ktJvmListClass(ak, v.length) }
@@ -7366,7 +7377,24 @@ function ktCollJvmClass(v) {
     }
     if (ktIsSet(v)) { return ktJvmTag(v, "java.util.LinkedHashSet") }
     if (rtIsDictObj(v)) { return ktJvmTag(v, "java.util.LinkedHashMap") }
+    var tup = ktTupleName(v)
+    if (tup != "") { return "kotlin." + tup }
+    var ejc = ktEntryJvmClass(v)
+    if (ejc != "") { return ejc }
     return ktRangeClass(v)
+}
+
+// The JVM class of a map entry, "" for any other value. Twin of ktEntryJvmClass
+// in abnf/jsrtkotlin.go, which has the rules.
+function ktEntryJvmClass(v) {
+    if (!ktIsEntry(v)) { return "" }
+    var jc = "java.util.LinkedHashMap"
+    var m = v["__m"]
+    if (ktIsObj(m)) { jc = ktJvmTag(m, jc) }
+    if (jc == "java.util.HashMap") { return "java.util.HashMap$Node" }
+    if (jc == "java.util.TreeMap") { return "java.util.TreeMap$Entry" }
+    if (jc == "java.util.Collections$SingletonMap") { return "java.util.AbstractMap$SimpleImmutableEntry" }
+    return "java.util.LinkedHashMap$Entry"
 }
 
 // ktIsClassLit (jsrtkotlin.go:5889)
@@ -7441,6 +7469,11 @@ function js_ktclasslit(base) {
         if (typeof base["__kttype"] == "string") {
             var tn = base["__kttype"]
             if (ktIsBuiltinExc(tn)) { return ktClassOfDesc(ktExcHierarchy()[tn]) }
+            // The stdlib classes whose KClass is a java class: ktStdJvm in
+            // abnf/jsrtkotlin.go.
+            if (tn == "Pair" || tn == "Triple") { return ktJavaClass("kotlin." + tn) }
+            if (tn == "StringBuilder") { return ktJavaClass("java.lang.StringBuilder") }
+            if (tn == "Regex") { return ktJavaClass("kotlin.text.Regex") }
             return ktClassLit(tn)
         }
         if (base["__isclass"] === true) { return ktClassOfDesc(base) }
@@ -12224,8 +12257,8 @@ function js_ktrefbase(env, name, istype) {
     // name is a literal at the call site - so it hands the answer over instead of
 // this file keeping another copy of a list that abnf/jsrtkotlin.go,
 // kotlin-interpreter.abnf and the emitter must already keep in step. The Go
-// twin ignores the extra argument and re-decides from its own table, which is
-// the same table, so the two engines agree by construction.
+// twin tests its own table OR the flag (which alone carries the Pair / Triple
+// decision), so the two engines agree by construction.
     if (istype === true) { return ktTypeMarker(name) }
     var v = anytype
     v = k6Find(env, name)

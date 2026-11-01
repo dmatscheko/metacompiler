@@ -6908,6 +6908,40 @@ fun s156() {
         LongRange.EMPTY == (5L..2L) && IntRange.EMPTY.count() == ns[1])
 }
 
+// ===== SECTION 157: the KClass of a Pair, a Triple, a map entry, a builder =====
+// `to`, Pair() and Triple() build kotlin.Pair / kotlin.Triple, whose KClass is that
+// java class: simpleName Pair, qualifiedName kotlin.Pair, equal to Pair::class.
+// A map entry is no Pair: its class is its map's node class (LinkedHashMap$Entry,
+// HashMap$Node, TreeMap$Entry, a singleton map's AbstractMap$SimpleImmutableEntry).
+// StringBuilder and Regex are java.lang.StringBuilder / kotlin.text.Regex; an
+// unsigned type and an array type are qualified in package kotlin (kotlinc 2.2.21
+// on java 24).
+fun cn157(v: Any): String = "" + v::class.simpleName + " " + v::class.qualifiedName + " " + v.javaClass.name
+fun s157() {
+    val ps = listOf<Any>(1L to 2, Pair("a", 'b'), Triple(1, 2, 3))
+    check("kcls157a", ps.map { it::class.simpleName } == listOf("Pair", "Pair", "Triple") &&
+        cn157(ps[0]) == "Pair kotlin.Pair kotlin.Pair" && cn157(ps[2]) == "Triple kotlin.Triple kotlin.Triple" &&
+        ps[1]::class.java.name == "kotlin.Pair")
+    check("kcls157b", ps[0]::class == Pair::class && ps[1]::class == ps[0]::class && ps[2]::class == Triple::class &&
+        ps[2]::class != Pair::class && Pair::class.simpleName == "Pair" && Triple::class.qualifiedName == "kotlin.Triple" &&
+        kotlin.Pair::class.simpleName == "Pair")
+    check("kcls157c", ps.map { it is Pair<*, *> } == listOf(true, true, false) && ps.map { it is Triple<*, *, *> } == listOf(false, false, true))
+    val m = mutableMapOf(1 to 2, 3 to 4)
+    val es = listOf<Any>(m.entries.first(), mapOf(1 to 2).entries.first(), hashMapOf(1 to 2).entries.first(), sortedMapOf(1 to 2).entries.first())
+    check("kcls157d", es.map { cn157(it) } == listOf("Entry java.util.LinkedHashMap.Entry java.util.LinkedHashMap\$Entry",
+        "SimpleImmutableEntry java.util.AbstractMap.SimpleImmutableEntry java.util.AbstractMap\$SimpleImmutableEntry",
+        "Node java.util.HashMap.Node java.util.HashMap\$Node", "Entry java.util.TreeMap.Entry java.util.TreeMap\$Entry") &&
+        es.none { it is Pair<*, *> } && es[0]::class != Pair::class)
+    val sb = StringBuilder("a")
+    val re = Regex("a+")
+    check("kcls157e", cn157(sb) == "StringBuilder java.lang.StringBuilder java.lang.StringBuilder" &&
+        cn157(re) == "Regex kotlin.text.Regex kotlin.text.Regex" && sb::class == StringBuilder::class && re::class == Regex::class &&
+        StringBuilder::class.qualifiedName == "java.lang.StringBuilder" && Regex::class.java.name == "kotlin.text.Regex")
+    check("kcls157f", listOf(5u::class.qualifiedName, 5uL::class.qualifiedName, arrayOf("a")::class.qualifiedName,
+        intArrayOf(1)::class.qualifiedName, uintArrayOf(1u)::class.qualifiedName, booleanArrayOf(true)::class.qualifiedName) ==
+        listOf("kotlin.UInt", "kotlin.ULong", "kotlin.Array", "kotlin.IntArray", "kotlin.UIntArray", "kotlin.BooleanArray"))
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7061,6 +7095,7 @@ fun main() {
     s154() // SECTION-CALL 154
     s155() // SECTION-CALL 155
     s156() // SECTION-CALL 156
+    s157() // SECTION-CALL 157
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

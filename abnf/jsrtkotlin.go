@@ -1587,6 +1587,9 @@ func init() {
 				if i := strings.IndexByte(ct, '<'); i >= 0 {
 					ct = ct[:i]
 				}
+				if tup := ktTupleName(v); tup != "" && strings.TrimSuffix(ct, "?") == tup {
+					return boolH(true)
+				}
 				if is, ok := ktCollIsType(v, strings.TrimSuffix(ct, "?")); ok {
 					return boolH(is)
 				}
@@ -2179,8 +2182,9 @@ func init() {
 			name := rt.toString(u(a[1]))
 			// A builtin TYPE name is a type even though the scope carries a same-named
 			// builder for it: `String::length` must not bind itself to the String
-			// conversion function.
-			if ktTypeNames[name] {
+			// conversion function. The emitter's flag (a[2]) also says so for Pair /
+			// Triple where no class of the name is declared.
+			if ktTypeNames[name] || u(a[2]) == interface{}(true) {
 				return w(ktTypeName{name: name})
 			}
 			for s := sc; s != nil; s = s.parent {
@@ -2277,6 +2281,9 @@ func init() {
 				// A builtin throwable's is the java class (ktClassOfDesc).
 				if ktIsBuiltinExc(tn.name) {
 					return w(ktClassOfDesc(ktExcHierarchy()[tn.name]))
+				}
+				if jc, isStd := ktStdJvm[tn.name]; isStd {
+					return w(ktJavaClass(jc))
 				}
 				return w(ktClassLit(tn.name))
 			}
@@ -4053,20 +4060,8 @@ func ktJvmClass(v interface{}) interface{} {
 			}
 		}
 	}
-	if ktIsSet(v) {
-		return "java.util.LinkedHashSet"
-	}
-	if _, _, isDict := dictParts(v); isDict {
-		return "java.util.LinkedHashMap"
-	}
-	if rc := ktRangeClass(v); rc != "" {
-		return rc
-	}
-	if p, ok := ktIsPair(v); ok {
-		if _, has := p.props["third"]; has {
-			return "kotlin.Triple"
-		}
-		return "kotlin.Pair"
+	if cjc := ktCollJvmClass(v); cjc != "" {
+		return cjc
 	}
 	if bn := jvBoxName(v); bn != "" {
 		return "java.lang." + bn
@@ -5160,6 +5155,27 @@ func ktIsPair(v interface{}) (*jsObject, bool) {
 	}
 	return o, true
 }
+
+// ktTupleName is "Pair" or "Triple" for a tuple (ktIsPair), "" for any other
+// value - a map entry too, which is pair-shaped but no Pair: the simple name of
+// its class, kotlin.Pair / kotlin.Triple. Twin of kTupleName in
+// kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktTupleName(v interface{}) string {
+	p, ok := ktIsPair(v)
+	if !ok || ktIsEntry(v) {
+		return ""
+	}
+	if _, has := p.props["third"]; has {
+		return "Triple"
+	}
+	return "Pair"
+}
+
+// ktStdJvm maps the stdlib class names whose KClass is a java class to it, the
+// class a value of the type has (ktCollJvmClass). Twin of kStdJvm in
+// kotlin-interpreter.abnf and js_ktclasslit in languages/lib/kotlin-rt.metajs.
+var ktStdJvm = map[string]string{"Pair": "kotlin.Pair", "Triple": "kotlin.Triple",
+	"StringBuilder": "java.lang.StringBuilder", "Regex": "kotlin.text.Regex"}
 
 // ktCall invokes a lambda argument.
 func (rt *jsrt) ktCall(f interface{}, args ...interface{}) interface{} {
@@ -11057,7 +11073,11 @@ func ktKClassFq(o *jsObject) interface{} {
 
 var ktBuiltinFq = map[string]bool{"Int": true, "Long": true, "Short": true, "Byte": true,
 	"Double": true, "Float": true, "Boolean": true, "Char": true, "Unit": true,
-	"Nothing": true, "Number": true, "CharSequence": true, "Comparable": true}
+	"Nothing": true, "Number": true, "CharSequence": true, "Comparable": true,
+	"UInt": true, "ULong": true, "UByte": true, "UShort": true, "Array": true,
+	"IntArray": true, "LongArray": true, "DoubleArray": true, "FloatArray": true,
+	"CharArray": true, "BooleanArray": true, "ByteArray": true, "ShortArray": true,
+	"UIntArray": true, "ULongArray": true, "UByteArray": true, "UShortArray": true}
 
 // ktClassOf is `v::class`. A collection's KClass is its JVM class (ktJavaClass):
 // kotlin-stdlib's ClassReference names a java class by the class itself. Twin of
@@ -11109,10 +11129,17 @@ func ktJavaClass(jc string) *jsObject {
 
 var ktJvmPrimNames = [...]string{"int", "long", "double", "float", "char", "boolean", "byte", "short"}
 
-// ktCollJvmClass is the JVM class of a List, a Set, a Map, a values view or a
-// range, "" for any other value. Twin of kCollJvmClass in kotlin-interpreter.abnf
-// and ktCollJvmClass in languages/lib/kotlin-rt.metajs.
+// ktCollJvmClass is the JVM class of a List, a Set, a Map, a values view, a
+// range, a Pair / Triple, a map entry, a StringBuilder or a Regex, "" for any
+// other value. Twin of kCollJvmClass in kotlin-interpreter.abnf and
+// ktCollJvmClass in languages/lib/kotlin-rt.metajs.
 func ktCollJvmClass(v interface{}) string {
+	if ktIsSb(v) {
+		return "java.lang.StringBuilder"
+	}
+	if ktRxIsRegex(v) {
+		return "kotlin.text.Regex"
+	}
 	if a, isArr := v.(*jsArray); isArr {
 		if a.kind <= 0 || a.kind == ktArrVals || a.kind == ktArrFixed {
 			return ktJvmListClass(a.kind, len(a.elems))
@@ -11125,7 +11152,35 @@ func ktCollJvmClass(v interface{}) string {
 	if _, _, isDict := dictParts(v); isDict {
 		return ktJvmTag(v, "java.util.LinkedHashMap")
 	}
+	if tup := ktTupleName(v); tup != "" {
+		return "kotlin." + tup
+	}
+	if ejc := ktEntryJvmClass(v); ejc != "" {
+		return ejc
+	}
 	return ktRangeClass(v)
+}
+
+// ktEntryJvmClass is the JVM class of a map entry, "" for any other value: the
+// node class of the class of its map (__m; a LinkedHashMap without one). Twin of
+// kEntryJvmClass in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktEntryJvmClass(v interface{}) string {
+	if !ktIsEntry(v) {
+		return ""
+	}
+	jc := "java.util.LinkedHashMap"
+	if m, has := v.(*jsObject).props["__m"].(*jsObject); has {
+		jc = ktJvmTag(m, jc)
+	}
+	switch jc {
+	case "java.util.HashMap":
+		return "java.util.HashMap$Node"
+	case "java.util.TreeMap":
+		return "java.util.TreeMap$Entry"
+	case "java.util.Collections$SingletonMap":
+		return "java.util.AbstractMap$SimpleImmutableEntry"
+	}
+	return "java.util.LinkedHashMap$Entry"
 }
 
 func ktIsClassLit(v interface{}) (*jsObject, bool) {

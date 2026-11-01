@@ -8139,8 +8139,11 @@ KwContract  = "contract" KwEnd ;
             // A builtin TYPE name is decided HERE, at emit time, because the base is
             // a literal: the extern's ktTypeNames arm runs before its scope walk, so
             // it cannot be lowered under the walk. Everything else goes through the
-            // kt_refbase helper (see rtRefBase).
-            var baseV = ktTypeNameSet["$" + baseName] == true
+            // kt_refbase helper (see rtRefBase). Pair and Triple are kotlin's tuple
+            // classes unless the program declares a class of the name.
+            var isTup = (baseName == "Pair" || baseName == "Triple") && classNames[baseName] != 1 &&
+                        interfaceNames["$" + baseName] != true
+            var baseV = ktTypeNameSet["$" + baseName] == true || isTup
                 ? callExt(b, "js_ktrefbase", [curScopeV, emitStr(b, baseName), hTrue])
                 : b.NewCall(rtRefBase(), [curScopeV, emitStr(b, baseName)])
             if (name == "class") {
