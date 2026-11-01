@@ -151,13 +151,15 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
 // expansion (e='1 + 2'; `i < $e * 2` is i < 5), and may be empty: an empty condition is 1.
 CForStmt    <~~ push(makeCFor(takeAll(), lineStr(up.start))) ~~>
             = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep LoopBody ;
-CfPart      = CfDyn | CfSt | CfZero ;
-CfCond      = CfDyn | CfSt | CfOne ;
+CfPart      = CfDyn | CfSt | CfRaw | CfZero ;
+CfCond      = CfDyn | CfSt | CfRaw | CfOne ;
 CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
 CfDynWord   <~~ push(mkNsWord(takeAll())) ~~> = CfDynSeg { CfDynSeg } ;
 CfDynSeg    = DqSeg | ExpSeg | ArDynParen | CfDynBare ;
 CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\";" ;
-CfSt        <~~ arClaim(up.start, up.pos); push(pop()) ~~> = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL ;
+CfSt        <~~ arClaim(up.start, up.pos); push(pop()) ~~> = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL CfEnd ;
+// A part the parser does not take (`b[]=0`) is read by the run-time evaluator, as (( )) is.
+CfRaw       <~~ push(mkArDyn(pop())) ~~> = WsNL !";" !"))" CfDynWord ;
 CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
 CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
@@ -334,10 +336,12 @@ NsWord      <~~ push(mkNsWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 ArrayLit    <~~ push(mkArrayLit(takeAll())) ~~> = "(" :whitespace(WsNL) ArrayItems ")" ;
 ArrayItems  = { ArrayItem } ;
-ArrayItem   = ArrayKV | CWord ;
+ArrayItem   = ArrayKV | ArrayWord ;
+// The element as written ({src}) is what an empty associative key reports.
+ArrayWord   <~~ push({aw: pop(), src: arSrc(up.start, up.pos)}) ~~> = CWord ;
 // `[k]=v` inside an array literal is an assignment too: bash 5.3 keeps `A=([0]=$x)`
-// unsplit exactly as it keeps `A=$x`.
-ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" :whitespace() IdxWord "]" :whitespace() "=" :whitespace() NsWord ;
+// unsplit exactly as it keeps `A=$x`, and `[k]=` stores the empty string.
+ArrayKV     <~~ push(mkArrayKV(takeAll(), arSrc(up.start, up.pos))) ~~> = "[" :whitespace() IdxWord "]" :whitespace() "=" :whitespace() [ NsWord ] ;
 WsNL        = { @+" \t\r\n" | Comment } ;
 AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 
@@ -586,9 +590,10 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 
 // NAME or NAME[SUBSCRIPT] - the subscript is a word, read as an arithmetic index for an
 // indexed array and as a literal key for an associative one. "@" and "*" mean the whole array.
+// An empty SUBSCRIPT is no target: `${b[]}` is the run-time "bad substitution" (PeBad).
 // peTgt: the target as written, the prefix of an arithmetic error in ${v:off} (ArOff).
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
-PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" IdxWord "]" ;
+PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" !"]" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
 IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
@@ -719,12 +724,13 @@ ArList      <~~ push(foldComma(takeAll())) ~~> = ArAssign { "," ArAssign } ;
 ArAssign    = ArAssignForm | ArCond ;
 ArAssignForm <~~ push(mkArAssign(takeAll(), up.pos)) ~~> = ArLhs ArAsgOp ArAssign ;
 // NAME[SUBSCRIPT] is an array element, an operand and an assignment target alike:
-// `$(( nums[0] + nums[2] ))`, `(( m[p]++ ))`, `(( a[i] += 2 ))`.
-ArLhs       = ArLhsElem | ArLhsName ;
-ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" IdxWord "]" ;
+// `$(( nums[0] + nums[2] ))`, `(( m[p]++ ))`, `(( a[i] += 2 ))`. An empty SUBSCRIPT leaves
+// the expression to the run-time evaluator, which has bash's errors for it (arSubscript).
+ArLhs       =ArLhsElem | ArLhsName ;
+ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" !"]" IdxWord "]" ;
 ArElemName  <~~ push({lhs: up.in}) ~~> = ArName ;
 ArLhsName   <~~ push({lhs: up.in}) ~~> = ArName ;
-ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" IdxWord "]" ;
+ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" !"]" IdxWord "]" ;
 ArAsgOp     <~~ push({aop: up.in}) ~~>
             = "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | ArPlainAsg ;
 ArPlainAsg  = "=" NotEq ;
@@ -1038,6 +1044,15 @@ CfHasExp = :script(~~
             }
             i = i + 1
         }
+    })()
+~~) ;
+// Succeeds (consuming nothing) at the ";" or ")" that ends a for (( ; ; )) part, so a part
+// the static parser reads only a head of (`b` of `b[]=0`) is left to CfRaw.
+CfEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc === 59 || cc === 41) { return }
+        return abnf.newToken("\x01cf-more", 0)
     })()
 ~~) ;
 // Whether a `let` argument must be read as a word (LetWord): it holds a "$" or "`" outside
@@ -1482,7 +1497,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (anyRef) {
             var rn = refTarget(name)
             if (rn != name) {
-                if (rn == "") { arithErr = true } else if (isElemRef(rn)) { elemRefSet(rn, false, val) } else { setVarVal(rn, val) }
+                if (rn == "") { arithErr = true } else if (isElemRef(rn)) { elemRefSet(rn, false, val, false) } else { setVarVal(rn, val) }
                 return
             }
         }
@@ -1580,11 +1595,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A store through a nameref whose target is the element NAME[SUB]: the subscript is
     // evaluated now, as in `NAME[SUB]=v`, and NAME[@], NAME[*] and NAME[] are refused even
-    // for an associative array. Answers the stored text. Twin of the subscript arm of
+    // for an associative array - unless a builtin stores (bi: read, printf -v), where they
+    // are keys of one. Answers the stored text. Twin of the subscript arm of
     // rt_setvar_byname.
-    function elemRefSet(name, append, v) {
+    function elemRefSet(name, append, v, bi) {
         var sp = splitSubscript(name)
-        var whole = sp.key == "@" || sp.key == "*" || sp.key == ""
+        var whole = sp.key == "" || ((sp.key == "@" || sp.key == "*") && !(bi && assocFact(sp.name, false)))
         // The subscript's arithmetic errors carry no builtin's prefix (arPfx is for the value).
         var svp = arPfx
         arPfx = ""
@@ -1648,11 +1664,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Is NAME a prefix binding of the running call that no `local` has claimed?
     function tmpHere(name) {
-        if (localFrames.length == 0) { return false }
+        var e = tmpOwn(name)
+        return e != null && e.loc != true
+    }
+    // The running call's prefix binding of NAME, claimed by a `local` or not, else null.
+    function tmpOwn(name) {
+        if (localFrames.length == 0) { return null }
         var fr = localFrames[localFrames.length - 1]
         var i
-        for (i = 0; i < fr.length; i++) { if (fr[i].name == name) { return fr[i].tmp == true && fr[i].loc != true } }
-        return false
+        for (i = 0; i < fr.length; i++) { if (fr[i].name == name) { return fr[i].tmp == true ? fr[i] : null } }
+        return null
     }
     // Record NAME's current binding in the innermost call frame, so it is restored on return.
     //
@@ -2013,16 +2034,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //     abc -> 'abc'   a b -> 'a b'   it's -> 'it'\''s'   "x<NL>y" -> $'x\ny'
     function shellQuote(v0) {
         var v = normBytes(v0)
-        var i
-        if (!needsAnsi(v)) {
-            var out = "'"
-            for (i = 0; i < v.length; i++) {
-                var ch = v.charAt(i)
-                if (ch == "'") { out = out + "'\\''" } else { out = out + ch }
-            }
-            return out + "'"
-        }
-        return ansiQuote(v)
+        return needsAnsi(v) ? ansiQuote(v) : bashSq(v)
     }
     // The class of a character from U+0080 up in the macOS en_US.UTF-8 locale, which is
     // what bash 5.3 asks iswctype for a POSIX bracket class in a glob (globCtype) and
@@ -2270,8 +2282,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Does this subscript need quoting inside `[...]`? bash quotes an associative key only
     // when the shell would need it - `[ab_c]`, `[k]` and `[5x]` stay bare, `["k one"]` and
     // `["q\$x"]` do not - and the test is sh_contains_shell_metas from bash's own lib/sh.
-    // languages/lib/bash-rt.c's rt_keymeta is the same list.
+    // languages/lib/bash-rt.c's rt_keymeta is the same list. A key that is just "@" is
+    // quoted too, so it does not read as every element.
     function keyNeedsQuote(k) {
+        if (k == "@") { return true }
         var i
         for (i = 0; i < k.length; i++) {
             var c = k.charCodeAt(i)
@@ -2923,7 +2937,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var d = (wordT != null) ? wordJoin(wordT()) : ""
                     // A readonly NAME abandons the line, as an expansion error does.
                     if (tn != null && roRefused(tn, "")) { arithErr = true; return "" }
-                    if (tn != null) { d = storeAttr(tn, d) }
+                    if (tn != null) { d = storeAttr(tn, d, false) }
                     return d
                 }
                 return v
@@ -3053,6 +3067,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // inside one bash only warns, which is not modelled). Twin of the same check in
             // makeDecl in bash-to-llvm-ir.abnf.
             var nk = "$" + names[k]
+            // A value that names no variable is refused, and nothing is declared (bashRefBad).
+            var refBad = (isRef && asgs[k] != null && asgs[k].lit == null && asgs[k].idxT == null) ? bashRefBad(kw, v) : ""
+            if (refBad != "") { diagErr(refBad); roFail = true; return }
             var sv = {v: hasOwn(vars, nk) ? vars[nk] : null, h: hasOwn(varsHas, nk) ? varsHas[nk] : null}
             if (isRef) { noRef = noRef + 1 }
             declOneN(k, v)
@@ -3079,6 +3096,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // attributes (bash 5.3: f() { local a=5; local a; echo $a; } prints 5).
             var fresh = localize && !localHere(names[k])
             if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0) && roRefused(names[k], (kw == "readonly" || kw == "export") ? "" : kw + ": ")) { roFail = true; return }
+            // +a of an indexed array, +A of an associative one, is refused. Twin of rt_arr_plus.
+            if (!fresh && isArr(names[k]) && arrKeyList(names[k]).length > 0 && (arrs[arrKey(names[k])].assoc ? plus.indexOf("A") : plus.indexOf("a")) >= 0) {
+                diagErr(kw + ": " + names[k] + ": cannot destroy array variables in this way\n")
+                roFail = true
+                return
+            }
             if (localize && !fresh) { claimLocal(names[k]) }
             // A bare `local x` whose visible x is a caller's prefix binding (`x=5 f`)
             // starts from that value, bash 5.3; any other starts unset.
@@ -3119,7 +3142,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (wasSet) { arrs[arrKey(names[k])].lit = true }
             }
             if (asgs[k] != null) {
-                if (asgs[k].lit != null) { runAssign(asgs[k], assoc) } else { runAssignV(asgs[k], assoc, v) }
+                if (asgs[k].lit != null) { runAssign(asgs[k], assoc, true) } else { runAssignV(asgs[k], assoc, v) }
             }
             else if (inherit) { setVarVal(names[k], inhV) }
             else if (fresh) { unsetVar(names[k]) }
@@ -3886,9 +3909,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `unset 'NAME[SUB]'`, answering the status. On a variable that is no array - set, or
     // declared without a value - subscript 0 unsets it and any other, @ and * and a negative
     // index included, is bash 5.3's "not an array variable", status 1. A name that is no
-    // variable at all is left alone. Twin of rt_arr_unset.
+    // variable at all is left alone, and so is every variable for an empty SUB (`unset 'b[]'`
+    // is status 0). Twin of rt_arr_unset.
     // An index still negative from the end is "unset: [SUB]: bad array subscript", status 1.
     function unsetElem(name, sub) {
+        if (sub == "") { return 0 }
         if (isArr(name)) {
             var key = sub
             if (sub != "@" && sub != "*" && !assocFact(name, false)) {
@@ -4932,10 +4957,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (arIdCh(arAt(0), arP == s0)) { arP = arP + 1 }
         return arS.slice(s0, arP)
     }
-    // [ EXPR ] after a name, as the key it names, or null when there is no subscript.
+    // [ EXPR ] after a name, as the key it names, or null when there is no subscript. An
+    // empty one, `b[]`, is AR_NOSUB, which names no element: reading it and storing to it are
+    // bash's errors (arValue, arStore), and the expression goes on. Twin of ar_subscript.
+    var AR_NOSUB = "\x03nosub"
     function arSubscript(nm) {
         if (arAt(0) != 91) { return null }
         arP = arP + 1
+        if (arAt(0) == 93) { arP = arP + 1; return AR_NOSUB }
         // An associative array's subscript is the literal text up to the "]".
         if (assocFact(nm, false)) {
             var s0 = arP
@@ -4944,7 +4973,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             arP = arP + 1
             return arS.slice(s0, arP - 1)
         }
-        var k = arComma()
+        // A blank subscript, `b[ ]`, is element 0. Twin of ar_subscript.
+        arWs()
+        var k = (arAt(0) == 93) ? 0 : arComma()
         arWs()
         if (arAt(0) != 93) { arErr("missing `]'"); return null }
         arP = arP + 1
@@ -4953,6 +4984,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A variable's value as an operand: empty is 0, anything else is itself an expression.
     function arValue(nm, key) {
         if (arNoeval > 0) { return 0 }
+        // bash 5.3 reports it twice.
+        if (key == AR_NOSUB) { diagErr(nm + "[]: bad array subscript\n"); diagErr(nm + "[]: bad array subscript\n"); return 0 }
         var v = (key != null) ? scGet(nm, key) : getVarVal(nm)
         if (v == "") { return 0 }
         if (arDepth >= 1024) { return arErr("expression recursion level exceeded") }
@@ -4960,6 +4993,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function arStore(nm, key, v) {
         if (arNoeval > 0 || arithErr) { return v }
+        if (key == AR_NOSUB) { diagErr(arPfx + "`" + nm + "[]': not a valid identifier\n"); return v }
         if (roRefused(nm, "")) { arBad = true; arithErr = true; return v }
         if (key != null) { arrSet(nm, key, numToStr(v)) } else { setVarVal(nm, numToStr(v)) }
         return v
@@ -5257,7 +5291,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ---- statement / command thunks: function() -> int status | {ret: int} ----
 
     // items = [{aname}, {aidx}?, idxThunk?, {aop2}, valueWordThunk? | {arr}]
-    function mkArrayKV(items) { return {kv: 1, key: items[0], val: items[1]} }
+    function mkArrayKV(items, src) { return {kv: 1, key: items[0], val: (items.length > 1) ? items[1] : null, src: src} }
     function mkArrayLit(items) { return {arr: items} }
     function parseAssign(items) {
         var name = items[0].aname
@@ -5283,17 +5317,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 0; i < litItems.length; i++) {
             var it = litItems[i]
-            if (typeof it == "function") {
-                var f = wordFields(it())
+            if (it.aw != undefined) {
+                var f = wordFields(it.aw())
                 var k
-                for (k = 0; k < f.length; k++) { out.push({k: null, v: f[k]}) }
+                for (k = 0; k < f.length; k++) { out.push({k: null, v: f[k], src: it.src}) }
             } else {
-                out.push({k: wordJoin(it.key()), v: wordJoin(it.val())})
+                out.push({k: wordJoin(it.key()), v: (it.val == null) ? "" : wordJoin(it.val()), src: it.src})
             }
         }
         return out
     }
-    function applyArrayLit(name, pairs, append, assoc) {
+    function applyArrayLit(name, pairs, append, assoc, decl) {
         touchState(name)
         if (!append) { arrNew(name, assoc) }
         else { arrEnsure(name, assoc) }
@@ -5301,9 +5335,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         // In an INDEXED literal a bare word takes the index after the element before it, so
         // b=([3]=c [1]=a b) is 1 2 3 = a b c in bash 5.3; [k] is an arithmetic expression.
-        // A [k]=v that is @, * or an index still negative from the end is reported quoting
-        // the element ("[-9]=v: bad array subscript"); it stops the literal and abandons the
-        // line. Twin of rt_arr_litkey / rt_arr_litwords.
+        // A [k]=v that is empty, @, * or an index still negative from the end is reported
+        // quoting the element ("[-9]=v: bad array subscript"); it stops the literal and
+        // abandons the line. Twin of rt_arr_litkey / rt_arr_litwords.
         if (!arrs[arrKey(name)].assoc) {
             var next = anytype
             next = append ? arrNextIdx(name) : 0
@@ -5314,6 +5348,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 else {
                     var lbl = "[" + pairs[i].k + "]=" + pairs[i].v
+                    if (pairs[i].k == "") { diagErr(lbl + ": bad array subscript\n"); arithErr = true; return }
                     if (pairs[i].k == "@" || pairs[i].k == "*") { diagErr(lbl + ": cannot assign to non-numeric index\n"); arithErr = true; return }
                     var kv = arEval(pairs[i].k)
                     if (arithErr) { return }
@@ -5328,12 +5363,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS - bash 5.3.15
         // reads `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a
         // trailing odd word takes an empty value, so `a+=(zz)` gives a["zz"]="".
+        //
+        // An EMPTY KEY is a bad array subscript, reported quoting the element: as written in
+        // an assignment (`[$k]=v`), and as a declaration builtin re-spells it (decl) - each
+        // part in single quotes, `['']='v'`. A [k]=v so stops the literal and abandons the
+        // line; a pair so (`"" v`) is skipped. Twin of rt_arr_akbad in lib/bash-rt.c.
         var plain = []
         for (i = 0; i < pairs.length; i++) {
-            if (pairs[i].k == null) { plain.push(pairs[i].v) } else if (!elemSet(name, pairs[i].k, null, pairs[i].v)) { return }
+            if (pairs[i].k == null) { plain.push(pairs[i]); continue }
+            if (pairs[i].k == "") {
+                diagErr((decl ? "[" + bashSq("") + "]=" + bashSq(pairs[i].v) : pairs[i].src) + ": bad array subscript\n")
+                arithErr = true
+                return
+            }
+            if (!elemSet(name, pairs[i].k, null, pairs[i].v)) { return }
         }
         for (i = 0; i < plain.length; i = i + 2) {
-            if (!elemSet(name, plain[i], null, (i + 1 < plain.length) ? plain[i + 1] : "")) { return }
+            if (plain[i].v == "") { diagErr((decl ? bashSq("") : plain[i].src) + ": bad array subscript\n"); continue }
+            if (!elemSet(name, plain[i].v, null, (i + 1 < plain.length) ? plain[i + 1].v : "")) { return }
         }
     }
     // items: one {a} per assignment and the redirection records, interleaved. The status is
@@ -5353,7 +5400,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < as.length; k++) {
                 // A readonly name abandons the command line, as an arithmetic error does.
                 if (roRefused(as[k].name, "")) { abortSignal = {ret: 1, isExit: 1, soft: 1} }
-                else { runAssign(as[k], false) }
+                else { runAssign(as[k], false, false) }
                 var ab = takeAbort()
                 if (ab != null) { return ab }
             }
@@ -5386,8 +5433,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // with status 1 on an error instead: this answers whether one was raised, and clears it.
     function takeArithErr() { var e = arithErr; arithErr = false; subBad = false; return e }
     // An expansion error in a value abandons the command before anything is stored:
-    // `k=$(( 1/0 ))` leaves k as it was. Twin of the emitAbortCheck in emitAssign.
-    function runAssign(a, assoc) {
+    // `k=$(( 1/0 ))` leaves k as it was. decl: an operand of a declaration builtin, whose
+    // array literal reports an element as applyArrayLit says. Twin of the emitAbortCheck in
+    // emitAssign.
+    function runAssign(a, assoc, decl) {
         a = refAssign(a)
         if (a == null) { return }
         var isAs = assocFact(a.name, assoc)
@@ -5396,7 +5445,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (arithErr || abortSignal != null) { return }
             // A replacing literal drops a scalar of the name; an appending one keeps it as element 0.
             if (a.op != "+=") { unsetVar(a.name) } else if (!isAs) { arrAdopt(a.name) }
-            applyArrayLit(a.name, lv, a.op == "+=", assoc)
+            applyArrayLit(a.name, lv, a.op == "+=", assoc, decl)
             return
         }
         runAssignV(a, assoc, (a.valT != null) ? wordJoin(a.valT()) : "")
@@ -5444,7 +5493,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (arithErr || abortSignal != null) { return }
-        if (isElemRef(a.name)) { elemRefSet(a.name, a.op == "+=", v); return }
+        if (isElemRef(a.name)) { elemRefSet(a.name, a.op == "+=", v, false); return }
         if (a.op == "+=") {
             // On an array name `+=` appends to element 0's text: e=(ab c); e+=d is `abd c`.
             if (isArr(a.name)) { elemSet(a.name, "0", arrGet(a.name, "0"), v) }
@@ -5452,16 +5501,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { setVarVal(a.name, quietVal(a.name) + v) }
             return
         }
-        storeAttr(a.name, v)
+        storeAttr(a.name, v, false)
     }
     // v stored as NAME's value the way `NAME=v` stores it: element 0 of an array name, the
     // value of v as arithmetic under -i (`declare -i n` makes n=EXPR evaluate EXPR; an error
     // stores nothing), the case map under -u / -l. read, printf -v, a for loop's name and
     // ${v:=w} store this way too. Answers the stored text. Twin of emitStoreAttr in
     // bash-to-llvm-ir.abnf.
-    function storeAttr(name, v) {
+    function storeAttr(name, v, bi) {
         if (anyRef) { name = refTarget(name); if (name == "") { arithErr = true; return "" } }
-        if (isElemRef(name)) { return elemRefSet(name, false, v) }
+        if (isElemRef(name)) { return elemRefSet(name, false, v, bi) }
         if (isArr(name)) { elemSet(name, "0", null, v); return arrGet(name, "0") }
         if (attrOn(intVars, name)) {
             var iv = arEval(v)
@@ -5575,14 +5624,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (roRefused(nm, "")) { continue }
             var v = (asgs[k].val != null) ? wordJoin(asgs[k].val()) : ""
             if (asgs[k].op == "+=") { v = quietVal(nm) + v }
-            if (!undo) { storeAttr(nm, v); continue }
+            if (!undo) { storeAttr(nm, v, false); continue }
             if (frame) {
                 // For a FUNCTION the bindings are the call's frame (runPrefixed): what the
                 // function assigns to such a name changes the binding (gone after the call),
                 // `unset` removes it (unsetCallerLocal), and a callee's `local` inherits its
                 // value (tmpVisible). The binding is a plain scalar: it hides an array of that
-                // name, and takes no attributes (`U=b f` hands f "b" whatever `declare -u U`
-                // said).
+                // name, and takes no attributes but the export below (`U=b f` hands f "b"
+                // whatever `declare -u U` said).
                 if (saved.length == 0) { pushLocalFrame() }
                 declareLocal(nm)
                 var fr = localFrames[localFrames.length - 1]
@@ -5590,7 +5639,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 saved.push(fr[fr.length - 1])
                 dropAttrs(nm)
                 arrs[arrKey(nm)] = null
-            } else { saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm)}) }
+            } else { touchState(nm); saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm), ex: exVars["$" + nm] == true}) }
+            // A binding of the temporary environment is exported while the command runs.
+            exVars["$" + nm] = true
             if (rawSeen) { v = normBytes(v) }
             saved[saved.length - 1].nv = v
             touchVar(nm); vars["$" + nm] = v; varsHas["$" + nm] = true
@@ -5612,6 +5663,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function restorePrefix(saved) {
         if (saved.length > 0 && saved[0].tmp == true) { popLocalFrame(); return }
         restoreVals(saved)
+        var k
+        for (k = saved.length - 1; k >= 0; k--) { exVars["$" + saved[k].name] = saved[k].ex }
     }
     function restoreVals(saved) {
         var k
@@ -6147,7 +6200,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (roRefused(dest, "")) { return 1 }
             var svp = arPfx
             arPfx = "printf: "
-            storeAttr(dest, cutNul(res))
+            storeAttr(dest, cutNul(res), true)
             arPfx = svp
             if (takeSubBad()) { return 1 }
         } else { emitOut(res) }
@@ -6242,7 +6295,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // attributes. Twin of emitMapfile in bash-to-llvm-ir.abnf, with rt_mf_begin.
     function mapfileBuiltin(who, args) {
         var o = mfOpts(args)
-        if (o.bad != null) { mfUsage(who, o.bad, o.missing); return 2 }
+        if (o.bad != null) { optUsage(who, o.bad, o.missing, bashMfSyn); return 2 }
         var nm = o.name
         if (o.cb != null) { o.cbT = compileSnippet(o.cb + " \"$@\"", 0) }
         var cnt = mfNum(o.n), org = mfNum(o.O), skp = mfNum(o.s), qn = mfNum(o.c), fd = mfNum(o.u)
@@ -6325,25 +6378,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (i < args.length) { o.name = args[i] }
         return o
     }
-    function mfUsage(who, opt, missing) {
+    // An unknown option, or (missing) one without its value: bash's two lines, the second
+    // the builtin's synopsis syn. Twin of rt_opt_usage.
+    function optUsage(who, opt, missing, syn) {
         diagErr(who + ": " + opt + (missing ? ": option requires an argument\n" : ": invalid option\n"))
-        emitErr(who + ": usage: " + who + " [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]\n")
-    }
-    // An option value as bash's legal_number reads it - blanks, an optional sign, decimal
-    // digits, blanks - or null. Twin of rt_mf_num.
-    function mfNum(s) {
-        if (s == null) { return null }
-        var i = 0
-        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n")) { i = i + 1 }
-        var neg = false
-        if (i < s.length && (s.charAt(i) == "-" || s.charAt(i) == "+")) { neg = s.charAt(i) == "-"; i = i + 1 }
-        var d0 = i
-        var n = 0
-        while (i < s.length && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { n = n * 10 + (s.charCodeAt(i) - 48); i = i + 1 }
-        if (i == d0) { return null }
-        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n")) { i = i + 1 }
-        if (i < s.length) { return null }
-        return neg ? -n : n
+        emitErr(who + ": usage: " + who + syn + "\n")
     }
     // A shell NAME: a letter or underscore, then letters, digits and underscores. Twin of
     // isIdentText in bash-to-llvm-ir.abnf.
@@ -6358,7 +6397,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return true
     }
 
-    // read [-r] [-a NAME] [-d DELIM] NAME... : one record of standard input (readRec), split
+    // read [-r] [-a NAME] [-d DELIM] [-n|-N COUNT] NAME... : one record of standard input (readRec), split
     // on IFS, the last name taking the rest (readFields). The status is 1 when no delimiter
     // ended the record - at the end of the input the names are still stored, and with nothing
     // left at all they are CLEARED, REPLY included (`REPLY=keep; read -r </dev/null` leaves it
@@ -6369,18 +6408,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var o = bashReadOpts(args)
         var names = o.names
         var arrName = o.arr
+        if (o.bad != null) { optUsage("read", o.bad, o.missing, bashReadSyn); return 2 }
+        if (o.badNum != null) { diagErr("read: " + o.badNum + ": invalid number\n"); return 1 }
         if (names.length > 0 && !bashIsRef(names[0])) { diagErr("read: `" + names[0] + "': not a valid identifier\n"); return 1 }
         // A readonly target, once the record is read: the array or the last name fails the
         // read (status 1), REPLY or an earlier name stops it there (2), bash 5.3.
         // An -a name that is no NAME (`read -a 'b[1]'`) fails the read, its record consumed.
         var badArr = arrName != null && !isIdentText(arrName)
         if (badArr) { diagErr("read: `" + arrName + "': not a valid identifier\n") }
-        var rec = readRec(o.raw, o.dlm)
+        var rec = readRec(o.raw, o.dlm, o.nch)
         if (badArr) { return 1 }
         if (arrName != null && roRefused(arrName, "")) { return 1 }
         if (arrName == null && names.length == 0 && roRefused("REPLY", "")) { return 2 }
         var st = rec.eof ? 1 : 0
-        var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
+        // -N splits nothing, as an empty IFS.
+        var seps = o.whole ? "" : (isSetVar("IFS") ? vars["$IFS"] : " \t\n")
         if (arrName != null) {
             var svp = arPfx
             arPfx = "read: "
@@ -6399,7 +6441,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (k = 0; k < names.length && !arithErr; k++) {
             if (!bashIsRef(names[k])) { diagErr("read: `" + names[k] + "': not a valid identifier\n"); st = 1; break }
             if (roRefused(names[k], "")) { st = (k < names.length - 1) ? 2 : 1; break }
-            storeAttr(names[k], vs[k])
+            storeAttr(names[k], vs[k], true)
             // A refused subscript, like a readonly name: 2 and the rest unset, 1 for the last.
             if (takeSubBad()) { st = (k < names.length - 1) ? 2 : 1; break }
         }
@@ -6407,25 +6449,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return st
     }
     // One record of standard input for `read`, up to the delimiter dlm ("" for -d '', which
-    // never occurs), the input moving past it: {t: the record, eof: no delimiter ended it}.
-    // Nothing left at all is an empty record.
+    // never occurs) or, with nch >= 0, after nch characters, the input moving past the
+    // delimiter but no further than the last character read: {t: the record, eof: neither
+    // ended it}. Nothing left at all is an empty record, and so is -n 0, which reads nothing.
     //
     // Without -r a backslash quotes the character after it and is dropped, and a
     // backslash-newline is dropped whole, the record going on past it, with any delimiter;
     // a backslash that ends the input is dropped. A quoted character delimits no field,
     // which the record keeps by a "\x01" before it, as bash's CTLESC; a "\x01" of the input
-    // is quoted the same way, so that readFields can take every one away. Twin of
-    // rt_read_line in languages/lib/bash-rt.c.
-    function readRec(raw, dlm) {
+    // is quoted the same way, so that readFields can take every one away. The count is of
+    // the characters the record keeps: a quoted one counts, its backslash does not, and
+    // neither does a backslash-newline. Twin of rt_read_line in languages/lib/bash-rt.c.
+    function readRec(raw, dlm, nch) {
         var n = stdinBuf.length
         var p = stdinPos
         var t = ""
         var seg = p
         var eof = true
+        var got = 0
+        var full = false
         while (p < n) {
+            if (got == nch) { full = true; break }
             var ch = stdinBuf.charAt(p)
             if (ch == dlm) { eof = false; break }
-            if (raw || (ch != "\\" && ch != "\x01")) { p = p + 1; continue }
+            if (raw || (ch != "\\" && ch != "\x01")) { got = got + 1; p = p + 1; continue }
             t = t + stdinBuf.slice(seg, p)
             p = p + 1
             if (ch == "\\") {
@@ -6434,12 +6481,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 p = p + 1
                 if (ch == "\n") { seg = p; continue }
             }
+            got = got + 1
             t = t + "\x01" + ch
             seg = p
         }
         t = t + stdinBuf.slice(seg, p)
-        stdinPos = eof ? p : p + 1
-        return {t: t, eof: eof}
+        if (got == nch) { full = true }
+        stdinPos = (full || eof) ? p : p + 1
+        return {t: t, eof: eof && !full}
     }
     // THE VALUES A `read` STORES: with n names, field k under the POSIX delimiter rule
     // (splitIFS) for each name but the last, which takes the rest of the record; with n == 0
@@ -6805,8 +6854,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 else if (sp.key == null) {
                     if ((localHere(sp.name) && !tmpHere(sp.name)) || !unsetCallerLocal(sp.name)) {
+                        // A local made of the call's prefix binding keeps its export (bash's
+                        // makunbound).
+                        var keepX = attrOn(exVars, sp.name) && tmpOwn(sp.name) != null
                         unsetVar(sp.name); arrs[arrKey(sp.name)] = null; dropAttrs(sp.name)
                         if (localHere(sp.name)) { dclVars["$" + sp.name] = true }
+                        exVars["$" + sp.name] = keepX
                     }
                 }
                 else if (unsetElem(sp.name, sp.key) != 0) { ust = 1 }
@@ -7904,7 +7957,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // A nameref control variable is made to refer to each word in turn.
                 var fRef = anyRef && attrOn(refVars, fname)
                 if (fRef) { noRef = noRef + 1 }
-                storeAttr(fname, vals[k])
+                storeAttr(fname, vals[k], false)
                 if (fRef) { noRef = noRef - 1 }
                 r = bodyT()
                 if (typeof r == "object") {

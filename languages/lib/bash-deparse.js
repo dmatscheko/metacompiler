@@ -755,15 +755,49 @@ function bashDeclOperand(f, arr, quote, elem) {
     return f.slice(0, j + opLen) + quote(v)
 }
 
-// THE OPERANDS OF `read`, as getopt reads "ad:ei:n:N:p:rst:u:": letters bundle (`-ra arr`), a
-// value is the rest of its word or the next word, and the first word that is no option ends
-// them - every word after it is a name, even one starting with "-". Answers {raw: -r,
-// arr: the -a name or null, dlm: the -d delimiter ("" for -d '', "\n" without -d), names}.
-// Twin of rt_rd_parse in lib/bash-rt.c.
-function bashReadOpts(words) {
-    var o = {raw: false, arr: null, dlm: "\n", names: []}
+// v in single quotes, each ' in it spelled '\'' (bash's sh_single_quote). Twin of rt_sq in
+// lib/bash-rt.c.
+function bashSq(v) {
+    var out = "'"
+    var i
+    for (i = 0; i < v.length; i++) {
+        var ch = v.charAt(i)
+        if (ch == "'") { out = out + "'\\''" } else { out = out + ch }
+    }
+    return out + "'"
+}
+// The synopses bash prints after a usage error of mapfile and read (optUsage).
+var bashMfSyn = " [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]"
+var bashReadSyn = " [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]"
+// An option value as bash's legal_number reads it - blanks, an optional sign, decimal
+// digits, blanks - or null. Twin of rt_mf_num in lib/bash-rt.c.
+function mfNum(s) {
+    if (s == null) { return null }
     var i = 0
-    while (i < words.length) {
+    while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n")) { i = i + 1 }
+    var neg = false
+    if (i < s.length && (s.charAt(i) == "-" || s.charAt(i) == "+")) { neg = s.charAt(i) == "-"; i = i + 1 }
+    var d0 = i
+    var n = 0
+    while (i < s.length && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { n = n * 10 + (s.charCodeAt(i) - 48); i = i + 1 }
+    if (i == d0) { return null }
+    while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n")) { i = i + 1 }
+    if (i < s.length) { return null }
+    return neg ? -n : n
+}
+// THE OPERANDS OF `read`, as getopt reads "Eea:d:i:n:N:p:rst:u:": letters bundle (`-ra arr`),
+// a value is the rest of its word or the next word, and the first word that is no option ends
+// them - every word after it is a name, even one starting with "-". Answers {raw: -r,
+// arr: the -a name or null, dlm: the -d delimiter ("" for -d '', "\n" without -d), nch: the
+// -n/-N count (-1 without), whole: -N was given, names}. -N reads past every delimiter
+// (dlm "", whatever -d says) and splits nothing; the later of -n and -N sets the count.
+// The first bad option stops the parse: {bad} holds the letter of an unknown option or one
+// without its value (usage, status 2), or {badNum} a count that is no int from 0 up
+// ("invalid number", status 1). Twin of rt_rd_parse in lib/bash-rt.c.
+function bashReadOpts(words) {
+    var o = {raw: false, arr: null, dlm: "\n", nch: -1, whole: false, names: [], bad: null, missing: false, badNum: null}
+    var i = 0
+    while (i < words.length && o.bad == null && o.badNum == null) {
         var f = words[i]
         if (f.length < 2 || f.charAt(0) != "-") { break }
         i = i + 1
@@ -772,14 +806,29 @@ function bashReadOpts(words) {
         while (j < f.length) {
             var ch = f.charAt(j)
             if (ch == "r") { o.raw = true }
-            if ("adinNptu".indexOf(ch) < 0) { j = j + 1; continue }
+            if ("adinNptu".indexOf(ch) < 0) {
+                if ("Eers".indexOf(ch) < 0) { o.bad = "-" + ch; break }
+                j = j + 1
+                continue
+            }
             var v = f.slice(j + 1)
-            if (v == "" && i < words.length) { v = words[i]; i = i + 1 }
+            if (v == "") {
+                if (i >= words.length) { o.bad = "-" + ch; o.missing = true; break }
+                v = words[i]
+                i = i + 1
+            }
             if (ch == "a") { o.arr = v }
             if (ch == "d") { o.dlm = v.charAt(0) }
+            if (ch == "n" || ch == "N") {
+                var c = mfNum(v)
+                if (c == null || c < 0 || c > 2147483647) { o.badNum = v; break }
+                o.nch = c
+                if (ch == "N") { o.whole = true }
+            }
             j = f.length
         }
     }
+    if (o.whole) { o.dlm = "" }
     while (i < words.length) { o.names.push(words[i]); i = i + 1 }
     return o
 }
@@ -805,4 +854,10 @@ function bashIsRef(t) {
         i = i + 1
     }
     return false
+}
+// The diagnostic of `declare -n` (who) refusing the value v, which names no variable;
+// "" when v is a NAME or NAME[SUB]. Twin of rt_nref_bad in lib/bash-rt.c.
+function bashRefBad(who, v) {
+    if (bashIsRef(v)) { return "" }
+    return who + ": `" + v + "': " + ((v == "") ? "not a valid identifier" : "invalid variable name for name reference") + "\n"
 }

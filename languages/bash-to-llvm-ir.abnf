@@ -143,13 +143,15 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
 // expansion (e='1 + 2'; `i < $e * 2` is i < 5), and may be empty: an empty condition is 1.
 CForStmt    <~~ push(atLine(makeCFor(takeAll()), srcLine(up.start))) ~~>
             = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep LoopBody ;
-CfPart      = CfDyn | CfSt | CfZero ;
-CfCond      = CfDyn | CfSt | CfOne ;
+CfPart      = CfDyn | CfSt | CfRaw | CfZero ;
+CfCond      = CfDyn | CfSt | CfRaw | CfOne ;
 CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
 CfDynWord   <~~ push(mkNsWord(takeAll())) ~~> = CfDynSeg { CfDynSeg } ;
 CfDynSeg    = DqSeg | ExpSeg | ArDynParen | CfDynBare ;
 CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\";" ;
-CfSt        <~~ arClaim(up.start, up.pos); push(pop()) ~~> = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL ;
+CfSt        <~~ arClaim(up.start, up.pos); push(pop()) ~~> = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL CfEnd ;
+// A part the parser does not take (`b[]=0`) is read by the run-time evaluator, as (( )) is.
+CfRaw       <~~ push(mkArDyn(pop())) ~~> = WsNL !";" !"))" CfDynWord ;
 CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
 CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
@@ -322,10 +324,12 @@ NsWord      <~~ push(mkNsWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 ArrayLit    <~~ push(mkArrayLit(takeAll())) ~~> = "(" :whitespace(WsNL) ArrayItems ")" ;
 ArrayItems  = { ArrayItem } ;
-ArrayItem   = ArrayKV | CWord ;
+ArrayItem   = ArrayKV | ArrayWord ;
+// The element as written ({src}) is what an empty associative key reports.
+ArrayWord   <~~ push({aw: pop(), src: arSrc(up.start, up.pos)}) ~~> = CWord ;
 // `[k]=v` inside an array literal is an assignment too: bash 5.3 keeps `A=([0]=$x)`
-// unsplit exactly as it keeps `A=$x`.
-ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" :whitespace() IdxWord "]" :whitespace() "=" :whitespace() NsWord ;
+// unsplit exactly as it keeps `A=$x`, and `[k]=` stores the empty string.
+ArrayKV     <~~ push(mkArrayKV(takeAll(), arSrc(up.start, up.pos))) ~~> = "[" :whitespace() IdxWord "]" :whitespace() "=" :whitespace() [ NsWord ] ;
 WsNL        = { @+" \t\r\n" | Comment } ;
 AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 
@@ -545,9 +549,10 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 
 // NAME or NAME[SUBSCRIPT] - the subscript is a word, read as an arithmetic index for an
 // indexed array and as a literal key for an associative one. "@" and "*" mean the whole array.
+// An empty SUBSCRIPT is no target: `${b[]}` is the run-time "bad substitution" (PeBad).
 // peTgt: the target as written, the prefix of an arithmetic error in ${v:off} (ArOff).
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
-PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" IdxWord "]" ;
+PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" !"]" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
 IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
@@ -667,10 +672,10 @@ ArAssignForm <~~ push(mkArAssign(takeAll(), up.pos)) ~~> = ArLhs ArAsgOp ArAssig
 // NAME[SUBSCRIPT] is an array element, an operand and an assignment target alike. Twin of
 // ArLhs / ArElem in bash-interpreter.abnf.
 ArLhs       = ArLhsElem | ArLhsName ;
-ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" IdxWord "]" ;
+ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" !"]" IdxWord "]" ;
 ArElemName  <~~ push({lhs: up.in}) ~~> = ArName ;
 ArLhsName   <~~ push({lhs: up.in}) ~~> = ArName ;
-ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" IdxWord "]" ;
+ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" !"]" IdxWord "]" ;
 ArAsgOp     <~~ push({aop: up.in}) ~~>
             = "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | ArPlainAsg ;
 ArPlainAsg  = "=" NotEq ;
@@ -902,6 +907,15 @@ CfHasExp = :script(~~
             }
             i = i + 1
         }
+    })()
+~~) ;
+// Succeeds (consuming nothing) at the ";" or ")" that ends a for (( ; ; )) part, so a part
+// the static parser reads only a head of (`b` of `b[]=0`) is left to CfRaw.
+CfEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc === 59 || cc === 41) { return }
+        return abnf.newToken("\x01cf-more", 0)
     })()
 ~~) ;
 // Whether a `let` argument must be read as a word (LetWord): it holds a "$" or "`" outside
@@ -1820,7 +1834,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtAnsiC = rtDecl("rt_ansic", true, [1])
     var rtUnraw = rtDecl("rt_unraw", true, [1])
     var rtHasChar = rtDecl("rt_haschar", false, [1, 0])
-    var rtReadLine = rtDecl("rt_read_line", true, [0, 0])
+    var rtReadLine = rtDecl("rt_read_line", true, [0, 0, 0])
     var rtRdFields = rtDecl("rt_rd_fields", true, [1, 1, 0, 0])
 
     // field lists: a value carrying more than one word is "\x02" followed by the fields (rt_islist),
@@ -1856,6 +1870,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrHas = rtDecl("rt_arr_has", false, [1, 1])
     var rtArrUnset = rtDecl("rt_arr_unset", false, [1, 1])
     var rtArrAny = rtDecl("rt_arr_any", false, [1])
+    var rtArrPlus = rtDecl("rt_arr_plus", false, [1, 1, 0, 0])
+    var rtNrefBad = rtDecl("rt_nref_bad", false, [1, 1])
     var rtArrList = rtDecl("rt_arr_list", true, [1, 1, 0, 0])
     // The scalar-aware quartet, EXPANSION SITES ONLY - see languages/lib/bash-rt.c.
     var rtScGet = rtDecl("rt_sc_get", true, [1, 1])
@@ -1893,12 +1909,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrIkey = rtDecl("rt_arr_ikey", true, [1, 3])
     var rtArrLitKey = rtDecl("rt_arr_litkey", 3, [1, 1, 1, 3, 0])
     var rtArrLitWords = rtDecl("rt_arr_litwords", 3, [1, 1, 3, 0])
+    var rtArrAkbad = rtDecl("rt_arr_akbad", false, [1, 1, 1, 0, 0])
     // i8* rt_attrv(i8* old, i8* v, i32 at): an element's value under its array's attributes.
     var rtAttrv = rtDecl("rt_attrv", true, [1, 1, 0])
     // i32 rt_arr_keep(i64 m, i64 lm, i8* nm, i8* k, i8* v, i32 assoc): see emitElemSet.
     var rtArrKeep = rtDecl("rt_arr_keep", false, [3, 3, 1, 1, 1, 0])
     // mapfile / readarray: see emitMapfile.
-    var rtMfUsage = rtDecl("rt_mf_usage", false, [1, 1, 0])
+    var rtOptUsage = rtDecl("rt_opt_usage", false, [1, 1, 0, 1])
     var rtMfBegin = rtDecl("rt_mf_begin", false, [1, 1, 1, 1, 1, 1, 1, 1, 0, 0])
     var rtMfNext = rtDecl("rt_mf_next", false, [])
     var rtMfDue = rtDecl("rt_mf_due", false, [])
@@ -1975,6 +1992,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtFnEnter = rtDecl("rt_fn_enter", false, [0])
     var rtLocalNew = rtDecl("rt_local_new", false, [0, 0])
     var rtUnsetUp = rtDecl("rt_unset_up", false, [0, 0, 0])
+    var rtUnsetX = rtDecl("rt_unset_x", false, [0, 0])
     var rtGlobSwap = rtDecl("rt_glob_swap", false, [0])
 
     // ===================================================================================
@@ -3450,7 +3468,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function storeStatusI(b, n) { b.NewStore(llvm.constant.NewInt(i32, n), gStatus) }
 
     // items = [{aname}, {aidx}?, idxWord?, {aop2}, valueWord? | {arr}]
-    function mkArrayKV(items) { return {kv: 1, key: items[0], val: items[1]} }
+    function mkArrayKV(items, src) { return {kv: 1, key: items[0], val: (items.length > 1) ? items[1] : null, src: src} }
     function mkArrayLit(items) { return {arr: items} }
     function parseAssign(items) {
         var name = items[0].aname
@@ -3469,6 +3487,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // An array literal element list; a bare word contributes one element per FIELD. Every
     // word is expanded BEFORE the array is cleared: f=([5]=x "${f[@]}") reads the old f.
+    // litDecl: the literal is an operand of a declaration builtin (rt_arr_akbad).
+    var litDecl = false
     function emitArrayLit(b, name, litItems, append, assoc) {
         var nm = gepStr(b, name)
         var vals = []
@@ -3477,11 +3497,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = litItems[i]
             if (it.kv != undefined) {
                 var rk = it.key.fn(b); b = rk.b
-                var rv = it.val.fn(b); b = rv.b
-                vals.push({k: wordJoin(b, rk.v), v: wordJoin(b, rv.v)})
+                var vv = emptyPtr(b)
+                if (it.val != null) { var rv = it.val.fn(b); b = rv.b; vv = wordJoin(b, rv.v) }
+                vals.push({k: wordJoin(b, rk.v), v: vv, src: it.src})
             } else {
-                var rw = it.fn(b); b = rw.b
-                vals.push({k: null, v: rw.v})
+                var rw = it.aw.fn(b); b = rw.b
+                vals.push({k: null, v: rw.v, src: it.src})
             }
         }
         b = emitAbortCheck(b)
@@ -3492,17 +3513,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewCall(rtArrMark, nm)
         // Bare words in an ASSOCIATIVE array literal are KEY VALUE pairs - bash 5.3.15 reads
         // `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a trailing odd word
-        // takes an empty value.
+        // takes an empty value. An empty key is refused (emitAkSet).
         if (assoc) {
             var pendKey = null
+            var pendSrc = ""
             var abox = {b: b}
+            var stop = curF.NewBlock("")
             for (i = 0; i < vals.length; i++) {
-                if (vals[i].k != null) { emitElemSet(abox, name, nm, vals[i].k, null, vals[i].v, true, null); continue }
+                if (vals[i].k != null) { emitAkSet(abox, name, nm, vals[i].k, vals[i].v, vals[i].src, stop); continue }
                 var w = wordJoin(abox.b, vals[i].v)
-                if (pendKey == null) { pendKey = w } else { emitElemSet(abox, name, nm, pendKey, null, w, true, null); pendKey = null }
+                if (pendKey == null) { pendKey = w; pendSrc = vals[i].src } else { emitAkSet(abox, name, nm, pendKey, w, pendSrc, null); pendKey = null }
             }
-            if (pendKey != null) { emitElemSet(abox, name, nm, pendKey, null, emptyPtr(abox.b), true, null) }
-            return abox.b
+            if (pendKey != null) { emitAkSet(abox, name, nm, pendKey, emptyPtr(abox.b), pendSrc, null) }
+            abox.b.NewBr(stop)
+            return emitAbortCheck(stop)
         }
         // In an INDEXED literal a bare word takes the index after the element before it
         // (b=([3]=c [1]=a b) is 1 2 3 = a b c), so the next index is threaded through
@@ -3517,6 +3541,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A bad subscript, or under -i an element that is an arithmetic error, stops the
         // literal and abandons the line.
         return emitAbortCheck(b)
+    }
+    // One key k and value v of an associative literal, stored unless rt_arr_akbad refuses
+    // an empty k, quoting src: a refused [k]=v jumps to stop, ending the literal, and a
+    // refused pair (stop null) is skipped. Twin of the assoc arm of applyArrayLit in
+    // bash-interpreter.abnf.
+    function emitAkSet(abox, name, nm, k, v, src, stop) {
+        var kv = stop != null
+        var bad = abox.b.NewCall(rtArrAkbad, [k, v, gepStr(abox.b, src), litDecl ? one : zero, kv ? one : zero])
+        var setB = curF.NewBlock(""), nextB = curF.NewBlock("")
+        abox.b.NewCondBr(abox.b.NewICmp(llvm.enum.IPredEQ, bad, zero), setB, kv ? stop : nextB)
+        abox.b = setB
+        emitElemSet(abox, name, nm, k, null, v, true, null)
+        abox.b.NewBr(nextB)
+        abox.b = nextB
     }
     // The key of NAME[SUB]=v for a name not declared associative: rt_arr_akey refuses a
     // written @ or * and an index still negative from the end, quoting the subscript as
@@ -3754,7 +3792,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // Operands that are constant words (`declare -a 'b[1]=x'`) spell a declaration known now.
         if (anyDyn) {
-            var dt = bashDeclText(items, constFields, sqQuote)
+            var dt = bashDeclText(items, constFields, bashSq)
             if (dt != null) { return makeDeclSpelled(kw, dt, redirs) }
         }
         // A computed operand names its variable only at run time, where this compiler keeps
@@ -3795,7 +3833,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
         var isRef = kw != "export" && flags.indexOf("n") >= 0
-        var selfBadP = null      // i32 slot: a computed nameref value named its own variable
+        // +a / +A, which an array of that kind refuses at run time (rt_arr_plus).
+        var plusArr = plus.indexOf("a") >= 0 || plus.indexOf("A") >= 0
+        var refuseP = null       // i32 slot: a name was refused at run time (nameref value, +a)
         var subBadP = null       // i32 slot: an element operand's subscript was refused
         var anyIdx = false
         for (i = 0; i < asgs.length; i++) { if (asgs[i] != null && asgs[i].idxT != null) { anyIdx = true } }
@@ -3841,8 +3881,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return b
         }
-        // One name: its attributes, then its value (v expanded, or null for the assignment's own).
+        // One name, unless it is refused (status 1, nothing declared): a nameref value that
+        // names no variable (bashRefBad, rt_nref_bad), or +a / +A finding an array it may not
+        // take apart (a fresh local is no array yet). Twin of the same checks in declOne and
+        // declOneN in bash-interpreter.abnf.
         var declOne = function(b, j, v) {
+            var a = asgs[j]
+            var refChk = isRef && a != null && a.lit == null && a.idxT == null
+            if (refChk && v == null && (a.valT == null || a.valT.c != undefined)) {
+                var msg = bashRefBad(kw, (a.valT != null) ? a.valT.c : "")
+                if (msg != "") { emitDiag(b, gepStr(b, msg)); roFail = true; return b }
+                refChk = false
+            }
+            var fresh = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset") && !hasOwn(curFrame.locs, "$" + names[j])
+            var bad = null
+            if (refChk) { bad = b.NewCall(rtNrefBad, [gepStr(b, kw), v]) }
+            else if (plusArr && !fresh) { bad = b.NewCall(rtArrPlus, [gepStr(b, kw), gepStr(b, names[j]), (plus.indexOf("a") >= 0) ? one : zero, (plus.indexOf("A") >= 0) ? one : zero]) }
+            if (bad == null) { return declOneBody(b, j, v) }
+            var okB = curF.NewBlock(""), badB = curF.NewBlock(""), endB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, bad, zero), badB, okB)
+            badB.NewStore(one, refuseP)
+            badB.NewBr(endB)
+            okB = declOneBody(okB, j, v)
+            okB.NewBr(endB)
+            return endB
+        }
+        // One name: its attributes, then its value (v expanded, or null for the assignment's own).
+        var declOneBody = function(b, j, v) {
             // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
             // function declare a function-local name (value AND attributes restored on
             // return) unless -g is given; `export` and `readonly` always act on the global.
@@ -3928,14 +3993,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var a = asgs[j]
                 if (v != null || a.idxT != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: (v != null) ? null : a.lit, valT: (v != null) ? doneWord(v) : a.valT, isrc: a.isrc, soft: subBadP} }
                 var prevV = selfRef ? loadVar(b, names[j]) : null
+                litDecl = true
                 b = emitAssign(b, a, assoc, null)
+                litDecl = false
                 if (selfRef) {
                     // Refused, the name keeps its value and gets no nameref mark.
                     var selfB = curF.NewBlock(""), okB = curF.NewBlock(""), joinB = curF.NewBlock("")
                     b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [loadVar(b, names[j]), gepStr(b, names[j])]), zero), selfB, okB)
                     storeVarRaw(selfB, names[j], prevV)
                     emitDiag(selfB, gepStr(selfB, selfMsg))
-                    selfB.NewStore(one, selfBadP)
+                    selfB.NewStore(one, refuseP)
                     selfB.NewBr(joinB)
                     okB.NewCall(rtNmark, [gepStr(okB, names[j]), one])
                     okB.NewBr(joinB)
@@ -4041,8 +4108,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var badP = anyDyn ? slotOf(i32) : null
             if (anyDyn) { b.NewStore(zero, badP) }
-            selfBadP = isRef ? slotOf(i32) : null
-            if (isRef) { b.NewStore(zero, selfBadP) }
             subBadP = anyIdx ? slotOf(i32) : null
             if (anyIdx) { b.NewStore(zero, subBadP) }
             var o
@@ -4059,7 +4124,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             storeStatusI(b, roFail ? 1 : 0)
             if (anyDyn) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, badP))) }
-            if (isRef) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, selfBadP))) }
+            if (refuseP != null) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, refuseP))) }
             if (anyIdx) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, subBadP))) }
             roFail = false
             return b
@@ -4073,6 +4138,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var j
             var vals = []
+            refuseP = (isRef || plusArr) && !query ? slotOf(i32) : null
+            if (refuseP != null) { b.NewStore(zero, refuseP) }
             for (j = 0; j < names.length && !query; j++) {
                 var a = asgs[j]
                 vals.push(null)
@@ -4101,15 +4168,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fs.push(dyn[i].c)
         }
         return fs
-    }
-    function sqQuote(v) {
-        var out = "'"
-        var i
-        for (i = 0; i < v.length; i++) {
-            var ch = v.charAt(i)
-            if (ch == "'") { out = out + "'\\''" } else { out = out + ch }
-        }
-        return out + "'"
     }
     // The declaration dt (bashDeclText) spells, its bad fields reported first, under the
     // redirections. Twin of makeDeclDyn in bash-interpreter.abnf.
@@ -5134,8 +5192,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = emitAssign(b, namedAsg(dest, b.NewCall(rtPfValue, out), subP), false, mk)
             b.NewStore(emptyPtr(b), gArPfx)
         } else {
-            // A computed name is stored by name at run time (rt_setvar_byname).
-            b.NewCall(rtSetByName, [rdv, b.NewCall(rtPfValue, out), zero, refAttrs(b, rdv, false)])
+            // A computed name is stored by name at run time (rt_setvar_byname, as a builtin).
+            b.NewCall(rtSetByName, [rdv, b.NewCall(rtPfValue, out), zero, b.NewOr(refAttrs(b, rdv, false), llvm.constant.NewInt(i32, 32))])
             b.NewStore(b.NewCall(rtTakeSubbad), subP)
             b = emitAbortCheck(b)
         }
@@ -5143,7 +5201,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b
     }
 
-    // read [-r] [-a NAME] [-d DELIM] NAME... (bashReadOpts): one record of standard input
+    // read [-r] [-a NAME] [-d DELIM] [-n|-N COUNT] NAME... (bashReadOpts): one record of standard input
     // (rt_read_line), split on IFS with the last name taking the rest (rt_rd_fields); the
     // status is 1 when no delimiter ended the record. An empty IFS (IFS= read) means no
     // splitting at all; an UNSET IFS is the default. Twin of readBuiltin in
@@ -5158,6 +5216,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var o = bashReadOpts(words)
         var names = o.names
         var arrName = o.arr
+        if (o.bad != null) {
+            storeStatus(b, b.NewCall(rtOptUsage, [gepStr(b, "read"), gepStr(b, o.bad), o.missing ? one : zero, gepStr(b, bashReadSyn)]))
+            return b
+        }
+        if (o.badNum != null) {
+            emitDiag(b, gepStr(b, "read: " + o.badNum + ": invalid number\n"))
+            storeStatusI(b, 1)
+            return b
+        }
         if (names.length > 0 && !bashIsRef(names[0])) {
             emitDiag(b, gepStr(b, "read: `" + names[0] + "': not a valid identifier\n"))
             storeStatusI(b, 1)
@@ -5174,7 +5241,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var mk = (arrName == null && names.length >= 1 && !anyElem) ? ((cmk != null) ? cmk : heapMark(b)) : null
         var mk1 = (names.length == 1) ? mk : null
         var q = o.raw ? zero : one
-        var line = b.NewCall(rtReadLine, [o.raw ? one : zero, llvm.constant.NewInt(i32, utf8Lead(o.dlm))])
+        var line = b.NewCall(rtReadLine, [o.raw ? one : zero, llvm.constant.NewInt(i32, utf8Lead(o.dlm)), llvm.constant.NewInt(i32, o.nch)])
         if (badArr) {
             emitDiag(b, gepStr(b, "read: `" + arrName + "': not a valid identifier\n"))
             storeStatusI(b, 1)
@@ -5194,8 +5261,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!bashIsRef(names[k])) { stopK = k; stopSt = 1; stopBad = true }
             else if (attrOn(roVars, names[k])) { stopK = k; stopSt = (k < names.length - 1) ? 2 : 1 }
         }
-        var ifsRaw = loadVar(b, "IFS")
-        var ifs = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ifsRaw, unsetPtr(b)), gepStr(b, " \t\n"), ifsRaw)
+        var ifs = emptyPtr(b)
+        // -N splits nothing, as an empty IFS.
+        if (!o.whole) {
+            var ifsRaw = loadVar(b, "IFS")
+            ifs = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ifsRaw, unsetPtr(b)), gepStr(b, " \t\n"), ifsRaw)
+        }
         var merge = curF.NewBlock("")
         if (arrName != null) {
             b.NewCall(rtArrClear, gepStr(b, arrName))
@@ -5316,7 +5387,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             i = i + 1
         }
         if (bad != null) {
-            storeStatus(b, b.NewCall(rtMfUsage, [gepStr(b, who), gepStr(b, bad), llvm.constant.NewInt(i32, missing)]))
+            storeStatus(b, b.NewCall(rtOptUsage, [gepStr(b, who), gepStr(b, bad), llvm.constant.NewInt(i32, missing), gepStr(b, bashMfSyn)]))
             return b
         }
         if (i < args.length) {
@@ -6148,7 +6219,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else if (sp0.key == null) {
                         storeVarRaw(b, sp0.name, unsetPtr(b))
                         b.NewCall(rtArrClear, gepStr(b, sp0.name))
-                        b.NewCall(rtXmark, [gepStr(b, sp0.name), zero])
+                        var ownLoc = curFrame != null && hasOwn(curFrame.locs, "$" + sp0.name)
+                        if (ownLoc) { b.NewCall(rtUnsetX, [llvm.constant.NewInt(i32, getVarId(sp0.name)), b.NewLoad(i32, curFrame.depth)]) }
+                        else { b.NewCall(rtXmark, [gepStr(b, sp0.name), zero]) }
                         // `unset` drops the attributes with the value, in bash and here.
                         intVars["$" + sp0.name] = false
                         upVars["$" + sp0.name] = false
@@ -6156,7 +6229,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         refVars["$" + sp0.name] = false
                         // A local unset in the function that declared it stays declared
                         // (rt_arr_smark). Twin of localHere in bash-interpreter.abnf.
-                        if (curFrame != null && hasOwn(curFrame.locs, "$" + sp0.name)) { b.NewCall(rtArrSmark, gepStr(b, sp0.name)) }
+                        if (ownLoc) { b.NewCall(rtArrSmark, gepStr(b, sp0.name)) }
                         // Not ours: a CALLER's local of that name is dropped instead, which
                         // overwrites the unset just stored with the next binding outward.
                         else if (curFrame != null && sp0.name != "FUNCNAME") {
@@ -6247,7 +6320,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var v = r.v
                 b.NewCall(isFn ? rtPushTmp : rtPushLocal, llvm.constant.NewInt(i32, getVarId(asgs[k].aname)))
                 if (isFn) { b.NewCall(rtArrClear, gepStr(b, asgs[k].aname)) }
-                // No attrCase: the binding takes no attributes. Twin of applyPrefix. Nothing
+                b.NewCall(rtXmark, [gepStr(b, asgs[k].aname), one])
+                // No attrCase: the binding takes no attributes but the export. Twin of applyPrefix. Nothing
                 // pins it: it is restored before the statement ends, and every release
                 // during the command goes to a mark taken after it.
                 storeVarRaw(b, asgs[k].aname, v)
@@ -6798,6 +6872,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var r = prefixVal(b, asgs[k])
                 b = r.b
                 b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(asgs[k].aname)))
+                b.NewCall(rtXmark, [gepStr(b, asgs[k].aname), one])
                 storeVarRaw(b, asgs[k].aname, r.v)
                 cell["$" + asgs[k].aname] = r.v
             }

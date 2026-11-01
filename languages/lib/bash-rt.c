@@ -205,7 +205,7 @@ int rt_utf8put(char *d, long cp);
 char *rt_unraw(char *s);
 int rt_haschar(char *s, int ch);
 int rt_inwords(char *w, char *list);
-char *rt_read_line(int raw, int dlm);
+char *rt_read_line(int raw, int dlm, int nch);
 char *rt_rd_val(char *l, int s, int e, int q);
 char *rt_rd_fields(char *l, char *ifs, int q, int n);
 char *rt_radix(char *s, int base, int upper, int alt);
@@ -1319,12 +1319,20 @@ char *ar_name(void)
 }
 
 /* [ EXPR ] after a name, or 0 when the name has no subscript. An associative
- * array's subscript is the literal text up to the "]". */
+ * array's subscript is the literal text up to the "]". An empty one, `b[]`, is
+ * ar_nosub, which names no element: reading it and storing to it are bash's
+ * errors (ar_value, ar_store), and the expression goes on. A blank one, `b[ ]`,
+ * is element 0. Twin of arSubscript. */
+char ar_nosub[1];
 char *ar_subscript(char *nm)
 {
     long k;
     if (ar_at(0) != 91) return 0;
     ar_p = ar_p + 1;
+    if (ar_at(0) == 93) {
+        ar_p = ar_p + 1;
+        return &ar_nosub[0];
+    }
     if (rt_isassoc(nm) != 0) {
         int s0 = ar_p;
         while (ar_p < ar_len && ar_at(0) != 93) ar_p = ar_p + 1;
@@ -1332,7 +1340,8 @@ char *ar_subscript(char *nm)
         ar_p = ar_p + 1;
         return rt_substr(ar_s, s0, ar_p - s0 - 1);
     }
-    k = ar_comma();
+    ar_ws();
+    k = ar_at(0) == 93 ? 0 : ar_comma();
     ar_ws();
     if (ar_at(0) != 93) { ar_err("missing `]'"); return 0; }
     ar_p = ar_p + 1;
@@ -1345,6 +1354,12 @@ long ar_value(char *nm, char *key)
 {
     char *v;
     if (ar_noeval > 0) return 0;
+    if (key == &ar_nosub[0]) {
+        /* bash 5.3 reports it twice. */
+        rt_berr("", rt_strcat(nm, "[]"), "bad array subscript");
+        rt_berr("", rt_strcat(nm, "[]"), "bad array subscript");
+        return 0;
+    }
     if (key != 0) v = rt_sc_get(nm, key);
     else if (rt_arr_any(nm) != 0) v = rt_arr_get(nm, "0");
     else v = rt_getvar_byname(nm);
@@ -1356,6 +1371,10 @@ long ar_value(char *nm, char *key)
 long ar_store(char *nm, char *key, long v)
 {
     if (ar_noeval > 0 || arith_err != 0) return v;
+    if (key == &ar_nosub[0]) {
+        rt_berr("", rt_strcat(rt_strcat(rt_strcat(ar_pfx(), "`"), nm), "[]'"), "not a valid identifier");
+        return v;
+    }
     if (key != 0) rt_arr_iset(nm, key, rt_int2str(v));
     else if (rt_arr_any(nm) != 0) rt_arr_iset(nm, "0", rt_int2str(v));
     else rt_setvar_byname(nm, rt_int2str(v), 0, 0);
@@ -2901,32 +2920,47 @@ int rt_inwords(char *w, char *list) {
 }
 
 /* rt_read_line: the next record of stdin_buf for `read`, up to the delimiter
- * byte dlm (0, from -d '', never occurs), advancing stdin_pos past it.
- * read_eof is 1 when no delimiter ended the record: the end of the input, or
- * nothing left at all (a null stdin_buf, when nothing was redirected, holds
- * nothing), which is an empty record.
+ * byte dlm (0, from -d '' or -N, never occurs) or, with nch >= 0, after nch
+ * characters, advancing stdin_pos past the delimiter but no further than the
+ * last character read. read_eof is 1 when neither ended the record: the end of
+ * the input, or nothing left at all (a null stdin_buf, when nothing was
+ * redirected, holds nothing), which is an empty record. -n 0 reads nothing.
  *
  * Without -r (raw == 0) a backslash quotes the byte after it and is dropped,
  * and a backslash-newline is dropped whole, the record going on past it, with
  * any delimiter; a backslash that ends the input is dropped. A quoted byte
  * delimits no field, which the record keeps by a 0x01 before it, as bash's
  * CTLESC; a 0x01 of the input is quoted the same way so rt_rd_val can take
- * every one away. Twin of readRec in bash-interpreter.abnf. */
-char *rt_read_line(int raw, int dlm) {
+ * every one away. The count is of the UTF-8 characters the record keeps: a
+ * quoted one counts, its backslash does not, and neither does a
+ * backslash-newline. Twin of readRec in bash-interpreter.abnf. */
+char *rt_read_line(int raw, int dlm, int nch) {
     char *buf = stdin_buf;
     int pos = stdin_pos;
     int len = buf != 0 ? rt_strlen(buf) : 0;
     int k = pos;
     int o = 0;
+    int got = 0;
+    int c;
     char *dst;
-    read_eof = 1;
-    if (pos >= len) return empty;
-    while (k < len && (int)(unsigned char)buf[k] != dlm) {
-        if (raw == 0 && buf[k] == 92 && k + 1 < len) k = k + 1;
+    read_eof = nch == 0 ? 0 : 1;
+    if (pos >= len || nch == 0) return empty;
+    while (k < len) {
+        c = (int)(unsigned char)buf[k];
+        if (got == nch && (c & 192) != 128) break;
+        if (c == dlm) break;
+        if (raw == 0 && c == 92) {
+            /* The quoted byte counts; a trailing backslash is no character. */
+            k = k + 1;
+            if (k >= len) break;
+            c = buf[k] == 10 ? 128 : (int)(unsigned char)buf[k];
+        }
+        if ((c & 192) != 128) got = got + 1;
         k = k + 1;
     }
-    if (k < len) read_eof = 0;
-    stdin_pos = k < len ? k + 1 : k;
+    /* Here k < len means a delimiter or the count stopped the record. */
+    if (got == nch || k < len) read_eof = 0;
+    stdin_pos = k < len && got != nch ? k + 1 : k;
     if (raw != 0) return rt_substr(buf, pos, k - pos);
     dst = rt_bump(2 * (k - pos) + 1);
     while (pos < k) {
@@ -5332,16 +5366,22 @@ char *rt_attrv(char *old, char *v, int at) {
 
 /* One [k]=v of an INDEXED array literal, v under the attributes `at`. The answer
  * is the index a following bare word takes, one past k - b=([3]=c [1]=a b) puts b
- * at 2. A k that is @, * or an index still negative from the end is reported
- * quoting the element ("[-9]=v: bad array subscript") and, like an arithmetic
- * error, stops the literal: arith_err is left set, the rest stores nothing, and
- * the line is abandoned. Twin of applyArrayLit in bash-interpreter.abnf. */
+ * at 2. A k that is empty, @, * or an index still negative from the end is
+ * reported quoting the element ("[-9]=v: bad array subscript") and, like an
+ * arithmetic error, stops the literal: arith_err is left set, the rest stores
+ * nothing, and the line is abandoned. Twin of applyArrayLit in
+ * bash-interpreter.abnf. */
 long rt_arr_litkey(char *nm, char *k, char *v, long next, int at) {
     char *lbl;
     char *key;
     long kv;
     if (arith_err != 0) return next;
     lbl = rt_strcat(rt_strcat(rt_strcat("[", k), "]="), v);
+    if (k[0] == 0) {
+        rt_berr("", lbl, "bad array subscript");
+        arith_err = 1;
+        return next;
+    }
     if (rt_streq(k, "@") != 0 || rt_streq(k, "*") != 0) {
         rt_berr("", lbl, "cannot assign to non-numeric index");
         arith_err = 1;
@@ -5358,6 +5398,44 @@ long rt_arr_litkey(char *nm, char *k, char *v, long next, int at) {
     if (arith_err != 0) return next;
     rt_arr_iset(nm, key, v);
     return rt_str2int(key) + 1;
+}
+
+/* v in single quotes, each ' in it spelled '\'' (bash's sh_single_quote). Twin
+ * of bashSq in lib/bash-deparse.js. */
+char *rt_sq(char *v) {
+    char *dst = rt_bump(4 * rt_strlen(v) + 3);
+    int o = 0;
+    int i = 0;
+    dst[o] = 39;
+    o = o + 1;
+    while (v[i] != 0) {
+        if (v[i] == 39) {
+            dst[o] = 39;
+            dst[o + 1] = 92;
+            dst[o + 2] = 39;
+            o = o + 3;
+        }
+        dst[o] = v[i];
+        o = o + 1;
+        i = i + 1;
+    }
+    dst[o] = 39;
+    dst[o + 1] = 0;
+    return dst;
+}
+
+/* Is k, a key of an ASSOCIATIVE array literal, empty? Then bash's "bad array
+ * subscript", quoting the element: as written (src) in an assignment, and in a
+ * declaration (decl) each part in single quotes, `['']='v'` for [k]=v (kv) and
+ * '' for a key of a pair. A [k]=v so stops the literal and abandons the line
+ * (arith_err). Answers 1 for an empty k. Twin of applyArrayLit in
+ * bash-interpreter.abnf. */
+int rt_arr_akbad(char *k, char *v, char *src, int decl, int kv) {
+    if (k[0] != 0) return 0;
+    if (decl != 0) src = kv != 0 ? rt_strcat("['']=", rt_sq(v)) : "''";
+    rt_berr("", src, "bad array subscript");
+    if (kv != 0) arith_err = 1;
+    return 1;
 }
 
 /* The fields `let` word arguments expanded to, each its own expression, in order; the
@@ -5436,9 +5514,9 @@ int rt_mf_num(char *s, long *out)
     return 1;
 }
 
-/* An unknown option, or (missing) one without its value: bash's two lines and
- * status 2. Twin of mfUsage. */
-int rt_mf_usage(char *who, char *opt, int missing)
+/* An unknown option, or (missing) one without its value: bash's two lines, the
+ * second the builtin's synopsis syn, and status 2. Twin of optUsage. */
+int rt_opt_usage(char *who, char *opt, int missing, char *syn)
 {
     int saved;
     rt_berr(who, opt, missing != 0 ? "option requires an argument" : "invalid option");
@@ -5447,7 +5525,8 @@ int rt_mf_usage(char *who, char *opt, int missing)
     rt_prints(who);
     rt_prints(": usage: ");
     rt_prints(who);
-    rt_prints(" [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]\n");
+    rt_prints(syn);
+    rt_prints("\n");
     sink_out = saved;
     return 2;
 }
@@ -5583,6 +5662,16 @@ int rt_isasgref(char *t)
     return 0;
 }
 
+/* `declare -n` (who) refusing the value v, which names no variable: bash's
+ * diagnostic and 1; 0 when v is a NAME or NAME[SUB]. Twin of bashRefBad in
+ * lib/bash-deparse.js. */
+int rt_nref_bad(char *who, char *v)
+{
+    if (rt_isasgref(v) != 0) return 0;
+    rt_berr(who, rt_strcat(rt_strcat("`", v), "'"), v[0] == 0 ? "not a valid identifier" : "invalid variable name for name reference");
+    return 1;
+}
+
 /* The callback's two arguments, the index and the record, as a field list. */
 char *rt_mf_args(void)
 {
@@ -5655,11 +5744,13 @@ int rt_arr_del(char *nm, char *k) {
  * variable that is no array - set, or declared without a value - subscript 0
  * unsets it and any other, @ and * and a negative index included, is bash 5.3's
  * "not an array variable", status 1: `p=ab; unset 'p[1]'` keeps p. A name that is
- * no variable at all is left alone. Twin of unsetElem in bash-interpreter.abnf. */
+ * no variable at all is left alone, and so is every variable for an empty SUB
+ * (`unset 'b[]'` is status 0). Twin of unsetElem in bash-interpreter.abnf. */
 int rt_arr_unset(char *nm, char *sub) {
     int r = rt_ar_find(nm);
     char *k;
     long kv;
+    if (sub[0] == 0) return 0;
     if ((r >= 0 && (ar_n[r] > 0 || (ar_mk[r] & 3) != 0)) || rt_isassoc(nm) != 0) {
         /* An index still negative from the end is "unset: [SUB]: bad array
          * subscript", status 1. */
@@ -5688,6 +5779,19 @@ int rt_arr_any(char *nm) {
     if (arr_rows == 0) return 0;
     r = rt_ar_find(nm);
     return r >= 0 && ar_n[r] > 0 ? 1 : 0;
+}
+
+/* `declare +a` of an indexed array or `+A` of an associative one is refused with
+ * bash's diagnostic: 1, else 0. Twin of the same check in declOneN in
+ * bash-interpreter.abnf. */
+int rt_arr_plus(char *kw, char *nm, int pa, int pA)
+{
+    int as;
+    if (rt_arr_any(nm) == 0) return 0;
+    as = rt_isassoc(nm);
+    if ((pa == 0 || as != 0) && (pA == 0 || as == 0)) return 0;
+    rt_berr(kw, nm, "cannot destroy array variables in this way");
+    return 1;
 }
 
 /* i32 rt_arr_count(i8* nm) */
@@ -6179,9 +6283,11 @@ char *rt_dqs(char *v) {
 /* Does this subscript need quoting inside `[...]`? bash quotes an associative
  * key only when the shell would need it - `[ab_c]`, `[k]` and `[5x]` stay bare,
  * `["k one"]` and `["q\$x"]` do not - and the test is sh_contains_shell_metas
- * from bash's own lib/sh. */
+ * from bash's own lib/sh. A key that is just "@" is quoted too, so it does not
+ * read as every element. Twin of keyNeedsQuote in bash-interpreter.abnf. */
 int rt_keymeta(char *k) {
     int i = 0;
+    if (k[0] == 64 && k[1] == 0) return 1;
     while (k[i] != 0) {
         int c = (int)(unsigned char)k[i];
         if (c == 32 || c == 9 || c == 10) return 1;
@@ -7356,6 +7462,23 @@ int rt_local_here(int id, int d)
     return 0;
 }
 
+/* `unset NAME` of a local of the call whose frame starts at depth d: the export
+ * mark goes, unless the local is the call's own prefix binding, whose export
+ * bash keeps (makunbound). Twin of keepX in bash-interpreter.abnf. */
+int rt_unset_x(int id, int d)
+{
+    int t = d;
+    while (t < ls_top) {
+        if (ls_id[t] == id) {
+            if (ls_tmp[t] != 0) return 0;
+            break;
+        }
+        t = t + 1;
+    }
+    rt_xmark(varnames[id], 0);
+    return 0;
+}
+
 /* `declare -g NAME` where a local or prefix binding hides the global NAME:
  * exchange the binding in effect, array rows included, with the global one,
  * which the OUTERMOST save-stack entry of `id` holds. Called around the
@@ -7650,14 +7773,17 @@ char *rt_getvar_byname(char *n)
  * never mentions gets a slot now. NAME[SUB] - a nameref to
  * an element - stores the element, its subscript evaluated now; NAME[@],
  * NAME[*] and NAME[] are bash's "bad array subscript" even for an associative
- * array, and abandon the line. With app, v is appended to the old value (an element's key
- * evaluated once); at is the attributes of the variable it lands on (rt_attrv),
- * which the emitter picks by rt_nref_base. Twin of elemRefSet and storeAttr in
- * bash-interpreter.abnf. */
+ * array, and abandon the line - unless a builtin stores (at & 32: read, printf -v),
+ * where @ and * are keys of an associative array. With app, v is appended to the old
+ * value (an element's key evaluated once); at & 7 is the attributes of the variable it
+ * lands on (rt_attrv), which the emitter picks by rt_nref_base. Twin of elemRefSet and
+ * storeAttr in bash-interpreter.abnf. */
 int rt_setvar_byname(char *n, char *v, int app, int at)
 {
     int i;
+    int bi = at & 32;
     char *old;
+    at = at & 7;
     if (nref_any != 0) {
         n = rt_nref_end(n);
         if (n == 0) {
@@ -7670,7 +7796,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
         char *nm = rt_substr(n, 0, i);
         char *sub = rt_substr(n, i + 1, rt_strlen(n) - i - 2);
         char *k;
-        if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0 || sub[0] == 0) {
+        if (sub[0] == 0 || ((rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) && (bi == 0 || rt_isassoc(nm) == 0))) {
             rt_berr("", n, "bad array subscript");
             arith_err = 1;
             sub_bad = 1;
@@ -8005,28 +8131,49 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
  * read may store: the names, then the -a array or, with neither, REPLY; the
  * emitter hands rt_rd_at the attributes (1 -i, 2 -u, 4 -l, 8 readonly) of each
  * rt_rd_name(k), and rt_rd_run reads the record, stores it and answers the
- * status. Twin of emitRead in bash-to-llvm-ir.abnf, for literal names. */
+ * status. A bad option is reported here, and rt_rd_run answers its status
+ * (rd_err) storing nothing. Twin of emitRead in bash-to-llvm-ir.abnf, for
+ * literal names. */
 char *rd_vars;
 int rd_names;
 int rd_arr;
 char *rd_ats;
 int rd_raw;
 int rd_dlm;
+int rd_nch;
+int rd_whole;
+int rd_err;
+
+/* read's usage error: an unknown option, or (missing) one without its value. */
+int rt_rd_usage(int o, int missing)
+{
+    char opt[3];
+    opt[0] = 45;
+    opt[1] = (char)o;
+    opt[2] = 0;
+    return rt_opt_usage("read", opt, missing, " [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]");
+}
 
 int rt_rd_parse(char *list)
 {
     int n = rt_nfields(list);
     int i = 0;
     int j;
+    long c;
     char *arr = 0;
     char *f;
     rd_vars = &list_nil[0];
     rd_names = 0;
+    rd_arr = 0;
     rd_raw = 0;
     rd_dlm = 10;
-    /* getopt's "ad:ei:n:N:p:rst:u:": letters bundle, and a value is the rest
-     * of its word or the next word. */
-    while (i < n) {
+    rd_nch = -1;
+    rd_whole = 0;
+    rd_err = 0;
+    /* getopt's "Eea:d:i:n:N:p:rst:u:", as bashReadOpts in lib/bash-deparse.js:
+     * letters bundle, a value is the rest of its word or the next word, and the
+     * first bad option stops the parse. */
+    while (i < n && rd_err == 0) {
         f = rt_getfield(list, i);
         if (f[0] != 45 || f[1] == 0) break;
         i = i + 1;
@@ -8037,19 +8184,38 @@ int rt_rd_parse(char *list)
             char *v;
             if (o == 114) rd_raw = 1;
             if (rt_haschar("adinNptu", o) == 0) {
+                if (rt_haschar("Eers", o) == 0) {
+                    rd_err = rt_rd_usage(o, 0);
+                    break;
+                }
                 j = j + 1;
                 continue;
             }
             v = f + j + 1;
-            if (v[0] == 0 && i < n) {
+            if (v[0] == 0) {
+                if (i >= n) {
+                    rd_err = rt_rd_usage(o, 1);
+                    break;
+                }
                 v = rt_getfield(list, i);
                 i = i + 1;
             }
             if (o == 97) arr = v;
             if (o == 100) rd_dlm = (int)(unsigned char)v[0];
+            if (o == 110 || o == 78) {
+                if (rt_mf_num(v, &c) == 0 || c < 0 || c > 2147483647) {
+                    rt_berr("read", v, "invalid number");
+                    rd_err = 1;
+                    break;
+                }
+                rd_nch = (int)c;
+                if (o == 78) rd_whole = 1;
+            }
             break;
         }
     }
+    if (rd_err != 0) return 0;
+    if (rd_whole != 0) rd_dlm = 0;
     while (i < n) {
         rd_vars = rt_fadd(rd_vars, rt_getfield(list, i));
         rd_names = rd_names + 1;
@@ -8062,6 +8228,7 @@ int rt_rd_parse(char *list)
     rd_ats = rt_bump(n + 1);
     return n;
 }
+
 
 char *rt_rd_name(int k)
 {
@@ -8091,10 +8258,11 @@ int rt_rd_run(void)
     char *ifs;
     char *vs;
     int k;
+    if (rd_err != 0) return rd_err;
     /* The first name is checked before anything is read, the others as they are stored. */
     if (rd_names > 0 && rt_isasgref(rt_getfield(rd_vars, 0)) == 0) return rt_rd_badname(rt_getfield(rd_vars, 0));
     if (bad != 0) rt_berr("read", rt_strcat(rt_strcat("`", arr), "'"), "not a valid identifier");
-    line = rt_read_line(rd_raw, rd_dlm);
+    line = rt_read_line(rd_raw, rd_dlm, rd_nch);
     if (bad != 0) return 1;
     if (arr != 0 && (rd_ats[rd_names] & 8) != 0) {
         rt_berr("", arr, "readonly variable");
@@ -8106,6 +8274,8 @@ int rt_rd_run(void)
     }
     ifs = rt_getvar_byname("IFS");
     if (ifs == &unset_marker[0]) ifs = " \t\n";
+    /* -N splits nothing, as an empty IFS. */
+    if (rd_whole != 0) ifs = empty;
     if (arr != 0) {
         char *sv = ar_pfx_s;
         rt_arr_clear(arr);
@@ -8135,7 +8305,7 @@ int rt_rd_run(void)
                 rst = k < last ? 2 : 1;
                 break;
             }
-            rt_setvar_byname(rt_getfield(rd_vars, k), rt_getfield(vs, k), 0, rd_ats[k] & 7);
+            rt_setvar_byname(rt_getfield(rd_vars, k), rt_getfield(vs, k), 0, (rd_ats[k] & 7) | 32);
             if (rt_take_subbad() != 0) {
                 rst = k < last ? 2 : 1;
                 break;

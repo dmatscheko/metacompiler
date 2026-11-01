@@ -1809,6 +1809,54 @@ declare -i s92t="5"'
   s92v=(1 2); n=s92v; declare -a "$n+=8"; check dac3 "$(declare -p s92v)" 'declare -a s92v=([0]="8")'
   g92() { local s=1; local -a "$1"; declare -p s; }; check dac4 "$(g92 s)" "declare -a s=()"
 }
+# ===== SECTION 93: prefix exports, read -n/-N, empty and @ subscripts, nameref values, +a =====
+# A prefix binding is exported while its command runs, and a local made from it keeps the
+# export. read -n stops after COUNT characters, -N reads exactly COUNT and splits nothing.
+# An empty subscript is a no-op for unset, a bad substitution in ${ }, a bad array subscript
+# in a literal (quoted as declare spells it) and its own diagnostics in arithmetic; a blank
+# one is element 0. A nameref value must name a variable. +a / +A cannot take an array of
+# that kind apart. read and printf -v store an associative array's @ and * as keys, which
+# declare -p quotes. Every expected value is bash 5.3's.
+s93() {
+  local r x n b
+  b=(1 2)
+  g93() { local s+=4; declare -p s; }; check pxl1 "$(s=5 g93)" 'declare -x s="54"'
+  g93() { local s; unset s; declare -p s; }; check pxl2 "$(s=5 g93)" 'declare -x s'
+  g93() { declare -p s93p; }; check pxl3 "$(s93p=5 g93)" 'declare -x s93p="5"'
+  read -n 2 x <<< abcd; check rdn1 "$x" "ab"
+  read -N 3 x <<< 'a bcd'; check rdn2 "$x" "a b"
+  r=$(printf 'a\nbc' | { read -N 3 x; echo "$?[$x]"; }); check rdn3 "$r" "0[a
+b]"
+  r=$(printf 'xy\nz' | { read -N 5 x; echo "$?[$x]"; }); check rdn4 "$r" "1[xy
+z]"
+  read -n 0 x <<< abc; check rdn5 "$?[$x]" "0[]"
+  r=$(read -n q x <<< abc 2>&1); check rdn6 "$?|$r" "1|$0: line $LINENO: read: q: invalid number"
+  r=$(read -n <<< abc 2>&1); check rdn7 "$?|${r%%usage:*}" "2|$0: line $LINENO: read: -n: option requires an argument
+read: "
+  unset 'b[]'; check esu1 "$?|${b[*]}" "0|1 2"
+  r=$( (echo "${b[]}") 2>&1); check esu2 "$?|$r" "1|$0: line $LINENO: \${b[]}: bad substitution"
+  r=$(exec 2>&1; b+=([]=v); echo "$?"); check esu3 "$r" "$0: line $LINENO: []=v: bad array subscript"
+  r=$(exec 2>&1; declare -A s93n=([]=v); echo "$?"); check esu4 "$r" "$0: line $LINENO: ['']='v': bad array subscript"
+  declare -A s93m=([k]=); check esu5 "$(declare -p s93m)" 'declare -A s93m=([k]="" )'
+  r=$(let 'b[]=3' 2>&1; echo "$?"); check esa1 "$r" "$0: line $LINENO: let: \`b[]': not a valid identifier
+0"
+  r=$(let 'x=b[]' 2>&1; echo "$?|$x"); check esa2 "$r" "$0: line $LINENO: b[]: bad array subscript
+$0: line $LINENO: b[]: bad array subscript
+1|0"
+  r=$(for (( b[]=0; 0; )); do :; done 2>&1; echo "$?"); check esa3 "$r" "$0: line $LINENO: ((: \`b[]': not a valid identifier
+0"
+  check esa4 "$(( b[ ] + 5 ))" 6
+  r=$(declare -n s93r='b[]' 2>&1); check nrv1 "$?|$r" "1|$0: line $LINENO: declare: \`b[]': invalid variable name for name reference"
+  r=$(declare -n s93r='' 2>&1); check nrv2 "$?|$r" "1|$0: line $LINENO: declare: \`': not a valid identifier"
+  n='1x'; r=$(declare -n s93r="$n" 2>&1; declare -p s93r 2>/dev/null); check nrv3 "$?|$r" "1|$0: line $LINENO: declare: \`1x': invalid variable name for name reference"
+  declare -a s93a=(1 2); r=$(declare +a s93a 2>&1); check pla1 "$?|$r" "1|$0: line $LINENO: declare: s93a: cannot destroy array variables in this way"
+  declare -A s93b=([k]=1); r=$(declare +A s93b 2>&1); check pla2 "$?|$r" "1|$0: line $LINENO: declare: s93b: cannot destroy array variables in this way"
+  declare +a s93b; check pla3 "$?" 0
+  declare -A s93c; printf -v 's93c[@]' %s q; check aks1 "$(declare -p s93c)" 'declare -A s93c=(["@"]="q" )'
+  declare -A s93d; read 's93d[*]' <<< z; check aks2 "$(declare -p s93d)" 'declare -A s93d=(["*"]="z" )'
+  declare -A s93e; n='s93e[@]'; printf -v "$n" %s q2; check aks3 "$(declare -p s93e)" 'declare -A s93e=(["@"]="q2" )'
+  declare -A s93f; n='s93f[*]'; read "$n" <<< z2; check aks4 "$(declare -p s93f)" 'declare -A s93f=(["*"]="z2" )'
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1856,5 +1904,6 @@ s89   # SECTION-CALL 89
 s90   # SECTION-CALL 90
 s91   # SECTION-CALL 91
 s92   # SECTION-CALL 92
+s93   # SECTION-CALL 93
 echo "full: $checks checks, $fails failures"
 exit $fails
