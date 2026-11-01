@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1071** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1072** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,8 +108,8 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter · P3 · CS · IN PROGRESS (CS worker, round 12) [V]
-Spec-only (ECMA-334 12.21.5). `class C { string s = "init"; public int Sets = 0; public string P { get { return s; } set { Sets++; s = value; } } }` then `C c = new C(); string r = c.P ??= "other"; Console.WriteLine(r + " " + c.P + " " + c.Sets);` -> spec `init init 0`; all three legs `other other 1`. makeRefRead (both C# grammars) uses hasOwn/js_get; route the qualified read through the getter dispatch csQualWrite already uses. Check indexers (`d[k] ??= v`, user `this[]`) and static properties too.
+### T-1071 csharp: member access on null never raises a catchable NullReferenceException · P3 · CS · OPEN [V]
+Spec-only. `class C { public string F; public string P { get; set; } }` then `C c = null; try { string r = c.F; } catch (NullReferenceException) { Console.WriteLine("NRE F"); }` -> `NRE F`; same for `c.P`, `c.P = x`, `c.P ??= x`, `c.M()`, `c.F = x`, and `catch (Exception e)` with e.Message "Object reference not set to an instance of an object." All engines abort instead: interpreter "field .F of null", run/native "member 'F' of null" (native property: "method call '__get_P' on a null"). Route null-receiver member/method/indexer access in both grammars to a C#-level NullReferenceException raise.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1139,6 +1139,7 @@ T-1062 kotlin: javaClass/KClass leftovers (sequences, static-typed primitives, e
 T-1063 php: Exception data model - $previous/getPrevious(), real property layout — DONE (PHP r41, cf62ea41): Exception/Error declare php-src's 7-slot property table (visibility+defaults), $previous ctor arg + getPrevious(), finally-escape chaining with cycle guards; running-generator Error asserted previous-free; 3 legs agree with php-src (probe incl. protected-access error, foreach 0, (array) 7 keys)
 T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter — DONE (CS r11, 998e63fe): one csQualWrite per engine handles every qualified store (dict, user indexer, setter, Capacity, slot); ++/--/compound go through getter+setter; prefix/postfix values per ECMA-334 12.8.16; 3 legs agree with spec
 T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-in/splat — PARTIAL→split (RB r45, 5 commits to d090f079): splat via #to_a (Enumerator/Hash/Struct/nil), multi-value yield spread into Lazy blocks, Object#<=> backs Comparable, for over Enumerators with block-style per-yield binding (sent back once for each_with_index binding); 4 legs = ruby 2.6. Suspendable #each (next/peek/rewind) filed separately
+T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter — DONE (CS r12, ece96736): ??= and compound reads go through getter / indexer get (one csQualRead in the compiler); missing Dictionary key throws KeyNotFoundException in both halves (interpreter compound read was 0); user-indexer ??= no longer crashes compiled; 3 legs agree with ECMA-334 12.21.5
 
 # Settled — do not re-open
 
