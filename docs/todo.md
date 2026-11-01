@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1049** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1050** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -98,8 +98,8 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1045 csharp: null message in two-arg Argument* ctors; 3-argument exception ctors · P3 · CS · IN PROGRESS (CS worker, round 6) [V spec-only]
-Per dotnet/runtime source (found by CS r5), all three engines: `new ArgumentException(null, "pn").Message` → "Value does not fall within the expected range. (Parameter 'pn')"; `new ArgumentNullException("pn", null)` / `ArgumentOutOfRangeException("pn", null)` → "Exception of type 'System.X' was thrown. (Parameter 'pn')". Ours: Message null. 3-arg forms `ArgumentException(message, paramName, inner)` and `ArgumentOutOfRangeException(paramName, actualValue, message)` (appends "\nActual value was …") read only the first argument.
+### T-1049 csharp: null message on non-Argument exceptions gives "" · P3 · CS · OPEN [V spec-only]
+Exception.cs (all .NET versions): Message is `_message ?? SR.Format(Exception_WasThrown, GetClassName())`. `string[] s={null}; new Exception(s[0]).Message` → "Exception of type 'System.Exception' was thrown."; `new InvalidOperationException(s[0]).Message` → "Exception of type 'System.InvalidOperationException' was thrown."; user `MyEx : Exception` with `: base(m)` → "Exception of type 'MyEx' was thrown." Ours "" in all engines. Found by CS r6.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1094,6 +1094,7 @@ T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null �
 T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)` modifiers — DONE (JS r40, 680aacaa): lookbehind (backward emission, node-identical captures), (?ims-ims:) modifiers, v-flag class sets/strictness with V8 texts; also \r/U+2028/9 line terminators, \P{} under i, v-mode surrogate advancement. Properties of strings declined (no emoji-sequence data). Master probe vs node 24 (22 lines): 4 legs agree; dart+js rows green.
 T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPTY — DONE (KT r19, 57416b54): exact unsigned ULong ranges (iteration/in/step/count/for-last), ::class on member-access receivers, range companions EMPTY. Master probe vs kotlinc 2.2.21 (16 lines incl. ULong.MAX ranges): 4 legs agree.
 T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` escapes rescue — DONE (RB r42, d4af700b): all?/any?/none?/one? short-circuit (Array/Range/Hash); Array#+ - & | take Array/to_ary (incl. singleton) else catchable TypeError — fixes [[1], nil].sum([]). Master probe vs ruby 2.6 (sent back once for singleton to_ary in the interpreter): 4 legs agree.
+T-1045 csharp: null message in two-arg Argument* ctors; 3-argument exception ctors — DONE (CS r6, eddf9698): null message in 2-arg Argument* ctors falls back to the type default (.NET 9/10 source: message ?? SR.*; ticket text described .NET 8); 3-arg ArgumentException(message, paramName, inner) and ArgumentOutOfRangeException(paramName, actualValue, message) incl. ActualValue suffix. Master spec probe: 3 legs agree.
 
 # Settled — do not re-open
 
