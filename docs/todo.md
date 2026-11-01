@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1013** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1014** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -99,12 +99,12 @@ foreign object).
 
 # JV — Java
 
-### T-1001 java interpreter: default method from a more specific superinterface loses to the less specific one; package-private members across packages · P3 · JV · IN PROGRESS (JV worker, round 18) [V]
-Found by the master probing round 17 (oracle java 24). `interface A { default String who() { return "A"; } } interface B extends A
-{ default String who() { return "B"; } } class C implements A, B {}` → `new C().who()` java and the compiler `B`, interpreter `A`
-(jFindMember walks __ifaces in declaration order). Also (JV worker, round 17): a package-private member of a public class used from
-another package (`Toolbox.clamp(..)`) → javac "clamp(int,int,int) is not public in Toolbox; cannot be accessed from outside
-package"; all legs accept it (needs the receiver's static type at each member access).
+### T-1013 java: protected receiver rule, package-private constructors, untyped receivers escape the access check · P3 · JV · OPEN [V]
+Found by the JV worker, round 18 (oracle javac 24). `class Sub extends q.Box { int peek(Box b) { return b.prot(); } }` → javac "prot()
+has protected access in Box" (JLS 6.6.2.1: the receiver must be Sub or below); all legs print 3. `new Box(3)` with a package-private
+`Box(int)` from another package (and a public `Box()`) → javac "constructor Box in class Box cannot be applied to given types;"; all
+legs run it (constructor access unchecked). `Main.mk().a += 2` with package-private `a` → javac refuses; jRecvTy does not type a
+class-qualified static call's result, so nothing is checked.
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
@@ -1096,6 +1096,7 @@ T-1008 ruby: compiled `for k, v in hash` raises KeyError; `default_proc=`; missi
 T-1006 bash interpreter: a stderr fragment without a trailing newline gets one added at exit — DONE - interpreter writes fd 2 unbuffered through eprint; native-full checks interpreter stderr bytes
 T-1009 bash: eval does not catch an abandoned line; bad subscripts outside plain assignment; subscripted prefix assignments — DONE - eval/trap catch abandoned lines (subshells end status 1), bad subscripts in literals/declare/read/printf -v/unset, subscripted prefix assignments, brace and bare-compound bodies, LINENO in $( ) functions
 T-1010 bash compiled: read/printf -v into element or computed names; attributes through a computed nameref — DONE - compiled read/printf -v into element and computed names, nameref target attributes picked at run time, single diagnostic
+T-1001 java interpreter: default method from a more specific superinterface loses to the less specific one; package-private members across packages — DONE - most specific default method wins (class chain first) in both halves; package-private/private/protected member access refused with javac's messages
 
 # Settled — do not re-open
 
