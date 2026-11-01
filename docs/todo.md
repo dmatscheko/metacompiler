@@ -108,9 +108,6 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1076 csharp: compound assignment evaluates the right side before reading the left · P3 · CS · IN PROGRESS (CS worker, round 14) [V]
-Spec-only (ECMA-334 12.21.4 + 12.4.1 left-to-right). `static int x = 1; static int Bump() { x = 100; return 5; }` then `x += Bump(); Console.WriteLine(x);` -> 6 (x read before Bump runs); all three legs print 105. Same with `c.F += BumpF()`, properties (`c.P += ...`: getter before RHS), indexers (`a[i()] += j()`: a, i(), get, j(), set), and ++/-- operands. Interpreter makeAssign evaluates valT() before applyOp(op, csGetVar(...)); csQualWrite's mk reads the old value afterwards; the compiler matches.
-
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
@@ -1137,6 +1134,7 @@ T-1067 php: Exception::__toString / uncaught format; getFile/getLine/getTrace; n
 T-1071 csharp: member access on null never raises a catchable NullReferenceException — DONE (CS r13, c70a8ed8): member/method/indexer/delegate access through null raises a catchable NullReferenceException (.NET message) in all engines - interpreter csNullRef, compiler via floor miss-hooks, js_csmcall/js_cslen in Go twin + layer 2, new C#-only js_cshas; ?. and extension-on-null unaffected; 3 legs agree with ECMA-335/334
 T-1073 kotlin: compiled reified call to a function declared later crashes — DONE (KT r24, c50317b5): reified hidden args appended at emit time / inferred at first run, so calls to later-declared reified functions work in all legs; forwarded reified T in is-checks (plain + extension) fixed in both engines; member form covered; 4 legs = kotlinc
 T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-cast javaClass — DONE (KT r24, 377b9b84): KClass javaPrimitiveType/hashCode, KClass keys in sets/maps compare by name (run/native), destructured lambda/for/val components and let-after-cast smart cast typed; 4 legs = kotlinc
+T-1076 csharp: compound assignment evaluates the right side before reading the left — DONE (CS r14, 4 commits to 318d9fc6): compound assignment reads the target before the RHS for every target kind; also fixed: simple assignment evaluates receiver+indices before the RHS, ??= evaluates its target once, prefix ++/-- on member chains parses, bare-named static-field path roots compiled; 3 legs agree with ECMA-334 12.21
 
 # Settled — do not re-open
 
