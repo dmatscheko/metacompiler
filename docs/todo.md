@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1072** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1073** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -153,21 +153,14 @@ Spec-only (php-src Zend/zend_exceptions.c). All engines:
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1057 bash: assoc/declare remainder after T-1044 · P3 · SH · IN PROGRESS (SH worker, round 29) [V]
-Left over from T-1044 (verify each vs /opt/homebrew/bin/bash 5.3, LC_ALL=C):
-- per-scope assoc kind: `local m[@]=z` inside a function shadowing a global assoc
-- compiled half: `declare -A "$s"`, `export -a "$s"`, `declare -a "$n=(1 2)"` (word-expanded declaration operands)
-- `unset 'm[$k]'` / `unset 'b[""]'` / `printf -v 'm[$k]'` must word-expand the subscript
-- `${#m[$k]}` with empty k (bad array subscript diagnostic)
-- `a=5 eval ...` prefix bindings
-New defects found during T-1044:
-- `$'\xff'` as an assoc subscript (byte key hashing/printing)
-- LC_ALL=C non-ASCII keys in `declare -p` quoting
-- `export -i`
-- compiled `[[ -v m[$x] ]]`
-- diagnostic label for `declare m[$k]=v`
-- `read m[$k]` with empty k
-- compiled `declare -r` on a nameref
+### T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration leftovers · P3 · SH · OPEN [V]
+Oracle /opt/homebrew/bin/bash 5.3:
+- assoc-ness is a whole-program fact in both engines (assocArrays, rt_isassoc registry): `local m[@]=z` in a function shadowing a global assoc, and compiled `declare -A "$s"` (computed name) are wrong/refused. Needs a per-variable runtime kind.
+- `export +x px=1`: bash prints "export: `+x': not a valid identifier", status 1, and still exports px.
+- `ia[$'1']=5` on an indexed array: bash 5.3 "'1': arithmetic syntax error"; ours stores [1].
+- compiled computed array literal with an unquoted glob char (`declare -a "$n=(2*3)"`) is refused; bash globs it (no match -> literal).
+- POLICY (needs user decision, do not start without it): engines model a UTF-8 locale; under LC_ALL=C non-ASCII keys in declare -p are $'..'-quoted by bash. 43 ratchet checks assert UTF-8 behaviour.
+Note: `-max-steps N` must precede the grammar on the mec command line (after the program file it becomes a program argument).
 
 # C — C subset
 
@@ -1140,6 +1133,7 @@ T-1063 php: Exception data model - $previous/getPrevious(), real property layout
 T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter — DONE (CS r11, 998e63fe): one csQualWrite per engine handles every qualified store (dict, user indexer, setter, Capacity, slot); ++/--/compound go through getter+setter; prefix/postfix values per ECMA-334 12.8.16; 3 legs agree with spec
 T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-in/splat — PARTIAL→split (RB r45, 5 commits to d090f079): splat via #to_a (Enumerator/Hash/Struct/nil), multi-value yield spread into Lazy blocks, Object#<=> backs Comparable, for over Enumerators with block-style per-yield binding (sent back once for each_with_index binding); 4 legs = ruby 2.6. Suspendable #each (next/peek/rewind) filed separately
 T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter — DONE (CS r12, ece96736): ??= and compound reads go through getter / indexer get (one csQualRead in the compiler); missing Dictionary key throws KeyNotFoundException in both halves (interpreter compound read was 0); user-indexer ??= no longer crashes compiled; 3 legs agree with ECMA-334 12.21.5
+T-1057 bash: assoc/declare remainder after T-1044 — PARTIAL→split (SH r29, 8 commits): eval prefix bindings, invalid declaration-builtin options, word-expanded subscripts for unset/printf -v/[[ -v ]]/${#m[$k]}, expanded-subscript labels, declarations through namerefs act on the target, $'..' keys + $'..' quoting in declare -p, computed array literals compiled (rt_decl_lit); sections 90-94 moved full.3->full.5 (step brake); 4 legs = bash 5.3. Remainder filed
 
 # Settled — do not re-open
 
