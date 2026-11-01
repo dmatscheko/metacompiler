@@ -1949,6 +1949,62 @@ def s165
   check("lz165l", [1, 2].each.lazy.each { } == [1, 2] && r1 == :done && r2 == [1, 2] && [1, 2].map.lazy.each { |x| x * 3 } == [3, 6] &&
         [1, 2].each_slice(1).lazy.each { |x| }.nil? && {a: 1}.each.lazy.each { |x| } == {a: 1} && [1, 2].each.lazy.each_with_index { |x, i| } == [1, 2])
 end
+# ===== SECTION 166: ops on an eager endless Enumerator; Object#to_enum on a user class; Enumerator dup / clone =====
+# Array#cycle's Enumerator is eager: take_while, map, select, uniq, zip, drop and
+# grep on it are Enumerable's and run at once (forever, on a non-empty cycle,
+# unless the op stops), a blockless with_index is an Enumerator, and
+# chunk_while answers an Enumerator. to_enum / enum_for(meth = :each, *args) on
+# any user instance is an Enumerator over what that method yields; its #each
+# with a block calls the method and answers what it answers, and its size is
+# nil. Enumerator#dup / #clone copy the Enumerator (clone keeps frozen?), and
+# raise TypeError once next has begun an external iteration.
+# /usr/bin/ruby 2.6 settles each.
+class S166C
+  include Enumerable
+  def each; yield 1; yield 2, 3; :done; end
+  def foo(a); yield a; yield a * 2; :foo; end
+  def inspect; "C!"; end
+end
+class S166P
+  def each; yield :a; end
+end
+class S166R
+  def each
+    return to_enum unless block_given?
+    yield 1
+    yield 2
+    self
+  end
+  def pairs; return enum_for(:pairs) unless block_given?; yield 1, 2; end
+end
+def s166
+  wi = [1, 2].cycle.with_index
+  check("en166a", [1, 2].cycle.take_while { |x| x < 2 } == [1] && [1, 2].cycle.each_slice(3).take_while { |a| a[0] < 2 } == [[1, 2, 1]] &&
+        wi.class == Enumerator && wi.inspect == "#<Enumerator: #<Enumerator: [1, 2]:cycle>:with_index>" &&
+        wi.first(3) == [[1, 0], [2, 1], [1, 2]] && [1, 2].cycle.with_index(1).first(2) == [[1, 1], [2, 2]] &&
+        [1, 2].cycle.each_with_index.class == Enumerator)
+  check("en166b", [].cycle.map { |x| x } == [] && [].cycle.uniq == [] && [].cycle.zip([1]) == [] && [].cycle.drop(1) == [] &&
+        [].cycle.grep(1) == [] && [].cycle.select { |x| x } == [] &&
+        [1, 2].cycle.chunk_while { |a, b| b == a + 1 }.class == Enumerator &&
+        [1, 2].cycle.chunk_while { |a, b| b == a + 1 }.first(2) == [[1, 2], [1, 2]] &&
+        [1, 2].cycle.lazy.take_while { |x| x < 2 }.class == Enumerator::Lazy && [1, 2].cycle.lazy.with_index.class == Enumerator::Lazy)
+  te = S166C.new.to_enum
+  check("en166c", te.class == Enumerator && te.inspect == "#<Enumerator: C!:each>" && te.to_a == [1, [2, 3]] &&
+        S166C.new.to_enum.lazy.each { } == :done && S166C.new.to_enum.each { |x| x } == :done && te.size.nil? &&
+        S166C.new.each_entry.lazy.each { }.class == S166C)
+  fe = S166C.new.enum_for(:foo, 5)
+  check("en166d", fe.to_a == [5, 10] && fe.inspect == "#<Enumerator: C!:foo(5)>" && fe.each { |x| x } == :foo &&
+        fe.map { |x| x + 1 } == [6, 11] && S166C.new.to_enum(:foo, 2).with_index.to_a == [[2, 0], [4, 1]] &&
+        S166P.new.to_enum.to_a == [:a] && S166P.new.enum_for.next == :a && te.dup.to_a == [1, [2, 3]] &&
+        S166R.new.each.to_a == [1, 2] && S166R.new.each.map { |x| x * 3 } == [3, 6] &&
+        S166R.new.each.lazy.each { }.class == S166R && S166R.new.pairs.to_a == [[1, 2]])
+  e = [1, 2, 3].each
+  cx = begin; n = [1, 2].each; n.next; n.dup; rescue TypeError => x; x.message; end
+  check("en166e", e.dup.class == Enumerator && e.clone.inspect == "#<Enumerator: [1, 2, 3]:each>" && !e.dup.equal?(e) &&
+        [1, 2, 3].map.dup.each { |x| x * 2 } == [2, 4, 6] && [1, 2].each.freeze.clone.frozen? && ![1, 2].each.freeze.dup.frozen? &&
+        (1..3).each_slice(2).dup.inspect == "#<Enumerator: 1..3:each_slice(2)>" && cx == "can't copy execution context" &&
+        e.clone.to_a == [1, 2, 3])
+end
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -1994,5 +2050,6 @@ s162() # SECTION-CALL 162
 s163() # SECTION-CALL 163
 s164() # SECTION-CALL 164
 s165() # SECTION-CALL 165
+s166() # SECTION-CALL 166
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

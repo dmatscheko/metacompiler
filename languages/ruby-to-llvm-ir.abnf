@@ -5694,10 +5694,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
                          "singleton_methods", "define_singleton_method", "define_method", "frozen?", "equal?",
-                         "instance_variables"]
+                         "instance_variables", "to_enum", "enum_for"]
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-interpreter.abnf.
-    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?"]
+    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?", "to_enum", "enum_for"]
     function isSelfCall(name) {
         return selfCallNames.indexOf(name) >= 0 && rubyAllMethods["$" + name] !== true && !knownLocal(name)
     }

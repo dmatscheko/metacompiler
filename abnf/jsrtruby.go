@@ -127,10 +127,10 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		default:
 			_, _, isDict := dictParts(v)
 			_, isRng := rubyIsRange(v)
-			// A deferred Enumerator's #size, and a Lazy's over a user #each, is
-			// nil: rubyEnumMethod answers it.
+			// A deferred Enumerator's #size, to_enum's, and a Lazy's over a user
+			// #each, is nil: rubyEnumMethod answers it.
 			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rdefer"] != true &&
-				v.(*jsObject).props["kind"] != "each")
+				v.(*jsObject).props["__rcall"] != true && v.(*jsObject).props["kind"] != "each")
 		}
 		if counted {
 			return pylen(a[:1])
@@ -2464,12 +2464,68 @@ func rubyEnumDefers(name string, nargs int) bool {
 	return false
 }
 
+// rubyToEnum is Object#to_enum / #enum_for on a user instance. Twin of toEnum
+// in ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyToEnum(t interface{}, args []interface{}) *jsObject {
+	pos, _ := rubyBlockArgs(args)
+	meth := "each"
+	if len(pos) > 0 {
+		meth = rt.rubyStr(pos[0])
+		pos = pos[1:]
+	}
+	e := rubyEnumAt(rubyMkEnumOp(&jsArray{}, "each"), t, meth, pos)
+	e.set("__rdefer", true)
+	e.set("__rcall", true)
+	return e
+}
+
+// rubyEnumCopy is Enumerator#dup / #clone. Twin of enumCopy in
+// ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyEnumCopy(t *jsObject, clone bool) *jsObject {
+	if rubyToF(t.props["pos"]) > 0 {
+		rt.rubyRaiseErr("initialize_copy", "TypeError", "can't copy execution context")
+	}
+	items, _ := t.props["items"].(*jsArray)
+	op, _ := t.props["op"].(string)
+	c := rubyMkEnumOp(items, op)
+	if meth, has := t.props["meth"].(string); has {
+		rubyEnumAt(c, t.props["src"], meth, t.props["margs"].(*jsArray).elems)
+	}
+	for _, k := range []string{"__rdefer", "__rcall"} {
+		if t.props[k] == true {
+			c.set(k, true)
+		}
+	}
+	if clone && t.props["__fz"] == true {
+		c.set("__fz", true)
+	}
+	return c
+}
+
 // rubyEnumForce runs a deferred Enumerator's method, once, and takes over the
-// element list and pending op of the Enumerator it answers.
+// element list and pending op of the Enumerator it answers; to_enum's takes the
+// values its method yields.
 func (rt *jsrt) rubyEnumForce(t *jsObject) {
 	t.set("__rdefer", false)
 	meth, _ := t.props["meth"].(string)
 	margs := append([]interface{}{}, t.props["margs"].(*jsArray).elems...)
+	if t.props["__rcall"] == true {
+		its := &jsArray{}
+		collect := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+			switch len(a) {
+			case 0:
+				its.elems = append(its.elems, jsNull)
+			case 1:
+				its.elems = append(its.elems, a[0])
+			default:
+				its.elems = append(its.elems, &jsArray{elems: append([]interface{}{}, a...)})
+			}
+			return jsNull
+		}}
+		rt.rubyMethod(t.props["src"], meth, append(margs, rubyBlkWrap(collect)))
+		t.set("items", its)
+		return
+	}
 	if e, isObj := rt.rubyEnumRun(t.props["src"], meth, margs).(*jsObject); isObj && rubyIsEnum(e) {
 		t.set("items", e.props["items"])
 		t.set("op", e.props["op"])

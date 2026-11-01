@@ -6917,24 +6917,36 @@ function rbRangeLazy(r) {
     lz["ev"] = r
     return lz
 }
+// An op's answer on an eager Enumerator (Array#cycle's): run at once, or an
+// Enumerator for chunk_while / slice_when. Twin of lazyOut in
+// ruby-interpreter.abnf, which states the rule.
+function rbLazyOut(t, lz, name) {
+    if (t["lazy"] === true) { return lz }
+    if (name == "chunk_while" || name == "slice_when") {
+        lz["lazy"] = false
+        lz["desc"] = "#<Enumerator: " + t["desc"] + ":" + name + ">"
+        return lz
+    }
+    return rbLazyFirst(lz, -1)
+}
 function rbLazyMethod(t, name, args) {
     var blk = rbBlockOf(args)
     var nPos = rbNPos(args)
     var lop = rbaLazyOp(name)
     var desc = t["desc"]
-    if (lop != "" && blk !== null) { return rbLazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + desc + ":" + name + ">") }
+    if (lop != "" && blk !== null) { return rbLazyOut(t, rbLazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + desc + ":" + name + ">"), name) }
     // The Lazy-answering methods without a block, the streaming with_index /
     // with_object, the early-stopping and the eager Enumerable ones, dup and
     // clone. Twin of lazyMethod in ruby-interpreter.abnf, which states the rules.
     var ld = "#<Enumerator::Lazy: " + desc + ":" + name
-    if (name == "uniq") { return rbLazyCopy(t, {k: "uniq", f: null, n: 0}, true, ld + ">") }
+    if (name == "uniq") { return rbLazyOut(t, rbLazyCopy(t, {k: "uniq", f: null, n: 0}, true, ld + ">"), name) }
     if ((name == "grep" || name == "grep_v") && nPos > 0) {
         var gpat = rbArgAt(args, 0)
         var gv = name == "grep_v"
         var gl = rbLazyCopy(t, {k: "select", f: function(v) { return rbTruthy(js_rxwhen(gpat, v)) != gv }, n: 0}, true,
             ld + "(" + rbInspect(gpat) + ")>")
         if (blk !== null) { gl["ops"].push({k: "map", f: blk, n: 0}) }
-        return gl
+        return rbLazyOut(t, gl, name)
     }
     if (name == "zip") {
         var zf = []
@@ -6946,21 +6958,24 @@ function rbLazyMethod(t, name, args) {
             zd = zd + rbInspect(args[zi])
             zi = zi + 1
         }
-        return rbLazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + "(" + zd + ")>")
+        return rbLazyOut(t, rbLazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + "(" + zd + ")>"), name)
     }
     if (name == "drop") {
         var dn = Math.trunc(rbToF(rbArgAt(args, 0)))
         if (dn < 0) { rbRaiseErr(name, "ArgumentError", "attempt to drop negative size") }
-        return rbLazyCopy(t, {k: "drop", f: null, n: dn}, true, ld + "(" + dn + ")>")
+        return rbLazyOut(t, rbLazyCopy(t, {k: "drop", f: null, n: dn}, true, ld + "(" + dn + ")>"), name)
     }
     var wix = name == "with_index" || name == "each_with_index"
     var wob = name == "with_object" || name == "each_with_object"
     if (wix && blk === null) {
+        var wl = t["lazy"] === true
+        var wd = "#<Enumerator: " + desc + ":" + name
+        if (wl) { wd = ld }
         if (name == "with_index" && nPos > 0) {
             var wo = Math.trunc(rbToF(rbArgAt(args, 0)))
-            return rbLazyCopy(t, {k: "with_index", f: null, n: wo}, true, ld + "(" + wo + ")>")
+            return rbLazyCopy(t, {k: "with_index", f: null, n: wo}, wl, wd + "(" + wo + ")>")
         }
-        return rbLazyCopy(t, {k: "with_index", f: null, n: 0}, true, ld + ">")
+        return rbLazyCopy(t, {k: "with_index", f: null, n: 0}, wl, wd + ">")
     }
     if (t["en"] !== null && t["ops"].length == 0 && blk !== null && (name == "each" || wix || wob)) { return rbMethod(t["en"], name, args) }
     if ((wix || wob) && blk !== null) {
@@ -7070,6 +7085,16 @@ function rbEnumMethod(t, name, args) {
         return t
     }
     if (t["__rlazy"] === true) { return rbLazyMethod(t, name, args) }
+    if (name == "dup" || name == "clone") { return rbEnumCopy(t, name == "clone") }
+    // Twin of the to_enum arm of enumMethod in ruby-interpreter.abnf.
+    if (t["__rcall"] === true) {
+        if (name == "each" && rbBlockOf(args) !== null) {
+            var cargs = rtCopyArr(t["margs"])
+            cargs.push(args[args.length - 1])
+            return rbMethod(t["src"], t["meth"], cargs)
+        }
+        if (name == "size") { return null }
+    }
     // A deferred Enumerator over a user #each. Twin of the arm in rubyEnumMethod in
     // abnf/jsrt.go, which states the rule.
     if (t["__rdefer"] === true) {
@@ -8554,6 +8579,7 @@ function rbMemberCall(target, name, args) {
                 if (name == "name" || name == "to_s") { return target["__renc"] }
                 if (name == "ascii_compatible?") { return true }
             }
+            if ((name == "to_enum" || name == "enum_for") && rbUserObj(target)) { return rbToEnum(target, args) }
             if (rbEnumAnswers(target, name)) { return rbEnumMixin(target, name, args) }
             // A call nothing answers goes to the class's method_missing, with the
             // name as a Symbol in front of the arguments. Twin of the method_missing
@@ -9601,10 +9627,11 @@ function js_rlen(v, name) {
     if (rbIsArr(v)) { return v.length }
     if (rbIsDict(v)) { return v["keys"].length }
     // An Enumerator's length is its element count; a deferred one's #size is nil,
-    // as is a Lazy's over a user #each, and iterating a deferred one runs its
-    // method.
+    // as are to_enum's and a Lazy's over a user #each, and iterating a deferred
+    // one runs its method.
     if (rbIsEnum(v)) {
         if (name !== null && v["__rlazy"] === true && v["kind"] == "each") { return null }
+        if (name !== null && v["__rcall"] === true) { return null }
         if (v["__rdefer"] === true) {
             if (name !== null) { return null }
             rbEnumForce(v)
@@ -10944,8 +10971,48 @@ function rbEnumMixin(t, name, args) {
 }
 // A deferred Enumerator's method runs once. Twin of enumForce in
 // ruby-interpreter.abnf.
+// Object#to_enum / #enum_for on a user instance. Twin of toEnum in
+// ruby-interpreter.abnf, which states the rule.
+function rbToEnum(t, args) {
+    var pos = rbPosArgs(args)
+    var meth = "each"
+    if (pos.length > 0) { meth = rbStr(pos[0]) }
+    var e = rbEnumAt(rbMkEnumOp([], "each"), t, meth, rbArgsFrom(pos, 1))
+    e["__rdefer"] = true
+    e["__rcall"] = true
+    return e
+}
+// Enumerator#dup / #clone. Twin of enumCopy in ruby-interpreter.abnf, which
+// states the rule.
+function rbEnumCopy(t, clone) {
+    if (rbToF(t["pos"]) > 0) { rbRaiseErr("initialize_copy", "TypeError", "can't copy execution context") }
+    var c = rbMkEnumOp(t["items"], t["op"])
+    if (t["meth"] !== undefined) { rbEnumAt(c, t["src"], t["meth"], t["margs"]) }
+    if (t["__rdefer"] === true) { c["__rdefer"] = true }
+    if (t["__rcall"] === true) { c["__rcall"] = true }
+    if (clone && t["__fz"] === true) { c["__fz"] = true }
+    return c
+}
 function rbEnumForce(t) {
     t["__rdefer"] = false
+    if (t["__rcall"] === true) {
+        var its = []
+        var cargs = rtCopyArr(t["margs"])
+        cargs.push(js_rblkwrap(function() {
+            if (arguments.length == 1) { its.push(arguments[0]) }
+            else if (arguments.length == 0) { its.push(null) }
+            else {
+                var a = []
+                var i = 0
+                while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
+                its.push(a)
+            }
+            return null
+        }))
+        rbMethod(t["src"], t["meth"], cargs)
+        t["items"] = its
+        return
+    }
     var e = rbEnumRun(t["src"], t["meth"], rtCopyArr(t["margs"]))
     if (rbIsEnum(e)) {
         t["items"] = e["items"]

@@ -7933,9 +7933,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // An Enumerator's length is its element count. A bare `.size' / `.length'
         // is lowered to this shortcut in BOTH halves rather than to a method call.
         // A deferred one's #size is nil, as is a Lazy's over a user #each, and
-        // iterating a deferred one runs its method.
+        // iterating a deferred one runs its method. to_enum's #size stays nil.
         if (isEnum(v)) {
             if (v.__rlazy === true && v.kind == "each") { return null }
+            if (v.__rcall === true && name != null) { return null }
             if (v.__rdefer === true) {
                 if (name != null) { return null }
                 enumForce(v)
@@ -8474,10 +8475,43 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return enumRun(t, name, args, blk)
     }
+    // Object#to_enum / #enum_for(meth = :each, *args) on a user instance: a
+    // deferred Enumerator whose values are what that method yields (enumForce).
+    // Twins: rubyToEnum in abnf/jsrtruby.go, rbToEnum in lib/ruby-rt.metajs.
+    function toEnum(t, args) {
+        var meth = args.length > 0 ? rstr(args[0]) : "each"
+        var e = enumAt(mkEnumOp([], "each"), t, meth, args.slice(1))
+        e.__rdefer = true
+        e.__rcall = true
+        return e
+    }
+    // Enumerator#dup / #clone: a copy that runs the same method; #clone keeps the
+    // frozen flag. One whose external iteration has begun (next) is MRI's
+    // TypeError, its execution context being uncopyable. Twins: rubyEnumCopy in
+    // abnf/jsrtruby.go, rbEnumCopy in lib/ruby-rt.metajs.
+    function enumCopy(t, clone) {
+        if (t.pos > 0) { raiseErr("initialize_copy", "TypeError", "can't copy execution context") }
+        var c = mkEnumOp(t.items, t.op)
+        if (t.meth !== undefined) { enumAt(c, t.src, t.meth, t.margs) }
+        if (t.__rdefer === true) { c.__rdefer = true }
+        if (t.__rcall === true) { c.__rcall = true }
+        if (clone && t.__fz === true) { c.__fz = true }
+        return c
+    }
     // A deferred Enumerator's method runs once; the Enumerator takes over the
     // element list and pending op of the one it answers.
     function enumForce(t) {
         t.__rdefer = false
+        if (t.__rcall === true) {
+            var its = []
+            mcall(t.src, t.meth, t.margs.slice(0), function() {
+                var a = argsArray(arguments)
+                its.push(a.length == 1 ? a[0] : (a.length == 0 ? null : a))
+                return null
+            })
+            t.items = its
+            return
+        }
         var e = anytype
         e = enumRun(t.src, t.meth, t.margs.slice(0), null)
         if (isEnum(e)) {
@@ -9693,6 +9727,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // Object#freeze only sets the flag #frozen? and #clone read: no write
                 // to the instance checks it.
                 if (name == "freeze") { target.__fz = true; return target }
+                if (name == "to_enum" || name == "enum_for") { return toEnum(target, args) }
                 if (name == "instance_variable_get" || name == "instance_variable_set") {
                     return ivarAccess(target, name == "instance_variable_set", args)
                 }
@@ -10560,21 +10595,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         lz.ev = r
         return lz
     }
+    // An op on an eager Enumerator (Array#cycle's) is Enumerable's method, run at
+    // once over the values, but for chunk_while / slice_when, which answer an
+    // Enumerator. Twins: rubyLazyOut in abnf/jsrtrubystr.go, rbLazyOut in
+    // lib/ruby-rt.metajs.
+    function lazyOut(t, lz, name) {
+        if (t.lazy) { return lz }
+        if (name == "chunk_while" || name == "slice_when") {
+            lz.lazy = false
+            lz.desc = "#<Enumerator: " + t.desc + ":" + name + ">"
+            return lz
+        }
+        return lazyFirst(lz, -1)
+    }
     function lazyMethod(t, name, args, blk) {
         var lop = rbaLazyOp(name)
-        if (lop != "" && blk != null) { return lazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + t.desc + ":" + name + ">") }
+        if (lop != "" && blk != null) { return lazyOut(t, lazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + t.desc + ":" + name + ">"), name) }
         // uniq, grep / grep_v (a select, then the block's map), zip, drop and a
         // blockless with_index / each_with_index answer a Lazy too. Twins:
         // rubyLazyMethod in abnf/jsrtrubystr.go, rbLazyMethod in lib/ruby-rt.metajs.
         var ld = "#<Enumerator::Lazy: " + t.desc + ":" + name
-        if (name == "uniq") { return lazyCopy(t, {k: "uniq", f: null, n: 0}, true, ld + ">") }
+        if (name == "uniq") { return lazyOut(t, lazyCopy(t, {k: "uniq", f: null, n: 0}, true, ld + ">"), name) }
         if ((name == "grep" || name == "grep_v") && args.length > 0) {
             var gpat = anytype
             gpat = args[0]
             var gv = name == "grep_v"
             var gl = lazyCopy(t, {k: "select", f: function(v) { return rtest(caseEq(gpat, v)) != gv }, n: 0}, true, ld + "(" + rinspect(gpat) + ")>")
             if (blk != null) { gl.ops.push({k: "map", f: blk, n: 0}) }
-            return gl
+            return lazyOut(t, gl, name)
         }
         if (name == "zip") {
             var zf = []
@@ -10583,18 +10631,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 zf.push(lazyNth(args[zi]))
                 zd = zd + (zi > 0 ? ", " : "") + rinspect(args[zi])
             }
-            return lazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + "(" + zd + ")>")
+            return lazyOut(t, lazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + "(" + zd + ")>"), name)
         }
         if (name == "drop") {
             var dn = Math.trunc(toF(args[0]))
             if (dn < 0) { raiseErr(name, "ArgumentError", "attempt to drop negative size") }
-            return lazyCopy(t, {k: "drop", f: null, n: dn}, true, ld + "(" + dn + ")>")
+            return lazyOut(t, lazyCopy(t, {k: "drop", f: null, n: dn}, true, ld + "(" + dn + ")>"), name)
         }
         var wix = name == "with_index" || name == "each_with_index"
         var wob = name == "with_object" || name == "each_with_object"
         if (wix && blk == null) {
             var wo = name == "with_index" && args.length > 0 ? Math.trunc(toF(args[0])) : 0
-            return lazyCopy(t, {k: "with_index", f: null, n: wo}, true, ld + (name == "with_index" && args.length > 0 ? "(" + wo + ")" : "") + ">")
+            var wd = (t.lazy ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + t.desc + ":" + name
+            return lazyCopy(t, {k: "with_index", f: null, n: wo}, t.lazy, wd + (name == "with_index" && args.length > 0 ? "(" + wo + ")" : "") + ">")
         }
         if (t.en !== undefined && t.ops.length == 0 && blk != null && (name == "each" || wix || wob)) { return mcall(t.en, name, args, blk) }
         // with_index / with_object and their each_ forms run the block as each
@@ -10688,6 +10737,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // freeze sets the flag #frozen? reads, without running a deferred method.
         if (name == "freeze") { t.__fz = true; return t }
         if (t.__rlazy === true) { return lazyMethod(t, name, args, blk) }
+        if (name == "dup" || name == "clone") { return enumCopy(t, name == "clone") }
+        // Object#to_enum's Enumerator: #each with a block calls the method with it,
+        // and there is no size to ask.
+        if (t.__rcall === true) {
+            if (name == "each" && blk != null) { return mcall(t.src, t.meth, t.margs.slice(0), blk) }
+            if (name == "size") { return null }
+        }
         // A deferred Enumerator over a user #each: #each with a block IS its method
         // with that block (so `find.each { }' stops #each early, as MRI's does), and
         // its size is nil - there is no #size to ask. Anything but #inspect
@@ -12617,10 +12673,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
                          "singleton_methods", "define_singleton_method", "define_method", "frozen?", "equal?",
-                         "instance_variables"]
+                         "instance_variables", "to_enum", "enum_for"]
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-to-llvm-ir.abnf.
-    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?"]
+    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?", "to_enum", "enum_for"]
     // A receiver-less send(:name, ...) reaches a top-level def or a Kernel function,
     // both private Object methods in MRI, unless self has its own method of the name.
     // Twin of js_rselfsend in abnf/jsrtruby.go.

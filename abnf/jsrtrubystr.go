@@ -404,12 +404,27 @@ func rubyLazyOpOf(k string, f interface{}, n int) *jsObject {
 	return op
 }
 
+// rubyLazyOut is an op's answer on an eager Enumerator (Array#cycle's): run at
+// once, or an Enumerator for chunk_while / slice_when. Twin of lazyOut in
+// ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyLazyOut(t, lz *jsObject, name string) interface{} {
+	if t.props["lazy"] == true {
+		return lz
+	}
+	if name == "chunk_while" || name == "slice_when" {
+		lz.set("lazy", false)
+		lz.set("desc", "#<Enumerator: "+t.props["desc"].(string)+":"+name+">")
+		return lz
+	}
+	return &jsArray{elems: rt.rubyLazyFirst(lz, -1)}
+}
+
 func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) interface{} {
 	pos, blk := rubyBlockArgs(args)
 	desc := t.props["desc"].(string)
 	lazy := t.props["lazy"] == true
 	if k := rubyLazyOp(name); k != "" && blk != nil {
-		return rubyLazyCopy(t, rubyLazyOpOf(k, blk, 0), true, "#<Enumerator::Lazy: "+desc+":"+name+">")
+		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf(k, blk, 0), true, "#<Enumerator::Lazy: "+desc+":"+name+">"), name)
 	}
 	// The Lazy-answering methods without a block, the streaming with_index /
 	// with_object, the early-stopping and the eager Enumerable ones, freeze, dup
@@ -421,7 +436,7 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 	wob := name == "with_object" || name == "each_with_object"
 	switch {
 	case name == "uniq":
-		return rubyLazyCopy(t, rubyLazyOpOf("uniq", jsNull, 0), true, ld+">")
+		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("uniq", jsNull, 0), true, ld+">"), name)
 	case (name == "grep" || name == "grep_v") && len(pos) > 0:
 		pat, gv := pos[0], name == "grep_v"
 		sel := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
@@ -432,7 +447,7 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			gops := gl.props["ops"].(*jsArray)
 			gops.elems = append(gops.elems, rubyLazyOpOf("map", blk, 0))
 		}
-		return gl
+		return rt.rubyLazyOut(t, gl, name)
 	case name == "zip":
 		zf, zd := &jsArray{}, ""
 		for i, a := range pos {
@@ -445,19 +460,23 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			}
 			zd += rt.rubyInspect(pos[i])
 		}
-		return rubyLazyCopy(t, rubyLazyOpOf("zip", zf, 0), true, ld+"("+zd+")>")
+		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("zip", zf, 0), true, ld+"("+zd+")>"), name)
 	case name == "drop":
 		dn := int(math.Trunc(rubyToF(argAt(pos, 0))))
 		if dn < 0 {
 			rt.rubyRaiseErr(name, "ArgumentError", "attempt to drop negative size")
 		}
-		return rubyLazyCopy(t, rubyLazyOpOf("drop", jsNull, dn), true, ld+"("+strconv.Itoa(dn)+")>")
+		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("drop", jsNull, dn), true, ld+"("+strconv.Itoa(dn)+")>"), name)
 	case wix && blk == nil:
+		wd := "#<Enumerator: " + desc + ":" + name
+		if lazy {
+			wd = ld
+		}
 		if name == "with_index" && len(pos) > 0 {
 			wo := int(math.Trunc(rubyToF(pos[0])))
-			return rubyLazyCopy(t, rubyLazyOpOf("with_index", jsNull, wo), true, ld+"("+strconv.Itoa(wo)+")>")
+			return rubyLazyCopy(t, rubyLazyOpOf("with_index", jsNull, wo), lazy, wd+"("+strconv.Itoa(wo)+")>")
 		}
-		return rubyLazyCopy(t, rubyLazyOpOf("with_index", jsNull, 0), true, ld+">")
+		return rubyLazyCopy(t, rubyLazyOpOf("with_index", jsNull, 0), lazy, wd+">")
 	}
 	if en, has := t.props["en"]; has && len(ops) == 0 && blk != nil && (name == "each" || wix || wob) {
 		return rt.rubyMethod(en, name, args)

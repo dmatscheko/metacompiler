@@ -8229,6 +8229,9 @@ func (rt *jsrt) rubyMemberCall(target interface{}, name string, args []interface
 				}
 			}
 		}
+		if (name == "to_enum" || name == "enum_for") && rubyUserObj(target) {
+			return rt.rubyToEnum(target, args)
+		}
 		if rt.rubyEnumAnswers(target, name) {
 			return rt.rubyEnumMixin(target, name, args)
 		}
@@ -13192,6 +13195,19 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	}
 	if t.props["__rlazy"] == true {
 		return rt.rubyLazyMethod(t, name, args)
+	}
+	if name == "dup" || name == "clone" {
+		return rt.rubyEnumCopy(t, name == "clone")
+	}
+	// Twin of the to_enum arm of enumMethod in ruby-interpreter.abnf.
+	if t.props["__rcall"] == true {
+		if _, blk := rubyBlockArgs(args); name == "each" && blk != nil {
+			meth, _ := t.props["meth"].(string)
+			return rt.rubyMethod(t.props["src"], meth, append(append([]interface{}{}, t.props["margs"].(*jsArray).elems...), args[len(args)-1]))
+		}
+		if name == "size" {
+			return jsNull
+		}
 	}
 	// A deferred Enumerator over a user #each: #each with a block IS its method
 	// with that block (so `find.each { }' stops #each early, as MRI's does), and
