@@ -72,7 +72,7 @@ python3 3.14: `type(range(3)).__name__` → range, `type(iter(range(3))).__name_
 
 # RB — Ruby
 
-### T-1030 ruby: Proc#=== as an operator returns a boolean; Struct is not Enumerable · P3 · RB · OPEN [V]
+### T-1030 ruby: Proc#=== as an operator returns a boolean; Struct is not Enumerable · P3 · RB · IN PROGRESS (RB worker, round 39) [V]
 ruby 2.6: `pr = proc{|x| x*2}; p(pr === 3)` → 6, `p({a: 1}.to_proc === :a)` → 1; ours: interp `true`, llvm.Run/native `false` (js_rcase has no callable arm and falls to rubyEq; interpreter and layer 2 need the same arm; case/when with a proc already works). `Struct.new(:a).new(1).is_a?(Enumerable)` → true; ours false in all three engines. Found by RB r38.
 
 # JS — JavaScript and TypeScript
@@ -109,7 +109,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1024 kotlin: range type identity and function-spelled range builders · P3 · KT · OPEN [V]
+### T-1024 kotlin: range type identity and function-spelled range builders · P3 · KT · IN PROGRESS (KT worker, round 16) [V]
 `val a: Any = 1..5; a is ClosedRange<*>` / `a is OpenEndRange<*>` — kotlinc: true / true; ours (all three engines): false / false.
 `("a".."c")::class.simpleName` — kotlinc `ComparableRange`; ours `null`.
 `"a".rangeTo("c")` / `"a".rangeUntil("c")` — kotlinc `a..c` / `a..<c`; ours aborts.
