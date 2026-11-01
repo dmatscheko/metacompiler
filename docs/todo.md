@@ -134,7 +134,7 @@ go/test/typeparam/slices.go: interpreter `panic: _Max([]) = %!q(<nil>), want ""`
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-993 swift: local func called before its declaration; body-less `@_silgen_name` func; if-let binding used in its else branch · P3 · SW · OPEN [V]
+### T-993 swift: local func called before its declaration; body-less `@_silgen_name` func; if-let binding used in its else branch · P3 · SW · IN PROGRESS (SW worker, round 13) [V]
 Found by the SW worker, round 12 (oracle swiftc 6.1.2). `let r = helper(2); func helper(_ x: Int) -> Int {..}` inside one body →
 swiftc accepts; interpreter "unknown name: helper" at run time. `@_silgen_name("puts") func cputs(_: UnsafePointer<CChar>) -> Int32`
 (no body) does not parse in the interpreter. `if let x = o { } else { print(x) }` → swiftc "cannot find 'x' in scope"; ours only at
