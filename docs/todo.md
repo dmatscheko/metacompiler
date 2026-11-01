@@ -78,7 +78,7 @@ Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c 
 - `for` over a user #each must interleave the body with #each's side effects (today all yields are collected first).
 Needs: interpreter coroutine running src.each(&blk) with blk = coYield, switching run state (block/self frames, rescue state) on resume; compiled: one emitted generator closure registered with the Go twin / layer 2 (js_genfn/js_yield are emitter-only externs); per-coroutine rubyCatchTags (Go) and js_rcatch/js_rthrow state (layer 2) plus the current-exception slot; close of an unfinished one must skip ensure.
 
-### T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-based Lazy #each value · P3 · RB · OPEN [V]
+### T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-based Lazy #each value · P3 · RB · IN PROGRESS (RB worker, round 47) [V]
 Oracle /usr/bin/ruby 2.6; all engines raise NoMethodError where MRI answers:
 - eager on a Lazy: `(1..3).lazy.sum` -> 6; count/include?/min/max/sort/reduce/inject/find/detect/group_by/partition/min_by/each_with_index/each_with_object/with_index answer eagerly; find and include? must stop early on an endless source (`(1..Float::INFINITY).lazy.map { _1 * 2 }.find { |x| x > 10 }` -> 12 - use a block param in 2.6).
 - lazy-returning: zip/uniq/flat_map/grep/drop/chunk_while answer a Lazy.
@@ -112,7 +112,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin · P3 · KT · OPEN [V]
+### T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin · P3 · KT · IN PROGRESS (KT worker, round 25) [V]
 Oracle kotlinc 2.2.21:
 - `inline fun <reified T: Any> T.extName() = T::class.simpleName + " " + (this is T) + " " + ("q" is T)`; `5.extName()` -> "Int true false". Interpreter "Any false false", run/native "Any true true" (halves disagree). `List<T>.elName()` on listOf(1,2) -> Int, ours Any. Likely ktNoteGeneric reads the name of `fun <T> T.ext()` as "T".
 - `Long::class.javaObjectType.kotlin` aborts all engines ("member .kotlin of a class literal"); oracle gives the KClass (its javaPrimitiveType -> long).
@@ -149,7 +149,7 @@ Trap: loading library code with `static` vars arms usesRefs for the whole progra
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small diagnostics · P3 · SH · OPEN [V]
+### T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small diagnostics · P3 · SH · IN PROGRESS (SH worker, round 31) [V]
 Oracle /opt/homebrew/bin/bash 5.3; all engines:
 - reads with a quoted indexed subscript: `${ia['1']}`, `${ia[$'2']}`, `$(( ia['1'] ))` -> "'1': arithmetic syntax error: operand expected (error token is "'1'")", command fails; ours returns a value. Needs the assignment-side treatment in the parameter-expansion subscript path (PeIdxRef, subKeyAll/subKeyOf).
 - `a=(1); declare -A a=([x]=1)`: top level prints "a: cannot convert indexed to associative array" (no builtin prefix) and abandons the line; in a function the message prints twice, status 1, continues. Ours converts silently.
