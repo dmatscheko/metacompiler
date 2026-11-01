@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1031** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1032** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -77,12 +77,8 @@ ruby 2.6: `pr = proc{|x| x*2}; p(pr === 3)` → 6, `p({a: 1}.to_proc === :a)` �
 
 # JS — JavaScript and TypeScript
 
-### T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone surrogates in regex text into U+FFFD; `sc=Zyyy` on Unicode 17 scripts · P3 · JS · IN PROGRESS (JS worker, round 39) [V]
-Found by the JS worker, round 38 (oracle node 24). A bad pattern only fails when matched, and then aborts instead of raising a
-catchable SyntaxError at construction: `new RegExp("\\p{scx=Foo}","u")` → node SyntaxError "Invalid property name", ours "ok" then
-an uncatchable abort at .test; `new RegExp("p{l}","u").test("p{l}")` → node SyntaxError "Incomplete quantifier", ours true; the literal
-`/\p{scx=Foo}/u` aborts at run time instead of an early SyntaxError. The llvm.Run leg (Go twin) seems to map lone surrogates in regex
-text to U+FFFD (U+D800 matches \p{Grapheme_Base}). `\p{sc=Zyyy}` matches Unicode 17 script code points (Java 24 tables are Unicode 16).
+### T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)` modifiers · P3 · JS · OPEN [V]
+node 24: `/\{1}n/v` → SyntaxError "Lone quantifier brackets"; ours accepts (v-mode class-set syntax and its stricter rules are unimplemented — 212 of 6000 random v-flag patterns differ). Lookbehind `(?<=a)b` / `(?<!a)b` and ES2025 modifiers `(?i:a)b` are accepted at construction but abort when matched; node matches them. Found by JS r39.
 
 # JV — Java
 
@@ -1080,6 +1076,7 @@ T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a B
 T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attribute on an iterator; python-test-full.5.py near the step brake — PARTIAL→split (PY r20, 4a64d854): generator dir(); no-__dict__ AttributeError for iterators; unicode_escape/raw_unicode_escape/punycode/ASCII idna codecs; random.seed bit ops 3x cheaper with identical sequences. Master probe vs python3 3.14 (7 seeds incl. bignum/neg/str/bytes, big & | ^ << >>, codecs, dir): 4 legs agree. CJK codecs, \N{}, idna nameprep remain.
 T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(Enumerator)`; default_proc lambda arity — DONE (RB r38, 28b9c6e8): Enumerator/Lazy Enumerable, Symbol Comparable, exact instance_of?, Hash#to_proc and &hash, default_proc= conversion + lambda arity TypeError (2.6 rules). Master probe vs ruby 2.6: 4 legs agree.
 T-1023 go: a struct value's method set includes pointer methods in type switches/assertions; embedding another package's defined non-struct type — DONE (GO r22, 1ac92568): value method sets exclude pointer methods in type switches/assertions (incl. embedded fields); embedded-interface bodies now parse (goIfaceSet); imported defined non-struct types promote methods. Master probe (sent back once for interface{G;S}) vs go run: 4 legs agree.
+T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone surrogates in regex text into U+FFFD; `sc=Zyyy` on Unicode 17 scripts — DONE (JS r39, b35b47a1): catchable SyntaxError for bad RegExp patterns/flags with node's texts; regex literals early-error in JS+TS; Annex B escapes; duplicate group names; String.fromCodePoint lone surrogate (Go twin); \p{} at Unicode 17 via a JS-only correction table. Master probe vs node 24 (20 patterns + \p + surrogate): 4 legs agree; full matrix 601/601 and js+python ratchets green after rebase.
 
 # Settled — do not re-open
 
