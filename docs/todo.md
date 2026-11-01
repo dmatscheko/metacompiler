@@ -108,7 +108,7 @@ Spec-only (no dotnet here). All engines:
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1062 kotlin: javaClass/KClass leftovers (sequences, static-typed primitives, equality, reified) · P3 · KT · OPEN [V]
+### T-1062 kotlin: javaClass/KClass leftovers (sequences, static-typed primitives, equality, reified) · P3 · KT · IN PROGRESS (KT worker, round 22) [V]
 Oracle kotlinc 2.2.21; all three engines differ:
 - `generateSequence(1){it+1}.javaClass.name` aborts (javaClass of a sequence is null); oracle kotlin.sequences.GeneratorSequence. At least must not abort.
 - `5.javaClass.name` is `int` in the oracle (static type Int), ours java.lang.Integer; `(5 as Any).javaClass.name` stays java.lang.Integer.
