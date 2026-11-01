@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1083** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1084** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -137,12 +137,12 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1080 php: trace frames for native builtins / generators; string callbacks in compiled traces · P3 · PHP · IN PROGRESS (PHP worker, round 44) [V]
+### T-1083 php: builtin argument TypeErrors; dynamic undefined-call line; opcode-compiled builtins in traces · P3 · PHP · OPEN [V]
 Spec-only (php-src). All engines unless noted:
-- native builtins and generator bodies get no trace frame: PHP shows `#0 F(30): intdiv(1, 0)` and a `gen()` frame; ours `#0 {main}` (line is already right).
-- compiled only: a string callback bound by a library function at the call site shows as `Object(Closure)` in the trace (`array_map(Object(Closure), Array)`); PHP and our interpreter show `'cb'`. libChecks replaces the argument in place.
-- pre-existing: cloBind drops the closure's `ut` flag when it rebuilds a closure - check whether it is observable and fix or document.
-Keep the per-call cost within bench noise (paired runs against HEAD).
+- `strlen([])` returns 5; PHP TypeError "strlen(): Argument #1 ($string) must be of type string, array given". `array_key_exists([], [])` throws nothing; PHP TypeError. Audit the other builtins' strict-type argument checks (zend_parse_parameters) for the same gap.
+- compiled only: `$u = "nofn"; $u();` reports a stale line (php.site not stored before the raise): interpreter lines 6/11 vs compiled 3/8 on scratch PHP44/p6.php.
+- builtins PHP compiles to opcodes (call_user_func, call_user_func_array, strval/intval/boolval/floatval, ...) still get a trace frame; PHP shows none (zend_try_compile_special_func list).
+- approximation: a foreach header spanning several lines uses the foreach start line rather than the expression's line.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1143,6 +1143,7 @@ T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration lef
 T-1075 php: exception trace frames; file/line of engine-raised errors; __destruct — PARTIAL→split (PHP r43, 72cd7678): getTrace/getTraceAsString list calls in progress (functions, methods, closures, [internal function]; args per php-src escaping/15-char cut/float .0), engine-raised errors carry file/line/trace (php_here); closure/anon-class names use the absolute path; cost +0.68% paired bench / ~20 insns per call (within noise); 3 legs agree with php-src. __destruct DECLINED: refcount-timed destructors cannot be modelled faithfully without refcounting (docs 7.8); remaining trace gaps filed
 T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin — DONE (KT r25, b9c0859b): generic extensions recorded (ExtFun never called ktNoteGeneric); reified extension type args inferred from the receiver's static type (T., List<T>., Map<K,V>., T?.) in both engines incl. after field reads; Class.kotlin maps java classes back to KClasses in all engines; 4 legs = kotlinc
 T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-based Lazy #each value — DONE (RB r47, f9f45b06): Lazy answers MRI's eager Enumerable surface (sum/count/min/max/sort/reduce/group_by/partition/...), early-stopping scans on endless sources (find/detect/include?/any?/all?/find_index), lazy zip/uniq/flat_map/grep/drop/chunk_while/slice_when/with_index, freeze/clone/dup, #each value of Enumerator-based Lazy; 4 legs = ruby 2.6
+T-1080 php: trace frames for native builtins / generators; string callbacks in compiled traces — DONE (PHP r44, 3c4870f0): native builtins in progress get trace frames (opcode-compiled specials skipped per zend_try_compile_special_func), generator frames hang under foreach/yield-from/Generator->m() resumers, compiled string callbacks stay 'cb', cloBind keeps uses-$this; 3 legs agree with php-src; bench +0.02% paired
 
 # Settled — do not re-open
 
