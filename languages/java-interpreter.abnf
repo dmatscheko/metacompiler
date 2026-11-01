@@ -6257,6 +6257,11 @@ HasStatic   = :script(~~
     }
     // The constructor entry point of a class: pick the overload by arity, or - when
     // the class declares none - do the implicit super() plus own initialization.
+    // A constructor is a frame of its own (<init> is a method), so a field
+    // initializer that constructs its own class recurses into a
+    // StackOverflowError. A declared constructor counts its frame through
+    // invokeBody; the implicit one here and a record's canonical one, which run
+    // without it, count theirs by interp-core's call-depth protocol.
     function makeCtorDispatch(closures, ownInit, refs) {
         return function() {
             var self = arguments[0]
@@ -6268,8 +6273,12 @@ HasStatic   = :script(~~
                 // subclass (and an enum constant with a body) looks like: it
                 // declares none of its own, so the arguments belong to super.
                 if (refs.sup != null) { jZeroFields(self, refs.self) }
+                var depth = coreDepth + 1
+                coreDepth = depth
+                if (depth > coreDepthMax) { coreTooDeep() }
                 if (refs.sup != null) { jCallCtorSig(refs.sup, self, args, hasOwn(refs.self, "__supsig") ? refs.self.__supsig : "") }
                 ownInit(self)
+                coreDepth = depth - 1
                 return undefined
             }
             var a = [self]
@@ -6287,6 +6296,9 @@ HasStatic   = :script(~~
             var raw = []
             for (var i = 1; i < arguments.length; i++) { raw.push(arguments[i]) }
             var args = jCallArgs(info, raw)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             if (sup != null) { jCallCtor(sup, self, []) }
             ownInit(self)
             if (compact != null) {
@@ -6297,9 +6309,10 @@ HasStatic   = :script(~~
                 compact.body()
                 for (var j = 0; j < params.length; j++) { self[params[j]] = getVar(params[j]) }
                 scopes = saved
-                return undefined
+            } else {
+                for (var q = 0; q < params.length; q++) { self[params[q]] = q < args.length ? args[q] : undefined }
             }
-            for (var q = 0; q < params.length; q++) { self[params[q]] = q < args.length ? args[q] : undefined }
+            coreDepth = depth - 1
             return undefined
         }
     }

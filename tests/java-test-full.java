@@ -1624,8 +1624,14 @@ class S100 {
         String how = "";
         try { new S100().m(0); } catch (VirtualMachineError e) { how = e.getClass().getName(); }
         Main.check("soe2", how.equals("java.lang.StackOverflowError") && deep(100) == 100);
+        // An implicit constructor is a frame too: a field initializer that
+        // constructs its own class recurses the same way.
+        String init = "";
+        try { new S100F(); } catch (StackOverflowError e) { init = e.getClass().getName(); }
+        Main.check("soe3", init.equals("java.lang.StackOverflowError"));
     }
 }
+class S100F { S100F link = new S100F(); }
 
 // ===== SECTION 101: System.out.flush and System.err.flush =====
 //
