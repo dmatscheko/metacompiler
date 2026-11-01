@@ -317,8 +317,16 @@ func (rt *jsrt) csThrow(name, msg string) {
 	o.set("Message", msg)
 	if pn := csxExcParam(msg); pn != "" {
 		o.set("ParamName", pn)
+	} else if csExcArgFamily(name) {
+		o.set("ParamName", jsNull)
 	}
 	panic(&jsThrown{value: o})
+}
+
+// csExcArgFamily: ArgumentException and its two subclasses, whose ParamName is null
+// until a name is given. Twin of csExcArgFamily in languages/csharp-interpreter.abnf.
+func csExcArgFamily(n string) bool {
+	return n == "ArgumentException" || n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
 }
 
 // csxExcParam is the ParamName a runtime-raised ArgumentException carries: the name
@@ -657,7 +665,11 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 	o.set("MinValue", csNorm(lo, w, un))
 	o.set("MaxValue", csNorm(hi, w, un))
 	o.set("Parse", jsHostFunc("Parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		return rt.csParseInt(rt.toString(argAt(args, 0)), w, un)
+		v := argAt(args, 0)
+		if isUndefOrNull(v) {
+			rt.csThrow("ArgumentNullException", "Value cannot be null. (Parameter 's')")
+		}
+		return rt.csParseInt(rt.toString(v), w, un)
 	}))
 	return o
 }

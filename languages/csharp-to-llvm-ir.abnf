@@ -3864,6 +3864,7 @@ KwLet       = "let" KwEnd ;
                 // No argument: the type's OWN parameterless-constructor message, baked
                 // in at emit time (csExcDefMsg above).
                 callExt(b, "js_set", [eo, emitStr(b, "Message"), emitStr(b, csExcDefMsg(clsName))])
+                if (csExcArgFamily(clsName)) { callExt(b, "js_set", [eo, emitStr(b, "ParamName"), hNull]) }
                 var pn1 = csExcParamName1(clsName)
                 for (var m = 0; m < args.length; m++) {
                     var rm = args[m](b)
@@ -5383,6 +5384,9 @@ KwLet       = "let" KwEnd ;
     function csExcParamName1(n) {
         return n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
     }
+    // ArgumentException and the two above, whose ParamName is null until a name is
+    // given. Twin of csExcArgFamily in languages/csharp-interpreter.abnf.
+    function csExcArgFamily(n) { return n == "ArgumentException" || csExcParamName1(n) }
 
     var csClassTParams = {}
     // ----- unqualified access to a member of the enclosing type -----
@@ -6390,10 +6394,17 @@ KwLet       = "let" KwEnd ;
         // it stores the message (ECMA-335, System.Exception(String)).
         if (excBase != undefined && excBase != null && !isThisInit) {
             var thisEV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            if (csExcArgFamily(excBase)) { callExt(b, "js_set", [thisEV, emitStr(b, "ParamName"), hNull]) }
             if (cinit != undefined && cinit != null && cinit.cargs.length > 0) {
                 var er = cinit.cargs[0](b)
                 b = er.b
-                callExt(b, "js_set", [thisEV, emitStr(b, "Message"), er.v])
+                if (csExcParamName1(excBase)) {
+                    // `: base(name)` on ArgumentNullException / ArgumentOutOfRangeException
+                    // passes a PARAM NAME, as `new` does (csExcParamName1).
+                    callExt(b, "js_set", [thisEV, emitStr(b, "ParamName"), er.v])
+                    callExt(b, "js_set", [thisEV, emitStr(b, "Message"),
+                                          callExt(b, "js_csargmsg", [emitStr(b, csExcDefMsg(excBase)), er.v])])
+                } else { callExt(b, "js_set", [thisEV, emitStr(b, "Message"), er.v]) }
             } else if (csExcDefMsgOf(excBase) != "") {
                 // The implicit ': base()' runs the BASE's parameterless constructor, so
                 // the message is the BASE's own SR string. Bakeable.

@@ -295,8 +295,13 @@ function csThrow(name, msg) {
     o["__excname"] = name
     o["Message"] = msg
     var pn = csxExcParam(msg)
-    if (pn != "") { o["ParamName"] = pn }
+    if (pn != "") { o["ParamName"] = pn } else if (csExcArgFamily(name)) { o["ParamName"] = null }
     throw o
+}
+// ArgumentException and its two subclasses, whose ParamName is null until a name is
+// given. Twin of csExcArgFamily in languages/csharp-interpreter.abnf.
+function csExcArgFamily(n) {
+    return n == "ArgumentException" || n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
 }
 
 // csExcParent is the .NET base class of one BCL exception type. It is what makes a
@@ -1368,7 +1373,10 @@ function csTypeObject(name0) {
     }
     o["MinValue"] = csNorm(lo, w, un)
     o["MaxValue"] = csNorm(hi, w, un)
-    o["Parse"] = function(s) { return csParseInt(cpStr(s), w, un) }
+    o["Parse"] = function(s) {
+        if (s === null || s === undefined) { csThrow("ArgumentNullException", "Value cannot be null. (Parameter 's')") }
+        return csParseInt(cpStr(s), w, un)
+    }
     return o
 }
 

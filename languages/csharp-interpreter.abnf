@@ -1965,7 +1965,7 @@ KwLet       = "let" KwEnd ;
     function csThrowExc(clsName, msg) {
         var eo = {__excname: clsName, Message: msg}
         var pn = csxExcParam(msg)
-        if (pn != "") { eo.ParamName = pn }
+        if (pn != "") { eo.ParamName = pn } else if (csExcArgFamily(clsName)) { eo.ParamName = null }
         throw {__exc: true, v: eo}
     }
     // (a * b) mod 2^32. `(a * b) | 0` is WRONG: the exact product needs up to 62
@@ -2098,8 +2098,10 @@ KwLet       = "let" KwEnd ;
         return szMake(i64Trunc(p, w, u), w, u)
     }
     // int.Parse / long.Parse / uint.Parse ...: a decimal digit run with an
-    // optional sign, and a System.FormatException on anything else.
+    // optional sign, a System.FormatException on anything else, and an
+    // ArgumentNullException for a null string, as double.Parse.
     function csParseInt(s, w, u) {
+        if (s === null || s === undefined) { csThrowExc("ArgumentNullException", "Value cannot be null. (Parameter 's')") }
         var t = stripWs("" + s)
         var neg = false
         if (t.charAt(0) == "+" || t.charAt(0) == "-") { neg = t.charAt(0) == "-"; t = t.substring(1) }
@@ -2444,6 +2446,11 @@ KwLet       = "let" KwEnd ;
     function csExcParamName1(n) {
         return n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
     }
+    // ArgumentException and the two above: ParamName is null until a constructor is
+    // given a name (System.ArgumentException's _paramName field). Twins:
+    // csExcArgFamily in languages/csharp-to-llvm-ir.abnf, languages/lib/csharp-rt.metajs
+    // and abnf/jsrtcsharp.go.
+    function csExcArgFamily(n) { return n == "ArgumentException" || csExcParamName1(n) }
     function csArgParamMsg(base, pname) {
         if (pname === undefined || pname === null) { return base }
         var ps = csStr(pname)
@@ -3660,6 +3667,7 @@ KwLet       = "let" KwEnd ;
                 }
                 var eo = {__excname: clsName, Message: msg}
                 if (pn1 && args.length > 0) { eo.ParamName = pname }
+                else if (csExcArgFamily(clsName)) { eo.ParamName = null }
                 return eo
             }
             var cls = getVar(clsName)
@@ -6026,6 +6034,13 @@ KwLet       = "let" KwEnd ;
             // class here, so System.Exception's own constructor is inlined: it stores
             // the message (ECMA-335 / System.Exception(String)).
             if (sup == null && cls.__excbase != undefined) {
+                if (csExcArgFamily(cls.__excbase)) { self.ParamName = null }
+                if (bargs.length > 0 && csExcParamName1(cls.__excbase)) {
+                    // `: base(name)` passes a PARAM NAME, as `new` does (csExcParamName1).
+                    self.ParamName = bargs[0]
+                    self.Message = csArgParamMsg(csExcDefMsg(cls.__excbase), bargs[0])
+                    return
+                }
                 if (bargs.length > 0) { self.Message = bargs[0]; return }
                 // The implicit ': base()' runs the BASE's parameterless constructor, so
                 // the default message is the BASE's - and for System.Exception, which

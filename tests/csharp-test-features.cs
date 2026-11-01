@@ -158,6 +158,12 @@ namespace Demo
         public ArgEx() { }
     }
 
+    // ArgumentNullException's one-argument base constructor takes a PARAM NAME.
+    class NullArgEx : ArgumentNullException
+    {
+        public NullArgEx(string p) : base(p) { }
+    }
+
     class OverEx : Exception
     {
         public OverEx() { }
@@ -985,6 +991,31 @@ namespace Demo
             rtParam = "?";
             try { "abc".Substring(badArg[1]); } catch (ArgumentOutOfRangeException e) { rtParam = e.ParamName; }
             Program.Check("exc-runtime-paramname-substring", rtParam == "startIndex");
+            // SPEC-CITED, NOT MEASURED: ParamName is null, not "", when no name was
+            // given (ArgumentException's _paramName field) - on a constructed exception,
+            // a derived one, and one the runtime raises with no name in its message.
+            string[] noName = { "bad", null };
+            Program.Check("exc-paramname-null",
+                          new ArgumentException(noName[0]).ParamName == null
+                          && new ArgumentOutOfRangeException().ParamName == null
+                          && new ArgEx().ParamName == null);
+            Program.Check("exc-paramname-base-ctor",
+                          new NullArgEx(pnames[0]).ParamName == "value"
+                          && new NullArgEx(pnames[0]).Message == "Value cannot be null. (Parameter 'value')");
+            // int.Parse(string s) and its siblings reject null with
+            // ArgumentNullException(nameof(s)), as double.Parse does.
+            string parseNull = "?";
+            try { int.Parse(noName[1]); } catch (ArgumentNullException e) { parseNull = e.ParamName; }
+            try { long.Parse(noName[1]); } catch (ArgumentNullException e) { parseNull = parseNull + e.ParamName; }
+            try { byte.Parse(noName[1]); } catch (ArgumentNullException e) { parseNull = parseNull + e.ParamName; }
+            Program.Check("parse-int-null", parseNull == "sss");
+            // Dictionary.Add's duplicate key raises `new ArgumentException(message)`
+            // with no name (ThrowHelper.ThrowAddingDuplicateWithKeyArgumentException).
+            var dupKeys = new Dictionary<string, int>();
+            dupKeys.Add(noName[0], 1);
+            bool dupNull = false;
+            try { dupKeys.Add(noName[0], 2); } catch (ArgumentException e) { dupNull = e.ParamName == null; }
+            Program.Check("exc-runtime-paramname-null", dupNull);
             Program.Check("loop-break-out-of-try", Program.LoopBreakOutOfTry() == 3);
             Program.Check("loop-continue-out-of-try", Program.LoopContinueOutOfTry() == 4);
 
