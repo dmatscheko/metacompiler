@@ -156,7 +156,7 @@ Trap: loading library code with `static` vars arms usesRefs for the whole progra
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration leftovers · P3 · SH · OPEN [V]
+### T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration leftovers · P3 · SH · IN PROGRESS (SH worker, round 30) [V]
 Oracle /opt/homebrew/bin/bash 5.3:
 - assoc-ness is a whole-program fact in both engines (assocArrays, rt_isassoc registry): `local m[@]=z` in a function shadowing a global assoc, and compiled `declare -A "$s"` (computed name) are wrong/refused. Needs a per-variable runtime kind.
 - `export +x px=1`: bash prints "export: `+x': not a valid identifier", status 1, and still exports px.
