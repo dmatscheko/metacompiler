@@ -64,9 +64,6 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-1040 python: `type(x) is range` (and enumerate/zip/map/filter/reversed) is False · P3 · PY · IN PROGRESS (PY worker, round 22) [V]
-python3 3.14: `type(range(3)) is range` → True; same for enumerate, zip, map, filter, reversed. Ours False in all engines: the builtin name is bound to a function while type() answers a separate class object (`__name__` and isinstance are already right). Found by PY r21.
-
 ### T-1041 python: CJK multibyte codecs, `\N{NAME}` escapes, DeprecationWarning for invalid escapes — large data · P4 · PY · OPEN [V] · NEEDS SIZE DECISION
 Remainder of T-1028; each needs a table-size decision before work starts. CJK families (shift_jis 15888 two-byte mappings, cp932 19520, euc_jp 6942, gbk 21791, gb2312 7445, gb18030 23940, big5 13710, cp950 13752, big5hkscs 18402, euc_kr 8225, cp949 17048, johab 17065, shift_jis_2004 20240, euc_jis_2004 8860; ~75K unique) ≈ 150–500 KB shared table text + per-family state machines. `\N{NAME}` needs the Unicode name DB (34137 non-algorithmic names, ~215 KB zlib / ~450 KB word-compressed). The DeprecationWarning (`<file>:<line>: DeprecationWarning: "\q" is an invalid escape sequence...` + source line, once per location, only from __main__) needs warnings machinery and call-site source lines (CORE plumbing). Tables would follow the nameprep pattern: one shared file, linked only when the program names the codec.
 
@@ -1100,6 +1097,7 @@ T-1033 ruby: Enumerable methods on classes that include Enumerable; Numeric in I
 T-1029 python: range/reversed type identity; dotted codec names accepted — DONE (PY r21, 07577a53): range is its own type (repr/slices/attrs/hash/errors), per-source iterator + reverse-iterator types, lazy reversed() of a user sequence, dotted codec names only via aliases. Master probe vs python3 3.14 (range surface, iterator types, reversed, idna): 4 legs agree.
 T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep — PARTIAL→split (PY r21, 07577a53): idna nameprep (RFC 3491 over Unicode 3.2, shared python-nameprep.txt; tables linked when the program names 'idna'). CJK codecs (~75K mappings), \N{} (name DB ~450 KB), DeprecationWarning (needs warnings plumbing) filed as follow-up.
 T-1038 kotlin: unsigned ranges lose their type — DONE (KT r18, 43324a36): ranges carry an unsigned width (UIntRange/ULongRange identity, UInt/ULong elements, unsigned MAX for endExclusive) through step/reversed/downTo; until at MIN_VALUE answers EMPTY. Master probe vs kotlinc 2.2.21 (24 lines): 4 legs agree.
+T-1040 python: `type(x) is range` (and enumerate/zip/map/filter/reversed) is False — DONE (PY r22, fa60d906): type(v)/v.__class__ of range/enumerate/zip/map/filter/reversed return the builtin itself. Master probe vs python3 3.14 (is/==/dict keys/constructing via type(v)): 4 legs agree.
 
 # Settled — do not re-open
 
