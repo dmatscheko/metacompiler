@@ -116,7 +116,7 @@ TdEnumDef   <~~ takeAll(); push({tb: ctInt}) ~~>
               EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
 TdDeclr     = TdFnPtr | TdPlain ;
 TdFnPtr     <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
-            = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
+            = [ RetStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
 TdPlain     <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 
@@ -589,7 +589,7 @@ FieldDecl   = FnPtrField | FDecl ;
 FDecl       = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ BitWidth ] ;
 // 'int (*fptr)();' as a member: one cell holding a function identifier.
 FnPtrField  <~~ push({fnp: makeDeclr(takeAll(), "fnptr")}) ~~>
-            = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
+            = [ RetStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
 // 'unsigned a : 3' - the declared width in bits.
 BitWidth    <~~ push({bits: pop()}) ~~> = ":" Number ;
 // An UNNAMED bit field ('int : 3;', 'int : 0;') is pure padding: it is parsed, and
@@ -624,10 +624,14 @@ SRetType    <~~ push({ret: makeRetCt(takeAll())}) ~~>
 
 // 'int (*pick(int w))(int) { ... }': a function RETURNING a function pointer (a funcId).
 FnPtrFuncDef <~~ buildFnPtrFunc(takeAll()) ~~>
-            = TypeInt "(" Stars Id <~~ push(up.in) ~~> ParamList ")" FnParams { Attr } FnBody ;
-// The parameter list of a function TYPE ('(int)', '(void)', '(int, char *)'): only
-// the arity of the call matters here, so the balanced run is parsed and ignored.
-FnParams    = SkipParen ;
+            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> "(" Stars Id <~~ push(up.in) ~~> ParamList ")" FnParams { Attr } FnBody ;
+// The parameter list of a function TYPE ('(int)', '(void)', '(int, char *)'): its
+// parameter types, which a call through the pointer converts its arguments to. A
+// list FnSig does not read is skipped as a balanced run, and calls through it
+// convert nothing.
+FnParams    = FnSig | SkipParen ;
+FnSig       <~~ push({fsig: fnSigOf(takeAll())}) ~~>
+            = "(" [ ( VoidOnly | ParamItem { "," ParamItem } [ "," "..." ] | "..." ) ] ")" ;
 
 // VoidOnly comes first and declines a following '*', so '(void)' is the empty list
 // while '(void *p)' is a parameter. A trailing '...' is accepted and ignored.
@@ -652,7 +656,7 @@ Param       <~~ push(makeParam(takeAll())) ~~>
 // An abstract (unnamed) parameter; 'int ()' is adjusted to a function pointer.
 ParamAbs    <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] [ ArrDims | AbsFnTy { FnParams } ] ;
-AbsFnTy     <~~ push({fnabs: true}) ~~> = FnParams ;
+AbsFnTy     <~~ push(absFnOf(takeAll())) ~~> = FnParams ;
 // An unnamed parameter of typedef type; tried last.
 TdParamAbs  <~~ push(makeTdParam(takeAll())) ~~>
             = { PtrQual } TdName { PtrQual } [ Stars ] [ ArrDims ] ;
@@ -679,6 +683,8 @@ StructGDecl <~~ defineGlobals(takeAll()) ~~>
 
 // A '*' run in a position that pushes nothing (prototypes, casts, sizeof names).
 PStars      = "*" { PtrQual | "*" } ;
+// The '*'s in front of a function-pointer declarator belong to its return type.
+RetStars    <~~ push({rptr: starCount(up.in)}) ~~> = PStars ;
 
 // A run of one or more '*' in a declarator, with the pointer qualifiers that may sit
 // between them. Every level is one uniform i32* cell, so int** nests freely.
@@ -851,11 +857,11 @@ DeclItem    = FnPtrRetDecl | FnPtrDecl | PtrArrDecl | InitDecl ;
 // 'int (*fp)(int)' - a pointer to a function - and 'int (*tab[2])(int)', an array
 // of them. A function pointer is one i32 holding the callee's identifier.
 FnPtrDecl   <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
-            = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams [ "=" DInit ] ;
+            = [ RetStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams [ "=" DInit ] ;
 // 'int (* (*p)(int, int))(int, int)': a pointer to a function returning a function
 // pointer. Before FnPtrDecl: only the second '(' tells them apart.
-FnPtrRetDecl <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
-            = [ PStars ] "(" Stars "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ")" FnParams [ "=" DInit ] ;
+FnPtrRetDecl <~~ push({dcl: makeDeclr(takeAll(), "fnret")}) ~~>
+            = [ RetStars ] "(" Stars "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ")" FnParams [ "=" DInit ] ;
 PtrArrDecl  <~~ push({dcl: makeDeclr(takeAll(), "ptrarr")}) ~~>
             = "(" Stars Id <~~ push(up.in) ~~> ")" ArrDims [ "=" DInit ] ;
 InitDecl    <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
@@ -1156,10 +1162,10 @@ OffsetVal   <~~ var s = takeAll(); push(cOffsetOf(s[0], s.slice(1))) ~~>
 OffMember   <~~ push({fld: up.in}) ~~> = Id ;
 OffIndex    <~~ push({at: pop()}) ~~> = CExpr ;
 // A type name: base plus '*'s, optionally an abstract function-pointer declarator
-// (every function pointer type is the same ctFn) or an array declarator.
+// (whose return type the base and '*'s are) or an array declarator.
 TypeName    <~~ push(makeTypeName(takeAll())) ~~>
             = { Attr | PtrQual } SizeBase { PtrQual } { "*" <~~ push("*") ~~> [ PtrQual ] } [ AbsFnPtr | ArrDims ] ;
-AbsFnPtr    <~~ push({fnabs: true}) ~~> = "(" { Attr } Stars { Attr } ")" FnParams ;
+AbsFnPtr    <~~ push(absFnOf(takeAll())) ~~> = "(" { Attr } Stars { Attr } ")" FnParams ;
 SizeBase    = ScalarName
             | EnumRef <~~ push(ctInt) ~~>
             | KwStruct Id <~~ push(ctStruct(up.in)) ~~>
@@ -1701,9 +1707,10 @@ KwDefault   = "default" KwEnd ;
     // sign-extended to the pointer's 64 bits and truncated back.
     function icallBox(b, v) { return ptrOperand(b, v) }
     function icallUnbox(b, v) { return b.NewTrunc(b.NewPtrToInt(v, llvm.types.I64), i32) }
-    // Unpack one boxed argument into the type the callee actually declares: a pointer
-    // parameter takes the box itself, a 64-bit one its full integer value (which is how
-    // a double travels too, as its bit pattern), and an i32 one the truncation.
+    // Unpack one boxed value into the type it really has - an argument into the type
+    // the callee declares, a result into its return type's register: a pointer takes
+    // the box itself, a 64-bit value its full integer (which is how a double travels
+    // too, as its bit pattern), and an i32 the truncation.
     function icallArg(b, v, want) {
         if (llvm.types.IsPointer(want)) return b.NewBitCast(v, want)
         if (llvm.types.Equal(want, llvm.types.I64)) return b.NewPtrToInt(v, llvm.types.I64)
@@ -1836,7 +1843,7 @@ KwDefault   = "default" KwEnd ;
         for (var i = 1; i < items.length; i++) {
             // An abstract function-pointer declarator ends the type whatever came before
             // it: '(void (*)(void))' is a function pointer, not a pointer to void.
-            if (items[i] != undefined && items[i].fnabs == true) return ctFn
+            if (items[i] != undefined && items[i].fnabs == true) return fnpCt(ct, items[i].sig)
             // An abstract ARRAY declarator: '_Generic(a, int[4]: 2, ...)', 'sizeof(int[4])'.
             if (items[i] != undefined && items[i].dims != undefined) return arrCt(items[i].dims, ct, 0)
             ct = {k: "ptr", p: ct}
@@ -2001,7 +2008,7 @@ KwDefault   = "default" KwEnd ;
     // {k:"int", w: bytes, u: unsigned}  char / short / int / long, signed or not
     // {k:"flt", w: bytes}                float / double / long double
     // {k:"void"}                         only ever reached through a pointer
-    // {k:"ptr", p} | {k:"arr", n, e} | {k:"struct", s} | {k:"fnp"}
+    // {k:"ptr", p} | {k:"arr", n, e} | {k:"struct", s} | {k:"fnp", r, sig}
     // structs[name] = {lty, fields: {fname: {idx, ct, bf}}, order, isUnion, bytes, wideCt}.
     // Every pointer is emitted as i32*; the ct says what it points at and drives the
     // getelementptrs. A cell has its C width (ctLTy), a value lives in i32/i64 (ctRTy).
@@ -2017,8 +2024,12 @@ KwDefault   = "default" KwEnd ;
     var ctVoid = {k: "void"}
     var ctSizeT = {k: "int", w: 8, u: true}
     // A FUNCTION POINTER cell. It holds the callee's identifier (see funcId below),
-    // which is an ordinary i32, so it needs no pointee type.
-    var ctFn = {k: "fnp"}
+    // an ordinary i32. r is the pointed-to function's return type and sig its
+    // parameters ({cts, ptrs}, see fnSigOf); a call through the pointer converts its
+    // arguments and its result by them. ctFn is the pointer nothing more is known of:
+    // an int result, no argument conversion.
+    function fnpCt(r, sig) { return {k: "fnp", r: r, sig: sig} }
+    var ctFn = fnpCt(undefined, undefined)
     var structs = {}
     function isFlt(ct) { return ct.k == "flt" }
     // The C types whose VALUE is a machine address, and so whose conversions to and
@@ -2261,7 +2272,7 @@ KwDefault   = "default" KwEnd ;
             }
             // A function-pointer member brings its own base type with it.
             if (it != undefined && it.fnp != undefined) {
-                fields.push({name: it.fnp.name, bty: ctFn, star: 0, dims: it.fnp.dims, uns: false})
+                fields.push({name: it.fnp.name, bty: fnpDeclCt(bty, it.fnp), star: 0, dims: it.fnp.dims, uns: false})
                 star = 0
                 continue
             }
@@ -3436,7 +3447,7 @@ KwDefault   = "default" KwEnd ;
                 if (hasOwn(enumConsts, name)) return {b: b, v: kint(enumConsts[name] | 0), ct: ctInt, cv: enumConsts[name] | 0}
                 // A bare function name is its address: the function pointer value.
                 if (hasOwn(userFuncs, name)) {
-                    return {b: b, v: llvm.constant.NewInt(i32, funcId(name, userFuncs[name])), ct: ctFn}
+                    return {b: b, v: llvm.constant.NewInt(i32, funcId(name, userFuncs[name])), ct: funcPtrCt(name)}
                 }
                 var sc = cStdConst(name)
                 if (sc != undefined) return sc(b)
@@ -4075,10 +4086,10 @@ KwDefault   = "default" KwEnd ;
             for (var i = start; i < lists.length; i++) {
                 var s = lists[i]
                 if (s.args != undefined) {
-                    var ri = emitIndirectCall(b, v, s.args)
+                    var ri = emitIndirectCall(b, v, vct, s.args)
                     b = ri.b
                     v = ri.v
-                    vct = ctInt
+                    vct = ri.ct
                     declRet = undefined
                 } else {
                     var stepCt = (declRet != undefined && vct.k == "int") ? declRet : vct
@@ -4129,15 +4140,22 @@ KwDefault   = "default" KwEnd ;
         // A pointer-returning function reports its declared pointer type (its LLVM result
         // is already i32*); ctInt would send 'strchr(s, c) - s' down the ptr+int path.
         var rct = hasOwn(funcRetCt, name) ? funcRetCt[name] : ctInt
-        if (retIsPtr(name)) { rct = funcRetAll[name] }
+        if (retIsPtr(name) || (hasOwn(funcRetAll, name) && funcRetAll[name].k == "fnp")) { rct = funcRetAll[name] }
         return {b: b, v: cv, ct: rct}
     }
-    function emitIndirectCall(b, idv, args) {
+    // A call through a function pointer of type fct: the arguments and the result are
+    // converted by its signature exactly as a direct call's are. A struct or void
+    // result, and a pointer whose type says nothing, come back as an int.
+    function emitIndirectCall(b, idv, fct, args) {
+        var known = fct != undefined && fct.k == "fnp"
+        var sig = (known && fct.sig != undefined) ? fct.sig : {cts: undefined, ptrs: undefined}
         var argValues = []
-        b = emitCallArgs(b, args, argValues)
+        b = emitCallArgs(b, args, argValues, sig.cts, sig.ptrs)
         var all = [idv]
         for (var i = 0; i < argValues.length; i++) { all.push(icallBox(b, argValues[i])) }
-        return {b: b, v: icallUnbox(b, b.NewCall(trampolineFor(args.length), all)), ct: ctInt}
+        var rct = known ? fct.r : undefined
+        if (rct == undefined || rct.k == "void" || rct.k == "struct" || rct.k == "arr") { rct = ctInt }
+        return {b: b, v: icallArg(b, b.NewCall(trampolineFor(args.length), all), ctRTy(rct)), ct: rct}
     }
 
     // ----- Statement thunks: function(block) -> block to continue in -----
@@ -4145,24 +4163,34 @@ KwDefault   = "default" KwEnd ;
     // ----- Declarators -----
     // A declarator collapses into a descriptor; the enclosing declaration owns the base type.
     function makeDeclr(items, kind) {
-        var d = {name: "", ptr: 0, dims: undefined, init: undefined, gv: undefined, kind: kind}
+        var d = {name: "", ptr: 0, rptr: 0, sigs: [], dims: undefined, init: undefined, gv: undefined, kind: kind}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) continue
             if (typeof it == "string") { d.name = it; continue }
             if (typeof it == "function") { d.init = it; continue }
             if (it.ptr != undefined) { d.ptr = it.ptr; continue }
+            if (it.rptr != undefined) { d.rptr = it.rptr; continue }
+            if (it.fsig != undefined) { d.sigs.push(it.fsig); continue }
             if (it.dims != undefined) { d.dims = it.dims; continue }
             if (it.gv != undefined) { d.gv = it.gv; continue }
             d.init = it            // {list: ...} or {str: ...}
         }
         return d
     }
+    // The function-pointer type a function-pointer declarator names, without its
+    // array dimensions. 'int (**pp)(int)': each '*' past the first is a pointer to the
+    // function pointer. 'int (*(*p)(int))(int)' (kind "fnret") points to a function
+    // returning a function pointer; its two parameter lists come innermost first.
+    function fnpDeclCt(base, d) {
+        var r = ptrTo(d.rptr, base)
+        var f = (d.kind == "fnret") ? fnpCt(fnpCt(r, d.sigs[1]), d.sigs[0]) : fnpCt(r, d.sigs[0])
+        return d.ptr > 1 ? ptrTo(d.ptr - 1, f) : f
+    }
     // The C type that a base type plus one declarator name.
     function declCt(base, d) {
-        if (d.kind == "fnptr") {
-            // 'int (**pp)(int)': each '*' past the first is a pointer to the function pointer.
-            var f = d.ptr > 1 ? ptrTo(d.ptr - 1, ctFn) : ctFn
+        if (d.kind == "fnptr" || d.kind == "fnret") {
+            var f = fnpDeclCt(base, d)
             if (d.dims != undefined) return arrCt(d.dims, f, initCount(d.init, d.dims, f))
             return f
         }
@@ -4289,14 +4317,20 @@ KwDefault   = "default" KwEnd ;
             return contB
         }
     }
-    // 'int (*f)(int)' as a parameter: the base type is irrelevant, only the name is.
+    // 'int (*f)(int)' as a parameter: items = [{bty}|{sname}, {ptr}, name, {fsig}?].
     function makeFnPtrParam(items) {
-        var name = ""
-        for (var i = 0; i < items.length; i++) { if (typeof items[i] == "string") name = items[i] }
-        return {name: name, ptr: false, ct: ctFn}
+        var base = ctInt
+        if (items[0].sname != undefined) { base = ctStruct(items[0].sname) }
+        else if (items[0].bty != undefined) { base = items[0].bty }
+        var d = makeDeclr(items.slice(1), "fnptr")
+        return {name: d.name, ptr: false, ct: fnpDeclCt(base, d)}
     }
-    // items = [{ptr}, name, [params...], bodyThunk].
-    function buildFnPtrFunc(items) { emitFunctionBody(items[1], items[2], items[3], undefined) }
+    // items = [{ret}, {ptr}, name, [params...], {fsig}?, bodyThunk]. The function
+    // returns a function pointer, which is what a call of it reports.
+    function buildFnPtrFunc(items) {
+        noteRetAll(items[2], fnpCt(items[0].ret, items.length > 5 ? items[4].fsig : undefined))
+        emitFunctionBody(items[2], items[3], items[items.length - 1], undefined)
+    }
     // ----- GCC statement expressions -----
     // The value of the last expression statement EMITTED. exprToStmt is overridden to
     // record it; a statement expression emits its block and then reads it back. Emission
@@ -4488,6 +4522,31 @@ KwDefault   = "default" KwEnd ;
         if (pname == undefined || pname == "") { unnamedSeq = unnamedSeq + 1; pname = "$arg" + unnamedSeq }
         return {name: pname, ptr: ct.k == "ptr" || isAggCt(ct), ct: ct}
     }
+    // A function type's parameter list -> the {cts, ptrs} a call through a pointer
+    // to it converts its arguments by (emitCallArgs).
+    function fnSigOf(params) {
+        var cts = []
+        var ptrs = []
+        for (var i = 0; i < params.length; i++) {
+            cts.push(params[i].ct)
+            ptrs.push(params[i].ptr == true)
+        }
+        return {cts: cts, ptrs: ptrs}
+    }
+    // An abstract function declarator ('int (*)(int)', the parameter 'int (int)'),
+    // with the {fsig} of its parameter list when FnSig read one.
+    function absFnOf(items) {
+        var sig = undefined
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].fsig != undefined) { sig = items[i].fsig }
+        }
+        return {fnabs: true, sig: sig}
+    }
+    // The type of a function's name used as a value: a pointer to that function.
+    function funcPtrCt(name) {
+        return fnpCt(hasOwn(funcRetAll, name) ? funcRetAll[name] : undefined,
+                     {cts: paramCtsOf(name), ptrs: paramPtrsOf(name)})
+    }
     // Param / ParamAbs items = [{bty}|{sname}, {ptr}?, name?, {dims}?].
     function makeParam(items) {
         var i = 0
@@ -4495,7 +4554,7 @@ KwDefault   = "default" KwEnd ;
         if (items[i] != undefined && items[i].sname != undefined) { base = ctStruct(items[i].sname); i++ }
         else if (items[i] != undefined && items[i].bty != undefined) { base = items[i].bty; i++ }
         for (var k = i; k < items.length; k++) {
-            if (items[k] != undefined && items[k].fnabs == true) return paramOf("", ctFn)
+            if (items[k] != undefined && items[k].fnabs == true) return paramOf("", fnpCt(ptrTo(starsOf(items[i]), base), items[k].sig))
         }
         var d = makeDeclr(items.slice(i), "plain")
         return paramOf(d.name, declCt(base, d))

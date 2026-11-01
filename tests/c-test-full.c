@@ -586,6 +586,16 @@ int s19_inc(int x) { return x + 1; }
 int s19_dbl(int x) { return x + x; }
 int s19_apply(int (*f)(int), int v) { return f(v); }
 int (*s19_pick(int which))(int) { return which == 0 ? s19_inc : s19_dbl; }
+/* A call through a pointer converts its arguments and its result by the pointer's
+   function type, as a direct call does (C11 6.5.2.2p5, p7). */
+double s19_half(double x) { return x / 2; }
+long s19_hi(long x) { return x * 4294967296L; }
+char *s19_skip(char *s) { return s + 2; }
+float s19_f(float x) { return x * 1.5f; }
+double s19_dapply(double (*f)(double), int v) { return f(v); }
+typedef double (*s19_df)(double);
+struct S19 { double (*h)(double); long (*w)(long); };
+double (*s19_dpick(int w))(double) { return s19_half; }
 int s19(void) {
     int (*fp)(int) = s19_inc;
     check(1901, fp(4) == 5 && (*fp)(4) == 5);
@@ -595,6 +605,21 @@ int s19(void) {
     check(1903, tab[0](3) + tab[1](3) == 10);
     check(1904, s19_apply(s19_dbl, 6) == 12);
     check(1905, s19_pick(1)(5) == 10);
+    double (*dp)(double) = s19_half;
+    long (*lp)(long) = s19_hi;
+    char *(*cp)(char *) = s19_skip;
+    float (*ffp)(float) = s19_f;
+    check(1906, (int)(dp(9.0) * 10) == 45 && (int)(dp(9) * 10) == 45);
+    check(1907, lp(3) == 12884901888L);
+    char word[6] = "hello";
+    check(1908, *cp(word) == 'l' && (int)(ffp(3.0f) * 10) == 45);
+    s19_df td = s19_half;
+    struct S19 st;
+    st.h = s19_half;
+    st.w = s19_hi;
+    check(1909, (int)(td(7) * 10) == 35 && (int)(st.h(5) * 10) == 25 && st.w(1) == 4294967296L);
+    check(1910, (int)(s19_dapply(s19_half, 3) * 10) == 15 && (int)(s19_dpick(0)(13) * 10) == 65);
+    check(1911, (int)(((double (*)(double))td)(11) * 10) == 55 && (int)((*s19_half)(1) * 10) == 5);
     return 0;
 }
 
