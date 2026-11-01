@@ -155,7 +155,7 @@ TdExtern    <~~ push({ext: true}) ~~> = "extern" KwEnd ;
 TdStatic    <~~ push(makeDeclSeq(tdBase(takeAll()), true)) ~~>
             = { TdQual } KwStatic { TdQual } TdName { TdQual } SInitDecl { "," SInitDecl } ";" ;
 TdFuncDef   <~~ defineTdFunc(takeAll()) ~~>
-            = { TdSpec } TdName { TdQual } [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } FnBody ;
+            = { TdSpec } TdName { TdQual } [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } FnBody ;
 TdProto     <~~ takeAll() /* A prototype needs no lowering. */ ~~>
             = { TdSpec } TdName { TdQual } [ Stars ] Id ParamList { Attr } ";" ;
 TdQual      = "const" KwEnd | "volatile" KwEnd | "extern" KwEnd | "register" KwEnd | "auto" KwEnd
@@ -3567,13 +3567,16 @@ KwDefault   = "default" KwEnd ;
         var name = pop()
         var star = pop()
         var rt = (typeof star == "string") ? pop() : star
-        // The declared RETURN type converts the returned value, exactly as C requires
-        // (6.8.6.4p3) - which is what makes a function declared int truncate a long.
-        // A pointer return (the star run present) keeps the address unconverted; its
-        // type is still what an unevaluated call (typeOnly) answers.
+        defineFunc(name, params, bodyT, star, rt.ret)
+    }
+    // The declared RETURN type converts the returned value, exactly as C requires
+    // (6.8.6.4p3) - which is what makes a function declared int truncate a long.
+    // A pointer return (the star run present) keeps the address unconverted; its
+    // type is still what an unevaluated call (typeOnly) answers.
+    function defineFunc(name, params, bodyT, star, ret) {
         var isPtr = typeof star == "string"
-        funcs[name] = {params: params, body: bodyT, ret: isPtr ? undefined : rt.ret,
-                       rct: isPtr ? ptrTo(starCount(star), rt.ret) : rt.ret}
+        funcs[name] = {params: params, body: bodyT, ret: isPtr ? undefined : ret,
+                       rct: isPtr ? ptrTo(starCount(star), ret) : ret}
     }
     function starCount(text) { return text.split("*").length - 1 }
     // The C type a 'struct S' / 'union U' / 'struct S *' return type names.
@@ -3657,10 +3660,14 @@ KwDefault   = "default" KwEnd ;
         var d = makeDeclr(items.slice(1), "plain")
         return paramOf(d.name, declCt(typedefOf(items[0].tname), d))
     }
-    // items = [{tname}, name, [params...], bodyThunk]: a function whose return type
-    // is a typedef name. The value returned is one word like every other, so only the
-    // declarator syntax differs from an ordinary definition.
-    function defineTdFunc(items) { funcs[items[1]] = {params: items[2], body: items[3]} }
+    // items = [{tname}, "*"?, name, [params...], bodyThunk]: a function whose return
+    // type is a typedef name, which resolves to the type it abbreviates.
+    // Twin of buildTdFunc in c-to-llvm-ir.abnf.
+    function defineTdFunc(items) {
+        var star = items.length > 4 ? items[1] : undefined
+        var n = items.length - 3
+        defineFunc(items[n], items[n + 1], items[n + 2], star, typedefOf(items[0].tname))
+    }
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "c"

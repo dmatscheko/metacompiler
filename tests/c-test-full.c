@@ -250,6 +250,20 @@ static const S08Num s08_k = 3;
 S08Num const s08_k2 = 4;
 static inline S08Num s08_twice(const S08Num x, S08Num const y) { return x * 2 + y; }
 S08Num s08_count(void) { static S08Num c = 0; c++; return c; }
+/* A typedef'd RETURN type is the type it abbreviates (C11 6.7.8p3): a call converts to
+   it and sees its full width, whether the definition or only a prototype precedes. */
+typedef double S08D;
+typedef long S08L;
+typedef unsigned char S08UC;
+typedef double (*S08DF)(double);
+S08L s08_fwd(int);
+S08D s08_half(S08D x) { return x / 2; }
+S08L s08_big(int x) { return x * 4294967296L; }
+S08UC s08_byte(int x) { return x; }
+double s08_dh(double x) { return x / 2; }
+S08DF s08_dpick(void) { return s08_dh; }
+S08D *s08_next(S08D *p) { return p + 1; }
+S08Box s08_box(int v) { S08Box r; r.v = v; return r; }
 int s08(void) {
     S08Num n = 41;
     check(801, n + 1 == 42);
@@ -269,8 +283,17 @@ int s08(void) {
     s08_count();
     check(806, a + sb == 42 && v + r + tail == 2 && s08_seed == 42 && s08_k + s08_k2 == 7);
     check(807, s08_twice(1, 1) == 3 && s08_count() == 2);
+    check(808, (int)(s08_half(9.0) * 10) == 45);
+    check(809, s08_big(3) == 12884901888L && s08_fwd(2) == 2000000000000L);
+    check(810, s08_byte(-1) == 255);
+    check(811, (int)(s08_dpick()(7.0) * 10) == 35);
+    S08D ds[2] = { 1.5, 2.5 };
+    check(812, *s08_next(ds) == 2.5);
+    check(813, s08_box(6).v == 6);
     return 0;
 }
+
+S08L s08_fwd(int x) { return x * 1000000000000L; }
 
 // ===== SECTION 09: pointers =====
 int s09_seen = 0;

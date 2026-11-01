@@ -132,9 +132,9 @@ TdExtern    <~~ push({ext: true}) ~~> = "extern" KwEnd ;
 TdStatic    <~~ push(makeDeclSeq(tdBase(takeAll()), true)) ~~>
             = { TdQual } KwStatic { TdQual } TdName { TdQual } SInitDecl { "," SInitDecl } ";" ;
 TdFuncDef   <~~ buildTdFunc(takeAll()) ~~>
-            = { TdSpec } TdName { TdQual } [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } FnBody ;
-TdProto     <~~ takeAll() /* A prototype needs no lowering. */ ~~>
-            = { TdSpec } TdName { TdQual } [ Stars ] Id ParamList { Attr } ";" ;
+            = { TdSpec } TdName { TdQual } [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } FnBody ;
+TdProto     <~~ registerTdProto(takeAll()) ~~>
+            = { TdSpec } TdName { TdQual } [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
 TdQual      = "const" KwEnd | "volatile" KwEnd | "extern" KwEnd | "register" KwEnd | "auto" KwEnd
             | "inline" KwEnd | "_Noreturn" KwEnd | "_Thread_local" KwEnd | "_Atomic" KwEnd | Attr ;
 // At file scope 'static' is only linkage.
@@ -4649,9 +4649,15 @@ KwDefault   = "default" KwEnd ;
         var name = pop()
         var star = pop()
         var rt = (typeof star == "string") ? pop() : star
-        noteRetCt(name, (typeof star == "string") ? undefined : rt.ret)
-        noteRetAll(name, (typeof star == "string") ? ptrTo(starCount(star), rt.ret) : rt.ret)
+        noteRet(name, star, rt.ret)
         emitFunctionBody(name, params, bodyT, undefined)
+    }
+    // Records the declared return type 'ret', or a pointer to it when a star run
+    // ("*", "**") stands in front of the name.
+    function noteRet(name, star, ret) {
+        var isPtr = typeof star == "string"
+        noteRetCt(name, isPtr ? undefined : ret)
+        noteRetAll(name, isPtr ? ptrTo(starCount(star), ret) : ret)
     }
     // A prototype only records the shape: the name and the parameters are dropped, the
     // return type is remembered so a call that PRECEDES the definition already emits
@@ -4661,8 +4667,7 @@ KwDefault   = "default" KwEnd ;
         var name = pop()
         var star = pop()
         var rt = (typeof star == "string") ? pop() : star
-        noteRetCt(name, (typeof star == "string") ? undefined : rt.ret)
-        noteRetAll(name, (typeof star == "string") ? ptrTo(starCount(star), rt.ret) : rt.ret)
+        noteRet(name, star, rt.ret)
         noteParamCts(name, params)
     }
     // A prototype sitting in a comma-separated declarator list ('int f(int a), g(int), a;').
@@ -4830,10 +4835,27 @@ KwDefault   = "default" KwEnd ;
         var d = makeDeclr(items.slice(1), "plain")
         return paramOf(d.name, declCt(typedefOf(items[0].tname), d))
     }
-    // items = [{tname}, name, [params...], bodyThunk]: a function whose return type
-    // is a typedef name. The value returned is one i32 like every other, so only the
-    // declarator syntax differs from an ordinary definition.
-    function buildTdFunc(items) { emitFunctionBody(items[1], items[2], items[3], undefined) }
+    // items = [{tname}, "*"?, name, [params...], bodyThunk?]: a function whose return
+    // type is a typedef name. The name resolves to the type it abbreviates, which then
+    // drives the signature exactly as if spelled out (a struct by value gets sret).
+    // Returns [name, params, sret struct type or undefined].
+    function noteTdRet(items) {
+        var rt = typedefOf(items[0].tname)
+        var star = (typeof items[1] == "string" && typeof items[2] == "string") ? items[1] : undefined
+        var n = star == undefined ? 1 : 2
+        noteRet(items[n], star, rt)
+        var sret = (star == undefined && rt.k == "struct") ? rt : undefined
+        if (sret != undefined) { structRet[items[n]] = sret }
+        return [items[n], items[n + 1], sret]
+    }
+    function buildTdFunc(items) {
+        var d = noteTdRet(items)
+        emitFunctionBody(d[0], d[1], items[items.length - 1], d[2])
+    }
+    function registerTdProto(items) {
+        var d = noteTdRet(items)
+        noteParamCts(d[0], d[1])
+    }
 
     // System headers the runtime already provides; #include of anything else is an
     // external library we cannot resolve (see resolveImport in lib/compile-core.js).
