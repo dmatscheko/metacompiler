@@ -168,9 +168,6 @@ range 0..2: 7` (a plain RangeError); the current engines print the IndexError fo
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
-### T-1035 c: the C compiler silently merges two definitions of one function name into a corrupt module · P3 · CORE · IN PROGRESS (CORE worker, round 18) [V]
-Defining the same C function twice (seen with a second `rt_isref` in languages/lib/bash-rt.c during SH r26) produces an LLVM module with "%entry already present" instead of a redefinition error. cc rejects it ("redefinition of 'rt_isref'"). The C front end should diagnose a duplicate function definition.
-
 # Closed
 
 (The master moves DONE / DECLINED tickets here, one line each:
@@ -1120,6 +1117,7 @@ T-1047 kotlin: interpreter `Pair::class.simpleName` is null — DONE (KT r20, f4
 T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array literals; prefix-assignment and assoc-key edge cases — PARTIAL→split (SH r28, 4 commits): prefix bindings before declaration builtins, assoc arrays in bash hash order, must-use-subscript + empty-key diagnostics, expanded @ as key, unsplit assoc literal words; probed 4 legs vs bash 5.3; remainder filed as follow-up
 T-1055 csharp: `base.Prop` / `base.Field` reads unsupported — DONE (CS r8, cb5c2c80): base.Prop/base.Field reads in both grammars, base.Message via hidden __excmsg slot in all 3 engines; probed 3 legs vs spec (multi-level base.Name/base.V chains, nested Message overrides, ArgumentException suffix)
 T-1054 php: interpreter `(array)` cast of an object drops references; generator self-resume message — DONE (PHP r39, 485ec76e): (array) of an object copies the property table at cast time keeping references (3 engines); self-resume of a running generator raises 'Cannot resume an already running generator' and stays resumable; also unset($o->p) releases the reference holder (typed+untyped); probed 3 legs vs php-src semantics. Lazy stdClass table sharing after a cast is T-1053 (COW) territory
+T-1035 c: the C compiler silently merges two definitions of one function name into a corrupt module — DONE (CORE r18, 20df82c7): shared cNoteFnDef rejects a second body with clang's "redefinition of 'f'" in both engines (plain/struct/typedef/fn-ptr returns); repeated prototypes, extern/static decls before the body still legal (probed: all legs exit 19 = clang); SHOULD FAIL rows added
 
 # Settled — do not re-open
 
