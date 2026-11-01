@@ -114,7 +114,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `CompareTo` on strings, `char.ConvertFromUtf32` · P3 · CS · OPEN [V spec-only]
+### T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `CompareTo` on strings, `char.ConvertFromUtf32` · P3 · CS · IN PROGRESS (CS worker, round 2) [V spec-only]
 Found by the CS worker, round 1 (.NET reference docs). `string.CompareOrdinal(a, ia, b, ib, len)` → "unknown string method" (compares
 Min(len, len-index) units; ArgumentOutOfRangeException on bad ranges). `list.Sort(string.CompareOrdinal)` → our "culture's collation
 not modelled" error; the method group must convert to Comparison<string> (C# spec, method group conversion). `"x".CompareTo("a")` →
@@ -138,7 +138,7 @@ are queued, buffers past capacity instead of blocking. go/test/chan powser1/2, s
 (10000 nested drains overflow the stack) still fail. Needs a suspension mechanism that works in all three engines (the manual calls
 real coroutines out of the subset - decide first). Go also runs the most recently spawned goroutine first; we run spawn order.
 
-### T-1021 go: interface dispatch to a method promoted from a defined non-struct type; `%T` of a method expression · P3 · GO · OPEN [V]
+### T-1021 go: interface dispatch to a method promoted from a defined non-struct type; `%T` of a method expression · P3 · GO · IN PROGRESS (GO worker, round 21) [V]
 Found by the GO worker, round 20 (oracle go run). `type T []int; func (t *T) Sum() int {..}; type U struct{ *T }; type Summer interface{
 Sum() int }; var s Summer = &U{&t}; s.Sum()` → go the sum; interpreter 0, run/native "range over a object" (goHasMethod/goMethod only
 follow embedded fields holding class instances - interpreter, abnf/jsrtgolang.go/jsrt.go, go-rt.metajs). `fmt.Printf("%T %T", (*P).Add,
