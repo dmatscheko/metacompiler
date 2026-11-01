@@ -122,7 +122,7 @@ Found by the CS worker, round 2 (.NET reference source). `try { char.ConvertFrom
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1024 · KT · OPEN · range type identity and function-spelled range builders
+### T-1024 kotlin: range type identity and function-spelled range builders · P3 · KT · OPEN [V]
 `val a: Any = 1..5; a is ClosedRange<*>` / `a is OpenEndRange<*>` — kotlinc: true / true; ours (all three engines): false / false.
 `("a".."c")::class.simpleName` — kotlinc `ComparableRange`; ours `null`.
 `"a".rangeTo("c")` / `"a".rangeUntil("c")` — kotlinc `a..c` / `a..<c`; ours aborts.
@@ -152,10 +152,10 @@ of a object" (goPromDt matches only when the field's type text equals its name).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-1025 · PHP · OPEN · reference counts: remaining release points
+### T-1025 php: reference counts: remaining release points · P3 · PHP · OPEN [V spec-only]
 Follow-up of T-1000 (only correct-but-high counts remain, so `&` may survive a copy that PHP would unwrap). Not yet released: arrays that hold reference cells and die (overwritten, frame-local, temporaries passed as args); frames unwound by an exception; unfinished generators; dynamic names (`$$n`, extract, `global $$k`). Interpreter copies by-value array params counting kept cells while the compiler shares unwritten params, so the engines can differ once the original holder dies. Also: print_r recursion depth and the "Recursion detected" warnings for count/print_r/var_dump. Spec: zend_array_dup_element keeps a ref only while refcount > 1.
 
-### T-1026 · PHP · OPEN · return-by-reference functions; static property assignment copy
+### T-1026 php: return-by-reference functions; static property assignment copy · P3 · PHP · OPEN [V spec-only]
 `function &counter() { static $c = 0; $c++; return $c; } $c1 = &counter(); $c1 += 100; echo counter();` — PHP: 102; ours: 2 (`=&` of a by-ref return degrades to a value copy). Unverified: the compiler may not copy on `C::$p = $a`, aliasing `$a`'s array (check `$a=[1]; C::$p=$a; $a[0]=2; echo C::$p[0];` → 1). Found by PHP r35; spec-only oracle.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
