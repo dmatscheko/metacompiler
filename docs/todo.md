@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1001** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1002** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -93,16 +93,12 @@ foreign object).
 
 # JV — Java
 
-### T-998 java compiled: an interface extending `Comparable<T>` fails with "variable not defined: Comparable" · P2 · JV · IN PROGRESS (JV worker, round 17) [V]
-Found by the master probing round 16 (oracle java 24). `interface Shape extends Comparable<Shape> { double area(); default int
-compareTo(Shape o) {..} }` with a class implementing it → interpreter and java agree; llvm.Run and native abort with "js runtime
-error: variable not defined: Comparable" (pre-existing on main). Library interfaces as an interface's superinterface need a stub.
-
-### T-999 java: package access is not checked; tests/java-test-multifile.java imports non-public classes · P3 · JV · IN PROGRESS (JV worker, round 17) [V]
-Found by the JV worker, round 16 (oracle javac 24). `util.Toolbox` / `util.Pair` in tests/imports/util are not public; javac refuses
-the import ("Toolbox is not public in util; cannot be accessed from outside package"). Both halves accept it. Fix the test (make
-them public) and refuse access to a package-private type from another package. Generic constructors' type-parameter lists are
-skipped (SkipAngle), so a bound cycle there is not checked either.
+### T-1001 java interpreter: default method from a more specific superinterface loses to the less specific one; package-private members across packages · P3 · JV · OPEN [V]
+Found by the master probing round 17 (oracle java 24). `interface A { default String who() { return "A"; } } interface B extends A
+{ default String who() { return "B"; } } class C implements A, B {}` → `new C().who()` java and the compiler `B`, interpreter `A`
+(jFindMember walks __ifaces in declaration order). Also (JV worker, round 17): a package-private member of a public class used from
+another package (`Toolbox.clamp(..)`) → javac "clamp(int,int,int) is not public in Toolbox; cannot be accessed from outside
+package"; all legs accept it (needs the receiver's static type at each member access).
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
@@ -1108,6 +1104,8 @@ T-974 java: cyclic inheritance across files, through a redefined Object, and in 
 T-994 kotlin: a binary operator at the start of a line continues the previous expression — DONE - OpSameLine: a newline outside ()/[]/${} ends the statement before + - * / % and postfix ++/--; kotlinc 2.2.21 verified
 T-995 kotlin: sortedBy/sortedWith selector call counts differ from the JDK's TimSort; held map entries are snapshots — DONE - JDK 24 TimSort port (call counts and contract violation match), comparator call order, live map entry nodes with setValue
 T-970 php: `print_r` of a self-referencing array never terminates; `count($x, COUNT_RECURSIVE)`; `&` marker needs reference counts — PARTIAL - count COUNT_RECURSIVE (+ValueError, sizeof), print_r *RECURSION*, library constants without a library piece; var_dump & needs exact refcounts, filed
+T-998 java compiled: an interface extending `Comparable<T>` fails with "variable not defined: Comparable" — DONE - library interfaces as supertypes get stub descriptors; instanceof Comparable/Runnable/Iterable true for user classes; all legs
+T-999 java: package access is not checked; tests/java-test-multifile.java imports non-public classes — DONE - import of a non-public type from another package refused with javac's message; multifile test fixed; constructor type-variable cycles checked
 
 # Settled — do not re-open
 
