@@ -307,6 +307,7 @@ char *rt_getvar_ind(char *n);
 int rt_varslot(char *n);
 int rt_setvar_byname(char *n, char *v);
 int rt_eval_assign(char *s);
+int rt_decl_word(char *w, int d);
 int putchar(int c);
 
 /* ---- standard error and fail-stop ------------------------------------------
@@ -7545,6 +7546,36 @@ int rt_eval_assign(char *s)
         while (s[i] == 32 || s[i] == 9) i = i + 1;
         if (s[i] == 59) i = i + 1;
     }
+    return 0;
+}
+
+/* One operand of a declaration that came out of an expansion (`local "$1"`,
+ * `declare $v='x y'`): NAME, NAME=VALUE or NAME+=VALUE, the value taken as it
+ * is. With d >= 0 the name is made a local of the call whose save stack starts
+ * at d, unless it already is one. Answers 0, 1 for a word that is no name
+ * (bash's "not a valid identifier"), 2 for one that starts with - or +: an
+ * option, which only the emitter could apply. Twin of the computed operands of
+ * makeDecl in bash-interpreter.abnf. */
+int rt_decl_word(char *w, int d)
+{
+    int i = 0;
+    int app = 0;
+    int id;
+    char *nm;
+    char *v;
+    if (w[0] == 45 || w[0] == 43) return 2;
+    while (w[i] == 95 || (w[i] >= 65 && w[i] <= 90) || (w[i] >= 97 && w[i] <= 122)
+           || (i > 0 && w[i] >= 48 && w[i] <= 57)) i = i + 1;
+    if (i == 0) return 1;
+    if (w[i] == 43 && w[i + 1] == 61) app = 1;
+    else if (w[i] != 61 && w[i] != 0) return 1;
+    nm = rt_substr(w, 0, i);
+    id = rt_varslot(nm);
+    if (d >= 0 && id >= 0 && rt_local_here(id, d) == 0) rt_local_new(id, d, w[i] == 0 ? 1 : 0);
+    if (w[i] == 0) return 0;
+    v = rt_substr(w, i + 1 + app, -1);
+    if (app != 0) v = rt_strcat(rt_getvar_byname(nm), v);
+    rt_setvar_byname(nm, v);
     return 0;
 }
 

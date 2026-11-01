@@ -815,6 +815,38 @@ check fsub1 "$xfs|$xfv|$xfr|$REPLY" "hi|7|r7|keep"
 check fsub2 "<${ for xfi in a b; do echo -$xfi-; done; }>" "<-a-
 -b->"
 
+# ----- declaration operands computed by expansion; + options -----
+xdn=(xdfoo)
+declare ${xdn[0]}='hello there'
+check dyn1 "$xdfoo" "hello there"
+xdf() { local "$1"; echo "$xdx $xda"; }
+check dyn2 "$(xdf 'xdx=y xda=b'; echo "[$xdx$xda]")" "y xda=b 
+[]"
+xdv=x
+typeset xds${xdv}+=foo
+typeset xds${xdv}+=bar
+check dyn3 "$xdsx" "foobar"
+declare 'xd b' xdc=1 2>/dev/null
+check dyn4 "$?/$xdc" "1/1"
+xdl=('xdp=P' 'xdq=Q')
+export "${xdl[@]}"
+check dyn5 "$xdp$xdq" "PQ"
+declare -i xdi
+xdi=2+3
+declare +i xdi
+xdj=$xdi
+xdi=2+3
+check dyn6 "$xdj $xdi" "5 2+3"
+readonly xdr=r1
+typeset +r xdr=r2 2>/dev/null
+check dyn7 "$?/$xdr" "1/r1"
+declare -- xdd=1
+check dyn8 "$xdd" "1"
+
+# ----- set -u: an append and a function's locals read no unbound name -----
+check nou1 "$(set -u; xuf() { local xul; xul+=q; echo "$xul"; }; xuf; xuv+=w; echo "$xuv")" "q
+w"
+
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
 # arithmetic error's message reach it from llvm.Run as they do from the interpreter.

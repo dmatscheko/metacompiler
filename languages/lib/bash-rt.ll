@@ -14191,7 +14191,7 @@ entry:
 	%391 = phi i32 [ 1, %388 ], [ 0, %389 ]
 	br label %376
 
-dead764:
+dead769:
 	ret i32 0
 }
 
@@ -58968,6 +58968,410 @@ dead747:
 	ret i32 0
 }
 
+define i32 @rt_decl_word(i32* %0, i32 %1) {
+entry:
+	%2 = alloca i32*
+	store i32* %0, i32** %2
+	%3 = alloca i32
+	store i32 %1, i32* %3
+	%4 = alloca i32
+	store i32 0, i32* %4
+	%5 = alloca i32
+	store i32 0, i32* %5
+	%6 = alloca i32
+	%7 = alloca i32*
+	%8 = alloca i32*
+	%9 = load i32*, i32** %2
+	%10 = getelementptr i8, i32* %9, i32 0
+	%11 = load i8, i8* %10
+	%12 = sext i8 %11 to i32
+	%13 = icmp eq i32 %12, 45
+	%14 = zext i1 %13 to i32
+	%15 = icmp ne i32 %14, 0
+	%16 = zext i1 %15 to i32
+	%17 = icmp ne i32 %16, 0
+	br i1 %17, label %27, label %18
+
+18:
+	%19 = load i32*, i32** %2
+	%20 = getelementptr i8, i32* %19, i32 0
+	%21 = load i8, i8* %20
+	%22 = sext i8 %21 to i32
+	%23 = icmp eq i32 %22, 43
+	%24 = zext i1 %23 to i32
+	%25 = icmp ne i32 %24, 0
+	%26 = zext i1 %25 to i32
+	br label %27
+
+27:
+	%28 = phi i32 [ %16, %entry ], [ %26, %18 ]
+	%29 = icmp ne i32 %28, 0
+	br i1 %29, label %30, label %31
+
+30:
+	ret i32 2
+
+31:
+	br label %32
+
+dead748:
+	br label %31
+
+32:
+	%33 = load i32, i32* %4
+	%34 = load i32*, i32** %2
+	%35 = getelementptr i8, i32* %34, i32 %33
+	%36 = load i8, i8* %35
+	%37 = sext i8 %36 to i32
+	%38 = icmp eq i32 %37, 95
+	%39 = zext i1 %38 to i32
+	%40 = icmp ne i32 %39, 0
+	%41 = zext i1 %40 to i32
+	%42 = icmp ne i32 %41, 0
+	br i1 %42, label %62, label %51
+
+43:
+	%44 = load i32, i32* %4
+	%45 = add i32 %44, 1
+	store i32 %45, i32* %4
+	br label %32
+
+46:
+	%47 = load i32, i32* %4
+	%48 = icmp eq i32 %47, 0
+	%49 = zext i1 %48 to i32
+	%50 = icmp ne i32 %49, 0
+	br i1 %50, label %144, label %145
+
+51:
+	%52 = load i32, i32* %4
+	%53 = load i32*, i32** %2
+	%54 = getelementptr i8, i32* %53, i32 %52
+	%55 = load i8, i8* %54
+	%56 = sext i8 %55 to i32
+	%57 = icmp sge i32 %56, 65
+	%58 = zext i1 %57 to i32
+	%59 = icmp ne i32 %58, 0
+	%60 = zext i1 %59 to i32
+	%61 = icmp ne i32 %60, 0
+	br i1 %61, label %65, label %75
+
+62:
+	%63 = phi i32 [ %41, %32 ], [ %78, %75 ]
+	%64 = icmp ne i32 %63, 0
+	br i1 %64, label %90, label %79
+
+65:
+	%66 = load i32, i32* %4
+	%67 = load i32*, i32** %2
+	%68 = getelementptr i8, i32* %67, i32 %66
+	%69 = load i8, i8* %68
+	%70 = sext i8 %69 to i32
+	%71 = icmp sle i32 %70, 90
+	%72 = zext i1 %71 to i32
+	%73 = icmp ne i32 %72, 0
+	%74 = zext i1 %73 to i32
+	br label %75
+
+75:
+	%76 = phi i32 [ %60, %51 ], [ %74, %65 ]
+	%77 = icmp ne i32 %76, 0
+	%78 = zext i1 %77 to i32
+	br label %62
+
+79:
+	%80 = load i32, i32* %4
+	%81 = load i32*, i32** %2
+	%82 = getelementptr i8, i32* %81, i32 %80
+	%83 = load i8, i8* %82
+	%84 = sext i8 %83 to i32
+	%85 = icmp sge i32 %84, 97
+	%86 = zext i1 %85 to i32
+	%87 = icmp ne i32 %86, 0
+	%88 = zext i1 %87 to i32
+	%89 = icmp ne i32 %88, 0
+	br i1 %89, label %93, label %103
+
+90:
+	%91 = phi i32 [ %63, %62 ], [ %106, %103 ]
+	%92 = icmp ne i32 %91, 0
+	br i1 %92, label %114, label %107
+
+93:
+	%94 = load i32, i32* %4
+	%95 = load i32*, i32** %2
+	%96 = getelementptr i8, i32* %95, i32 %94
+	%97 = load i8, i8* %96
+	%98 = sext i8 %97 to i32
+	%99 = icmp sle i32 %98, 122
+	%100 = zext i1 %99 to i32
+	%101 = icmp ne i32 %100, 0
+	%102 = zext i1 %101 to i32
+	br label %103
+
+103:
+	%104 = phi i32 [ %88, %79 ], [ %102, %93 ]
+	%105 = icmp ne i32 %104, 0
+	%106 = zext i1 %105 to i32
+	br label %90
+
+107:
+	%108 = load i32, i32* %4
+	%109 = icmp sgt i32 %108, 0
+	%110 = zext i1 %109 to i32
+	%111 = icmp ne i32 %110, 0
+	%112 = zext i1 %111 to i32
+	%113 = icmp ne i32 %112, 0
+	br i1 %113, label %117, label %127
+
+114:
+	%115 = phi i32 [ %91, %90 ], [ %143, %140 ]
+	%116 = icmp ne i32 %115, 0
+	br i1 %116, label %43, label %46
+
+117:
+	%118 = load i32, i32* %4
+	%119 = load i32*, i32** %2
+	%120 = getelementptr i8, i32* %119, i32 %118
+	%121 = load i8, i8* %120
+	%122 = sext i8 %121 to i32
+	%123 = icmp sge i32 %122, 48
+	%124 = zext i1 %123 to i32
+	%125 = icmp ne i32 %124, 0
+	%126 = zext i1 %125 to i32
+	br label %127
+
+127:
+	%128 = phi i32 [ %112, %107 ], [ %126, %117 ]
+	%129 = icmp ne i32 %128, 0
+	br i1 %129, label %130, label %140
+
+130:
+	%131 = load i32, i32* %4
+	%132 = load i32*, i32** %2
+	%133 = getelementptr i8, i32* %132, i32 %131
+	%134 = load i8, i8* %133
+	%135 = sext i8 %134 to i32
+	%136 = icmp sle i32 %135, 57
+	%137 = zext i1 %136 to i32
+	%138 = icmp ne i32 %137, 0
+	%139 = zext i1 %138 to i32
+	br label %140
+
+140:
+	%141 = phi i32 [ %128, %127 ], [ %139, %130 ]
+	%142 = icmp ne i32 %141, 0
+	%143 = zext i1 %142 to i32
+	br label %114
+
+144:
+	ret i32 1
+
+145:
+	%146 = load i32, i32* %4
+	%147 = load i32*, i32** %2
+	%148 = getelementptr i8, i32* %147, i32 %146
+	%149 = load i8, i8* %148
+	%150 = sext i8 %149 to i32
+	%151 = icmp eq i32 %150, 43
+	%152 = zext i1 %151 to i32
+	%153 = icmp ne i32 %152, 0
+	%154 = zext i1 %153 to i32
+	%155 = icmp ne i32 %154, 0
+	br i1 %155, label %156, label %167
+
+dead749:
+	br label %145
+
+156:
+	%157 = load i32, i32* %4
+	%158 = add i32 %157, 1
+	%159 = load i32*, i32** %2
+	%160 = getelementptr i8, i32* %159, i32 %158
+	%161 = load i8, i8* %160
+	%162 = sext i8 %161 to i32
+	%163 = icmp eq i32 %162, 61
+	%164 = zext i1 %163 to i32
+	%165 = icmp ne i32 %164, 0
+	%166 = zext i1 %165 to i32
+	br label %167
+
+167:
+	%168 = phi i32 [ %154, %145 ], [ %166, %156 ]
+	%169 = icmp ne i32 %168, 0
+	br i1 %169, label %170, label %186
+
+170:
+	store i32 1, i32* %5
+	br label %171
+
+171:
+	%172 = load i32*, i32** %2
+	%173 = bitcast i32* %172 to i32*
+	%174 = load i32, i32* %4
+	%175 = call i32* @rt_substr(i32* %173, i32 0, i32 %174)
+	%176 = bitcast i32* %175 to i32*
+	store i32* %176, i32** %7
+	%177 = load i32*, i32** %7
+	%178 = bitcast i32* %177 to i32*
+	%179 = call i32 @rt_varslot(i32* %178)
+	store i32 %179, i32* %6
+	%180 = load i32, i32* %3
+	%181 = icmp sge i32 %180, 0
+	%182 = zext i1 %181 to i32
+	%183 = icmp ne i32 %182, 0
+	%184 = zext i1 %183 to i32
+	%185 = icmp ne i32 %184, 0
+	br i1 %185, label %212, label %218
+
+186:
+	%187 = load i32, i32* %4
+	%188 = load i32*, i32** %2
+	%189 = getelementptr i8, i32* %188, i32 %187
+	%190 = load i8, i8* %189
+	%191 = sext i8 %190 to i32
+	%192 = icmp ne i32 %191, 61
+	%193 = zext i1 %192 to i32
+	%194 = icmp ne i32 %193, 0
+	%195 = zext i1 %194 to i32
+	%196 = icmp ne i32 %195, 0
+	br i1 %196, label %197, label %207
+
+197:
+	%198 = load i32, i32* %4
+	%199 = load i32*, i32** %2
+	%200 = getelementptr i8, i32* %199, i32 %198
+	%201 = load i8, i8* %200
+	%202 = sext i8 %201 to i32
+	%203 = icmp ne i32 %202, 0
+	%204 = zext i1 %203 to i32
+	%205 = icmp ne i32 %204, 0
+	%206 = zext i1 %205 to i32
+	br label %207
+
+207:
+	%208 = phi i32 [ %195, %186 ], [ %206, %197 ]
+	%209 = icmp ne i32 %208, 0
+	br i1 %209, label %210, label %211
+
+210:
+	ret i32 1
+
+211:
+	br label %171
+
+dead750:
+	br label %211
+
+212:
+	%213 = load i32, i32* %6
+	%214 = icmp sge i32 %213, 0
+	%215 = zext i1 %214 to i32
+	%216 = icmp ne i32 %215, 0
+	%217 = zext i1 %216 to i32
+	br label %218
+
+218:
+	%219 = phi i32 [ %184, %171 ], [ %217, %212 ]
+	%220 = icmp ne i32 %219, 0
+	br i1 %220, label %221, label %229
+
+221:
+	%222 = load i32, i32* %6
+	%223 = load i32, i32* %3
+	%224 = call i32 @rt_local_here(i32 %222, i32 %223)
+	%225 = icmp eq i32 %224, 0
+	%226 = zext i1 %225 to i32
+	%227 = icmp ne i32 %226, 0
+	%228 = zext i1 %227 to i32
+	br label %229
+
+229:
+	%230 = phi i32 [ %219, %218 ], [ %228, %221 ]
+	%231 = icmp ne i32 %230, 0
+	br i1 %231, label %232, label %243
+
+232:
+	%233 = load i32, i32* %6
+	%234 = load i32, i32* %3
+	%235 = load i32, i32* %4
+	%236 = load i32*, i32** %2
+	%237 = getelementptr i8, i32* %236, i32 %235
+	%238 = load i8, i8* %237
+	%239 = sext i8 %238 to i32
+	%240 = icmp eq i32 %239, 0
+	%241 = zext i1 %240 to i32
+	%242 = icmp ne i32 %241, 0
+	br i1 %242, label %252, label %253
+
+243:
+	%244 = load i32, i32* %4
+	%245 = load i32*, i32** %2
+	%246 = getelementptr i8, i32* %245, i32 %244
+	%247 = load i8, i8* %246
+	%248 = sext i8 %247 to i32
+	%249 = icmp eq i32 %248, 0
+	%250 = zext i1 %249 to i32
+	%251 = icmp ne i32 %250, 0
+	br i1 %251, label %257, label %258
+
+252:
+	br label %254
+
+253:
+	br label %254
+
+254:
+	%255 = phi i32 [ 1, %252 ], [ 0, %253 ]
+	%256 = call i32 @rt_local_new(i32 %233, i32 %234, i32 %255)
+	br label %243
+
+257:
+	ret i32 0
+
+258:
+	%259 = load i32*, i32** %2
+	%260 = bitcast i32* %259 to i32*
+	%261 = load i32, i32* %4
+	%262 = add i32 %261, 1
+	%263 = load i32, i32* %5
+	%264 = add i32 %262, %263
+	%265 = call i32* @rt_substr(i32* %260, i32 %264, i32 -1)
+	%266 = bitcast i32* %265 to i32*
+	store i32* %266, i32** %8
+	%267 = load i32, i32* %5
+	%268 = icmp ne i32 %267, 0
+	%269 = zext i1 %268 to i32
+	%270 = icmp ne i32 %269, 0
+	br i1 %270, label %271, label %280
+
+dead751:
+	br label %258
+
+271:
+	%272 = load i32*, i32** %7
+	%273 = bitcast i32* %272 to i32*
+	%274 = call i32* @rt_getvar_byname(i32* %273)
+	%275 = bitcast i32* %274 to i32*
+	%276 = load i32*, i32** %8
+	%277 = bitcast i32* %276 to i32*
+	%278 = call i32* @rt_strcat(i32* %275, i32* %277)
+	%279 = bitcast i32* %278 to i32*
+	store i32* %279, i32** %8
+	br label %280
+
+280:
+	%281 = load i32*, i32** %7
+	%282 = bitcast i32* %281 to i32*
+	%283 = load i32*, i32** %8
+	%284 = bitcast i32* %283 to i32*
+	%285 = call i32 @rt_setvar_byname(i32* %282, i32* %284)
+	ret i32 0
+
+dead752:
+	ret i32 0
+}
+
 define i32 @rt_fskind(i32* %0) {
 entry:
 	%1 = alloca i32*
@@ -59467,7 +59871,7 @@ entry:
 	%290 = load i32, i32* %2
 	ret i32 %290
 
-dead748:
+dead753:
 	ret i32 0
 }
 
@@ -59485,7 +59889,7 @@ entry:
 	%9 = load i32, i32* %8
 	ret i32 %9
 
-dead749:
+dead754:
 	ret i32 0
 }
 
@@ -59506,7 +59910,7 @@ entry:
 	store i32 %11, i32* %10
 	ret i32 0
 
-dead750:
+dead755:
 	ret i32 0
 }
 
@@ -59547,10 +59951,10 @@ entry:
 	%25 = load i32, i32* %6
 	ret i32 %25
 
-dead751:
+dead756:
 	br label %13
 
-dead752:
+dead757:
 	ret i32 0
 }
 
@@ -59567,7 +59971,7 @@ entry:
 	%6 = add i32 128, %5
 	ret i32 %6
 
-dead753:
+dead758:
 	ret i32 0
 }
 
@@ -59640,10 +60044,10 @@ entry:
 	store i32 %43, i32* %4
 	br label %9
 
-dead754:
+dead759:
 	br label %39
 
-dead755:
+dead760:
 	ret i32 0
 }
 
@@ -59698,7 +60102,7 @@ entry:
 	%30 = icmp ne i32 %29, 0
 	br i1 %30, label %31, label %37
 
-dead756:
+dead761:
 	br label %26
 
 31:
@@ -59720,7 +60124,7 @@ dead756:
 	store i32 %41, i32* @re_pos
 	br label %2
 
-dead757:
+dead762:
 	ret i32 0
 }
 
@@ -59785,7 +60189,7 @@ entry:
 	%42 = phi i32 [ 1, %39 ], [ 0, %40 ]
 	ret i32 %42
 
-dead758:
+dead763:
 	ret i32 0
 }
 
@@ -59845,7 +60249,7 @@ entry:
 	%36 = phi i32 [ %32, %30 ], [ %34, %33 ]
 	ret i32 %36
 
-dead759:
+dead764:
 	ret i32 0
 }
 
@@ -59879,7 +60283,7 @@ entry:
 	store i8 %23, i8* %11
 	ret i32 0
 
-dead760:
+dead765:
 	ret i32 0
 }
 
@@ -59977,7 +60381,7 @@ entry:
 	%65 = call i32 @re_bit1(i32 %53, i32 %64)
 	br label %56
 
-dead761:
+dead766:
 	ret i32 0
 }
 
@@ -60020,7 +60424,7 @@ entry:
 22:
 	ret i32 0
 
-dead762:
+dead767:
 	ret i32 0
 }
 
@@ -60070,7 +60474,7 @@ entry:
 29:
 	ret i32 0
 
-dead763:
+dead768:
 	ret i32 0
 }
 
@@ -60118,7 +60522,7 @@ entry:
 	%25 = icmp ne i32 %24, 0
 	br i1 %25, label %26, label %34
 
-dead765:
+dead770:
 	br label %19
 
 26:
@@ -60145,7 +60549,7 @@ dead765:
 	store i32 %40, i32* %0
 	br label %4
 
-dead766:
+dead771:
 	br label %38
 
 41:
@@ -60207,10 +60611,10 @@ dead766:
 	%84 = load i32, i32* %3
 	ret i32 %84
 
-dead767:
+dead772:
 	br label %79
 
-dead768:
+dead773:
 	ret i32 0
 }
 
@@ -60261,7 +60665,7 @@ entry:
 	%32 = icmp ne i32 %31, 0
 	br i1 %32, label %33, label %34
 
-dead769:
+dead774:
 	br label %20
 
 33:
@@ -60327,7 +60731,7 @@ dead769:
 	%67 = icmp ne i32 %66, 0
 	br i1 %67, label %68, label %74
 
-dead770:
+dead775:
 	br label %61
 
 68:
@@ -60356,7 +60760,7 @@ dead770:
 	%84 = icmp ne i32 %83, 0
 	br i1 %84, label %85, label %91
 
-dead771:
+dead776:
 	br label %78
 
 85:
@@ -60410,7 +60814,7 @@ dead771:
 	store i32 0, i32* %7
 	br label %116
 
-dead772:
+dead777:
 	br label %115
 
 116:
@@ -60492,10 +60896,10 @@ dead772:
 166:
 	br label %45
 
-dead773:
+dead778:
 	br label %166
 
-dead774:
+dead779:
 	br label %102
 
 167:
@@ -60569,7 +60973,7 @@ dead774:
 	%215 = icmp ne i32 %214, 0
 	br i1 %215, label %216, label %217
 
-dead775:
+dead780:
 	br label %208
 
 216:
@@ -60584,7 +60988,7 @@ dead775:
 	store i32 %220, i32* %7
 	br label %221
 
-dead776:
+dead781:
 	br label %217
 
 221:
@@ -60610,7 +61014,7 @@ dead776:
 234:
 	br label %45
 
-dead777:
+dead782:
 	br label %194
 
 235:
@@ -60623,7 +61027,7 @@ dead777:
 	%240 = call i32 @re_emit(i32 3, i32 %239, i32 0)
 	ret i32 0
 
-dead778:
+dead783:
 	ret i32 0
 }
 
@@ -60767,7 +61171,7 @@ entry:
 	%100 = call i32 @re_emit(i32 %97, i32 %98, i32 %99)
 	br label %62
 
-dead779:
+dead784:
 	ret i32 0
 }
 
@@ -60841,7 +61245,7 @@ entry:
 	%46 = icmp ne i32 %45, 0
 	br i1 %46, label %47, label %48
 
-dead780:
+dead785:
 	br label %42
 
 47:
@@ -60856,7 +61260,7 @@ dead780:
 	%52 = icmp ne i32 %51, 0
 	br i1 %52, label %53, label %58
 
-dead781:
+dead786:
 	br label %48
 
 53:
@@ -60869,7 +61273,7 @@ dead781:
 58:
 	ret i32 0
 
-dead782:
+dead787:
 	br label %22
 
 59:
@@ -60886,7 +61290,7 @@ dead782:
 	%67 = icmp ne i32 %66, 0
 	br i1 %67, label %68, label %72
 
-dead783:
+dead788:
 	br label %63
 
 68:
@@ -60903,7 +61307,7 @@ dead783:
 	%76 = icmp ne i32 %75, 0
 	br i1 %76, label %77, label %81
 
-dead784:
+dead789:
 	br label %72
 
 77:
@@ -60920,7 +61324,7 @@ dead784:
 	%85 = icmp ne i32 %84, 0
 	br i1 %85, label %86, label %88
 
-dead785:
+dead790:
 	br label %81
 
 86:
@@ -60934,7 +61338,7 @@ dead785:
 	%92 = icmp ne i32 %91, 0
 	br i1 %92, label %93, label %99
 
-dead786:
+dead791:
 	br label %88
 
 93:
@@ -60968,10 +61372,10 @@ dead786:
 	%112 = call i32 @re_emit(i32 1, i32 %111, i32 0)
 	ret i32 0
 
-dead787:
+dead792:
 	br label %107
 
-dead788:
+dead793:
 	br label %99
 
 113:
@@ -61013,10 +61417,10 @@ dead788:
 	%137 = call i32 @re_emit(i32 1, i32 %136, i32 0)
 	ret i32 0
 
-dead789:
+dead794:
 	br label %132
 
-dead790:
+dead795:
 	ret i32 0
 }
 
@@ -61102,7 +61506,7 @@ entry:
 	%48 = icmp ne i32 %47, 0
 	br i1 %48, label %49, label %50
 
-dead804:
+dead809:
 	br label %44
 
 49:
@@ -61127,7 +61531,7 @@ dead804:
 	%63 = call i32 @re_set(i32 %61, i32 2, i32 %62)
 	br label %9
 
-dead805:
+dead810:
 	br label %50
 
 64:
@@ -61174,7 +61578,7 @@ dead805:
 94:
 	ret i32 0
 
-dead806:
+dead811:
 	ret i32 0
 }
 
@@ -61312,7 +61716,7 @@ entry:
 	%92 = icmp ne i32 %91, 0
 	br i1 %92, label %93, label %100
 
-dead791:
+dead796:
 	br label %84
 
 93:
@@ -61450,7 +61854,7 @@ dead791:
 170:
 	br label %164
 
-dead792:
+dead797:
 	br label %170
 
 171:
@@ -61469,7 +61873,7 @@ dead792:
 	%182 = icmp ne i32 %181, 0
 	br i1 %182, label %183, label %195
 
-dead793:
+dead798:
 	br label %178
 
 183:
@@ -61493,7 +61897,7 @@ dead793:
 	%199 = icmp ne i32 %198, 0
 	br i1 %199, label %200, label %201
 
-dead794:
+dead799:
 	br label %195
 
 200:
@@ -61562,7 +61966,7 @@ dead794:
 	%233 = icmp ne i32 %232, 0
 	br i1 %233, label %234, label %241
 
-dead795:
+dead800:
 	br label %223
 
 234:
@@ -61590,7 +61994,7 @@ dead795:
 	%249 = icmp ne i32 %248, 0
 	br i1 %249, label %250, label %251
 
-dead796:
+dead801:
 	br label %245
 
 250:
@@ -61606,7 +62010,7 @@ dead796:
 	%257 = icmp ne i32 %256, 0
 	br i1 %257, label %258, label %264
 
-dead797:
+dead802:
 	br label %251
 
 258:
@@ -61631,7 +62035,7 @@ dead797:
 271:
 	br label %121
 
-dead798:
+dead803:
 	br label %271
 
 272:
@@ -61680,7 +62084,7 @@ dead798:
 	store i32 1, i32* %0
 	br label %308
 
-dead799:
+dead804:
 	br label %301
 
 308:
@@ -61741,7 +62145,7 @@ dead799:
 	%349 = icmp ne i32 %348, 0
 	br i1 %349, label %316, label %323
 
-dead800:
+dead805:
 	br label %277
 
 350:
@@ -61933,7 +62337,7 @@ dead800:
 474:
 	ret i32 0
 
-dead801:
+dead806:
 	ret i32 0
 }
 
@@ -61993,10 +62397,10 @@ entry:
 	store i32 %36, i32* %0
 	br label %4
 
-dead802:
+dead807:
 	br label %33
 
-dead803:
+dead808:
 	ret i32 0
 }
 
@@ -62035,7 +62439,7 @@ entry:
 	%25 = icmp ne i32 %24, 0
 	br i1 %25, label %26, label %32
 
-dead807:
+dead812:
 	br label %21
 
 26:
@@ -62119,10 +62523,10 @@ dead807:
 	store i8 %82, i8* %71
 	ret i32 0
 
-dead808:
+dead813:
 	br label %68
 
-dead809:
+dead814:
 	ret i32 0
 }
 
@@ -62185,10 +62589,10 @@ entry:
 33:
 	br label %28
 
-dead810:
+dead815:
 	br label %33
 
-dead811:
+dead816:
 	ret i32 0
 }
 
@@ -62217,7 +62621,7 @@ entry:
 	%16 = icmp ne i32 %15, 0
 	br i1 %16, label %17, label %21
 
-dead812:
+dead817:
 	br label %12
 
 17:
@@ -62261,7 +62665,7 @@ dead812:
 39:
 	ret i32 1
 
-dead813:
+dead818:
 	ret i32 0
 }
 
@@ -62361,7 +62765,7 @@ entry:
 	%66 = icmp ne i32 %65, 0
 	br i1 %66, label %67, label %74
 
-dead814:
+dead819:
 	br label %43
 
 67:
@@ -62621,7 +63025,7 @@ dead814:
 	store i32 %223, i32* %4
 	br label %205
 
-dead815:
+dead820:
 	br label %214
 
 224:
@@ -62684,7 +63088,7 @@ dead815:
 	store i32 %261, i32* %4
 	br label %237
 
-dead816:
+dead821:
 	br label %246
 
 262:
@@ -62716,7 +63120,7 @@ dead816:
 	%280 = icmp ne i32 %279, 0
 	br i1 %280, label %281, label %287
 
-dead817:
+dead822:
 	br label %275
 
 281:
@@ -62893,7 +63297,7 @@ dead817:
 	store i32 %376, i32* %21
 	br label %377
 
-dead818:
+dead823:
 	br label %375
 
 377:
@@ -62975,7 +63379,7 @@ dead818:
 	%425 = icmp ne i32 %424, 0
 	br i1 %425, label %426, label %431
 
-dead819:
+dead824:
 	br label %416
 
 426:
@@ -62997,10 +63401,10 @@ dead819:
 	store i32 %437, i32* %434
 	br label %405
 
-dead820:
+dead825:
 	br label %431
 
-dead821:
+dead826:
 	ret i32 0
 }
 
@@ -63122,7 +63526,7 @@ entry:
 	%80 = icmp ne i32 %79, 0
 	br i1 %80, label %81, label %82
 
-dead822:
+dead827:
 	br label %76
 
 81:
@@ -63778,7 +64182,7 @@ dead822:
 	store i32* %425, i32** @re_err
 	ret i32 -1
 
-dead823:
+dead828:
 	br label %106
 
 426:
@@ -63835,7 +64239,7 @@ dead823:
 	%457 = icmp ne i32 %456, 0
 	br i1 %457, label %458, label %466
 
-dead824:
+dead829:
 	br label %453
 
 458:
@@ -63912,10 +64316,10 @@ dead824:
 	%500 = load i32, i32* %19
 	ret i32 %500
 
-dead825:
+dead830:
 	br label %466
 
-dead826:
+dead831:
 	ret i32 0
 }
 
@@ -63943,10 +64347,10 @@ entry:
 	%14 = bitcast i32* %13 to i32*
 	ret i32* %14
 
-dead827:
+dead832:
 	br label %12
 
-dead828:
+dead833:
 	ret i32* null
 }
 
@@ -63954,7 +64358,7 @@ define i32 @__mec_body_main() {
 entry:
 	ret i32 0
 
-dead829:
+dead834:
 	ret i32 0
 }
 

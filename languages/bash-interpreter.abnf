@@ -280,12 +280,18 @@ DeclCommand <~~ push(makeDeclR(takeAll(), lineStr(up.start))) ~~>
             = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
 DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
-DeclFlag    <~~ push({dflag: up.in}) ~~> = "-" :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
+DeclFlag    <~~ push({dflag: up.in}) ~~> = DeclSign :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
+// -X gives an attribute, +X takes it away.
+DeclSign    = "-" | "+" ;
 DeclFlagCh  = "a" | "A" | "i" | "r" | "x" | "u" | "l" | "g" | "n" | "p" | "f" | "F" ;
-DeclItem    = DeclAssign | DeclName ;
-DeclAssign  <~~ push(mkDeclItem(takeAll())) ~~>
+DeclItem    = DeclAssign | DeclName | DeclDyn ;
+DeclAssign  <~~ push(mkDeclItem(takeAll(), arSrc(up.start, up.pos))) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
-DeclName    <~~ push({dname: up.in}) ~~> = Name ;
+DeclName    <~~ push({dname: up.in}) ~~> = Name KwEnd ;
+// Any other word is an operand known only once it is expanded (`local "$1"`,
+// `declare $v='x y'`, `typeset s${dyn}+=foo`, `declare 'q=1'`): its fields are read as
+// NAME, NAME=VALUE or an option when it runs.
+DeclDyn     <~~ push({dyn: takeAll()}) ~~> = NotIoRedir CWord ;
 
 // name=value : the = must stick to the name (no surrounding spaces), so the disable
 // (:whitespace()) sits in THIS sequence, right after the identifier. The value is optional
@@ -536,7 +542,10 @@ PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
 PeLenBad    <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = "#" PeCore ;
 // Any other text between the braces parses as well and is the same run-time error
 // (`${(m)foo}`, a zsh idiom): the message, and the command line is abandoned with status 1.
-PeBad       <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = PeBadCh { PeBadCh } ;
+// Not after a blank or "|", which open a function substitution (FunSub) in bash, so one
+// without its closing "}" is the syntax error it is there.
+PeBad       <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = PeBadFirst { PeBadCh } ;
+PeBadFirst  = !@+"} \t\n|" ;
 PeBadCh     = !@+"}" ;
 PeIndForm   <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | PeCore ) ;
 PeCore      = PePatForm | PeCaseForm | PeReplForm | PeXform | PeOpForm | PeSubstrForm | PePlain ;
@@ -1631,7 +1640,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function bindingOf(name) {
         var ak = arrKey(name)
         var hadA = hasOwn(arrs, ak) && arrs[ak] != null
-        return {name: name, had: isSetVar(name), val: getVarVal(name),
+        return {name: name, had: isSetVar(name), val: quietVal(name),
                 ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
                 ad: attrOn(dclVars, name), ar: attrOn(roVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}}
     }
@@ -1725,6 +1734,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // a line table for; languages/lib/bash-rt.c's rt_nounset writes the same string.
         if (optNounset) { emitErr("bash: " + name + ": unbound variable\n"); abortSignal = {ret: 1, isExit: 1} }
         return ""
+    }
+    // NAME's value with no set -u check (an unset name is empty): what `NAME+=v` appends
+    // to, and what a local binding saves.
+    function quietVal(name) {
+        var nu = optNounset
+        optNounset = false
+        var v = getVarVal(name)
+        optNounset = nu
+        return v
     }
     // "$*" joins with the FIRST character of IFS (a space when IFS is unset).
     function ifsFirst() {
@@ -2897,11 +2915,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeDecl(items, redirs, ln) {
         var kw = items[0].dkw
         var flags = ""
+        var plus = ""
         var names = []
         var asgs = []
         var i
+        for (i = 1; i < items.length; i++) { if (items[i].dyn != undefined) { return makeDeclDyn(items, redirs, ln) } }
         for (i = 1; i < items.length; i++) {
             var it = items[i]
+            if (it.dflag != undefined && it.dflag.charAt(0) == "+") { plus = plus + it.dflag; continue }
             if (it.dflag != undefined) { flags = flags + it.dflag; continue }
             if (it.dname != undefined) { names.push(it.dname); asgs.push(null) }
             else { names.push(it.a.name); asgs.push(it.a) }
@@ -2934,7 +2955,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A second `local` of a name in the same call keeps its value, array and
             // attributes (bash 5.3: f() { local a=5; local a; echo $a; } prints 5).
             var fresh = localize && !localHere(names[k])
-            if ((asgs[k] != null || fresh) && roRefused(names[k], (kw == "readonly" || kw == "export") ? "" : kw + ": ")) { roFail = true; return }
+            if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0) && roRefused(names[k], (kw == "readonly" || kw == "export") ? "" : kw + ": ")) { roFail = true; return }
             if (localize && !fresh) { claimLocal(names[k]) }
             // A bare `local x` whose visible x is a caller's prefix binding (`x=5 f`)
             // starts from that value, bash 5.3; any other starts unset.
@@ -2953,6 +2974,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (integer) { intVars["$" + names[k]] = true }
             if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
             if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
+            // +i +u +l take the attribute away (+x +a +A +n change nothing here).
+            if (plus.indexOf("i") >= 0) { intVars["$" + names[k]] = false }
+            if (plus.indexOf("u") >= 0) { upVars["$" + names[k]] = false }
+            if (plus.indexOf("l") >= 0) { loVars["$" + names[k]] = false }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
             if (isArray && asgs[k] == null) {
                 // A local scalar declared an array again becomes an empty one (bash 5.3).
@@ -3032,6 +3057,116 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return r
         }
     }
+    // A declaration with a computed operand ({dyn}) runs as the declaration its words spell
+    // once expanded: the written items as written, each leading -X/+X field an option, each
+    // NAME or NAME=VALUE field that operand (the value quoted, or kept as an array literal
+    // under -a/-A, as bash re-reads it). A field that is no name is bash's "not a valid
+    // identifier" and makes the status 1. Twin of the dyn arm of makeDecl in
+    // bash-to-llvm-ir.abnf.
+    function makeDeclDyn(items, redirs, ln) {
+        var kw = items[0].dkw
+        var compiled = {}
+        var pending = []
+        // pending's top: the run's diagnostics and its declaration (null when it has no
+        // operand), both under the redirections.
+        var body = function() {
+            var top = pending[pending.length - 1]
+            if (top.errs != "") { emitErr(top.errs) }
+            var r = anytype
+            r = 0
+            if (top.snip != null) { r = top.snip() }
+            return r
+        }
+        var run = body
+        if (redirs.length > 0) { run = mkRedirected([body].concat(redirs)) }
+        return function() {
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            var text = kw
+            var arr = false
+            var opts = true
+            var operands = 0
+            var errs = ""
+            var i
+            var k
+            for (i = 1; i < items.length; i++) {
+                var it = items[i]
+                if (it.dflag != undefined) {
+                    text = text + " " + it.dflag
+                    if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("a") >= 0 || it.dflag.indexOf("A") >= 0)) { arr = true }
+                    continue
+                }
+                if (it.dname != undefined || it.a != undefined) {
+                    opts = false
+                    operands = operands + 1
+                    text = text + " " + ((it.dname != undefined) ? it.dname : it.src)
+                    continue
+                }
+                var fs = expandWords(it.dyn)
+                var ab = takeAbort()
+                if (ab != null) { return ab }
+                for (k = 0; k < fs.length; k++) {
+                    var f = fs[k]
+                    if (opts && f == "--") { opts = false; continue }
+                    if (opts && f.length > 1 && (f.charAt(0) == "-" || f.charAt(0) == "+") && declFlagText(f)) {
+                        text = text + " " + f
+                        if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }
+                        continue
+                    }
+                    opts = false
+                    var op = declOperand(f, arr)
+                    if (op == "") { errs = errs + "bash: " + kw + ": `" + f + "': not a valid identifier\n"; continue }
+                    operands = operands + 1
+                    text = text + " " + op
+                }
+            }
+            var st = anytype
+            st = 0
+            if (operands > 0 || errs != "") {
+                var snip = null
+                if (operands > 0) {
+                    if (!hasOwn(compiled, "$" + text)) { compiled["$" + text] = compileSnippet(text) }
+                    snip = compiled["$" + text]
+                }
+                pending.push({snip: snip, errs: errs})
+                st = run()
+                pending.pop()
+                if (typeof st == "object") { return st }
+            }
+            if (errs != "") { st = 1 }
+            setStatus(st)
+            return st
+        }
+    }
+    // -X / +X: an option word of a declaration builtin.
+    function declFlagText(f) {
+        var i
+        for (i = 1; i < f.length; i++) { if ("aAirxulgnpfF".indexOf(f.charAt(i)) < 0) { return false } }
+        return true
+    }
+    // A computed operand as the declaration text that spells it: NAME, or NAME[SUB]=VALUE /
+    // NAME+=VALUE with VALUE quoted (left as an array literal (...) when arr); "" when the
+    // field is no such operand.
+    function declOperand(f, arr) {
+        var i = 0
+        while (i < f.length) {
+            var cc = f.charCodeAt(i)
+            if (cc == 95 || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (i > 0 && cc >= 48 && cc <= 57)) { i = i + 1 }
+            else { break }
+        }
+        if (i == 0) { return "" }
+        if (i == f.length) { return f }
+        var j = i
+        if (f.charAt(j) == "[") {
+            j = f.indexOf("]", j)
+            if (j < 0) { return "" }
+            j = j + 1
+        }
+        var opLen = (f.charAt(j) == "+" && f.charAt(j + 1) == "=") ? 2 : 1
+        if (f.charAt(j) != "=" && opLen == 1) { return "" }
+        var v = f.slice(j + opLen)
+        if (arr && v.length >= 2 && v.charAt(0) == "(" && v.charAt(v.length - 1) == ")") { return f.slice(0, j + opLen) + v }
+        return f.slice(0, j + opLen) + shellQuote(v)
+    }
     // A declaration CARRYING ITS OWN redirections. The declaration items are the ones
     // makeDecl understands; anything else on the stack is a redirection record.
     function makeDeclR(items, ln) {
@@ -3040,12 +3175,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined) { core.push(it) }
+            if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { core.push(it) }
             else { reds.push(it) }
         }
         return makeDecl(core, reds, ln)
     }
-    function mkDeclItem(items) { return {a: parseAssign(items)} }
+    // src: the item as written, which a declaration with a computed operand re-reads.
+    function mkDeclItem(items, src) { return {a: parseAssign(items), src: src} }
 
     // A character copied one at a time must carry a SURROGATE PAIR across in one piece: the
     // script string type re-encodes on every concatenation, so appending a lone surrogate
@@ -5146,8 +5282,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a.op == "+=") {
             // On an array name `+=` appends to element 0's text: e=(ab c); e+=d is `abd c`.
             if (isArr(a.name)) { elemSet(a.name, "0", arrGet(a.name, "0"), v) }
-            else if (attrOn(intVars, a.name)) { var sv = arOp("+", arEval(getVarVal(a.name)), arEval(v)); if (!arithErr) { setVarVal(a.name, numToStr(sv)) } }
-            else { setVarVal(a.name, getVarVal(a.name) + v) }
+            else if (attrOn(intVars, a.name)) { var sv = arOp("+", arEval(quietVal(a.name)), arEval(v)); if (!arithErr) { setVarVal(a.name, numToStr(sv)) } }
+            else { setVarVal(a.name, quietVal(a.name) + v) }
             return
         }
         storeAttr(a.name, v)
@@ -5267,7 +5403,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (k = 0; k < asgs.length; k++) {
             var nm = asgs[k].aname
             var v = (asgs[k].val != null) ? wordJoin(asgs[k].val()) : ""
-            if (asgs[k].op == "+=") { v = getVarVal(nm) + v }
+            if (asgs[k].op == "+=") { v = quietVal(nm) + v }
             // A readonly name keeps its value; the command still runs.
             if (roRefused(nm, "")) { continue }
             if (!undo) { storeAttr(nm, v); continue }
@@ -7157,7 +7293,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it != "function" && it.aname != undefined) { asgs.push(it) }
-            else if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined) { decl.push(it) }
+            else if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { decl.push(it) }
             else { reds.push(it) }
         }
         var flags = ""
