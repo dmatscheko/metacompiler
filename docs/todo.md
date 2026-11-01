@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1022** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1023** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,12 +114,10 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `CompareTo` on strings, `char.ConvertFromUtf32` · P3 · CS · IN PROGRESS (CS worker, round 2) [V spec-only]
-Found by the CS worker, round 1 (.NET reference docs). `string.CompareOrdinal(a, ia, b, ib, len)` → "unknown string method" (compares
-Min(len, len-index) units; ArgumentOutOfRangeException on bad ranges). `list.Sort(string.CompareOrdinal)` → our "culture's collation
-not modelled" error; the method group must convert to Comparison<string> (C# spec, method group conversion). `"x".CompareTo("a")` →
-"unknown method: CompareTo"; it is a culture comparison, so give the same deliberate not-modelled error as string.Compare(a,b).
-`char.ConvertFromUtf32` → "unknown char method".
+### T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a BCL type fails late · P3 · CS · OPEN [V spec-only]
+Found by the CS worker, round 2 (.NET reference source). `try { char.ConvertFromUtf32(-1); } catch (ArgumentOutOfRangeException e)
+{ Console.WriteLine(e.ParamName); }` → .NET "utf32"; ours "" (every runtime throw site carries the name only inside Message).
+`string.NoSuch` / `Math.NoSuch` read as a value → C# compile error; ours a delegate that fails when called.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1094,6 +1092,7 @@ T-1004 kotlin: string `<`/`>`, sorted, sortedDescending, maxOf, toSortedSet orde
 T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupError (utf-7, cp437, mac-roman...) — PARTIAL - utf-7, utf-8-sig, all 69 charmap codecs, undefined, 'not a text encoding' refusals; CJK multibyte, idna/punycode, escape codecs filed
 T-1005 python: generator `gi_running` — DONE - gi_running in all engines, read-only; generator/tuple new-attribute errors; full.5 split only gained 1.6M steps (random.seed costs 88M), filed
 T-1003 go: a promoted method used as a method-expression value — DONE - promoted methods (incl. via embedded defined non-struct types) as method-expression values and on expression receivers, all three engines
+T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `CompareTo` on strings, `char.ConvertFromUtf32` — DONE - 5-arg CompareOrdinal with .NET's range checks, BCL static method groups as delegates, String.CompareTo refused as culture collation, char.ConvertFromUtf32
 
 # Settled — do not re-open
 
