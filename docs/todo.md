@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1053** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1055** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -123,11 +123,11 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-1050 php: Generator::throw(); `yield from` value and send forwarding · P3 · PHP · IN PROGRESS (PHP worker, round 38) [V spec-only]
-PHP manual: `function thr() { try { yield 1; } catch (Exception $e) { echo "[caught ", $e->getMessage(), "]"; yield 99; } } $t = thr(); $t->current(); echo $t->throw(new Exception("boom"));` → "[caught boom]99"; ours (all engines): "Call to undefined method Generator::throw()". `function inner(){ yield 1; yield 2; return 3; } function outer(){ $r = yield from inner(); yield $r; }` → foreach prints 123; ours 12 (yield from evaluates to null; send() not forwarded to the delegate). Both currently documented as "Deviation" in the grammars — remove those notes when fixed.
+### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
+Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comments · P4 · PHP · IN PROGRESS (PHP worker, round 38) [V spec-only]
-Remainder of T-1036 (counts stay correct-but-high): arrays holding reference cells that die by overwrite / frame-local / temporary never release (needs per-array refcount or COW); unfinished generators never release; frames unwound by an exception keep parameter-copy holders (js_phown not joined to phpFrames unwinding); property-hook set parameters not covered by the compiler's param-copy release. print_r: `$y=[1]; $y[]=&$y; print_r($y)` prints one level deeper than PHP 8 (*RECURSION* at [1]) because the stdlib print_r's by-value param loses identity. Housekeeping: tests/php-test-full.php header still lists "references returned from functions" as out of scope (section 83 tests them); the phpRefHolders comment in abnf/jsrtphp.go says unwinding does not release (stale).
+### T-1054 php: interpreter `(array)` cast of an object drops references; generator self-resume message · P3 · PHP · OPEN [V spec-only]
+Found by PHP r38 (expected values derived from php-src): `$o=new stdClass; $o->a=1; $r=&$o->a; $arr=(array)$o; $r=5; echo $arr["a"];` → 5 (run/native 5, interpreter 1). `$p->arr=[1]; $p->arr[]=&$p->arr; $h=(array)$p; $h["arr"][0]=7; echo $p->arr[0];` → 7 (interpreter 1). Cause: phpObjArr uses phpCopy(deref(...)); likely copySlot when not iterating (foreach must not gain holders). Also makes interpreter print_r/var_dump of such objects differ. Separately: a generator resuming itself should throw "Cannot resume an already running generator"; the Go twin fails with a generic error.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1099,6 +1099,8 @@ T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` esca
 T-1045 csharp: null message in two-arg Argument* ctors; 3-argument exception ctors — DONE (CS r6, eddf9698): null message in 2-arg Argument* ctors falls back to the type default (.NET 9/10 source: message ?? SR.*; ticket text described .NET 8); 3-arg ArgumentException(message, paramName, inner) and ArgumentOutOfRangeException(paramName, actualValue, message) incl. ActualValue suffix. Master spec probe: 3 legs agree.
 T-1036 php: array refcount/COW for reference holders; generator eager-run and yield-in-catch bugs — PARTIAL→split (PHP r37, 168608a4): interpreter generators suspend (coroutines) with spec Generator methods; yield in try/catch/finally makes a generator; compiler by-ref $$n; by-value array param copies release holders; nested ref literals one temporary; count() recursion warning. Master spec probe: generator protocol (send/current/getReturn/rewind/finally/lazy start) 3 legs agree. Remainder filed.
 T-1048 ruby: Enumerable over a user #each doesn't stop early; Array#* / #/ #% #** with bad operands — DONE (RB r43, 8d529dd4): Enumerable over a user #each stops early (any?/all?/none?/one?/find/find_index/include?/first/take/take_while) via catch/throw out of #each; Array#* implicit-int TypeErrors; Array / % ** NoMethodError; find(ifnone); Go twin any?(pattern) uses ===. Master probe vs ruby 2.6 (21 lines with #each logs): 4 legs agree. did_you_mean second line not implemented anywhere (separate feature).
+T-1050 php: Generator::throw(); `yield from` value and send forwarding — DONE (PHP r38, 652f03e2): Generator::throw (runs a fresh generator to its first yield; throws into a yield-from delegate); yield from evaluates to the delegate's return value and forwards send(); uncaught throw finishes the generator. Master spec probe: generator protocol incl. throw/yield-from, 3 legs agree.
+T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comments — PARTIAL→split (PHP r38, 652f03e2): stale comments fixed; exception-unwound param-copy holders kept by design (PHP's trace keeps frame args). print_r depth + per-array COW + property-hook params need array copy-on-write identity → design ticket.
 
 # Settled — do not re-open
 
