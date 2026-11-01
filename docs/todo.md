@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1075** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1076** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -143,12 +143,12 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1067 php: Exception::__toString / uncaught format; getFile/getLine/getTrace; named ctor args · P3 · PHP · IN PROGRESS (PHP worker, round 42) [V]
-Spec-only (php-src Zend/zend_exceptions.c). All engines:
-- `echo $e` / `(string)$e` / `$e->__toString()` not modelled: PHP prints "Exception: m in FILE:LINE\nStack trace:\n#0 {main}" and walks the previous chain with "\n\nNext ...". Uncaught exceptions print an engine format ("uncaught exception: m") instead of PHP's "PHP Fatal error:  Uncaught Exception: m in ...".
-- getFile/getLine/getTrace/getTraceAsString missing (file/line/trace stay at defaults); line needs a call-site line table.
-- named constructor args (`new Exception(previous: $e)`), ErrorException, and zend_throw_exception_internal chaining (exception thrown while another is pending outside finally, e.g. destructor during unwinding).
-- goja-only quirk seen while working this: a throw from a catch nested in a host `finally` lost to the pending exception under goja but not -frozen (no minimal repro; phpTry now avoids host finally). Worth a minimal repro if it shows up elsewhere.
+### T-1075 php: exception trace frames; file/line of engine-raised errors; __destruct · P3 · PHP · OPEN [V]
+Spec-only (php-src). All engines:
+- trace frames: an exception thrown inside a function should render `#0 FILE(23): thrower()\n#1 {main}` in getTraceAsString/__toString/uncaught output, and getTrace() should list the frames; ours always `#0 {main}` / []. Needs a shadow call stack (function, call line, args) in all three engines - hot-path cost; measure with tests/bench.sh and keep it within noise, or propose a cheaper scheme (e.g. only for functions that can throw) before building it.
+- engine-raised errors (DivisionByZeroError from %, "Undefined constant", TypeErrors) have file "" / line 0 -> "in :0", "thrown in Unknown on line 0"; PHP gives the current opline's line. Needs one "current position" register all engines keep identically.
+- __destruct is not implemented; once it is, zend_throw_exception_internal chaining (exception thrown while another is pending outside finally) becomes reachable.
+Trap: loading library code with `static` vars arms usesRefs for the whole program (+59% bench) - keep unconditionally-loaded stdlib code free of statics/references.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1138,6 +1138,7 @@ T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-
 T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter — DONE (CS r12, ece96736): ??= and compound reads go through getter / indexer get (one csQualRead in the compiler); missing Dictionary key throws KeyNotFoundException in both halves (interpreter compound read was 0); user-indexer ??= no longer crashes compiled; 3 legs agree with ECMA-334 12.21.5
 T-1057 bash: assoc/declare remainder after T-1044 — PARTIAL→split (SH r29, 8 commits): eval prefix bindings, invalid declaration-builtin options, word-expanded subscripts for unset/printf -v/[[ -v ]]/${#m[$k]}, expanded-subscript labels, declarations through namerefs act on the target, $'..' keys + $'..' quoting in declare -p, computed array literals compiled (rt_decl_lit); sections 90-94 moved full.3->full.5 (step brake); 4 legs = bash 5.3. Remainder filed
 T-1066 kotlin: static-type javaClass for computed receivers; reified primitives / inference — DONE (KT r23, e3ccbe88): shared static typer (ktStaticTy/ktJvmTy) gives javaClass by JVM type for computed receivers (loop vars, lambda it, arithmetic, calls, members, array/string index) while casts/!!/List elements stay boxed; reified primitive .java is the wrapper; reified T inferred from argument types (ktInferTArgs); anonymous KClass simpleName null; 4 legs = kotlinc 2.2.21
+T-1067 php: Exception::__toString / uncaught format; getFile/getLine/getTrace; named ctor args — PARTIAL→split (PHP r42, 97eb6ff6): Exception::__toString with Next-chain, getFile/getLine from the new site, getTrace []/getTraceAsString '#0 {main}', PHP Fatal error Uncaught format + exit 255 (display_errors rule documented), named ctor args (+ inherited-ctor named-arg drop fixed), ErrorException, throw-type check; 3 legs byte-identical, formats per php-src. Trace frames / engine-raised positions / destructor chaining filed
 
 # Settled — do not re-open
 
