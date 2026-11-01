@@ -3507,6 +3507,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // and copied NOW, as goField does for a struct. Twin of js_godtbind in
     // abnf/jsrtgolang.go and lib/go-rt.metajs.
     function goDtBind(recv, s) { return bindMethod(goDtRecv(recv, s), goDtFns[goDtKey(s.pkg, s.dt.fn)]) }
+    // A struct's method promoted from a defined non-struct type (goPromDtMeths): it
+    // is handed the struct itself and calls the type's method on the embedded field.
+    // Twin of promDtWrapper in go-to-llvm-ir.abnf.
+    function goPromDtFn(p, pkg) {
+        var s = {dt: p, rc: null}
+        return function() {
+            var av = [goDtRecv(arguments[0], s)]
+            for (var i = 1; i < arguments.length; i++) { av.push(arguments[i]) }
+            return goDtFns[goDtKey(pkg, p.fn)].apply(undefined, av)
+        }
+    }
     function mcall(target, name, args) {
         if (isPtrBox(target)) { return mcall(target.__dv, name, args) }
         if (target === undefined || target === null) { goNilDeref() }   // recoverable; see goNilDeref
@@ -6774,6 +6785,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                    __fields: fields, __ftypes: ftypes, __ftags: ftags}
         structs[sKeyI(curPkgName, items[0])] = cls
         globalScope[items[0]] = cls
+        var pms = goPromDtMeths(items[0])
+        for (var pm = 0; pm < pms.length; pm++) {
+            cls[pms[pm][0]] = goPromDtFn(pms[pm][1], curPkgName)
+            cls["__ptr$" + pms[pm][0]] = pms[pm][1].ptr && !pms[pm][1].isPtr
+        }
         notePkgType(items[0])
     }
     // An unnamed receiver (func (T) M()) arrives as [{ptr}?, type, {anon:true}] because a

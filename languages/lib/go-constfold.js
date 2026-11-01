@@ -1904,6 +1904,7 @@ function goChainC(t, text, pos) {
     if (ty == "" && h > 0 && text.charAt(h) == "." && goFnSig["$" + text] !== undefined && !cIsLocal(text.substring(0, h))) { ty = goFnSig["$" + text] }
     // ... and a package's typed constant or variable (`time.Hour`) its type.
     if (ty == "" && h > 0 && text.charAt(h) == "." && cPkgTys["$" + text] !== undefined && !cIsLocal(text.substring(0, h))) { ty = cPkgTys["$" + text] }
+    if (ty == "") { ty = goMethExprSig(text) }
     // The constant first: registering one clears the position's static type.
     cPkgMember(text, pos)
     var pc = cPkgConstOf(text)
@@ -2102,6 +2103,7 @@ var goDefTys = {}     // "$T" -> true: `type T U`, a defined type
 var goMethRty = {}    // "$T.M" -> M's single result type ("" for none or several)
 var goMethPtr = {}    // "$T.M" -> true for a pointer receiver
 var goMethRecv = {}   // "$M" -> every receiver type that declares M
+var goMethNames = []  // every method name declared, once
 function goNoteDefTy(name) {
     // The main file is prescanned first, and its own T keeps the bare name.
     if (goPreForeign && goDefTys["$" + name] !== true) { goDtForeign["$" + name] = true }
@@ -2128,7 +2130,7 @@ function goNoteMeth1(rt, name, byPtr, rtys) {
         if (goTyMeths["$" + rt] === undefined) { goTyMeths["$" + rt] = [] }
         goTyMeths["$" + rt].push(name)
     }
-    if (goMethRecv["$" + name] === undefined) { goMethRecv["$" + name] = [] }
+    if (goMethRecv["$" + name] === undefined) { goMethRecv["$" + name] = []; goMethNames.push(name) }
     goMethRecv["$" + name].push(rt)
 }
 // "$f" -> top-level function f's single result type ("" otherwise); the builtin
@@ -3951,6 +3953,20 @@ function goMethExprTy(rc) {
     if (t == "" || stHeadLen(t) != t.length) { return "" }
     return (goStructTyName(t) != "" || goIsDefTy(t)) ? t : ""
 }
+// The type of a method expression's text `T.M` or `(*T).M`, or "": M's signature
+// with the receiver T (or *T) as its first parameter (Go spec "Method expressions").
+function goMethExprSig(text) {
+    var d = text.lastIndexOf(".")
+    if (d <= 0 || stHeadLen(text.substring(d + 1)) != text.length - d - 1) { return "" }
+    var rt = text.substring(0, d)
+    var ptr = rt.length > 3 && rt.substring(0, 2) == "(*" && rt.charAt(rt.length - 1) == ")"
+    if (ptr) { rt = rt.substring(2, rt.length - 1) }
+    if (rt == "" || stHeadLen(rt) != rt.length || cIsLocal(rt) || cTyLookup(rt) != "") { return "" }
+    if (goStructTyName(rt) == "" && !goIsDefTy(rt)) { return "" }
+    var sig = goMethSig["$" + goTyKey(rt) + "." + text.substring(d + 1)]
+    if (sig === undefined || sig.substring(0, 5) != "func(") { return "" }
+    return "func(" + (ptr ? "*" : "") + rt + (sig.charAt(5) == ")" ? "" : ",") + sig.substring(5)
+}
 // How rc.M() is called: null for an ordinary method call, else {fn: "T.M" (or ""
 // when several defined types declare M), ty: T, ptr, dyn}. dyn = the static type
 // is unknown, so a struct's own method still wins at run time. An imported
@@ -3979,14 +3995,38 @@ function goDtPlan(rc, name) {
         return {fn: bt + "." + name, ty: bt, ptr: goMethPtr["$" + bk + "." + name] === true, dyn: false,
                 isPtr: t.charAt(0) == "*", via: null}
     }
-    var pd = (bt != "" && goStructTyName(bt) != "") ? goPromDt(bt, name) : null
-    if (pd != null) {
-        return {fn: pd.ty + "." + name, ty: pd.ty, ptr: goMethPtr["$" + goTyKey(pd.ty) + "." + name] === true,
-                dyn: false, isPtr: pd.isPtr, via: pd.via}
-    }
+    var pp = bt != "" ? goPromDtPlan(bt, name) : null
+    if (pp != null) { return pp }
     if (cands.length != 1) { return {fn: "", ty: "", ptr: false, dyn: true, isPtr: false, via: null} }
     return {fn: cands[0] + "." + name, ty: cands[0], ptr: goMethPtr["$" + cands[0] + "." + name] === true,
             dyn: true, isPtr: false, via: null}
+}
+// The plan of struct type st's method name promoted from a defined non-struct
+// type (goPromDt), or null.
+function goPromDtPlan(st, name) {
+    var pd = goStructTyName(st) != "" ? goPromDt(st, name) : null
+    if (pd == null) { return null }
+    return {fn: pd.ty + "." + name, ty: pd.ty, ptr: goMethPtr["$" + goTyKey(pd.ty) + "." + name] === true,
+            dyn: false, isPtr: pd.isPtr, via: pd.via}
+}
+// The methods struct type st has promoted from defined non-struct types, as
+// [name, plan] pairs: its descriptor carries them, so a call through an interface
+// finds them as it finds its own. A name st declares, or holds as a field, is its own.
+// A pointer method reached through a value field is in *st's method set only, so
+// the descriptor marks it __ptr$ (fmt skips it for a value, as for st's own).
+function goPromDtMeths(st) {
+    var out = []
+    var k = goTyKey(st)
+    var i = 0
+    while (i < goMethNames.length) {
+        var nm = goMethNames[i]
+        if (goMethRty["$" + k + "." + nm] === undefined && goPreFld["$" + k + "." + nm] === undefined) {
+            var pp = goPromDtPlan(st, nm)
+            if (pp != null) { out.push([nm, pp]) }
+        }
+        i = i + 1
+    }
+    return out
 }
 // The method name of a defined non-struct type promoted into struct type st (Go
 // spec "Selectors": the shallowest embedding wins): {via: the embedded field names

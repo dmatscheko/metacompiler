@@ -7085,6 +7085,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         structFTypes[sKey(curPkgName, name)] = ftypes
         goRfStructs.push(sKey(curPkgName, name))
         var pkg = curPkgName == null ? "main" : curPkgName
+        var pms = goPromDtMeths(name)
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
@@ -7095,6 +7096,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             emitNameList(b, clsV, "__ftypes", ftypes)
             if (tagged) { emitNameList(b, clsV, "__ftags", ftags) }
             emitFCopy(b, clsV, ftypes)
+            for (var pm = 0; pm < pms.length; pm++) {
+                callExt(b, "js_set", [clsV, emitStr(b, pms[pm][0]), callExt(b, "js_closure", [handle(promDtWrapper(pms[pm][1])), curScopeV])])
+                if (pms[pm][1].ptr && !pms[pm][1].isPtr) { callExt(b, "js_set", [clsV, emitStr(b, "__ptr$" + pms[pm][0]), hTrue]) }
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             return b
         }
@@ -7349,6 +7354,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(fb, "js_pyset", [f.Params[1], emitNum(fb, 0), callExt(fb, "js_get", [a0, emitStr(fb, "__dv")])])
         var fV = emitDtFn(fb, f.Params[0], fn)
         fb.NewRet(callExt(fb, "js_call", [fV, hUndef, f.Params[1]]))
+        return idx
+    }
+    // A struct's method promoted from a defined non-struct type (goPromDtMeths): it
+    // is handed the struct itself and calls "T.M" on the embedded field. Twin of
+    // goPromDtFn in go-interpreter.abnf.
+    function promDtWrapper(p) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        curScopeV = f.Params[0]
+        var fb = f.NewBlock("entry")
+        var rr = emitDtRecv(fb, fb.NewCall(getExtern("js_arg", 2), [f.Params[1], handle(0)]), {rc: null}, p)
+        callExt(rr.b, "js_pyset", [f.Params[1], emitNum(rr.b, 0), rr.v])
+        rr.b.NewRet(callExt(rr.b, "js_call", [emitDtFn(rr.b, f.Params[0], p.fn), hUndef, f.Params[1]]))
+        curF = savedF
+        curScopeV = savedScope
         return idx
     }
     // A package var's emitter waits in goTopFns; the item list carries {topvar: index}

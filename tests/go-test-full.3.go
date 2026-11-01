@@ -1999,6 +1999,76 @@ func s143() {
 		s143W{s143T: s143T{1, 1}}.Len() == 2 && (ws[0]).Len() == 2 && ws[0].Get() == 109 && (ws[0]).Sum() == 4)
 }
 
+// ===== SECTION 144: a method promoted from a defined non-struct type, called through an interface =====
+// A struct embedding a defined non-struct type has its methods in its method set,
+// so it satisfies an interface by them and a call through the interface reaches
+// the embedded field (its address, for a pointer method of a value field); a
+// promoted String makes the struct print through it. A method expression's %T is
+// M's signature with the receiver first. The expected values are go run's.
+type s144L []int
+
+func (l *s144L) Push(v int) { *l = append(*l, v) }
+func (l s144L) Len() int    { return len(l) }
+
+type s144C int
+
+func (c *s144C) Inc()          { *c++ }
+func (c s144C) Get() int       { return int(c) }
+func (c s144C) String() string { return fmt.Sprintf("C%d", int(c)) }
+
+type s144U struct{ *s144L }
+
+type s144B struct {
+	s144L
+	name string
+}
+
+type s144O struct {
+	s144B
+	k int
+}
+
+type s144H struct{ s144C }
+
+type s144Pusher interface {
+	Push(int)
+	Len() int
+}
+
+type s144Incer interface {
+	Inc()
+	Get() int
+}
+
+type s144P struct{ x int }
+
+func (p *s144P) Add(n int) int { return p.x + n }
+func (p s144P) Twice() int     { return p.x * 2 }
+
+func s144fill(p s144Pusher, vs []int) int {
+	for _, v := range vs {
+		p.Push(v)
+	}
+	return p.Len()
+}
+
+func s144() {
+	vs := []int{7, 8}
+	l := s144L{1}
+	u := &s144U{&l}
+	b := &s144B{name: "b"}
+	o := &s144O{}
+	n := s144fill(u, vs)*100 + s144fill(b, vs)*10 + s144fill(o, vs)
+	check("promdt144", n == 322 && fmt.Sprint(l, b.s144L, o.s144L) == "[1 7 8] [7 8] [7 8]")
+	h := &s144H{}
+	var i s144Incer = h
+	i.Inc()
+	i.Inc()
+	var s fmt.Stringer = s144H{s144C(5)}
+	check("promdtcall144", i.Get() == 2 && h.s144C == 2 && s.String() == "C5" && fmt.Sprint(h, " ", s144H{s144C(3)}) == "C2 C3")
+	check("mexprty144", fmt.Sprintf("%T %T", (*s144P).Add, s144P.Twice) == "func(*main.s144P, int) int func(main.s144P) int")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -2048,6 +2118,7 @@ func main() {
 	s141()  // SECTION-CALL 141
 	s142()  // SECTION-CALL 142
 	s143()  // SECTION-CALL 143
+	s144()  // SECTION-CALL 144
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
