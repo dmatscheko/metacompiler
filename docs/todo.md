@@ -179,12 +179,6 @@ it out (the save is lexical). rt_setvar_byname drops a write to a name the progr
 
 # C — C subset
 
-### T-996 c compiled: a function whose return type is a typedef name loses it on a direct call · P2 · C · IN PROGRESS (C worker, round 16) [V]
-Found by the C worker, round 15 (oracle cc). `typedef double D; D half(D x){return x/2;}` → `(int)(half(9.0)*10)` cc and interpreter
-45, llvm.Run/native 40; `typedef long L; L big(int x){return x*4294967296L;}` → `big(3)` 12884901888 vs 0. Also a function returning
-a typedef'd function pointer: `typedef double (*DF)(double); DF pick(int k){return dh;}` → `pick(1)(7.0)` loses the double. Likely
-buildTdFunc / TdProto in c-to-llvm-ir.abnf never record the return type (noteRetCt / noteRetAll).
-
 # CORE — MetaJS, the engines, shared runtime, tooling
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
@@ -1114,6 +1108,7 @@ T-987 swift: undefined names need scope tables (out-of-scope uses, upper-case na
 T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result — DONE - ++/-- through a call's member or index (both forms), call runs once, ?. skips
 T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see re-read elements — PARTIAL - keys/values -= write through, live map views, lambdas read elements once, single stops at the 2nd match; sort selector counts filed
 T-982 c compiled: an indirect call through a function pointer loses the return type — DONE - function-pointer types carry their signature; indirect calls convert arguments and unpack the result type
+T-996 c compiled: a function whose return type is a typedef name loses it on a direct call — DONE - typedef'd return types (scalar, pointer, struct by value, function pointer) honoured in both engines
 
 # Settled — do not re-open
 
