@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1090** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1091** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -110,10 +110,11 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1089 kotlin: nested builtin receivers in scope functions; single-line when lambda typing · P3 · KT · IN PROGRESS (KT worker, round 28) [V]
+### T-1090 kotlin: class members / user extensions called inside builtin implicit receivers; List vs MutableList · P3 · KT · OPEN [V]
 Oracle kotlinc 2.2.21:
-- `StringBuilder().apply { with(listOf(1,2,3)) { append(size) } }` -> "3" appended (prints 3 / "31" in the worker's probe); interpreter "unknown list method: append", llvm.Run wrong value, native stops early. A builtin receiver claims every name in call position - needs a per-builtin-type member table so unknown names fall through to the outer receiver.
-- reified inference through a single-line when lambda: `listOf(1).map { when (it) { 1 -> "a" else -> "b" } }.elName()` (also with `;` separators) -> String; ours Any in all engines. The multi-line form already works.
+- class member inside a nested builtin receiver: `class Q(val n:Int){ fun tag(x:Int)="q"+(x+n); fun go()=with(listOf(1,2,3)){ tag(size) } }; Q(5).go()` -> q8 (also `with(b) { with(listOf(3,4)) { bump(size) } }` -> 3); all engines "unknown list method: tag". Needs a complete positive member table per builtin kind, and the compiler's kt_barecall (sends classMethodNames to the innermost this) to pick the declaring receiver (e.g. js_ktrecvof).
+- user extension on an implicit builtin receiver, compiled half: `fun MutableList<Int>.twice(x:Int){add(x*2)}; with(ml){ twice(5) }` -> [1, 10]; interpreter right, run/native "unknown list method 'twice'". An extension shadowing a builtin-looking name (`fun MutableList<Int>.append(x:Int){add(x*100)}; with(ml){append(5)}`) -> [1, 500]; all legs now "unknown name: append".
+- List vs MutableList: the member table's list row is MutableList, so `mutableSetOf(1).apply { with(listOf(9)) { add(1) } }` binds add to the immutable list; Kotlin resolves it to the set.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1147,6 +1148,7 @@ T-1082 ruby: eager endless Enumerators answer a Lazy; to_enum on user Enumerable
 T-1083 php: builtin argument TypeErrors; dynamic undefined-call line; opcode-compiled builtins in traces — DONE (PHP r45, eff70048): coercive argument TypeErrors for native builtins (strlen, substr, strpos, intdiv, array_key_exists offset rule, array_* ...) with stub parameter names; call-site line stored before dynamic-call/callback raises; call_user_func(_array)/strval/intval/... lowered frameless per zend_try_compile_special_func; multi-line foreach uses the expression's last leaf line; (int)/(float) of arrays fixed; 3 legs agree with php-src. Stdlib (PHP-written) builtin arg-type audit filed
 T-1084 bash: subscript leftovers (${a[@]:'1'}, [[ -v a[@] ]], quoted computed declare); option after operand — DONE (SH r32, 76ec1067): ${v:off:len} offsets fall back to run-time arithmetic (quoted offsets error like bash), [[ -v NAME[@] ]] / [*] semantics incl. assoc and nameref, quoted subscripts in computed declare operands, late option words in declare mark later literals; 4 legs = bash 5.3 incl. stderr and exit status. Stderr-only token wordings + pre-existing declare gaps filed; nullglob/locale out of scope
 T-1085 kotlin: apply{} receiver inside an extension (compiled crash); implicit javaClass; unboxed inline-lambda it — DONE (KT r27, 49f0b1c3): scope-function receivers are the innermost implicit receiver inside extensions and members (compiled apply{append} crash fixed, this@label resolution, fall-through to outer receiver), implicit javaClass, unboxed inline-lambda it, reified T through multi-line when lambdas and member references (map(Int::toString) was Unit); native String receivers no longer answered by C-floor methods; classNames keys $-prefixed (FROZEN-DIFF). Master probe: single-line when lambda still infers Any - filed
+T-1089 kotlin: nested builtin receivers in scope functions; single-line when lambda typing — DONE (KT r28, fb543678): kotlinc-derived builtin member table (9 kinds x 70 names) lets names an inner builtin receiver lacks fall through to the outer receiver, identical in all 3 engines; one-expression lambda bodies split only at top-level ; / newline (when lambdas type); 4 legs = kotlinc
 
 # Settled — do not re-open
 
