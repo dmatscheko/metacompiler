@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-998** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1000** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -93,10 +93,16 @@ foreign object).
 
 # JV — Java
 
-### T-974 java: cyclic inheritance across files, through a redefined Object, and in type-variable bounds is not refused · P3 · JV · IN PROGRESS (JV worker, round 16) [V]
-Left from T-932 (oracle javac 24). Multi-file cycles (javac corpus ClassCycle1a/2a/3a and the staticImport case), the
-redefineObject cases, and `<E extends T, T extends E>` (generics/6677785) are accepted; javac "cyclic inheritance involving X" /
-"cyclic inheritance involving E".
+### T-998 java compiled: an interface extending `Comparable<T>` fails with "variable not defined: Comparable" · P2 · JV · OPEN [V]
+Found by the master probing round 16 (oracle java 24). `interface Shape extends Comparable<Shape> { double area(); default int
+compareTo(Shape o) {..} }` with a class implementing it → interpreter and java agree; llvm.Run and native abort with "js runtime
+error: variable not defined: Comparable" (pre-existing on main). Library interfaces as an interface's superinterface need a stub.
+
+### T-999 java: package access is not checked; tests/java-test-multifile.java imports non-public classes · P3 · JV · OPEN [V]
+Found by the JV worker, round 16 (oracle javac 24). `util.Toolbox` / `util.Pair` in tests/imports/util are not public; javac refuses
+the import ("Toolbox is not public in util; cannot be accessed from outside package"). Both halves accept it. Fix the test (make
+them public) and refuse access to a package-private type from another package. Generic constructors' type-parameter lists are
+skipped (SkipAngle), so a bound cycle there is not checked either.
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
@@ -1107,6 +1113,7 @@ T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see r
 T-982 c compiled: an indirect call through a function pointer loses the return type — DONE - function-pointer types carry their signature; indirect calls convert arguments and unpack the result type
 T-996 c compiled: a function whose return type is a typedef name loses it on a direct call — DONE - typedef'd return types (scalar, pointer, struct by value, function pointer) honoured in both engines
 T-971 ruby: smaller gaps found in round 33 — PARTIAL - nested class-body consts, $~ after split, =~ dispatch/TypeError, builtin own instance_methods; Hash iteration insert check filed
+T-974 java: cyclic inheritance across files, through a redefined Object, and in type-variable bounds is not refused — DONE - cyclic inheritance across files (implicit source path), via redeclared java.lang.Object, and in type-variable bounds; javac's message, both halves
 
 # Settled — do not re-open
 
