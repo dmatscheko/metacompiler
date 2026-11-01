@@ -104,7 +104,7 @@ Exception.cs (all .NET versions): Message is `_message ?? SR.Format(Exception_Wa
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1047 kotlin: interpreter `Pair::class.simpleName` is null · P4 · KT · OPEN [V]
+### T-1047 kotlin: interpreter `Pair::class.simpleName` is null · P4 · KT · IN PROGRESS (KT worker, round 20) [V]
 kotlinc 2.2.21: `val r = 1L to 2; println(r::class.simpleName)` → Pair; llvm.Run and native print Pair, the interpreter prints null. Found by KT r19.
 
 # GO — Go  (oracle: `go run`)
