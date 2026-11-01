@@ -8061,13 +8061,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // =~ : either operand may be the pattern, and the answer is the INDEX of the
     // match (not a boolean) or nil - which is why `("zzz" =~ /b/) == nil` holds.
+    // Ruby 2.6 dispatches on the left operand: Regexp#=~ takes a String, a Symbol,
+    // nil (which clears $~) or a #to_str object and raises TypeError on anything
+    // else; String and Symbol match the pattern; nil and every other object answer
+    // nil without touching $~ (Object#=~), unless the class defines its own =~.
+    // Twins: rxMatchOp in abnf/jsrtregex.go, rbRxMatchOp in lib/ruby-rt.metajs.
     function reMatchOp(l, r) {
         var rv = anytype
         var s = ""
-        if (isRegex(l)) { rv = l; s = r === null || r === undefined ? null : rstr(r) }
-        else if (isRegex(r)) { rv = r; s = l === null || l === undefined ? null : rstr(l) }
-        else { fail("=~ needs a Regexp on one side") }
-        if (s === null) { setLastMatch(null); return null }
+        if (isRegex(l)) {
+            rv = l
+            if (r === null || r === undefined) { setLastMatch(null); return null }
+            if (isSym(r) || typeof r == "string" || isRStr(r) || isBin(r)) { s = rstr(r) }
+            else {
+                var cv = anytype
+                cv = fmtUserConv(r, "to_str", "")
+                if (typeof cv != "string") { raiseErr("=~", "TypeError", "no implicit conversion of " + fmtConvName(r) + " into String") }
+                s = cv
+            }
+        }
+        else if (isSym(l) || typeof l == "string" || isRStr(l) || isBin(l)) {
+            if (!isRegex(r)) { fail("=~ needs a Regexp on one side") }
+            rv = r
+            s = rstr(l)
+        }
+        else if (isUserObj(l) && typeof lookupMethod(l.__class, "=~") == "function") { return mcall(l, "=~", [r], null) }
+        else { return null }
         var md = reMatch(rv, s, 0)
         if (md === null) { return null }
         return rbsCharIdx(s, md.m.begin)
@@ -9248,7 +9267,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "split") {
                 var sre = args.length > 0 && isRegex(args[0]) ? args[0].prog : null
                 var ssep = args.length == 0 || args[0] === null || args[0] === undefined || sre !== null ? null : rstr(args[0])
-                return rbsSplit(target, ssep == " " ? null : ssep, sre, args.length > 1 ? toF(args[1]) : 0)
+                var slast = [undefined]
+                var sout = rbsSplit(target, ssep == " " ? null : ssep, sre, args.length > 1 ? toF(args[1]) : 0, slast)
+                if (slast[0] === null) { setLastMatch(null) }
+                else if (slast[0] !== undefined) { setLastMatch({__md: true, rev: args[0], text: target, m: slast[0]}) }
+                return sout
             }
             if (name == "length" || name == "size") { return charCount(target) }
             if (name == "to_s" || name == "to_str") { return target }
@@ -13468,11 +13491,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < c.__imn.length; i++) { if (c.__imn[i] == name) { return } }
         c.__imn.push(name)
     }
+    // A builtin class's own are its rbOwnRows row first, then the ones a
+    // reopening body added. Twins: rubyOwnIMethods in abnf/jsrt.go, rbOwnIMethods
+    // in lib/ruby-rt.metajs.
     function ownInstanceMethods(c) {
         var out = []
+        if (c.__builtin === true) {
+            var row = rbOwnRow(c.__name)
+            for (var k = 1; k < row.length; k++) { out.push(mkSym(row[k])) }
+        }
         for (var i = 0; c.__imn != undefined && i < c.__imn.length; i++) {
             var n = c.__imn[i]
-            if (n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?") { continue }
+            if (n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?" || symListHas(out, n)) { continue }
             if (hasOwn(c, "$v$" + n) && c["$v$" + n] == "private") { continue }
             out.push(mkSym(n))
         }
@@ -13490,8 +13520,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the class alone when inherit is false. initialize and its kin are private
     // whatever the body says; past the program's classes the builtin table
     // decides, with the private Kernel methods and the top-level defs (private
-    // methods of Object). Twins: rubyMethodVis in abnf/jsrtruby.go, rbMethodVis
-    // in lib/ruby-rt.metajs.
+    // methods of Object), after the methods a reopening body added to the builtin
+    // class. Twins: rubyMethodVis in abnf/jsrtruby.go, rbMethodVis in
+    // lib/ruby-rt.metajs.
     function methodVisIn(cls, n, inherit) {
         var c = anytype
         c = cls
@@ -13501,6 +13532,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (!inherit) { return "" }
             c = c.__super
         }
+        if (c != undefined && c != null && levelVis(c, n) != "") { return levelVis(c, n) }
         if (n == "initialize" || rbRespondsPrivate(n) || hasOwn(globalScope, "$d$" + n)) { return "private" }
         return rbResponds(c != undefined && c != null ? c.__name : "Object", n) ? "public" : ""
     }
@@ -14582,12 +14614,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var anc = ancestorsOf(cls)
         for (var i = 0; i < anc.length; i++) {
             var names = []
-            if (anc[i].__builtin === true) {
-                if (anc[i].__name == "Object") { names = rbRespondRows()[0].slice(1) }
-            } else {
-                var own = ownInstanceMethods(anc[i])
-                for (var j = 0; j < own.length; j++) { names.push(own[j].s) }
-            }
+            if (anc[i].__builtin === true && anc[i].__name == "Object") { names = rbRespondRows()[0].slice(1) }
+            var own = ownInstanceMethods(anc[i])
+            for (var j = 0; j < own.length; j++) { names.push(own[j].s) }
             for (var k = 0; k < names.length; k++) {
                 if (seen["$" + names[k]] !== true) {
                     seen["$" + names[k]] = true

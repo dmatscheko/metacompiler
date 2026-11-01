@@ -78,7 +78,7 @@ BodyItem    = HdBodyItem | AliasTop | Statement ;
 
 // module M ... end: creates (or reopens) the module object and runs its body, a program
 // of the same items. A nested module recurses.
-ModuleDecl  <~~ push(makeModuleStmt(takeAll(), up.pos)) ~~>
+ModuleDecl  <~~ push(makeModuleStmt(takeAll(), up.pos)); noteDecl(up.start, up.pos) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
               | ModuleDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~> | AliasStmt | AliasMethodStmt
@@ -184,7 +184,7 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
-ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
+ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)); noteDecl(up.start, up.pos) ~~>
             = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ] ClassItems [ ClassGuard ] End ;
 ClassItems  = { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
               | AliasStmt | AliasMethodStmt | DefineMethodStmt | MixinStmt | VisStmt | VisNamesStmt | VisDefStmt
@@ -337,7 +337,7 @@ ConstAhead = :script(~~
 ~~) ;
 // Anything else in a class body - @@classvar = v, include M, private, alias - runs
 // as an ordinary statement with `self` bound to the class object.
-ClassBodyStmt <~~ push({cstmt: pop(), ctext: up.in}) ~~>
+ClassBodyStmt <~~ push({cstmt: pop(), ctext: up.in, cfrom: up.start, cto: up.pos, cfile: c.curFile()}) ~~>
             = Statement ;
 AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
             = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
@@ -4382,7 +4382,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function makeAssign(items, pos) {
         var ref = items[0]
-        if (ref.path.length == 0 && ref.name != undefined) { assignedConsts["$" + ref.name] = true }
+        if (ref.path.length == 0 && ref.name != undefined) {
+            assignedConsts["$" + ref.name] = true
+            if (!isLocalName(ref.name)) { constSites.push({n: ref.name, at: pos, f: c.curFile()}) }
+        }
         var op = items[1]
         var valT = items[2]
         // ||= / &&= evaluate the right-hand side, and write, only when the old
@@ -7695,6 +7698,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // enclosing item's tag reads it.
     var lastDeclName = ""
 
+    // Where each constant assignment and each class or module statement is in the
+    // source, so a class body statement can tell which constants it binds below its
+    // top level (`begin; K = 1; rescue; end', `if c then K = 1 end', a block): those
+    // inside it and not inside a class or module statement nested in it. A nested
+    // statement binds its own name, recorded at its start.
+    var constSites = []
+    var declSites = []
+    function noteDecl(from, to) {
+        var f = c.curFile()
+        declSites.push({from: from, to: to, f: f})
+        if (lastDeclName.indexOf("::") < 0) { constSites.push({n: lastDeclName, at: from, f: f}) }
+    }
+    function nestedConstNames(it, direct) {
+        var out = []
+        if (it.ctext.indexOf("=") < 0 && it.ctext.indexOf("class") < 0 && it.ctext.indexOf("module") < 0) { return out }
+        for (var i = 0; i < constSites.length; i++) {
+            var cs = constSites[i]
+            if (cs.f != it.cfile || cs.at < it.cfrom || cs.at > it.cto || cs.n == direct || nameIn(out, cs.n)) { continue }
+            var inner = false
+            for (var j = 0; j < declSites.length && !inner; j++) {
+                var d = declSites[j]
+                inner = d.f == it.cfile && d.from >= it.cfrom && d.to <= it.cto && d.from < cs.at && cs.at <= d.to
+            }
+            if (!inner) { out.push(cs.n) }
+        }
+        return out
+    }
+
     // The visibility keyword that a `private` / `protected` line switches to.
     function visWordOf(text) {
         var t = text
@@ -8028,7 +8059,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (it.cstmt != undefined) {
                 var cn = constAssignName(it.ctext)
                 if (cn != "") { r.consts.push(cn); bodyConsts["$" + cn] = true }
-                r.cstmts.push({t: it.cstmt, name: cn})
+                var more = nestedConstNames(it, cn)
+                for (var mc = 0; mc < more.length; mc++) { r.consts.push(more[mc]); bodyConsts["$" + more[mc]] = true }
+                r.cstmts.push({t: it.cstmt, name: cn, more: more})
                 continue
             }
         }
@@ -8424,7 +8457,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return function(b) {
                 var bkey = "$" + curClsName + "::" + name
                 if (curClsName == "" && emittedClasses[bkey] == undefined) {
-                    emittedClasses[bkey] = {anc: [], snames: [], core: false, imn: null, sres: []}
+                    emittedClasses[bkey] = {anc: [], snames: [], core: false, imn: [], builtin: true, sres: []}
                     callExt(b, "js_rbreopen", [])
                 }
                 if (emittedClasses[bkey] == undefined) { notImpl("a nested class named like a builtin class", pos) }
@@ -8630,12 +8663,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // reads as the full path. Twin of lexConst in ruby-interpreter.abnf.
     var lexNames = {}
     function lexNote(qn, r) {
-        var add = []
+        lexNames["$" + qn] = unionNames(lexNames["$" + qn], bodyConstNames(r))
+    }
+    // The constants a class or module body binds, in source order: each statement's
+    // top-level one, then those below its top level.
+    function bodyConstNames(r) {
+        var out = []
         for (var i = 0; i < r.cstmts.length; i++) {
             var n = r.cstmts[i].name
-            if (n != undefined && n != "") { add.push(n) }
+            if (n != undefined && n != "") { out.push(n) }
+            var more = r.cstmts[i].more
+            if (more != undefined) { for (var j = 0; j < more.length; j++) { out.push(more[j]) } }
         }
-        lexNames["$" + qn] = unionNames(lexNames["$" + qn], add)
+        return out
     }
     function lexConstPath(name) {
         if (curDefLocals == null) { return null }
@@ -8752,11 +8792,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ruby-interpreter.abnf.
     var classConstNames = {}
     function emitConstNames(b, dstV, r) {
-        var add = []
-        for (var i = 0; i < r.cstmts.length; i++) {
-            var n = r.cstmts[i].name
-            if (n != undefined && n != "") { add.push(n) }
-        }
+        var add = bodyConstNames(r)
         if (add.length == 0) { return b }
         var all = unionNames(classConstNames["$" + curClsName], add)
         classConstNames["$" + curClsName] = all
@@ -8832,10 +8868,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         prev.snames = unionNames(prev.snames, snames)
         b = emitNameList(b, clsV, prev.snames, "__snames")
         // The reopening body's new instance-method names join the list at run time,
-        // behind any a define_method has added since. A builtin class keeps none.
+        // behind any a define_method has added since. A builtin class object starts
+        // without the list.
         var imn = prev.imn == null ? [] : ownIMNames(prev.imn, r)
         if (prev.imn != null && imn.length > prev.imn.length) {
             var imnV = callExt(b, "js_get", [clsV, emitStr(b, "__imn")])
+            if (prev.builtin === true) {
+                imnV = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, imnV, hUndef), callExt(b, "js_arr_new", []), imnV)
+                callExt(b, "js_set", [clsV, emitStr(b, "__imn"), imnV])
+            }
             for (var ii = prev.imn.length; ii < imn.length; ii++) { callExt(b, "js_arr_push", [imnV, emitStr(b, imn[ii])]) }
             prev.imn = imn
         }

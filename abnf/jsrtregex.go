@@ -7879,15 +7879,14 @@ func (rt *jsrt) rxRunMatch(reObj interface{}, s string, from int) *jsObject {
 	return o
 }
 
-// rxMatchOperand sorts the two sides of =~ / === into (pattern, subject).
-func rxMatchOperand(l, r interface{}) (interface{}, interface{}, bool) {
-	if rxIsRegexObj(l) {
-		return l, r, true
+// rxIsStrish: a String (any of its three forms) or a Symbol, what =~ matches a
+// pattern against.
+func rxIsStrish(v interface{}) bool {
+	switch v.(type) {
+	case string, *jsRStr, *jsRBin, jsSym:
+		return true
 	}
-	if rxIsRegexObj(r) {
-		return r, l, true
-	}
-	return nil, nil, false
+	return false
 }
 
 func rxKeyName(v interface{}) (string, bool) {
@@ -8179,17 +8178,37 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 }
 
 // rxMatchOp is the =~ operator: either operand may be the pattern, and the answer
-// is the INDEX of the match (not a boolean) or nil.
+// is the INDEX of the match (not a boolean) or nil. Twin of reMatchOp in
+// ruby-interpreter.abnf, which states the dispatch rule.
 func (rt *jsrt) rxMatchOp(l, r interface{}) interface{} {
-	reObj, subj, ok := rxMatchOperand(l, r)
-	if !ok {
-		rt.fail("=~ needs a Regexp on one side")
-	}
-	if isUndefOrNull(subj) == true {
-		rt.rxSetGlobals(nil)
+	var reObj interface{}
+	var subj string
+	switch {
+	case rxIsRegexObj(l):
+		reObj = l
+		if isUndefOrNull(r) == true {
+			rt.rxSetGlobals(nil)
+			return jsNull
+		}
+		if rxIsStrish(r) {
+			subj = rt.rubyStr(r)
+		} else if v, conv := rt.rubyFmtUserConv(r, "to_str", ""); conv && rxIsStrish(v) {
+			subj = rt.rubyStr(v)
+		} else {
+			rt.rubyRaiseErr("=~", "TypeError", "no implicit conversion of "+rubyFmtConvName(r)+" into String")
+		}
+	case rxIsStrish(l):
+		if !rxIsRegexObj(r) {
+			rt.fail("=~ needs a Regexp on one side")
+		}
+		reObj, subj = r, rt.rubyStr(l)
+	default:
+		if _, has := rubyFindMethod(l, "=~"); has && rubyUserObj(l) {
+			return rt.rubyMethod(l, "=~", []interface{}{r})
+		}
 		return jsNull
 	}
-	md := rt.rxRunMatch(reObj, rt.rubyStr(subj), 0)
+	md := rt.rxRunMatch(reObj, subj, 0)
 	if md == nil {
 		return jsNull
 	}

@@ -13,26 +13,51 @@ import (
 // only its own copy, so every gate would stay green while respond_to? answered
 // differently under llvm.Run.
 func TestRubyRespondTablesAgree(t *testing.T) {
+	js := readJSRows(t, "rbRespondRows")
+	compareRows(t, "respond_to?", js, rubyRespondNames, "rubyRespondNames")
+}
+
+// TestRubyOwnTablesAgree does the same for Module#instance_methods(false) of a
+// builtin class (rbOwnRows / rubyOwnNames), and checks every own name is one the
+// class answers, so the list never names a method the engines cannot call.
+func TestRubyOwnTablesAgree(t *testing.T) {
+	js := readJSRows(t, "rbOwnRows")
+	compareRows(t, "instance_methods(false)", js, rubyOwnNames, "rubyOwnNames")
+	for cls, names := range rubyOwnNames {
+		for _, n := range names {
+			if !rubyRespondSet["*#"+n] && !rubyRespondSet[cls+"#"+n] {
+				t.Errorf("instance_methods(false) row %q names %q, which its respond_to? rows lack", cls, n)
+			}
+		}
+	}
+}
+
+// readJSRows parses the rows table function fn of ruby-respond.js.
+func readJSRows(t *testing.T, fn string) map[string][]string {
 	src := readRepoFile(t, "../languages/lib/ruby-respond.js")
-	head := "function rbRespondRows() {\n    return ["
+	head := "function " + fn + "() {\n    return ["
 	start := strings.Index(src, head)
 	if start < 0 {
-		t.Fatal("rbRespondRows not found in ruby-respond.js - the parse broke, not the code")
+		t.Fatalf("%s not found in ruby-respond.js - the parse broke, not the code", fn)
 	}
 	js := parseRespondRows(src[start+len(head):])
 	if len(js) < 10 {
-		t.Fatalf("parsed only %d rows from ruby-respond.js - the parse broke, not the code", len(js))
+		t.Fatalf("parsed only %d rows of %s - the parse broke, not the code", len(js), fn)
 	}
+	return js
+}
+
+func compareRows(t *testing.T, what string, js, goRows map[string][]string, goName string) {
 	classes := map[string]bool{}
 	for cls := range js {
 		classes[cls] = true
 	}
-	for cls := range rubyRespondNames {
+	for cls := range goRows {
 		classes[cls] = true
 	}
 	for cls := range classes {
 		a := respondSetOf(js[cls])
-		b := respondSetOf(rubyRespondNames[cls])
+		b := respondSetOf(goRows[cls])
 		onlyJS, onlyGo := []string{}, []string{}
 		for n := range a {
 			if !b[n] {
@@ -47,8 +72,8 @@ func TestRubyRespondTablesAgree(t *testing.T) {
 		sort.Strings(onlyJS)
 		sort.Strings(onlyGo)
 		if len(onlyJS)+len(onlyGo) > 0 {
-			t.Errorf("respond_to? row %q differs: only in ruby-respond.js %v, only in rubyRespondNames %v",
-				cls, onlyJS, onlyGo)
+			t.Errorf("%s row %q differs: only in ruby-respond.js %v, only in %s %v",
+				what, cls, onlyJS, goName, onlyGo)
 		}
 	}
 }

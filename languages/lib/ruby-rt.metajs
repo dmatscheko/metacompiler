@@ -4089,14 +4089,26 @@ function js_rinclude(c, m) {
     c["__mixorder"] = order
     return null
 }
+// Module#instance_methods(false). Twin of ownInstanceMethods in
+// ruby-interpreter.abnf, which states the rule.
 function rbOwnIMethods(o) {
     var out = []
+    var seen = {}
+    if (typeof o["__rbuiltin"] == "string") {
+        var row = rbOwnRow(o["__rbuiltin"])
+        var k = 1
+        while (k < row.length) {
+            seen["$" + row[k]] = true
+            out.push(rbSym(row[k]))
+            k = k + 1
+        }
+    }
     var ns = anytype
     ns = o["__imn"]
     if (ns === undefined || ns === null) { return out }
     var i = 0
     while (i < ns.length) {
-        out.push(rbSym(ns[i]))
+        if (seen["$" + ns[i]] !== true) { out.push(rbSym(ns[i])) }
         i = i + 1
     }
     return out
@@ -4111,15 +4123,12 @@ function rbAllIMethods(o) {
     while (i < anc.length) {
         var a = anc[i]
         var names = []
-        if (typeof a["__rbuiltin"] == "string") {
-            if (a["__rbuiltin"] == "Object") { names = rbArgsFrom(rbRespondRows()[0], 1) }
-        } else {
-            var own = rbOwnIMethods(a)
-            var j = 0
-            while (j < own.length) {
-                names.push(own[j]["s"])
-                j = j + 1
-            }
+        if (a["__rbuiltin"] === "Object") { names = rbArgsFrom(rbRespondRows()[0], 1) }
+        var own = rbOwnIMethods(a)
+        var j = 0
+        while (j < own.length) {
+            names.push(own[j]["s"])
+            j = j + 1
         }
         var k = 0
         while (k < names.length) {
@@ -4206,7 +4215,7 @@ function rbConstNames(o, inherit) {
         ns = anc[i]["__cnames"]
         var j = 0
         while (ns !== undefined && ns !== null && j < ns.length) {
-            if (seen["$" + ns[j]] !== true) {
+            if (seen["$" + ns[j]] !== true && anc[i]["$c$" + ns[j]] !== undefined) {
                 seen["$" + ns[j]] = true
                 out.push(rbSym(ns[j]))
             }
@@ -5345,27 +5354,44 @@ function rbRxReplace(reObj, s, blk, repl, all) {
 }
 
 // The =~ operator: either operand may be the pattern, and the answer is the
-// INDEX of the match (not a boolean) or nil.
+// INDEX of the match (not a boolean) or nil. Twin of reMatchOp in
+// ruby-interpreter.abnf, which states the dispatch rule.
 function rbRxMatchOp(l, r) {
     var reObj = null
-    var subj = null
+    var subj = ""
     if (rbRxIsRegex(l)) {
         reObj = l
-        subj = r
-    } else if (rbRxIsRegex(r)) {
+        if (rtIsNil(r)) {
+            rbRxSetGlobals(null)
+            return null
+        }
+        if (rbRxIsStrish(r)) {
+            subj = rbStr(r)
+        } else {
+            var cv = rbFmtUserConv(r, "to_str", "")
+            if (typeof cv != "string") { rbRaiseErr("=~", "TypeError", "no implicit conversion of " + rbFmtConvName(r) + " into String") }
+            subj = cv
+        }
+    } else if (rbRxIsStrish(l)) {
+        if (!rbRxIsRegex(r)) { fail("=~ needs a Regexp on one side") }
         reObj = r
-        subj = l
+        subj = rbStr(l)
+    } else if (rbFindMethod(l, "=~") !== undefined) {
+        return rbMethod(l, "=~", [r])
     } else {
-        fail("=~ needs a Regexp on one side")
-    }
-    if (rtIsNil(subj)) {
-        rbRxSetGlobals(null)
         return null
     }
-    var md = rbRxRunMatch(reObj, rbStr(subj), 0)
+    var md = rbRxRunMatch(reObj, subj, 0)
     if (md === null) { return null }
     var mo = rbRxMatchOf(md)
     return rbsCharIdx(mo["text"], mo["m"]["begin"])
+}
+
+// A String (any of its three forms) or a Symbol: what =~ matches a pattern against.
+function rbRxIsStrish(v) {
+    if (typeof v == "string") { return true }
+    if (rbIsSym(v)) { return true }
+    return typeof v == "object" && (rtTag(v, "__rstr") || rtTag(v, "__rbin"))
 }
 
 // rxRegexMethod answers a method call whose RECEIVER is a Regexp or a MatchData
@@ -8349,6 +8375,18 @@ function js_rvisdir(recv, self, name) {
     return name
 }
 
+// Is n one of the public instance methods class c's bodies added (its __imn
+// list)? Twin of rubyIMNHas in abnf/jsrtruby.go.
+function rbIMNHas(c, n) {
+    var ns = anytype
+    ns = c["__imn"]
+    var i = 0
+    while (ns !== undefined && ns !== null && i < ns.length) {
+        if (ns[i] == n) { return true }
+        i = i + 1
+    }
+    return false
+}
 // The visibility of instance method n of a class, "" when it has none. Twin of
 // rubyMethodVis in abnf/jsrtruby.go, which states the rule.
 function rbMethodVis(cls, n, inherit) {
@@ -8366,6 +8404,7 @@ function rbMethodVis(cls, n, inherit) {
         if (!inherit) { return "" }
         c = c["__super"]
     }
+    if (c !== undefined && c !== null && rbIsObj(c) && rbIMNHas(c, n)) { return "public" }
     if (n == "initialize" || rbRespondsPriv(n)) { return "private" }
     var bn = "Object"
     if (c !== undefined && c !== null && rbIsObj(c) && typeof c["__rbuiltin"] == "string") { bn = c["__rbuiltin"] }
@@ -8703,7 +8742,14 @@ function rbMethod(target, name, args) {
             } else if (spn > 0 && args[0] !== null && args[0] !== undefined && rbStr(args[0]) != " ") {
                 spsep = rbStr(args[0])
             }
-            return rbsSplit(target, spsep, spre, spn > 1 ? rbToF(args[1]) : 0)
+            var splast = [undefined]
+            var spout = rbsSplit(target, spsep, spre, spn > 1 ? rbToF(args[1]) : 0, splast)
+            if (splast[0] === null) {
+                rbRxSetGlobals(null)
+            } else if (splast[0] !== undefined) {
+                rbRxSetGlobals(rbRxNewMatch(spre["src"], spre["flags"], target, splast[0]))
+            }
+            return spout
         }
         if (name == "index" || name == "rindex") { return rbStrSearch(target, name == "index", args) }
         if (name == "empty?") { return target.length == 0 }

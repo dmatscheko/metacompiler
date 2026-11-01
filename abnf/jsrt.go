@@ -6391,11 +6391,20 @@ func rubyIncludersPut(m *jsObject, nm string, fn interface{}) {
 	}
 }
 
+// rubyOwnIMethods is Module#instance_methods(false). Twin of ownInstanceMethods
+// in ruby-interpreter.abnf, which states the rule.
 func rubyOwnIMethods(o *jsObject) *jsArray {
 	out := &jsArray{}
+	seen := map[string]bool{}
+	if bn, isBuiltin := o.props["__rbuiltin"].(string); isBuiltin {
+		for _, n := range rubyOwnNames[bn] {
+			seen[n] = true
+			out.elems = append(out.elems, jsSym{s: n})
+		}
+	}
 	if ns, isArr := o.props["__imn"].(*jsArray); isArr {
 		for _, e := range ns.elems {
-			if s, isStr := e.(string); isStr {
+			if s, isStr := e.(string); isStr && !seen[s] {
 				out.elems = append(out.elems, jsSym{s: s})
 			}
 		}
@@ -6422,13 +6431,10 @@ func (rt *jsrt) rubyAllIMethods(o *jsObject) *jsArray {
 		if !isObj {
 			continue
 		}
-		if bn, isBuiltin := ao.props["__rbuiltin"].(string); isBuiltin {
-			if bn == "Object" {
-				for _, n := range rubyRespondNames["*"] {
-					add(n)
-				}
+		if bn, _ := ao.props["__rbuiltin"].(string); bn == "Object" {
+			for _, n := range rubyRespondNames["*"] {
+				add(n)
 			}
-			continue
 		}
 		for _, e := range rubyOwnIMethods(ao).elems {
 			add(e.(jsSym).s)
@@ -6453,8 +6459,10 @@ func rubyPublicIMethods(cls *jsObject, names *jsArray) *jsArray {
 
 // rubyConstNames is Module#constants: the class's own constants in definition
 // order (the __cnames list the emitter writes), then each ancestor's unless
-// inherit is false. Twins: constNames in ruby-interpreter.abnf, rbConstNames in
-// lib/ruby-rt.metajs.
+// inherit is false. A listed name counts once it is bound ($c$name): an
+// assignment the body never reached (`if false then K = 1 end', a raise before
+// it) defines nothing. Twins: constNames in ruby-interpreter.abnf, rbConstNames
+// in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyConstNames(o *jsObject, inherit bool) *jsArray {
 	out := &jsArray{}
 	seen := map[string]bool{}
@@ -6473,6 +6481,9 @@ func (rt *jsrt) rubyConstNames(o *jsObject, inherit bool) *jsArray {
 		}
 		for _, e := range ns.elems {
 			if n, isStr := e.(string); isStr && !seen[n] {
+				if _, bound := ao.props["$c$"+n]; !bound {
+					continue
+				}
 				seen[n] = true
 				out.elems = append(out.elems, jsSym{s: n})
 			}

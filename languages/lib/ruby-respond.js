@@ -161,6 +161,99 @@ function rbRespondRows() {
          "singleton_methods"]
     ]
 }
+// Module#instance_methods(false) of a builtin class: per class, the names of its
+// row (or of row "*") that MRI 2.6 defines on the class itself - its
+// instance_methods(false) restricted to what the engines dispatch. The Go twin's
+// copy is rubyOwnNames in abnf/jsrtruby.go; abnf/ruby_respond_test.go keeps the
+// two equal and each row inside its respond_to? names.
+function rbOwnRows() {
+    return [
+        ["Integer", "%", "&", "*", "**", "+", "-", "-@", "/", "<", "<=", "<=>", "==",
+         "===", ">", ">=", "[]", "^", "abs", "allbits?", "anybits?", "bit_length", "ceil",
+         "chr", "coerce", "denominator", "digits", "div", "divmod", "even?", "fdiv",
+         "floor", "gcd", "gcdlcm", "inspect", "integer?", "lcm", "magnitude", "modulo",
+         "next", "nobits?", "numerator", "odd?", "ord", "pow", "pred", "rationalize",
+         "remainder", "round", "size", "succ", "to_f", "to_i", "to_int", "to_r", "to_s",
+         "truncate", "|"],
+        ["Float", "%", "*", "**", "+", "-", "-@", "/", "<", "<=", "<=>", "==", "===", ">",
+         ">=", "abs", "angle", "arg", "ceil", "coerce", "denominator", "divmod", "eql?",
+         "fdiv", "finite?", "floor", "hash", "infinite?", "inspect", "magnitude", "modulo",
+         "nan?", "negative?", "next_float", "numerator", "phase", "positive?",
+         "prev_float", "quo", "rationalize", "round", "to_f", "to_i", "to_int", "to_r",
+         "to_s", "truncate", "zero?"],
+        ["Rational", "*", "**", "+", "-", "-@", "/", "<=>", "==", "abs", "ceil", "coerce",
+         "denominator", "fdiv", "floor", "hash", "inspect", "magnitude", "negative?",
+         "numerator", "positive?", "quo", "rationalize", "round", "to_f", "to_i", "to_r",
+         "to_s", "truncate"],
+        ["Complex", "*", "+", "-", "-@", "/", "==", "abs", "abs2", "angle", "arg",
+         "coerce", "conj", "conjugate", "denominator", "eql?", "fdiv", "finite?", "hash",
+         "imag", "imaginary", "infinite?", "inspect", "magnitude", "numerator", "phase",
+         "polar", "quo", "rationalize", "real", "real?", "rect", "rectangular", "to_c",
+         "to_f", "to_i", "to_r", "to_s"],
+        ["String", "%", "*", "+", "+@", "<<", "<=>", "==", "===", "[]", "ascii_only?", "b",
+         "bytes", "bytesize", "capitalize", "casecmp", "casecmp?", "center", "chars",
+         "chomp", "chomp!", "chop", "chop!", "chr", "clear", "codepoints", "concat",
+         "count", "delete", "delete!", "delete_prefix", "delete_prefix!", "delete_suffix",
+         "delete_suffix!", "downcase", "dump", "each_byte", "each_char", "each_codepoint",
+         "each_line", "empty?", "encode", "end_with?", "force_encoding", "freeze",
+         "getbyte", "hash", "hex", "include?", "index", "insert", "inspect", "intern",
+         "length", "lines", "ljust", "lstrip", "lstrip!", "next", "oct", "ord",
+         "partition", "prepend", "replace", "reverse", "reverse!", "rindex", "rjust",
+         "rpartition", "rstrip", "rstrip!", "scrub", "size", "slice", "slice!", "split",
+         "squeeze", "squeeze!", "start_with?", "strip", "strip!", "succ", "sum",
+         "swapcase", "swapcase!", "to_f", "to_i", "to_s", "to_str", "to_sym", "tr", "tr!",
+         "tr_s", "tr_s!", "unicode_normalize", "unicode_normalized?", "upcase", "upto",
+         "valid_encoding?"],
+        ["Symbol", "<=>", "==", "===", "[]", "capitalize", "downcase", "empty?", "id2name",
+         "inspect", "length", "next", "size", "succ", "swapcase", "to_proc", "to_s",
+         "to_sym", "upcase"],
+        ["Array", "&", "*", "+", "-", "<<", "<=>", "==", "[]", "all?", "any?", "append",
+         "assoc", "clear", "collect", "collect!", "combination", "compact", "compact!",
+         "concat", "count", "cycle", "delete", "delete_at", "delete_if", "drop",
+         "drop_while", "each", "each_index", "empty?", "fetch", "fill", "filter",
+         "filter!", "find_index", "first", "flatten", "flatten!", "hash", "include?",
+         "index", "insert", "inspect", "join", "keep_if", "last", "length", "map", "map!",
+         "max", "min", "none?", "one?", "permutation", "pop", "prepend", "product", "push",
+         "reject", "reject!", "reverse", "reverse!", "reverse_each", "rindex", "rotate",
+         "sample", "select", "select!", "shift", "shuffle", "shuffle!", "size", "slice",
+         "sort", "sort!", "sort_by!", "sum", "take", "take_while", "to_a", "to_h", "to_s",
+         "uniq", "uniq!", "unshift", "values_at", "zip", "|"],
+        ["Hash", "<", "<=", "==", ">", ">=", "[]", "any?", "assoc", "clear", "default",
+         "delete", "delete_if", "each", "each_key", "each_pair", "each_value", "empty?",
+         "fetch", "filter", "filter!", "has_key?", "hash", "include?", "inspect", "invert",
+         "keep_if", "key", "key?", "keys", "length", "merge", "merge!", "reject",
+         "reject!", "select", "select!", "size", "to_a", "to_h", "to_s", "transform_keys",
+         "transform_values", "update", "values", "values_at"],
+        ["Range", "==", "===", "begin", "cover?", "each", "end", "entries", "eql?",
+         "exclude_end?", "first", "hash", "include?", "inspect", "last", "max", "member?",
+         "min", "size", "step", "to_a", "to_s"],
+        ["NilClass", "&", "===", "^", "inspect", "nil?", "to_a", "to_f", "to_i", "to_s",
+         "|"],
+        ["TrueClass", "&", "===", "^", "inspect", "to_s", "|"],
+        ["FalseClass", "&", "===", "^", "inspect", "to_s", "|"],
+        ["Proc", "<<", "===", ">>", "[]", "arity", "call", "curry", "hash", "inspect",
+         "lambda?", "to_proc", "to_s", "yield"],
+        ["Method", "<<", "==", "===", ">>", "[]", "arity", "call", "curry", "hash",
+         "inspect", "name", "to_proc", "to_s"],
+        ["Regexp", "==", "===", "=~", "hash", "inspect", "match", "match?", "names",
+         "options", "source", "to_s"],
+        ["MatchData", "==", "[]", "begin", "captures", "end", "hash", "inspect", "length",
+         "named_captures", "names", "post_match", "pre_match", "size", "to_a", "to_s"],
+        ["Enumerator", "each", "each_with_index", "each_with_object", "inspect", "next",
+         "peek", "rewind", "size", "with_index", "with_object"]
+    ]
+}
+// The own names of builtin class cls (row 0 is its name), or [] for a class
+// without a row.
+function rbOwnRow(cls) {
+    var rows = rbOwnRows()
+    var i = 0
+    while (i < rows.length) {
+        if (rows[i][0] == cls) { return rows[i] }
+        i = i + 1
+    }
+    return [cls]
+}
 var rbRespondSet = {}
 var rbRespondReady = false
 

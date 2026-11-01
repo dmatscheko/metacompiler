@@ -2049,6 +2049,79 @@ var rubyRespondNames = map[string][]string{
 		"public_method_defined?", "public_send", "send", "singleton_methods"},
 }
 
+// rubyOwnNames is Module#instance_methods(false) of a builtin class: the names of
+// its rubyRespondNames row (or of row "*") that MRI defines on the class itself.
+// Twin of rbOwnRows in languages/lib/ruby-respond.js; ruby_respond_test.go keeps
+// the two equal.
+var rubyOwnNames = map[string][]string{
+	"Integer": {"%", "&", "*", "**", "+", "-", "-@", "/", "<", "<=", "<=>", "==", "===", ">",
+		">=", "[]", "^", "abs", "allbits?", "anybits?", "bit_length", "ceil", "chr", "coerce",
+		"denominator", "digits", "div", "divmod", "even?", "fdiv", "floor", "gcd", "gcdlcm",
+		"inspect", "integer?", "lcm", "magnitude", "modulo", "next", "nobits?", "numerator",
+		"odd?", "ord", "pow", "pred", "rationalize", "remainder", "round", "size", "succ",
+		"to_f", "to_i", "to_int", "to_r", "to_s", "truncate", "|"},
+	"Float": {"%", "*", "**", "+", "-", "-@", "/", "<", "<=", "<=>", "==", "===", ">", ">=",
+		"abs", "angle", "arg", "ceil", "coerce", "denominator", "divmod", "eql?", "fdiv",
+		"finite?", "floor", "hash", "infinite?", "inspect", "magnitude", "modulo", "nan?",
+		"negative?", "next_float", "numerator", "phase", "positive?", "prev_float", "quo",
+		"rationalize", "round", "to_f", "to_i", "to_int", "to_r", "to_s", "truncate", "zero?"},
+	"Rational": {"*", "**", "+", "-", "-@", "/", "<=>", "==", "abs", "ceil", "coerce",
+		"denominator", "fdiv", "floor", "hash", "inspect", "magnitude", "negative?", "numerator",
+		"positive?", "quo", "rationalize", "round", "to_f", "to_i", "to_r", "to_s", "truncate"},
+	"Complex": {"*", "+", "-", "-@", "/", "==", "abs", "abs2", "angle", "arg", "coerce",
+		"conj", "conjugate", "denominator", "eql?", "fdiv", "finite?", "hash", "imag",
+		"imaginary", "infinite?", "inspect", "magnitude", "numerator", "phase", "polar", "quo",
+		"rationalize", "real", "real?", "rect", "rectangular", "to_c", "to_f", "to_i", "to_r",
+		"to_s"},
+	"String": {"%", "*", "+", "+@", "<<", "<=>", "==", "===", "[]", "ascii_only?", "b",
+		"bytes", "bytesize", "capitalize", "casecmp", "casecmp?", "center", "chars", "chomp",
+		"chomp!", "chop", "chop!", "chr", "clear", "codepoints", "concat", "count", "delete",
+		"delete!", "delete_prefix", "delete_prefix!", "delete_suffix", "delete_suffix!",
+		"downcase", "dump", "each_byte", "each_char", "each_codepoint", "each_line", "empty?",
+		"encode", "end_with?", "force_encoding", "freeze", "getbyte", "hash", "hex", "include?",
+		"index", "insert", "inspect", "intern", "length", "lines", "ljust", "lstrip", "lstrip!",
+		"next", "oct", "ord", "partition", "prepend", "replace", "reverse", "reverse!", "rindex",
+		"rjust", "rpartition", "rstrip", "rstrip!", "scrub", "size", "slice", "slice!", "split",
+		"squeeze", "squeeze!", "start_with?", "strip", "strip!", "succ", "sum", "swapcase",
+		"swapcase!", "to_f", "to_i", "to_s", "to_str", "to_sym", "tr", "tr!", "tr_s", "tr_s!",
+		"unicode_normalize", "unicode_normalized?", "upcase", "upto", "valid_encoding?"},
+	"Symbol": {"<=>", "==", "===", "[]", "capitalize", "downcase", "empty?", "id2name",
+		"inspect", "length", "next", "size", "succ", "swapcase", "to_proc", "to_s", "to_sym",
+		"upcase"},
+	"Array": {"&", "*", "+", "-", "<<", "<=>", "==", "[]", "all?", "any?", "append", "assoc",
+		"clear", "collect", "collect!", "combination", "compact", "compact!", "concat", "count",
+		"cycle", "delete", "delete_at", "delete_if", "drop", "drop_while", "each", "each_index",
+		"empty?", "fetch", "fill", "filter", "filter!", "find_index", "first", "flatten",
+		"flatten!", "hash", "include?", "index", "insert", "inspect", "join", "keep_if", "last",
+		"length", "map", "map!", "max", "min", "none?", "one?", "permutation", "pop", "prepend",
+		"product", "push", "reject", "reject!", "reverse", "reverse!", "reverse_each", "rindex",
+		"rotate", "sample", "select", "select!", "shift", "shuffle", "shuffle!", "size", "slice",
+		"sort", "sort!", "sort_by!", "sum", "take", "take_while", "to_a", "to_h", "to_s", "uniq",
+		"uniq!", "unshift", "values_at", "zip", "|"},
+	"Hash": {"<", "<=", "==", ">", ">=", "[]", "any?", "assoc", "clear", "default", "delete",
+		"delete_if", "each", "each_key", "each_pair", "each_value", "empty?", "fetch", "filter",
+		"filter!", "has_key?", "hash", "include?", "inspect", "invert", "keep_if", "key", "key?",
+		"keys", "length", "merge", "merge!", "reject", "reject!", "select", "select!", "size",
+		"to_a", "to_h", "to_s", "transform_keys", "transform_values", "update", "values",
+		"values_at"},
+	"Range": {"==", "===", "begin", "cover?", "each", "end", "entries", "eql?",
+		"exclude_end?", "first", "hash", "include?", "inspect", "last", "max", "member?", "min",
+		"size", "step", "to_a", "to_s"},
+	"NilClass":   {"&", "===", "^", "inspect", "nil?", "to_a", "to_f", "to_i", "to_s", "|"},
+	"TrueClass":  {"&", "===", "^", "inspect", "to_s", "|"},
+	"FalseClass": {"&", "===", "^", "inspect", "to_s", "|"},
+	"Proc": {"<<", "===", ">>", "[]", "arity", "call", "curry", "hash", "inspect", "lambda?",
+		"to_proc", "to_s", "yield"},
+	"Method": {"<<", "==", "===", ">>", "[]", "arity", "call", "curry", "hash", "inspect",
+		"name", "to_proc", "to_s"},
+	"Regexp": {"==", "===", "=~", "hash", "inspect", "match", "match?", "names", "options",
+		"source", "to_s"},
+	"MatchData": {"==", "[]", "begin", "captures", "end", "hash", "inspect", "length",
+		"named_captures", "names", "post_match", "pre_match", "size", "to_a", "to_s"},
+	"Enumerator": {"each", "each_with_index", "each_with_object", "inspect", "next", "peek",
+		"rewind", "size", "with_index", "with_object"},
+}
+
 var rubyRespondSet = func() map[string]bool {
 	out := map[string]bool{}
 	for cls, names := range rubyRespondNames {
@@ -2329,12 +2402,26 @@ func rubyVisRelist(c *jsObject, n string, private bool) {
 	c.set(to, &jsArray{elems: append(out.elems, n)})
 }
 
+// rubyIMNHas: is n one of the public instance methods class c's bodies added (its
+// __imn list), as a reopening body adds them to a builtin class.
+func rubyIMNHas(c *jsObject, n string) bool {
+	if ns, isArr := c.props["__imn"].(*jsArray); isArr {
+		for _, e := range ns.elems {
+			if e == n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // rubyMethodVis is the visibility of instance method n of a class, "" when it
 // has none: Module#method_defined? and its public / private / protected twins,
 // which see the class alone when inherit is false. A restricted method is kept
 // under "$q$" + n, a private one also marked "$pv$" + n (emitMethods in
 // ruby-to-llvm-ir.abnf). initialize and its kin are private whatever the body
-// says; past the program's classes the builtin table decides, with the private
+// says; past the program's classes the methods a reopening body added to the
+// builtin class and then the builtin table decide, with the private
 // Kernel methods and the top-level defs. Twins: methodVisIn in
 // ruby-interpreter.abnf, rbMethodVis in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyMethodVis(o *jsObject, n string, inherit bool) string {
@@ -2359,6 +2446,9 @@ func (rt *jsrt) rubyMethodVis(o *jsObject, n string, inherit bool) string {
 			return ""
 		}
 		c, _ = c.props["__super"].(*jsObject)
+	}
+	if c != nil && rubyIMNHas(c, n) {
+		return "public"
 	}
 	if n == "initialize" || rt.rubyRespondsPrivate(n) {
 		return "private"

@@ -28,8 +28,10 @@ function rbsFind(s, t, from) {
 // whitespace is skipped. re, when not null, is a compiled pattern and wins over
 // sep; its groups are spliced into the answer. lim is the limit (0 when absent):
 // positive caps the field count, the last field holding the rest; zero drops
-// trailing empty fields; negative keeps them.
-function rbsSplit(s, sep, re, lim) {
+// trailing empty fields; negative keeps them. last[0] receives the result of
+// the final pattern search (null when it failed), which MRI leaves in $~; it is
+// untouched when no search ran.
+function rbsSplit(s, sep, re, lim, last) {
     var out = []
     if (lim == 1) {
         if (s.length > 0) { out.push(s) }
@@ -43,6 +45,7 @@ function rbsSplit(s, sep, re, lim) {
         var lastNull = false
         while (true) {
             var m = rxSearch(re, s, start)
+            last[0] = m
             if (m === null) { break }
             if (start == m.begin && m.begin == m.end) {
                 if (s.length == 0) {

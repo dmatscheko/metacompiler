@@ -359,16 +359,18 @@ func rubyFindRunes(s, t []rune, from int) int {
 }
 
 // rubySplit is String#split (rb_str_split_m); sep nil is awk mode and re, when
-// not nil, wins over sep. Twin of rbsSplit in lib/ruby-str.js.
-func (rt *jsrt) rubySplit(str string, sep *string, re *rxRe, lim int) *jsArray {
+// not nil, wins over sep. It also answers the final pattern search (nil when it
+// failed), which MRI leaves in $~. Twin of rbsSplit in lib/ruby-str.js.
+func (rt *jsrt) rubySplit(str string, sep *string, re *rxRe, lim int) (*jsArray, *rxMatch) {
 	out := &jsArray{}
+	var last *rxMatch
 	s := []rune(str)
 	push := func(a, b int) { out.elems = append(out.elems, string(s[a:b])) }
 	if lim == 1 {
 		if len(s) > 0 {
 			out.elems = append(out.elems, str)
 		}
-		return out
+		return out, nil
 	}
 	i, beg, p := 1, 0, 0
 	switch {
@@ -379,6 +381,7 @@ func (rt *jsrt) rubySplit(str string, sep *string, re *rxRe, lim int) *jsArray {
 			if !ok {
 				rt.fail("regexp: step limit exceeded")
 			}
+			last = m
 			if m == nil {
 				break
 			}
@@ -469,7 +472,7 @@ func (rt *jsrt) rubySplit(str string, sep *string, re *rxRe, lim int) *jsArray {
 		}
 		out.elems = out.elems[:n]
 	}
-	return out
+	return out, last
 }
 
 // rubySplitCall reads String#split's arguments: a Regexp, nil / " " (awk mode)
@@ -491,7 +494,15 @@ func (rt *jsrt) rubySplitCall(s string, args []interface{}) *jsArray {
 	if len(pos) > 1 {
 		lim = int(rubyToF(pos[1]))
 	}
-	return rt.rubySplit(s, sep, re, lim)
+	out, last := rt.rubySplit(s, sep, re, lim)
+	if re != nil && lim != 1 {
+		if last == nil {
+			rt.rxSetGlobals(nil)
+		} else {
+			rt.rxSetGlobals(rxNewMatchObj(re.src, re.flags, s, last))
+		}
+	}
+	return out
 }
 
 // rubySuccKind is MRI's ISALNUM class for String#succ: 1 a digit, 2 a letter.

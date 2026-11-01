@@ -962,6 +962,83 @@ def s147
                   (1..).each_slice(2).lazy.map { |a| a.sum }.first(3) == [3, 7, 11])
 end
 
+# ===== SECTION 148: constants below a class body's top level, $~ after split, =~ on any object, a reopened builtin's methods =====
+# A constant assigned inside begin / rescue, an if or a block of a class or module
+# body belongs to that class: its methods read it and Module#constants lists it,
+# unless the assignment never ran. String#split with a pattern leaves $~ at its
+# final search (nil once a search fails); a separator String leaves it alone.
+# `obj =~ re' is nil for an object that is neither a String nor a Symbol
+# (Object#=~ in 2.6) and Regexp#=~ raises TypeError on one; a class may define its
+# own =~. A builtin class reopened by a body lists its own methods and the new one.
+# /usr/bin/ruby 2.6 settles each.
+class S148K
+  begin
+    S148KC = 3
+  rescue
+  end
+  if true then S148KD = 4 end
+  [1].each { S148KE = 5 }
+  if false then S148KG = 6 end
+  begin
+    raise "x"
+    S148KH = 7
+  rescue
+  end
+  begin
+    class S148In; S148KJ = 8; end
+  rescue
+  end
+  def g; [S148KC, S148KD, S148KE, S148In::S148KJ]; end
+end
+module S148M
+  begin
+    S148MC = 9
+  ensure
+    S148MZ = 1
+  end
+  def self.h; S148MC + S148MZ; end
+end
+class S148Q
+  def =~(o); 42; end
+end
+class String
+  def s148shout; upcase + "!"; end
+end
+def s148
+  check("cb148a", S148K.new.g == [3, 4, 5, 8] && S148K.constants.sort == [:S148In, :S148KC, :S148KD, :S148KE] &&
+                  S148M.h == 10 && S148M.constants.sort == [:S148MC, :S148MZ] && S148K::S148In.constants == [:S148KJ])
+  "xay" =~ /a/
+  "a,b".split(/,/)
+  m1 = $~
+  "xay" =~ /a/
+  "a,b,c".split(/,/, 2)
+  m2 = $~
+  "xay" =~ /a/
+  "a,b".split(",")
+  m3 = $~
+  "xay" =~ /a/
+  "a,b".split(/,/, 1)
+  m4 = $~
+  check("sp148b", m1.nil? && m2[0] == "," && m3[0] == "a" && m4[0] == "a")
+  vs = [15, 1.5, [1], nil, :a5, "a5"]
+  rs = vs.map { |v| v =~ /5/ }
+  "xay" =~ /a/
+  t = (15 =~ /5/)
+  m5 = $~
+  e1 = nil
+  begin
+    /5/ =~ 15
+  rescue TypeError => e
+    e1 = e.message
+  end
+  check("rx148c", rs == [nil, nil, nil, nil, 1, 1] && t.nil? && m5[0] == "a" && (15 !~ /5/) == true &&
+                  e1 == "no implicit conversion of Integer into String" && (S148Q.new =~ /x/) == 42)
+  own = String.instance_methods(false)
+  check("im148d", own.include?(:s148shout) && own.include?(:upcase) && own.include?(:split) && !own.include?(:frozen?) &&
+                  String.instance_methods.include?(:s148shout) && String.method_defined?(:s148shout) &&
+                  Integer.instance_methods(false).include?(:even?) && !Integer.instance_methods(false).include?(:upcase))
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -988,5 +1065,6 @@ s144() # SECTION-CALL 144
 s145() # SECTION-CALL 145
 s146() # SECTION-CALL 146
 s147() # SECTION-CALL 147
+s148() # SECTION-CALL 148
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
