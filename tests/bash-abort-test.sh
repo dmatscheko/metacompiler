@@ -4,7 +4,9 @@
 # The diagnostic is written on standard error, which llvm.Run has none of (see rt_putc
 # in languages/lib/bash-rt.c), so the shell's standard error is made a copy of its
 # standard output first, and every engine shows the same text.
+# A command that is not found does not end the shell by itself (status 127, bash goes
+# on); the `|| exit` makes that status the script's.
 exec 2>&1
 echo "before the abort"
-nosuchcommand_abort_probe
+nosuchcommand_abort_probe || exit
 echo "never reached"

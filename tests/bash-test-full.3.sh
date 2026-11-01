@@ -330,9 +330,9 @@ s55() {
 # bash names the command ("((: ", "let: ", "[[: ", "v: " in ${v:off}), the expression without
 # its leading blanks, and an error token: for / and % the text from the divisor on, for **
 # and /= the token after the right operand or else its last one. The location prefix is
-# dropped before comparing (bash writes "FILE: line N: ", these engines "bash: ").
+# dropped before comparing ("FILE: line N: ").
 # Every expected value is bash 5.3's.
-s56m() { local m=${1#bash: }; printf '%s' "${m#*line [0-9]*: }"; }
+s56m() { local m=${1#"$0: line "}; printf '%s' "${m#*: }"; }
 s56() {
   local z=0 v=1 x=3 e='4/z' s=abc o d h
   o=$( { (( v = 1/z )); } 2>&1 ); check aem1 "$(s56m "$o")" '((: v = 1/z : division by 0 (error token is "z ")'
@@ -562,7 +562,7 @@ s62() {
 # -l apply to every element an array stores as to a scalar; `unset 'p[1]'` on a scalar is
 # an error; ${!a[k]} and ${!a[@] OP} are indirections through the element(s), and one that
 # lands on no name is an expansion error. Every expected value is bash 5.3's.
-s63m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s63m() { local m=${1#"$0: line "}; m=${m#*: }; printf '%s' "${m%%$'\n'*}"; }
 s63c() { r63="$r63<$1:$2>"; }
 s63() {
   local -a m=() n=(1 2 3 4)
@@ -740,7 +740,7 @@ y2"
 # NAME[@] is the substring of its value. A ${!REF:?} error names "!REF". Every expected value
 # is bash 5.3's (with the default IFS).
 s66p() { printf '<%s>' "$@"; }
-s66m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s66m() { local m=${1#"$0: line "}; m=${m#*: }; printf '%s' "${m%%$'\n'*}"; }
 s66() {
   local -a a=(aa bb 'c c' dd) e=()
   local s=hello x o r
@@ -772,7 +772,7 @@ s66() {
 # array name takes it as element 0. A declaration expands its words - and assigns an array
 # literal - before its redirections apply and before it stores anything. Every expected
 # value is bash 5.3's.
-s67m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s67m() { local m=${1#"$0: line "}; m=${m#*: }; printf '%s' "${m%%$'\n'*}"; }
 s67() {
   local -i c=5 c2 f p fi n=4 r1=1 r2=2
   local -u u g q
@@ -863,7 +863,7 @@ s69() {
 # let evaluates every argument at run time, so one that is no expression is an error and
 # status 1, not an unknown command. A shell has one EXIT trap: a new one replaces it and ''
 # or - removes it. Every expected value is bash 5.3's.
-s70m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s70m() { local m=${1#"$0: line "}; m=${m#*: }; printf '%s' "${m%%$'\n'*}"; }
 s70() {
   local o
   o=$( let "3+" 2>&1; echo " $?" )
@@ -953,7 +953,7 @@ p
 # an inexact result below the smallest normal double) is "Result too large". The kind
 # of a bad number is named by the word's first two bytes. Every expected value is
 # bash 5.3's, in the C locale.
-s73m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s73m() { local m=${1#"$0: line "}; m=${m#*: }; printf '%s' "${m%%$'\n'*}"; }
 s73() {
   local o e r v=(3.14159 7 2.675 0.25 0.1 2.5 abc 1e-5 123456789 0.0001 1e-10 1 -0 0x10 0x1.8p1)
   v+=(inf -INF nan -nan 1e309 1e-400 2.2250738585072011e-308 2.2250738585072012e-308 2.5x "")
@@ -994,7 +994,7 @@ s73() {
 # what ends the body. An arithmetic error after a joined line names its own text. In $'...'
 # a backslash-newline is an unknown escape and stays; inside "${v-w}" a $' is no quote, but
 # in the operand of a quoted ${v/p/r} it is. Every expected value is bash 5.3's.
-s74m() { local m=${1#bash: }; printf '%s' "${m#*line [0-9]*: }"; }
+s74m() { local m=${1#"$0: line "}; printf '%s' "${m#*: }"; }
 s74() {
   local xy x=X arr=(1 2 3) r o l
   x\
@@ -1132,7 +1132,7 @@ E
 # every newline of its text. In a double-quoted ${v-w} a " is still a quote, between two 's
 # too. An expansion error is reported before the command's own 2>/dev/null applies.
 s76f() { echo f1; echo f2 >&2; }
-s76m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s76m() { local m=${1#"$0: line "}; m=${m#*: }; printf '%s' "${m%%$'\n'*}"; }
 s76() {
   local l0=$LINENO u= r o
   r=
@@ -1501,6 +1501,31 @@ s86() {
   for s86ri in s86x s86n; do r="$r $s86ri"; done
   check nr13 "$r|${!s86ri}" " baz 60|s86n"
 }
+# ===== SECTION 87: a command that is not found; the "FILE: line N: " diagnostic prefix =====
+# A name that is no builtin, keyword or function is "NAME: command not found" with status
+# 127, and the shell goes on with the next command (set -e still ends it). Every shell
+# diagnostic starts with "$0: line N: ", N the line of the failing command: an eval
+# string's lines count from the eval's, a trap string's from 1. Every expected value is
+# bash 5.3's.
+s87() {
+  local r
+  readonly s87ro=1
+  r=$(s87nosuch 2>/dev/null; echo "after $?")
+  check nf1 "$r" "after 127"
+  r=$( (s87nosuch a b) 2>/dev/null; echo "sub $?"; if s87nosuch 2>/dev/null; then :; else echo "if $?"; fi )
+  check nf2 "$r" "sub 127
+if 127"
+  r=$(set -e; s87nosuch 2>/dev/null; echo no); check nf3 "$?[$r]" "127[]"
+  r=$(s87nosuch 2>&1); check dp1 "$r" "$0: line $LINENO: s87nosuch: command not found"
+  r=$( (s87ro=2) 2>&1 ); check dp2 "$r" "$0: line $LINENO: s87ro: readonly variable"
+  r=$( (( 1/0 )) 2>&1 ); check dp3 "$r" "$0: line $LINENO: ((: 1/0 : division by 0 (error token is \"0 \")"
+  r=$(eval $'\n\ns87nosuch' 2>&1); check dp4 "$r" "$0: line $((LINENO + 2)): s87nosuch: command not found"
+  r=$(exec 2>&1; set -u; : "$s87unset"); check dp5 "$r" "$0: line $LINENO: s87unset: unbound variable"
+  r=$(exec 2>&1; break); check dp6 "$r" "$0: line $LINENO: break: only meaningful in a \`for', \`while', or \`until' loop"
+  r=$(trap 'echo "t $LINENO"
+s87nosuch' EXIT; exec 2>&1); check dp7 "$r" "t 1
+$0: line 2: s87nosuch: command not found"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1542,5 +1567,6 @@ s83   # SECTION-CALL 83
 s84   # SECTION-CALL 84
 s85   # SECTION-CALL 85
 s86   # SECTION-CALL 86
+s87   # SECTION-CALL 87
 echo "full: $checks checks, $fails failures"
 exit $fails

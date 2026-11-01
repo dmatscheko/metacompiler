@@ -3542,7 +3542,7 @@
             "name": "Bash abort probe, command not found (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "expectError": "command not found: nosuchcommand_abort_probe",
+            "expectError": "nosuchcommand_abort_probe: command not found",
             "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test.sh", "-q"]
         },
         {

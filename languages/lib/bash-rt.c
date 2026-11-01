@@ -1055,6 +1055,18 @@ int rt_gch(char *s) {
     return c;
 }
 
+/* bash's prefix on a shell diagnostic when it runs a script, "SCRIPT: line N: ", N
+ * the line of the command that fails ($LINENO, which every command stores). Twin
+ * of diagPfx in bash-interpreter.abnf. */
+int rt_diag_pfx(void)
+{
+    rt_prints(script_name);
+    rt_prints(": line ");
+    rt_prints(rt_getvar_byname("LINENO"));
+    rt_prints(": ");
+    return 0;
+}
+
 /* ${v?word} / ${v:?word} on an unset (or, with the colon, empty) value: the word
  * - or bash's own text when it is empty - on the standard error channel, and the
  * abort flag, which ends the (sub)shell with status 1. */
@@ -1064,7 +1076,7 @@ char *rt_pcheck(char *v, int bad, char *name, char *msg)
     if (bad != 0) {
         saved = sink_out;
         sink_out = sink_err;
-        rt_prints("bash: ");
+        rt_diag_pfx();
         rt_prints(name);
         rt_prints(": ");
         rt_prints(msg);
@@ -1075,13 +1087,13 @@ char *rt_pcheck(char *v, int bad, char *name, char *msg)
     return v;
 }
 
-/* "bash: WHAT: NAME: MSG" on the standard error channel; an empty WHAT is left
- * out. */
+/* "WHAT: NAME: MSG" after the diagnostic prefix on the standard error channel; an
+ * empty WHAT is left out. */
 int rt_berr(char *what, char *name, char *msg)
 {
     int saved = sink_out;
     sink_out = sink_err;
-    rt_prints("bash: ");
+    rt_diag_pfx();
     if (what[0] != 0) {
         rt_prints(what);
         rt_prints(": ");
@@ -1136,7 +1148,7 @@ int rt_arith_fail(char *expr, char *msg, char *tok)
     arith_err = 1;
     saved = sink_out;
     sink_out = sink_err;
-    rt_prints("bash: ");
+    rt_diag_pfx();
     if (expr[0] != 0) { rt_prints(expr); rt_prints(": "); }
     rt_prints(msg);
     if (tok[0] != 0) { rt_prints(" (error token is \""); rt_prints(tok); rt_prints("\")"); }
@@ -3291,7 +3303,8 @@ int pf_bad(char *a, char *msg)
 {
     int saved = sink_out;
     sink_out = sink_err;
-    rt_prints("bash: printf: ");
+    rt_diag_pfx();
+    rt_prints("printf: ");
     rt_prints(a);
     rt_prints(": ");
     rt_prints(msg);
@@ -4129,7 +4142,8 @@ int pf_conv(char *fmt, int i, char *args, int nargs)
     if (cv == 0 || rt_haschar("diouxXcsbqeEfFgGaA", cv) == 0) {
         saved = sink_out;
         sink_out = sink_err;
-        rt_prints("bash: printf: `");
+        rt_diag_pfx();
+        rt_prints("printf: `");
         if (cv == 0) rt_prints(rt_substr(fmt, start, -1));
         else rt_prints(rt_substr(fmt, i, 1));
         rt_prints("': invalid format character\n");
@@ -5180,7 +5194,7 @@ char *rt_arr_ikey(char *nm, long k) {
     if (k < 0) {
         saved = sink_out;
         sink_out = sink_err;
-        rt_prints("bash: ");
+        rt_diag_pfx();
         rt_prints(nm);
         rt_prints(": bad array subscript\n");
         sink_out = saved;
@@ -6290,7 +6304,8 @@ int rt_declp(char *nm, char *flag, int assoc) {
              * as the shell does - the same rule rt_nounset follows. */
             saved = sink_out;
             sink_out = sink_err;
-            rt_prints("bash: declare: ");
+            rt_diag_pfx();
+            rt_prints("declare: ");
             rt_prints(nm);
             rt_prints(": not found\n");
             sink_out = saved;
@@ -6678,10 +6693,8 @@ char *rt_params(char *sep, int star) {
 
 /* Under set -u, reading an unset variable raises the abort flag. */
 /* `name` is the source name of the variable being read, for the diagnostic:
- * bash 5.3 prints "bash: line N: nope: unbound variable" on fd 2. The line
- * number is not recoverable here - the emitted program keeps no line table - so the text
- * is the rest of bash's message, and languages/bash-interpreter.abnf writes the
- * same string, character for character, from getVarVal.
+ * bash 5.3 prints "SCRIPT: line N: nope: unbound variable" on fd 2, and
+ * languages/bash-interpreter.abnf writes the same string from getVarVal.
  *
  * `isarr` is 1 when the caller's OTHER select arm is the live one (an array name
  * expands to element 0). The emitter cannot branch there - varString has to hand
@@ -6699,7 +6712,7 @@ char *rt_nounset(char *v, char *name, int isarr)
          * shell, and rt_putc is what honours that. */
         saved = sink_out;
         sink_out = sink_err;
-        rt_prints("bash: ");
+        rt_diag_pfx();
         rt_prints(name);
         rt_prints(": unbound variable\n");
         sink_out = saved;
@@ -6824,7 +6837,8 @@ char *rt_cap_end(int cmdsub)
     if (cmdsub != 0 && cap_nul[d2] != 0) {
         saved = sink_out;
         sink_out = sink_err;
-        rt_prints("bash: warning: command substitution: ignored null byte in input\n");
+        rt_diag_pfx();
+        rt_prints("warning: command substitution: ignored null byte in input\n");
         sink_out = saved;
     }
     buf = cap_buf[d2];

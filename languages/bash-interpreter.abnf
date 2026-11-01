@@ -1470,6 +1470,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return capStack.pop()
     }
     function emitErr(s) { writeChan(sinkErr, s) }
+    // A shell diagnostic: bash running a script prefixes each with "SCRIPT: line N: ", N the
+    // line of the command that fails. Twin of rt_diag_pfx in lib/bash-rt.c.
+    function diagPfx() { return scriptName + ": line " + vars["$LINENO"] + ": " }
+    function diagErr(s) { emitErr(diagPfx() + s) }
 
     function setStatus(s) { lastStatus = s | 0 }
 
@@ -1741,7 +1745,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // status, so the abort is recorded and picked up by the command about to run.
         // The diagnostic is bash 5.3's minus the "line N:" part, which no engine here keeps
         // a line table for; languages/lib/bash-rt.c's rt_nounset writes the same string.
-        if (optNounset) { emitErr("bash: " + name + ": unbound variable\n"); abortSignal = {ret: 1, isExit: 1} }
+        if (optNounset) { diagErr(name + ": unbound variable\n"); abortSignal = {ret: 1, isExit: 1} }
         return ""
     }
     // NAME's value with no set -u check (an unset name is empty): what `NAME+=v` appends
@@ -2628,8 +2632,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // substitution`, status 1, the rest of the line abandoned (PeLenBad, PeBad). Twin of
         // the badsub arm of paramCore in bash-to-llvm-ir.abnf.
         if (badsub != null) {
-            var badMsg = "bash: ${" + badsub + "}: bad substitution\n"
-            return function() { emitErr(badMsg); arithErr = true; return "" }
+            var badMsg = "${" + badsub + "}: bad substitution\n"
+            return function() { diagErr(badMsg); arithErr = true; return "" }
         }
         if (indp && bare && pfx == "") { pe = "ind" }
         // $@ and $* WITH AN OPERATOR are the positional parameters as a LIST, exactly as
@@ -2934,7 +2938,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return indFail(v + ": invalid variable name")
     }
     function indFail(msg) {
-        emitErr("bash: " + msg + "\n")
+        diagErr(msg + "\n")
         arithErr = true
         return null
     }
@@ -2951,7 +2955,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function paramErr(nm, wordT, colon) {
         var msg = (wordT != null) ? wordJoin(wordT()) : ""
         if (msg == "") { msg = colon ? "parameter null or not set" : "parameter not set" }
-        emitErr("bash: " + nm + ": " + msg + "\n")
+        diagErr(nm + ": " + msg + "\n")
         abortSignal = {ret: 1, isExit: 1}
     }
 
@@ -3072,7 +3076,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // bash 5.3: `local` outside every function declares nothing (an array literal
             // was already assigned with the words), status 1.
             if (kw == "local" && fnDepth == 0) {
-                emitErr("bash: local: can only be used in a function\n")
+                diagErr("local: can only be used in a function\n")
                 setStatus(1)
                 return 1
             }
@@ -3083,7 +3087,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var pst = 0
                     for (k = 0; k < names.length; k++) {
                         var line = declLineRaw(names[k])
-                        if (line == "") { emitErr("bash: declare: " + names[k] + ": not found\n"); pst = 1 }
+                        if (line == "") { diagErr("declare: " + names[k] + ": not found\n"); pst = 1 }
                         else { emitOut(line + "\n") }
                     }
                     setStatus(pst)
@@ -3182,7 +3186,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     }
                     opts = false
                     var op = declOperand(f, arr)
-                    if (op == "") { errs = errs + "bash: " + kw + ": `" + f + "': not a valid identifier\n"; continue }
+                    if (op == "") { errs = errs + diagPfx() + kw + ": `" + f + "': not a valid identifier\n"; continue }
                     operands = operands + 1
                     text = text + " " + op
                 }
@@ -3192,7 +3196,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (operands > 0 || errs != "") {
                 var snip = null
                 if (operands > 0) {
-                    if (!hasOwn(compiled, "$" + text)) { compiled["$" + text] = compileSnippet(text) }
+                    if (!hasOwn(compiled, "$" + text)) { compiled["$" + text] = compileSnippet(text, 0) }
                     snip = compiled["$" + text]
                 }
                 pending.push({snip: snip, errs: errs})
@@ -3873,7 +3877,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (assocFact(name, false)) { return 0 }
         if (!isSetVar(name) && !attrOn(dclVars, name)) { return 0 }
         if (sub != "@" && sub != "*" && numToStr(arEval(sub)) == "0") { unsetVar(name); return 0 }
-        emitErr("bash: unset: " + name + ": not an array variable\n")
+        diagErr("unset: " + name + ": not an array variable\n")
         return 1
     }
     function arrKeyList(name) {
@@ -4041,7 +4045,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         kk = k
         // A set scalar is element 0 of the array its name would be.
         if (arIsNeg(kk)) { kk = arOp("+", isArr(name) ? arrNextIdx(name) : (isSetVar(name) ? 1 : 0), kk) }
-        if (arIsNeg(kk)) { emitErr("bash: " + name + ": bad array subscript\n"); return BAD_KEY }
+        if (arIsNeg(kk)) { diagErr(name + ": bad array subscript\n"); return BAD_KEY }
         return numToStr(kk)
     }
     // The key a subscript's TEXT names: an associative array's is the text itself, an indexed
@@ -4092,7 +4096,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var src = bqUnescape(text, inDq)
         var once = []
         return function() {
-            if (once.length == 0) { once.push(compileSnippet(src)) }
+            if (once.length == 0) { once.push(compileSnippet(src, 0)) }
             return once[0]()
         }
     }
@@ -4143,7 +4147,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             localFrames = savedFrames
             var nulGone = capNul["$" + capStack.length]
             var out = capClose()
-            if (nulGone) { emitErr("bash: warning: command substitution: ignored null byte in input\n") }
+            if (nulGone) { diagErr("warning: command substitution: ignored null byte in input\n") }
             setStatus(st)
             cmdSubRan = true
             return stripTrailNL(out)
@@ -4660,7 +4664,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arFailAt(expr, msg, tok) {
         if (arithErr) { return }
         var t = (tok != "") ? " (error token is \"" + tok + "\")" : ""
-        emitErr("bash: " + ((expr != "") ? expr + ": " : "") + msg + t + "\n")
+        diagErr(((expr != "") ? expr + ": " : "") + msg + t + "\n")
         arithErr = true
     }
     // One binary operator. Two plain numbers take the double path while its result is still
@@ -5338,7 +5342,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // in bash-to-llvm-ir.abnf.
     function roRefused(name, who) {
         if (!attrOn(roVars, name)) { return false }
-        emitErr("bash: " + who + name + ": readonly variable\n")
+        diagErr(who + name + ": readonly variable\n")
         return true
     }
     // An error an expansion raised, taken before the command runs. set -u and ${v:?} end the
@@ -5589,7 +5593,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var hm = hiFd(tgt)
                 if (hm >= 0) {
                     ch = fdTab[hm]
-                    if (ch < 0) { emitErr("bash: " + tgt + ": Bad file descriptor\n"); st.bad = true; break }
+                    if (ch < 0) { diagErr(tgt + ": Bad file descriptor\n"); st.bad = true; break }
                 } else { ch = fixChan((tgt == "2") ? sinkErr : sinkOut) }
             } else if (r.rd == "&>" || r.rd == "&>>") {
                 ch = (tgt == "/dev/stdout") ? fixChan(sinkOut) : 2
@@ -5628,11 +5632,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return true
     }
-    function compileSnippet(src) {
+    // Its lines count from line0, or from the current command's line when line0 is 0: an eval
+    // string's from the eval's, a trap string's from 1 (bash 5.3).
+    function compileSnippet(src, line0) {
         if (snipIsEmpty(src)) { return function() { setStatus(0); return 0 } }
         if (src.indexOf("\\\n") >= 0 || src.indexOf("<<") >= 0) { src = c.compile(c.parseFrom(c.agrammar, src, "Spliced")).stack[0] }
         var sv = snipLine0
-        snipLine0 = strToInt(vars["$LINENO"])
+        snipLine0 = line0 > 0 ? line0 : strToInt(vars["$LINENO"])
         var t = arCompile(src, "CompoundList", false)
         snipLine0 = sv
         return function() {
@@ -5747,7 +5753,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pf.e = saved
         return r
     }
-    function pfBad(a, msg) { emitErr("bash: printf: " + a + ": " + msg + "\n"); pf.rc = 1 }
+    function pfBad(a, msg) { diagErr("printf: " + a + ": " + msg + "\n"); pf.rc = 1 }
     // An operand that is not entirely a number. bash names the kind by the word's first two
     // bytes alone (sh_invalidnum): 0 and a digit is octal, "0x" is hex. Twin of pf_invalid.
     function pfInvalid(a) {
@@ -6015,7 +6021,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (i < fmt.length && "hlLjzt".indexOf(fmt.charAt(i)) >= 0) { i = i + 1 }
         var cv = (i < fmt.length) ? fmt.charAt(i) : ""
         if (cv == "" || "diouxXcsbqeEfFgGaA".indexOf(cv) < 0) {
-            emitErr("bash: printf: `" + ((cv == "") ? fmt.slice(start) : cv) + "': invalid format character\n")
+            diagErr("printf: `" + ((cv == "") ? fmt.slice(start) : cv) + "': invalid format character\n")
             pf.rc = 1
             return -1
         }
@@ -6167,17 +6173,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var o = mfOpts(args)
         if (o.bad != null) { mfUsage(who, o.bad, o.missing); return 2 }
         var nm = o.name
-        if (o.cb != null) { o.cbT = compileSnippet(o.cb + " \"$@\"") }
+        if (o.cb != null) { o.cbT = compileSnippet(o.cb + " \"$@\"", 0) }
         var cnt = mfNum(o.n), org = mfNum(o.O), skp = mfNum(o.s), qn = mfNum(o.c), fd = mfNum(o.u)
-        if (o.u != null && fd == null) { emitErr("bash: " + who + ": " + o.u + ": invalid file descriptor specification\n"); return 1 }
-        if (o.u != null && fd != 0) { emitErr("bash: " + who + ": " + o.u + ": invalid file descriptor: Bad file descriptor\n"); return 1 }
-        if (o.n != null && (cnt == null || cnt < 0)) { emitErr("bash: " + who + ": " + o.n + ": invalid line count\n"); return 1 }
-        if (o.O != null && (org == null || org < 0)) { emitErr("bash: " + who + ": " + o.O + ": invalid array origin\n"); return 1 }
-        if (o.s != null && (skp == null || skp < 0)) { emitErr("bash: " + who + ": " + o.s + ": invalid line count\n"); return 1 }
-        if (o.c != null && (qn == null || qn <= 0)) { emitErr("bash: " + who + ": " + o.c + ": invalid callback quantum\n"); return 1 }
-        if (!isIdentText(nm)) { emitErr("bash: " + who + ": `" + nm + "': not a valid identifier\n"); return 1 }
+        if (o.u != null && fd == null) { diagErr(who + ": " + o.u + ": invalid file descriptor specification\n"); return 1 }
+        if (o.u != null && fd != 0) { diagErr(who + ": " + o.u + ": invalid file descriptor: Bad file descriptor\n"); return 1 }
+        if (o.n != null && (cnt == null || cnt < 0)) { diagErr(who + ": " + o.n + ": invalid line count\n"); return 1 }
+        if (o.O != null && (org == null || org < 0)) { diagErr(who + ": " + o.O + ": invalid array origin\n"); return 1 }
+        if (o.s != null && (skp == null || skp < 0)) { diagErr(who + ": " + o.s + ": invalid line count\n"); return 1 }
+        if (o.c != null && (qn == null || qn <= 0)) { diagErr(who + ": " + o.c + ": invalid callback quantum\n"); return 1 }
+        if (!isIdentText(nm)) { diagErr(who + ": `" + nm + "': not a valid identifier\n"); return 1 }
         if (roRefused(nm, "")) { return 1 }
-        if (assocFact(nm, false)) { emitErr("bash: " + who + ": " + nm + ": not an indexed array\n"); return 1 }
+        if (assocFact(nm, false)) { diagErr(who + ": " + nm + ": not an indexed array\n"); return 1 }
         if (o.O == null) { unsetVar(nm); arrNew(nm, false) } else { arrAdopt(nm); arrEnsure(nm, false) }
         arrs[arrKey(nm)].lit = true
         var dlm = (o.d == null) ? "\n" : o.d.charAt(0)
@@ -6249,7 +6255,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return o
     }
     function mfUsage(who, opt, missing) {
-        emitErr("bash: " + who + ": " + opt + (missing ? ": option requires an argument\n" : ": invalid option\n"))
+        diagErr(who + ": " + opt + (missing ? ": option requires an argument\n" : ": invalid option\n"))
         emitErr(who + ": usage: " + who + " [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]\n")
     }
     // An option value as bash's legal_number reads it - blanks, an optional sign, decimal
@@ -6643,14 +6649,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else if (ul == "v") { uv = true }
                     else if (ul == "n") { un = true }
                     else {
-                        emitErr("bash: unset: -" + ul + ": invalid option\nunset: usage: unset [-f] [-v] [-n] [name ...]\n")
+                        diagErr("unset: -" + ul + ": invalid option\nunset: usage: unset [-f] [-v] [-n] [name ...]\n")
                         setStatus(2)
                         return 2
                     }
                 }
             }
             if (uf && uv) {
-                emitErr("bash: unset: cannot simultaneously unset a function and a variable\n")
+                diagErr("unset: cannot simultaneously unset a function and a variable\n")
                 setStatus(1)
                 return 1
             }
@@ -6665,7 +6671,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 if (un) { noRef = noRef + 1 }
                 if (sp.key == null && attrOn(roVars, sp.name)) {
-                    emitErr("bash: unset: " + sp.name + ": cannot unset: readonly variable\n")
+                    diagErr("unset: " + sp.name + ": cannot unset: readonly variable\n")
                     ust = 1
                 }
                 else if (sp.key == null) {
@@ -6686,12 +6692,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cmd == "break" || cmd == "continue") {
             var lv = (args.length > 0) ? strToInt(args[0]) : 1
             if (loopDepth == 0) {
-                emitErr("bash: " + cmd + ": only meaningful in a `for', `while', or `until' loop\n")
+                diagErr(cmd + ": only meaningful in a `for', `while', or `until' loop\n")
                 setStatus(0)
                 return 0
             }
             if (lv < 1) {
-                emitErr("bash: " + cmd + ": " + args[0] + ": loop count out of range\n")
+                diagErr(cmd + ": " + args[0] + ": loop count out of range\n")
                 setStatus(1)
                 return {brk: loopDepth, bst: 1}
             }
@@ -6706,7 +6712,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (args.length == 0) {
                 if (exitTrap != null) { emitOut("trap -- " + shellQuote(exitTrapSrc) + " EXIT\n") }
             }
-            else if (args[0] != "-") { exitTrap = compileSnippet(args[0]); exitTrapSrc = args[0] }
+            else if (args[0] != "-") { exitTrap = compileSnippet(args[0], 1); exitTrapSrc = args[0] }
             else { exitTrap = null }
             setStatus(0)
             return 0
@@ -6717,7 +6723,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (args.length > 0 && args[0] == "--") { args = args.slice(1) }
             for (ei = 0; ei < args.length; ei++) { if (ei > 0) { src = src + " " }; src = src + args[ei] }
             if (src == "") { setStatus(0); return 0 }
-            var et = compileSnippet(src)
+            var et = compileSnippet(src, 0)
             var er = anytype
             er = et()
             if (typeof er == "object") { return er }
@@ -6766,14 +6772,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rc = (args.length > 0) ? (arPair(arStr(args[0])).l & 255) : lastStatus
             return {ret: rc}
         }
-        // A SHELL DIAGNOSTIC, NOT AN ENGINE DIAGNOSTIC: all three engines write
-        // `<script>: command not found: NAME` on the standard error channel and exit the
-        // current shell with 127 - a ( ) or $( ) ends there, the parent carries on. The word
-        // order differs from bash's `<script>: line N: NAME: command not found`, which needs a
-        // line number no engine here carries to run time; and this STOPS the shell it runs in,
-        // where bash would carry on with the next command.
-        emitErr(scriptName + ": command not found: " + cmd + "\n")
-        return {ret: 127, isExit: 1}
+        // No engine here runs external programs, so every other name is bash's "NAME:
+        // command not found" on the standard error channel, status 127, and the shell goes
+        // on with the next command. A builtin this half does not build is refused.
+        if (hasOwn(shellBuiltins, "$" + cmd)) { fail("the " + cmd + " builtin is not supported") }
+        return notFound(cmd)
+    }
+    function notFound(name) {
+        diagErr(name + ": command not found\n")
+        setStatus(127)
+        return 127
     }
 
     // `builtin NAME ARGS` and `command NAME ARGS` run NAME passing over shell functions
@@ -6808,7 +6816,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (; i < args.length; i++) {
                 var qk = "$" + args[i]
                 var kind = hasOwn(shellKeywords, qk) ? "a shell keyword" : (isFunc(args[i]) ? "f" : (hasOwn(shellBuiltins, qk) ? "a shell builtin" : ""))
-                if (kind == "") { if (query == "V") { emitErr("bash: command: " + args[i] + ": not found\n") }; continue }
+                if (kind == "") { if (query == "V") { diagErr("command: " + args[i] + ": not found\n") }; continue }
                 if (query == "v") { emitOut(args[i] + "\n") }
                 else if (kind == "f") { fail("command -V of a function is not supported") }
                 else { emitOut(args[i] + " is " + kind + "\n") }
@@ -6820,12 +6828,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var name = args[i]
         if (!hasOwn(shellBuiltins, "$" + name)) {
             if (cmd == "builtin") {
-                emitErr("bash: builtin: " + name + ": not a shell builtin\n")
+                diagErr("builtin: " + name + ": not a shell builtin\n")
                 setStatus(1)
                 return 1
             }
-            emitErr(scriptName + ": command not found: " + name + "\n")
-            return {ret: 127, isExit: 1}
+            return notFound(name)
         }
         skipFuncs = true
         return runCommand(name, args.slice(i + 1))
@@ -7250,7 +7257,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A pattern that does not compile is not fatal in bash: it reports on standard
             // error and gives the [[ ]] status 2.
             if (!re.ok) {
-                emitErr("bash: [[: invalid regular expression: " + re.err + "\n")
+                diagErr("[[: invalid regular expression: " + re.err + "\n")
                 condErr = 2
                 // BASH_REMATCH is deliberately NOT touched: bash only rewrites it once
                 // it has a compiled pattern to search with, so after a bad pattern the

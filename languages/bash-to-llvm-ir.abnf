@@ -1886,6 +1886,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtCapEnd = rtDecl("rt_cap_end", true, [0])
     var rtFixChan = rtDecl("rt_fix_chan", false, [0])
     var rtPrints = rtDecl("rt_prints", false, [1])
+    var rtDiagPfx = rtDecl("rt_diag_pfx", false, [])
     var rtSsSave = rtDecl("rt_ss_save", false, [0])
     var rtSsRestore = rtDecl("rt_ss_restore", false, [0])
     var rtPushLocal = rtDecl("rt_push_local", false, [0])
@@ -1958,7 +1959,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // mkBackBody in bash-interpreter.abnf.
     function mkBackBody(text, inDq) {
         var src = bqUnescape(text, inDq)
-        return function(b) { return compileSnippet(src)(b) }
+        return function(b) { return compileSnippet(src, 0)(b) }
     }
     // ${ LIST; } and ${| LIST; }: LIST runs in this shell, with its output captured or with
     // a REPLY of its own (a local, undone by the save stack). Twin of mkFunSub in
@@ -2193,9 +2194,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the command line with status 1 (arith_err). Twin of the badsub arm of paramCore in
         // bash-interpreter.abnf.
         if (badsub != null) {
-            var badMsg = "bash: ${" + badsub + "}: bad substitution\n"
+            var badMsg = "${" + badsub + "}: bad substitution\n"
             return {c: undefined, fn: function(b) {
-                emitOnStderr(b, gepStr(b, badMsg))
+                emitDiag(b, gepStr(b, badMsg))
                 b.NewStore(one, gArithErr)
                 return {b: b, v: emptyPtr(b)}
             }}
@@ -3234,7 +3235,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function atLine(emit, n) {
         return function(b) {
             emitLine = lnCtx == null ? n : bashCsLine(lnCtx.tab, lnCtx.base, n)
-            storeVarRaw(b, "LINENO", gepStr(b, "" + emitLine))
+            storeVarRaw(b, "LINENO", gepStr(b, emitLine))
             return emit(b)
         }
     }
@@ -3766,7 +3767,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var badB = curF.NewBlock(""), optB = curF.NewBlock(""), nextB = curF.NewBlock(""), okB = curF.NewBlock("")
             step.NewCondBr(step.NewICmp(llvm.enum.IPredEQ, rc, zero), nextB, okB)
             okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, rc, one), badB, optB)
-            emitOnStderr(badB, badB.NewCall(rtStrcat, [badB.NewCall(rtStrcat, [gepStr(badB, "bash: " + kw + ": `"), fld]),
+            emitDiag(badB, badB.NewCall(rtStrcat, [badB.NewCall(rtStrcat, [gepStr(badB, kw + ": `"), fld]),
                                                        gepStr(badB, "': not a valid identifier\n")]))
             badB.NewStore(one, badP)
             badB.NewBr(nextB)
@@ -3792,7 +3793,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // bash 5.3: `local` outside every function declares nothing (an array literal
             // was already assigned with the words), status 1.
             if (kw == "local" && curFrame == null) {
-                emitOnStderr(b, gepStr(b, "bash: local: can only be used in a function\n"))
+                emitDiag(b, gepStr(b, "local: can only be used in a function\n"))
                 storeStatusI(b, 1)
                 return b
             }
@@ -3901,7 +3902,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // bash-interpreter.abnf.
     function roRefused(b, name, who) {
         if (!attrOn(roVars, name)) { return false }
-        emitOnStderr(b, gepStr(b, "bash: " + who + name + ": readonly variable\n"))
+        emitDiag(b, gepStr(b, who + name + ": readonly variable\n"))
         return true
     }
     var assocArrays = {}  // names declared with `declare -A` / `local -A`
@@ -4665,11 +4666,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             errB.NewStore(llvm.constant.NewInt(i32, 2), gCondErr)
             errB.NewCondBr(errB.NewICmp(llvm.enum.IPredEQ, n, llvm.constant.NewInt(i32, -1)), badPat, overrun)
             // rt_regex_error allocates per call, so it is called once, here.
-            emitOnStderr(badPat, badPat.NewCall(rtStrcat,
-                [gepStr(badPat, "bash: [[: invalid regular expression: "),
+            emitDiag(badPat, badPat.NewCall(rtStrcat,
+                [gepStr(badPat, "[[: invalid regular expression: "),
                  badPat.NewCall(rtStrcat, [badPat.NewCall(rtRegexError), gepStr(badPat, "\n")])]))
             badPat.NewBr(merge)
-            emitOnStderr(overrun, gepStr(overrun, "bash: [[: regular expression step limit exceeded\n"))
+            emitDiag(overrun, gepStr(overrun, "[[: regular expression step limit exceeded\n"))
             overrun.NewBr(merge)
 
             // BASH_REMATCH is rebuilt only when the pattern COULD be used: a match fills
@@ -4708,6 +4709,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitOnStderr(b, msg) {
         var saved = b.NewLoad(i32, gSinkOut)
         b.NewStore(b.NewLoad(i32, gSinkErr), gSinkOut)
+        b.NewCall(rtPrints, msg)
+        b.NewStore(saved, gSinkOut)
+    }
+    // A shell diagnostic: msg after bash's "SCRIPT: line N: " (rt_diag_pfx).
+    function emitDiag(b, msg) {
+        var saved = b.NewLoad(i32, gSinkOut)
+        b.NewStore(b.NewLoad(i32, gSinkErr), gSinkOut)
+        b.NewCall(rtDiagPfx)
         b.NewCall(rtPrints, msg)
         b.NewStore(saved, gSinkOut)
     }
@@ -4775,11 +4784,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return true
     }
-    function compileSnippet(src) {
+    // Its lines count from line0, or from the current command's line when line0 is 0. Twin of
+    // compileSnippet in bash-interpreter.abnf.
+    function compileSnippet(src, line0) {
         if (snipIsEmpty(src)) { return function(b) { storeStatusI(b, 0); return b } }
         if (src.indexOf("\\\n") >= 0 || src.indexOf("<<") >= 0) { src = c.compile(c.parseFrom(c.agrammar, src, "Spliced")).stack[0] }
         var sv = snipLine0
-        snipLine0 = emitLine
+        snipLine0 = line0 > 0 ? line0 : emitLine
         var t = arCompile(src, "CompoundList", false)
         snipLine0 = sv
         return function(b) {
@@ -4982,7 +4993,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var base = cbB.NewLoad(i32, savedTop)
             cbB.NewStore(base, gFrameBase)
             cbB.NewStore(cbB.NewSub(cbB.NewLoad(i32, gArgvTop), base), gFrameN)
-            var after = compileSnippet(cb + " \"$@\"")(cbB)
+            var after = compileSnippet(cb + " \"$@\"", 0)(cbB)
             after.NewStore(after.NewLoad(i32, savedBase), gFrameBase)
             after.NewStore(after.NewLoad(i32, savedN), gFrameN)
             after.NewStore(after.NewLoad(i32, savedTop), gArgvTop)
@@ -5167,8 +5178,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is field-split and the extra fields become the first arguments. The name is known only at
     // RUN time, so the dispatch is a chain of string compares over echo, the three trivial
     // builtins and every user function. LIMIT: builtins compiled from a literal argument list
-    // (printf, test/[, read, eval, set, trap, unset, declare, control flow) reach the
-    // `command not found` fallback here, where the interpreter runs them.
+    // (printf, test/[, read, eval, set, trap, unset, declare, control flow) are refused at
+    // run time here, where the interpreter runs them.
     // subs: a word or prefix assignment holds a command substitution.
     // noFn: reached through `builtin` / `command`, which pass over the user functions.
     function emitComputedCommand(b, cmdT, argTs, subs, noFn) {
@@ -5235,13 +5246,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             hb.NewBr(done)
             b = miss
         }
-        // The same diagnostic and the same 127 the literal path writes, with the name from
-        // the expansion.
-        emitOnStderr(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, c.file + ": command not found: "), nameV]),
-                                             gepStr(b, "\n")]))
-        b.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
-        b.NewStore(one, gExited)
-        b.NewBr(viaUnwind(curExit, curExitRd))
+        // Any other builtin is refused at run time, exiting with 127; any other name is the
+        // literal path's "command not found" with the name from the expansion.
+        var bltB = curF.NewBlock(""), nfB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtInWords, [nameV, gepStr(b, "\n" + shellKnownWords.join("\n") + "\n")]), zero), bltB, nfB)
+        emitOnStderr(bltB, bltB.NewCall(rtStrcat, [bltB.NewCall(rtStrcat, [gepStr(bltB, c.file + ": a computed command name cannot run the builtin "), nameV]),
+                                                   gepStr(bltB, "\n")]))
+        bltB.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
+        bltB.NewStore(one, gExited)
+        bltB.NewBr(viaUnwind(curExit, curExitRd))
+        emitDiag(nfB, nfB.NewCall(rtStrcat, [nameV, gepStr(nfB, ": command not found\n")]))
+        storeStatusI(nfB, 127)
+        nfB.NewBr(done)
         return done
     }
 
@@ -5331,7 +5347,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             yes.NewCall(rtPrints, yes.NewCall(rtStrcat, [line, gepStr(yes, "\n")]))
             yes.NewBr(next)
             if (query == "V") {
-                emitOnStderr(no, no.NewCall(rtStrcat, [no.NewCall(rtStrcat, [gepStr(no, "bash: command: "), r.v]), gepStr(no, ": not found\n")]))
+                emitDiag(no, no.NewCall(rtStrcat, [no.NewCall(rtStrcat, [gepStr(no, "command: "), r.v]), gepStr(no, ": not found\n")]))
                 no.NewBr(next)
             }
             b = next
@@ -5408,7 +5424,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var nbox = {b: b}
                 evalArgs(nbox, argTs)
                 b = emitAbortCheck(nbox.b)
-                emitOnStderr(b, gepStr(b, "bash: builtin: " + ww.notBuiltin + ": not a shell builtin\n"))
+                emitDiag(b, gepStr(b, "builtin: " + ww.notBuiltin + ": not a shell builtin\n"))
                 storeStatusI(b, 1)
                 return b
             }
@@ -5480,12 +5496,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var depth = loopStack.length
                 var isBrk = cmd == "break"
                 if (depth == 0) {
-                    emitOnStderr(b, gepStr(b, "bash: " + cmd + ": only meaningful in a `for', `while', or `until' loop\n"))
+                    emitDiag(b, gepStr(b, cmd + ": only meaningful in a `for', `while', or `until' loop\n"))
                     storeStatusI(b, 0)
                     return b
                 }
                 var rangeMsg = function(bb, lvText) {
-                    emitOnStderr(bb, bb.NewCall(rtStrcat, [bb.NewCall(rtStrcat, [gepStr(bb, "bash: " + cmd + ": "), lvText]),
+                    emitDiag(bb, bb.NewCall(rtStrcat, [bb.NewCall(rtStrcat, [gepStr(bb, cmd + ": "), lvText]),
                                                           gepStr(bb, ": loop count out of range\n")]))
                     storeStatusI(bb, 1)
                 }
@@ -5541,7 +5557,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (src != "-") {
                     var flag = m.NewGlobalDef("trap_flag" + trapCount, zero)
                     trapCount = trapCount + 1
-                    trapList.push({flag: flag, src: src, body: compileSnippet(src)})
+                    trapList.push({flag: flag, src: src, body: compileSnippet(src, 1)})
                     b.NewStore(one, flag)
                 }
                 storeStatusI(b, 0)
@@ -5558,7 +5574,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 if (allConst) {
                     if (esrc == "") { storeStatusI(b, 0); return b }
-                    return compileSnippet(esrc)(b)
+                    return compileSnippet(esrc, 0)(b)
                 }
                 // A COMPUTED eval cannot be compiled in general. The one shape a compiler can
                 // still honour is a string of assignments, `eval "NAME=VALUE"`, which becomes a
@@ -5619,9 +5635,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var ubox = {b: b}
                     evalArgs(ubox, argTs)
                     b = emitAbortCheck(ubox.b)
-                    emitOnStderr(b, gepStr(b, (ubad != "")
-                        ? "bash: unset: -" + ubad + ": invalid option\nunset: usage: unset [-f] [-v] [-n] [name ...]\n"
-                        : "bash: unset: cannot simultaneously unset a function and a variable\n"))
+                    emitDiag(b, gepStr(b, (ubad != "")
+                        ? "unset: -" + ubad + ": invalid option\nunset: usage: unset [-f] [-v] [-n] [name ...]\n"
+                        : "unset: cannot simultaneously unset a function and a variable\n"))
                     storeStatusI(b, (ubad != "") ? 2 : 1)
                     return b
                 }
@@ -5664,7 +5680,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         continue
                     }
                     if (sp0.key == null && attrOn(roVars, sp0.name)) {
-                        emitOnStderr(b, gepStr(b, "bash: unset: " + sp0.name + ": cannot unset: readonly variable\n"))
+                        emitDiag(b, gepStr(b, "unset: " + sp0.name + ": cannot unset: readonly variable\n"))
                         ust = one
                     }
                     else if (sp0.key == null) {
@@ -5695,14 +5711,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bbox2 = {b: b}
             evalArgs(bbox2, argTs)
             b = bbox2.b
-            // Prefixed with $0, like every shell diagnostic, on the standard error channel; it
-            // exits the current shell (a ( ) or $( ) ends, its parent carries on) with 127.
-            // Twin of the end of runCommand in bash-interpreter.abnf.
-            emitOnStderr(b, gepStr(b, c.file + ": command not found: " + cmd + "\n"))
-            b.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
-            b.NewStore(one, gExited)
-            b.NewBr(viaUnwind(curExit, curExitRd))
-            return deadBlock()
+            // No compiled program runs external programs: any other name is bash's "NAME:
+            // command not found", status 127, and the shell goes on. A builtin this compiler
+            // does not build is refused instead. Twin of the end of runCommand in
+            // bash-interpreter.abnf.
+            if (hasOwn(shellBuiltins, "$" + cmd)) { fail("the " + cmd + " builtin is not supported") }
+            emitDiag(b, gepStr(b, cmd + ": command not found\n"))
+            storeStatusI(b, 127)
+            return b
         }
         var run = inner
         if (redirs.length > 0) { run = function(b) {
@@ -6202,7 +6218,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             skip.NewCondBr(skip.NewICmp(llvm.enum.IPredEQ, skip.NewLoad(i32, sv.bad), llvm.constant.NewInt(i32, n)), pb, nb)
             var errNow = pb.NewLoad(i32, gSinkErr)
             pb.NewStore(pb.NewLoad(i32, sv.badCh), gSinkErr)
-            emitOnStderr(pb, gepStr(pb, "bash: " + n + ": Bad file descriptor\n"))
+            emitDiag(pb, gepStr(pb, n + ": Bad file descriptor\n"))
             pb.NewStore(errNow, gSinkErr)
             pb.NewBr(nb)
             skip = nb
