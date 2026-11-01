@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-996** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-997** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -179,10 +179,11 @@ it out (the save is lexical). rt_setvar_byname drops a write to a name the progr
 
 # C — C subset
 
-### T-982 c compiled: an indirect call through a function pointer loses the return type · P2 · C · IN PROGRESS (C worker, round 15) [V]
-Found by the C worker, round 14 (oracle cc). `double dh(double x){return x/2;} double (*fp)(double)=dh; (int)(fp(9.0)*10)` → cc
-and the interpreter 45, llvm.Run and native 0; `long (*bp)(long)` returning x*2^32 likewise. emitIndirectCall always answers ctInt
-through the i32 trampoline because a function-pointer ct ({k:"fnp"}) carries no signature.
+### T-996 c compiled: a function whose return type is a typedef name loses it on a direct call · P2 · C · OPEN [V]
+Found by the C worker, round 15 (oracle cc). `typedef double D; D half(D x){return x/2;}` → `(int)(half(9.0)*10)` cc and interpreter
+45, llvm.Run/native 40; `typedef long L; L big(int x){return x*4294967296L;}` → `big(3)` 12884901888 vs 0. Also a function returning
+a typedef'd function pointer: `typedef double (*DF)(double); DF pick(int k){return dh;}` → `pick(1)(7.0)` loses the double. Likely
+buildTdFunc / TdProto in c-to-llvm-ir.abnf never record the return type (noteRetCt / noteRetAll).
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
@@ -1112,6 +1113,7 @@ T-977 swift: "cannot find label" and "continue cannot target an if label" are no
 T-987 swift: undefined names need scope tables (out-of-scope uses, upper-case names, members of open types); `#if DEBUG`; MemoryLayout — DONE - scoped undefined-name check incl. upper-case and open types, #if on unset flag false, MemoryLayout size/stride/alignment; if-let-in-else gap filed
 T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result — DONE - ++/-- through a call's member or index (both forms), call runs once, ?. skips
 T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see re-read elements — PARTIAL - keys/values -= write through, live map views, lambdas read elements once, single stops at the 2nd match; sort selector counts filed
+T-982 c compiled: an indirect call through a function pointer loses the return type — DONE - function-pointer types carry their signature; indirect calls convert arguments and unpack the result type
 
 # Settled — do not re-open
 
