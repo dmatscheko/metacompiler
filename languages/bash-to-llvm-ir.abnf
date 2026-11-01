@@ -433,7 +433,7 @@ AnyCh       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // --- $ expansions -----------------------------------------------------------------
 
-ExpSeg      = ArithExp | CmdSub | BackSub | DollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+ExpSeg      = ArithExp | CmdSub | BackSub | FunSub | ReplySub | DollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
 
 // $( LIST ) and the older `LIST` : run the list with stdout captured, and the value of the
 // word segment is that output with its trailing newlines removed (exactly like the shell).
@@ -449,6 +449,14 @@ BackSub     <~~ push(mkCmdSub(mkBackBody(arSrc(up.start + 1, up.pos - 1), false)
 DqBackSub   <~~ push(mkCmdSub(mkBackBody(arSrc(up.start + 1, up.pos - 1), true), {first: srcLine(up.start), skips: []})) ~~>
             = "`" :whitespace() BqText "`" ;
 BqText      = { "\\" ( AnyCh | "\n" ) | !@+"`\\" } ;
+// bash 5.3's function substitutions run the list in the CURRENT shell, so what it assigns
+// stays: `${ LIST; }` (a blank after the brace) is its captured output, trailing newlines
+// removed; `${| LIST; }` is the value LIST leaves in REPLY, which is local to it.
+FunSub      <~~ push(mkFunSub(pop(), false)) ~~>
+            = "${" :whitespace() FunSubBlank :whitespace(Whitespace) CompoundList "}" ;
+FunSubBlank = @+" \t\n" ;
+ReplySub    <~~ push(mkFunSub(pop(), true)) ~~>
+            = "${|" :whitespace(Whitespace) CompoundList "}" ;
 
 // $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
 // $(( EXPR )): a text holding an expansion (or a double quote, which bash removes) is kept as
@@ -490,11 +498,15 @@ DollarBrace <~~ push(mkParamExp(takeAll())) ~~>
 // "#" (length) and "!" (indirection) prefix a whole expansion; PeBraceEnd closes the
 // alternatives that can end early, because ordered choice commits.
 // Twin of PeBody in bash-interpreter.abnf; see there.
-PeBody      = PeLen | PeIndForm | PeCore | PeLenBad ;
+PeBody      = PeLen | PeIndForm | PeCore | PeLenBad | PeBad ;
 PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
 // `${#x-default}` and `${#a[0]/1/xxx}` PARSE in bash and then fail at run time with
 // "bad substitution"; this is the alternative that reaches that documented behaviour.
-PeLenBad    <~~ push({lenp: 1}) ~~> = "#" PeCore ;
+PeLenBad    <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = "#" PeCore ;
+// Any other text between the braces parses as well and is the same run-time error
+// (`${(m)foo}`, a zsh idiom): the message, and the command line is abandoned with status 1.
+PeBad       <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = PeBadCh { PeBadCh } ;
+PeBadCh     = !@+"}" ;
 PeIndForm   <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | PeCore ) ;
 // ${!prefix*} / ${!prefix@}: the NAMES of the set variables starting with the prefix.
 // Twin of PePfxNames in bash-interpreter.abnf; see there.
@@ -580,10 +592,10 @@ BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 
 // The expansions of a double-quoted context: a ' in the word of ${v-w} is kept, and the
 // text between two of them expanded. Twin of DqExpSeg in bash-interpreter.abnf; see there.
-DqExpSeg    = ArithExp | CmdSub | DqBackSub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+DqExpSeg    = ArithExp | CmdSub | DqBackSub | FunSub | ReplySub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
 DqDollarBrace <~~ push(mkParamExp(takeAll())) ~~>
             = "${" :whitespace() DqPeBody "}" ;
-DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad ;
+DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | PeBad ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
 DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | PeSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
@@ -1006,6 +1018,42 @@ BraceKwEnd = :script(~~
 // in which case it fails so the SimpleCommand does not swallow the keyword.
 NotReserved = :script(~~
     (function() {
+        // The offset of the "}" that ends a ${ LIST; } whose list starts at offset k, or -1:
+        // the first "}" in command position outside quotes and outside the brace groups
+        // and function substitutions the list itself opens.
+        function fsEnd(k) {
+            var depth = 0
+            var cmd = true
+            while (true) {
+                var ch = c.peek(k)
+                var n1 = c.peek(k + 1)
+                if (ch == -1) { return -1 }
+                if (ch == 39 || ch == 34) {
+                    k = k + 1
+                    while (c.peek(k) != ch) {
+                        if (c.peek(k) == -1) { return -1 }
+                        if (ch == 34 && c.peek(k) == 92) { k = k + 1 }
+                        k = k + 1
+                    }
+                    k = k + 1
+                    cmd = false
+                } else if (ch == 92) { k = k + 2; cmd = false }
+                else if (ch == 32 || ch == 9) { k = k + 1 }
+                else if (ch == 59 || ch == 10 || ch == 38 || ch == 124 || ch == 40) { k = k + 1; cmd = true }
+                else if (ch == 36 && n1 == 123 && (c.peek(k + 2) == 32 || c.peek(k + 2) == 9 || c.peek(k + 2) == 10 || c.peek(k + 2) == 124)) {
+                    depth = depth + 1
+                    k = k + 3
+                    cmd = true
+                } else if (ch == 123 && cmd && (n1 == 32 || n1 == 9 || n1 == 10)) { depth = depth + 1; k = k + 1 }
+                else if (ch == 125 && cmd) {
+                    if (depth == 0) { return k }
+                    depth = depth - 1
+                    k = k + 1
+                    cmd = false
+                } else { k = k + 1; cmd = false }
+            }
+            return -1
+        }
         var i = 0
         var cc = c.peek(i)
         while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
@@ -1015,6 +1063,17 @@ NotReserved = :script(~~
             var nb = c.peek(i + 1)
             if (nb == -1 || nb == 32 || nb == 9 || nb == 10 || nb == 13 || nb == 59 || nb == 38 || nb == 124 || nb == 41) {
                 return abnf.newToken("\x01close-brace", 0)
+            }
+            // The "}" that ends a function substitution closes it whatever follows
+            // (`x${ echo a; }y`, `"${ echo a; }"`): it is the one the nearest opener before
+            // it whose list ends here (fsEnd) would end at.
+            var j = -1
+            while (c.peek(j) != -1) {
+                var o2 = c.peek(j + 2)
+                if (c.peek(j) == 36 && c.peek(j + 1) == 123 && (o2 == 32 || o2 == 9 || o2 == 10 || o2 == 124) && fsEnd(j + 2) == i) {
+                    return abnf.newToken("\x01close-brace", 0)
+                }
+                j = j - 1
             }
         }
         // "[[" with a boundary is the reserved word that opens a conditional command, never a
@@ -1829,6 +1888,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var src = bqUnescape(text, inDq)
         return function(b) { return compileSnippet(src)(b) }
     }
+    // ${ LIST; } and ${| LIST; }: LIST runs in this shell, with its output captured or with
+    // a REPLY of its own (a local, undone by the save stack). Twin of mkFunSub in
+    // bash-interpreter.abnf.
+    function mkFunSub(bodyT, reply) {
+        return {s: true, c: undefined, fn: function(b) {
+            if (!reply) {
+                b.NewCall(rtCapBegin, zero)
+                var eb = bodyT(b)
+                return {b: eb, v: eb.NewCall(rtCapEnd, one)}
+            }
+            var depth = slotOf(i32)
+            b.NewStore(b.NewLoad(i32, gLsTop), depth)
+            b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId("REPLY")))
+            storeVarRaw(b, "REPLY", unsetPtr(b))
+            var rb = bodyT(b)
+            var v = loadVar(rb, "REPLY")
+            rb.NewCall(rtPopLocals, rb.NewLoad(i32, depth))
+            return {b: rb, v: v}
+        }}
+    }
     function mkCmdSub(bodyT, lnTab) {
         return {s: true, c: undefined, fn: function(b) {
             var svLn = lnCtx, svLine = emitLine
@@ -2001,6 +2080,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function paramCore(items, cell) {
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
+        var badsub = null
         var words = []     // word objects {fn, c}
         var ariths = []    // bare arithmetic thunks (the ${v:off:len} offsets)
         var wordT = null
@@ -2017,6 +2097,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.rtAssoc != undefined) { rtNm = true; rtAssoc = true }
             else if (it.fn != undefined) { words.push(it); wordT = it }
             else if (it.lenp != undefined) { lenp = true }
+            else if (it.badsub != undefined) { badsub = it.badsub }
             else if (it.indp != undefined) { indp = true }
             else if (it.xf != undefined) { xf = it.xf }
             else if (it.pfx != undefined) { pfx = it.pfx }
@@ -2029,6 +2110,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // their array forms ${#a[@]} and ${!a[@]}); combined with an operator it does not.
         var bare = (op == "" && pe == "" && xf == "")
         if (lenp && bare) { pe = "len" }
+        // `${#x-default}`, `${(m)foo}`: bash's run-time "bad substitution", which abandons
+        // the command line with status 1 (arith_err). Twin of the badsub arm of paramCore in
+        // bash-interpreter.abnf.
+        if (badsub != null) {
+            var badMsg = "bash: ${" + badsub + "}: bad substitution\n"
+            return {c: undefined, fn: function(b) {
+                emitOnStderr(b, gepStr(b, badMsg))
+                b.NewStore(one, gArithErr)
+                return {b: b, v: emptyPtr(b)}
+            }}
+        }
         if (indp && bare && pfx == "") { pe = "ind" }
         // ${!prefix*} / ${!prefix@}: sorted, joined by IFS's first character for *.
         if (pfx != "") {
@@ -2346,15 +2438,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pe == "ind") {
             return {f: true, c: undefined, fn: function(b) {
                 return {b: b, v: b.NewCall(rtGetInd, b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one]))}
-            }}
-        }
-        // ${#v OP arg} is a parse-time-legal, run-time-illegal combination in bash:
-        //     $ echo "${#x-default}"   ->  bash: ${#x-default}: bad substitution
-        // The shell dies; here that is the abort flag, the same one set -u raises.
-        if (lenp) {
-            return {c: undefined, fn: function(b) {
-                b.NewStore(one, gAbort)
-                return {b: b, v: emptyPtr(b)}
             }}
         }
         // ${!ref OP arg} and ${!a[k] OP arg}: the operator applies to the variable the
@@ -4463,7 +4546,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // one statement-sequence thunk); the thunk that comes back is emitted inline.
     // Its continuations are joined first, as in a script (Spliced), so the offsets arSrc reads
     // are those of the joined text.
+    // A snippet of nothing but blanks and comments (`eval '# note'`, `trap '# x' EXIT`) runs
+    // nothing, with status 0; the grammar's list needs at least one command.
+    function snipIsEmpty(src) {
+        var i = 0
+        while (i < src.length) {
+            var ch = src.charAt(i)
+            if (ch == "#") { while (i < src.length && src.charAt(i) != "\n") { i = i + 1 } }
+            else if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r") { i = i + 1 }
+            else { return false }
+        }
+        return true
+    }
     function compileSnippet(src) {
+        if (snipIsEmpty(src)) { return function(b) { storeStatusI(b, 0); return b } }
         if (src.indexOf("\\\n") >= 0 || src.indexOf("<<") >= 0) { src = c.compile(c.parseFrom(c.agrammar, src, "Spliced")).stack[0] }
         var sv = snipLine0
         snipLine0 = emitLine
@@ -5175,18 +5271,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (cmd == "set") { return emitSet(b, argTs) }
             if (cmd == "shopt") { return emitShopt(b, argTs) }
             if (cmd == "trap") {
-                if (argTs.length == 0 || argTs[0].c == undefined) {
-                    fail("trap needs a literal handler in this compiler")
-                }
-                var src = argTs[0].c
-                // One EXIT trap, as in the interpreter: a new one replaces the one before, and
-                // '' or - removes it.
                 var ti
+                // A bare `trap` lists the EXIT trap that is set, the way bash prints it.
+                if (argTs.length == 0) {
+                    for (ti = 0; ti < trapList.length; ti++) {
+                        var onB = curF.NewBlock(""), offB = curF.NewBlock("")
+                        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, trapList[ti].flag), zero), onB, offB)
+                        onB.NewCall(rtPrints, onB.NewCall(rtStrcat, [onB.NewCall(rtStrcat, [gepStr(onB, "trap -- "),
+                            onB.NewCall(rtShQuote, gepStr(onB, trapList[ti].src))]), gepStr(onB, " EXIT\n")]))
+                        onB.NewBr(offB)
+                        b = offB
+                    }
+                    storeStatusI(b, 0)
+                    return b
+                }
+                if (argTs[0].c == undefined) { fail("trap needs a literal handler in this compiler") }
+                var src = argTs[0].c
+                // One EXIT trap, as in the interpreter: a new one replaces the one before, ''
+                // sets one that runs nothing and - removes it.
                 for (ti = 0; ti < trapList.length; ti++) { b.NewStore(zero, trapList[ti].flag) }
-                if (src != "" && src != "-") {
+                if (src != "-") {
                     var flag = m.NewGlobalDef("trap_flag" + trapCount, zero)
                     trapCount = trapCount + 1
-                    trapList.push({flag: flag, body: compileSnippet(src)})
+                    trapList.push({flag: flag, src: src, body: compileSnippet(src)})
                     b.NewStore(one, flag)
                 }
                 storeStatusI(b, 0)
@@ -5196,6 +5303,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var esrc = ""
                 var ei
                 var allConst = true
+                if (argTs.length > 0 && argTs[0].c == "--") { argTs = argTs.slice(1) }
                 for (ei = 0; ei < argTs.length; ei++) {
                     if (argTs[ei].c == undefined) { allConst = false }
                     else { if (ei > 0) { esrc = esrc + " " }; esrc = esrc + argTs[ei].c }

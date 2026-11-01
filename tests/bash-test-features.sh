@@ -793,6 +793,28 @@ check bq2 "`echo \\(` `echo \"q\"` `echo \$xe5`" '( q 2'
 check bq3 `echo \`echo nested\``-`echo \\(` 'nested-('
 check bq4 "$(echo \ x)|"\ y " x| y"
 
+# ----- an eval / trap string of only comments; a bad substitution is a run-time error -----
+check evs1 "$(eval '# only a comment'; echo "s=$?"; eval '   '; echo "s=$?"; eval -- 'echo dd')" "s=0
+s=0
+dd"
+check evs2 "$(trap '# c' EXIT; trap; trap 'echo x' EXIT; trap; trap '' EXIT; trap)" "trap -- '# c' EXIT
+trap -- 'echo x' EXIT
+trap -- '' EXIT"
+xbs=0
+{ xbs=1; echo "${#xbs-d}"; xbs=2; } 2>/dev/null
+check bsub1 "$?/$xbs" "1/1"
+eval 'echo z ${(m)foo} z' 2>/dev/null
+check bsub2 "$?" 1
+
+# ----- ${ LIST; } and ${| LIST; } run LIST in the current shell -----
+xfv=0
+REPLY=keep
+xfs=${ echo hi; xfv=7; }
+xfr=${| REPLY=r$xfv; }
+check fsub1 "$xfs|$xfv|$xfr|$REPLY" "hi|7|r7|keep"
+check fsub2 "<${ for xfi in a b; do echo -$xfi-; done; }>" "<-a-
+-b->"
+
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
 # arithmetic error's message reach it from llvm.Run as they do from the interpreter.
