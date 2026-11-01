@@ -88,3 +88,11 @@ func Unbox(v any) Kind {
 type Shape interface{ Area() int }
 
 func (v Vec) Area() int { return v.a * v.b }
+
+// A defined slice type with a pointer method, embedded by a main-file struct as
+// field Stack: its methods are promoted across the package boundary.
+type Stack []int
+
+func (s *Stack) Push(x int) { *s = append(*s, x) }
+
+func (s Stack) Len() int { return len(s) }

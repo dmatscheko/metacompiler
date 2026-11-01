@@ -3464,7 +3464,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goDtCall(recv, s, args) {
         var p = s.dt
         if (p.dyn) {
-            if (goHasMethod(recv, s.name)) { return mcall(recv, s.name, args) }
+            if (goHasMethod(recv, s.name, false)) { return mcall(recv, s.name, args) }
             if (p.fn == "") { return mcall(recv, s.name, args) }
         }
         return goDtFns[goDtKey(s.pkg, p.fn)].apply(undefined, concat2impl([goDtRecv(recv, s)], args))
@@ -6032,25 +6032,33 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goSatisfies(v, ms) {
         if (!goIsInstance(v)) { return "" }
         for (var i = 0; i < ms.length; i++) {
-            if (!goHasMethod(v, ms[i])) { return ms[i] }
+            if (!goHasMethod(v, ms[i], v.__vv === true)) { return ms[i] }
         }
         return ""
     }
     // A method of v's own descriptor, or one PROMOTED from an embedded struct.
-    function goHasMethod(v, name) {
+    // val: v is a struct VALUE (a __vv copy, or a by-value embedded field of one),
+    // whose method set lacks the pointer-receiver methods; an embedded *T brings
+    // all of T's. Twins: goHasMethod in abnf/jsrtgolang.go and lib/go-rt.metajs.
+    function goHasMethod(v, name, val) {
         if (v === undefined || v === null || typeof v != "object") { return false }
         var cls = v.__class
         if (cls == undefined || cls == null) { return false }
-        if (hasOwn(cls, name)) { return typeof cls[name] == "function" }
+        if (hasOwn(cls, name)) { return typeof cls[name] == "function" && !(val && cls["__ptr$" + name] == true) }
         var fs = cls.__fields
         if (!Array.isArray(fs)) { return false }
         for (var i = 0; i < fs.length; i++) {
             var inner = v[fs[i]]
             if (inner != undefined && inner != null && typeof inner == "object" && inner.__class != undefined && goFieldEmbedded(cls, i)) {
-                if (goHasMethod(inner, name)) { return true }
+                if (goHasMethod(inner, name, val && !goFieldPtr(cls, i))) { return true }
             }
         }
         return false
+    }
+    // Is field i of descriptor cls declared as a pointer (an embedded *T)?
+    function goFieldPtr(cls, i) {
+        var fts = cls.__ftypes
+        return Array.isArray(fts) && i < fts.length && (fts[i] == "" || fts[i].charAt(0) == "*")
     }
     // x.(I) FOR A DECLARED INTERFACE PANICS when the value does not satisfy it (a
     // concrete target is goAssertType's). Go's own text is

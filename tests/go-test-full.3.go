@@ -2069,6 +2069,53 @@ func s144() {
 	check("mexprty144", fmt.Sprintf("%T %T", (*s144P).Add, s144P.Twice) == "func(*main.s144P, int) int func(main.s144P) int")
 }
 
+// ===== SECTION 145: a struct value's method set in a type switch and an assertion =====
+// A struct VALUE in an interface has only the value-receiver methods (Go spec
+// "Method sets"), so it does not satisfy an interface needing a pointer method,
+// while a pointer to it does. A by-value embedded struct lends a value only its
+// value methods; an embedded *T lends all of T's. The expected values are go run's.
+type s145S struct{ n int }
+
+func (s *s145S) Inc()    { s.n++ }
+func (s s145S) Get() int { return s.n }
+
+type s145Incer interface {
+	Inc()
+	Get() int
+}
+
+type s145Getter interface{ Get() int }
+
+type s145E struct{ s145S }
+
+type s145P struct{ *s145S }
+
+func s145kind(v interface{}) string {
+	switch v.(type) {
+	case s145Incer:
+		return "i"
+	case s145Getter:
+		return "g"
+	}
+	return "o"
+}
+
+func s145() {
+	s := s145S{6}
+	ps := &s
+	vs := []interface{}{s145S{7}, &s145S{8}}
+	k := s145kind(s145S{1}) + s145kind(&s145S{2}) + s145kind(s) + s145kind(*ps) + s145kind(ps) + s145kind(vs[0]) + s145kind(vs[1])
+	check("vmset145", k == "giggigi")
+	var g s145Getter = s145S{3}
+	_, ok1 := g.(s145Incer)
+	var g2 s145Getter = &s145S{4}
+	_, ok2 := g2.(s145Incer)
+	var x interface{} = s145S{5}
+	_, ok3 := x.(s145Incer)
+	check("vmsetok145", !ok1 && ok2 && !ok3)
+	check("vmsetemb145", s145kind(s145E{})+s145kind(&s145E{})+s145kind(s145P{&s145S{}}) == "gii")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -2119,6 +2166,7 @@ func main() {
 	s142()  // SECTION-CALL 142
 	s143()  // SECTION-CALL 143
 	s144()  // SECTION-CALL 144
+	s145()  // SECTION-CALL 145
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

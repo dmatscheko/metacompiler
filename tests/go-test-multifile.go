@@ -42,6 +42,16 @@ type Circ struct{ r int }
 
 func (c Circ) Area() int { return 3 * c.r * c.r }
 
+// Embeds another package's defined non-struct type: its field is named Stack.
+type Tagged struct {
+	vecbox.Stack
+	tag string
+}
+
+type Pusher interface{ Push(int) }
+
+type Lener interface{ Len() int }
+
 func kindOf(v any) string {
 	switch x := v.(type) {
 	case vecbox.Kind:
@@ -177,6 +187,18 @@ func main() {
 	sh := vecbox.Shape(Circ{2})
 	checkS("conversion to an imported interface", fmt.Sprintf("%d %T %v %d %v", sh.Area(), sh, sh,
 		vecbox.Shape(vecbox.NewVec(2, 3, 4)).Area(), vecbox.Shape(nil) == nil), "12 main.Circ {2} 6 true")
+	// AN EMBEDDED IMPORTED DEFINED TYPE promotes its methods; a pointer method
+	// reaches the field's address, and a struct value lacks it in its method set.
+	tg := &Tagged{tag: "t"}
+	tg.Push(4)
+	tg.Push(9)
+	var tv Tagged
+	tv.Push(1)
+	var tl Lener = tv
+	_, tvP := any(tv).(Pusher)
+	_, tgP := any(tg).(Pusher)
+	checkS("method promoted from an imported defined type", fmt.Sprint(tg.Len(), tg.Stack, tg.tag, tl.Len(), tvP, tgP),
+		"2 [4 9]t1 false true")
 
 	if fails == 0 {
 		fmt.Println("go multifile test passed")

@@ -4045,8 +4045,10 @@ function goPromDt(st, name) {
             while (fs !== undefined && j < fs.length) {
                 var ft = goPreFld["$" + sk + "." + fs[j]]
                 var et = ft.charAt(0) == "*" ? ft.substring(1) : ft
-                if (et == fs[j]) {
-                    var via = lvl[i].via.concat([et])
+                // An embedded field is named by its type's unqualified name.
+                var d = et.length - fs[j].length - 1
+                if (et == fs[j] || (d > 0 && et.charAt(d) == "." && et.substring(d + 1) == fs[j])) {
+                    var via = lvl[i].via.concat([fs[j]])
                     if (goMethRty["$" + goTyKey(et) + "." + name] !== undefined) {
                         return goIsDefTy(et) ? {via: via, ty: et, isPtr: ft.charAt(0) == "*"} : null
                     }

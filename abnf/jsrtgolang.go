@@ -3189,10 +3189,42 @@ func goPkgSlot(rt *jsrt, recv, key interface{}) (*jsScope, string, bool) {
 }
 
 // goHasMethod: a method of v's own descriptor, or one PROMOTED from an embedded
-// struct. rt.goMethod already answers exactly that, receiver semantics included.
-func goHasMethod(rt *jsrt, v interface{}, name string) bool {
-	_, _, found := rt.goMethod(v, name)
-	return found
+// struct (the lookup rt.goMethod does). val: v is a struct VALUE (a __vv copy, or
+// a by-value embedded field of one), whose method set lacks the pointer-receiver
+// methods; a pointer's box and an embedded *T bring all of T's. Twins:
+// goHasMethod in languages/go-interpreter.abnf and lib/go-rt.metajs.
+func goHasMethod(rt *jsrt, v interface{}, name string, val bool) bool {
+	if dv, isPtr := goPtrBoxed(v); isPtr {
+		return goHasMethod(rt, dv, name, false)
+	}
+	cls := goClassOf(v)
+	if cls == nil {
+		return false
+	}
+	if fn, has := cls.props[name]; has && isCallable(fn) {
+		return !(val && cls.props["__ptr$"+name] == true)
+	}
+	o := v.(*jsObject)
+	fs, ok := cls.props["__fields"].(*jsArray)
+	if !ok {
+		return false
+	}
+	ft, _ := cls.props["__ftypes"].(*jsArray)
+	for i, f := range fs.elems {
+		inner := o.props[rt.toString(f)]
+		if goClassOf(inner) == nil || !goFieldEmbedded(cls, i, rt.toString(f)) {
+			continue
+		}
+		byPtr := false
+		if ft != nil && i < len(ft.elems) {
+			t, _ := ft.elems[i].(string)
+			byPtr = t == "" || strings.HasPrefix(t, "*")
+		}
+		if goHasMethod(rt, inner, name, val && !byPtr) {
+			return true
+		}
+	}
+	return false
 }
 
 // goMissingMethod answers "" when v has every method in the comma-joined set, and
@@ -3204,11 +3236,13 @@ func goMissingMethod(rt *jsrt, v interface{}, csv string) string {
 	if goClassOf(v) == nil {
 		return ""
 	}
+	o, _ := v.(*jsObject)
+	val := o != nil && o.props["__vv"] == true
 	for _, name := range strings.Split(csv, ",") {
 		if name == "" {
 			continue
 		}
-		if !goHasMethod(rt, v, name) {
+		if !goHasMethod(rt, v, name, val) {
 			return name
 		}
 	}

@@ -2528,7 +2528,6 @@ function js_gorepanic() {
 // reads as "satisfied by anything". The twins are typeMatches / goSatisfies in
 // languages/go-interpreter.abnf.
 
-// A method of v's own descriptor, or one PROMOTED from an embedded struct.
 // Is field i of descriptor cls embedded, so that its methods are the struct's?
 // Its declared type is "" (an embedded pointer), its own name, or a package's
 // type of that name. Twins: goFieldEmbedded in abnf/jsrt.go and
@@ -2541,21 +2540,31 @@ function goFieldEmbedded(cls, i) {
     var d = t.length - n.length - 1
     return d > 0 && t.charAt(d) == "." && t.substring(d + 1) == n
 }
-function goHasMethod(v, name) {
+// A method of v's own descriptor, or one PROMOTED from an embedded struct.
+// val: v is a struct VALUE (a __vv copy, or a by-value embedded field of one),
+// whose method set lacks the pointer-receiver methods; an embedded *T brings all
+// of T's. Twins: goHasMethod in abnf/jsrtgolang.go and go-interpreter.abnf.
+function goHasMethod(v, name, val) {
     var cls = goClassOf(v)
     if (cls === undefined) { return false }
-    if (goIsFn(cls[name])) { return true }
+    if (goIsFn(cls[name])) { return !(val && cls["__ptr$" + name] === true) }
     var fs = cls.__fields
     if (!Array.isArray(fs)) { return false }
     var i = 0
     while (i < fs.length) {
         var inner = v[goStrOf(fs[i])]
         if (goClassOf(inner) !== undefined && goFieldEmbedded(cls, i)) {
-            if (goHasMethod(inner, name)) { return true }
+            if (goHasMethod(inner, name, val && !goFieldPtr(cls, i))) { return true }
         }
         i = i + 1
     }
     return false
+}
+// Is field i of descriptor cls declared as a pointer (an embedded *T)?
+function goFieldPtr(cls, i) {
+    if (!goHas(cls, "__ftypes") || !Array.isArray(cls.__ftypes) || i >= cls.__ftypes.length) { return false }
+    var t = goStrOf(cls.__ftypes[i])
+    return t == "" || t.charAt(0) == "*"
 }
 
 // The comma-joined method set, split without String.split (not in this dialect).
@@ -2579,9 +2588,10 @@ function goCsvSplit(s) {
 function goMissingMethod(v, csv) {
     if (goClassOf(v) === undefined) { return "" }
     var ms = goCsvSplit(goStrOf(csv))
+    var val = v.__vv === true
     var i = 0
     while (i < ms.length) {
-        if (!goHasMethod(v, ms[i])) { return ms[i] }
+        if (!goHasMethod(v, ms[i], val)) { return ms[i] }
         i = i + 1
     }
     return ""
