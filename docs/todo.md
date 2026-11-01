@@ -220,33 +220,33 @@ destructuring target, python comprehension/genexp, swift array/dict/type, go gen
 per-grammar fix (cut or reorder each alternative) and memoising rule results at a position in the PEG engine (abnf/), which
 fixes all seven at once; measure the memo cost on the matrix. Shared: the seven grammars.
 
-### T-958 python: a generator's run state is not reachable from layer 2 (send to a just-started generator, gi_running) · P3 · CORE · OPEN [V]
+### T-958 python: a generator's run state is not reachable from layer 2 (send to a just-started generator, gi_running) · P3 · CORE · IN PROGRESS (CORE worker, round 16) [V]
 Found by the PY worker, round 17. `def g(): yield 1` + `g().send(5)` → CPython "TypeError: can't send non-None value to a
 just-started generator"; ours sends. `gi_running` (True inside its own body) is missing. Layer 2 (python-rt.metajs) cannot read
 the floor generator cell's state (runtime.c cb[1]); needs a small floor accessor (and its Go-twin / interp counterparts), after
 which the PY group can implement both. Shared: runtime.c.
 
-### T-967 metajs goja leg: `[o] + ""` calls an element's own toString; other UTF-16 languages still order strings by code point · P3 · CORE · OPEN [V]
+### T-967 metajs goja leg: `[o] + ""` calls an element's own toString; other UTF-16 languages still order strings by code point · P3 · CORE · IN PROGRESS (CORE worker, round 16) [V]
 Found by the CORE worker, round 15. `var o = {toString: function () { return "x" }}; [o] + ""` → goja interp "x" (goja's
 Array join calls the element's own toString), -frozen / run / native "[object Object]" (manual 7.9: ToPrimitive never
 consults a stored toString). Pin goja to the dialect. Also: java, kotlin, csharp and dart (UTF-16 strings) still compare
 strings by code point in the floor and twin; their emitters could opt into str_cmp16 (js_rt_ecma's comparison only) -
 `"￿".compareTo("😀")` in Java is positive (unit 0xFFFF > 0xD83D), ours negative.
 
-### T-968 tooling: sweep.sh scores TypeScript files that tsc rejects with grammar errors as must-parse · P3 · CORE · OPEN [V]
+### T-968 tooling: sweep.sh scores TypeScript files that tsc rejects with grammar errors as must-parse · P3 · CORE · IN PROGRESS (CORE worker, round 16) [V]
 Left from T-926. typescript's directory rule scores 219 interpreter / 251 compiler failures as must-parse although tsc reports
 grammar errors (TS1xxx / TS17xxx / TS18xxx via getSemanticDiagnostics) for them; the honest interp ceiling is about 5303/5527.
 Decision for the worker: derive a checked-in reject list once from a real tsc (VS Code ships one, manual ch. 5) rather than
 running tsc on every sweep.
 
-### T-973 frozen engine: `String.prototype.lastIndexOf` missing; --full step budget nearly exhausted · P2 · CORE · OPEN [V]
+### T-973 frozen engine: `String.prototype.lastIndexOf` missing; --full step budget nearly exhausted · P2 · CORE · IN PROGRESS (CORE worker, round 16) [V]
 Found by the JV and PY workers, rounds 15 / 17. `"abcb".lastIndexOf("b")` in a tag script or layer 2 → goja 3, -frozen "call of
 a non function value: undefined". And the frozen interpreter legs of tests/java-test-full.java (90M-100M IR steps) and
 tests/python-test-full.py (98M-99M) sit just under the 1e8 -max-steps budget of ./test.sh --full: the next few assertions trip
 "step limit exceeded". Decide: raise the budget for --full, split the files (the .2/.3 convention), or find what makes those
 interpreters step-hungry - measure first.
 
-### T-975 stderr: a trailing fragment without a newline is never written · P3 · CORE · OPEN [V]
+### T-975 stderr: a trailing fragment without a newline is never written · P3 · CORE · IN PROGRESS (CORE worker, round 16) [V]
 Found by the JV worker, round 15. Standard error is written a line at a time over eprintln in java (System.err), ruby ($stderr)
 and python (sys.stderr), so `System.err.print("x"); System.err.flush();` and a program ending on a partial stderr line lose the
 fragment; java / ruby / python3 write it. Flush the pending fragment on flush() and at exit, in all engines.
