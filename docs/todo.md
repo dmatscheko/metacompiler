@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1087** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1088** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -136,12 +136,13 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1083 php: builtin argument TypeErrors; dynamic undefined-call line; opcode-compiled builtins in traces · P3 · PHP · IN PROGRESS (PHP worker, round 45) [V]
-Spec-only (php-src). All engines unless noted:
-- `strlen([])` returns 5; PHP TypeError "strlen(): Argument #1 ($string) must be of type string, array given". `array_key_exists([], [])` throws nothing; PHP TypeError. Audit the other builtins' strict-type argument checks (zend_parse_parameters) for the same gap.
-- compiled only: `$u = "nofn"; $u();` reports a stale line (php.site not stored before the raise): interpreter lines 6/11 vs compiled 3/8 on scratch PHP44/p6.php.
-- builtins PHP compiles to opcodes (call_user_func, call_user_func_array, strval/intval/boolval/floatval, ...) still get a trace frame; PHP shows none (zend_try_compile_special_func list).
-- approximation: a foreach header spanning several lines uses the foreach start line rather than the expression's line.
+### T-1087 php: argument-type checks for PHP-written stdlib builtins; object casts; deprecations · P3 · PHP · OPEN [V]
+Spec-only (php-src stubs + zend_parse_parameters). All engines:
+- builtins implemented in PHP in lib/php-stdlib.php have no argument-type checks: they coerce an array to "Array" or raise a TypeError naming an inner native ("strlen()"). Affected: str_repeat, trim/ltrim/rtrim, explode, strrev, str_pad, ucfirst, lcfirst, ucwords, str_contains, str_starts_with, str_ends_with, str_split, stripos, strstr, substr_count, str_word_count, nl2br, htmlspecialchars, wordwrap; number_format and round with an array crash ("array used as a number"). Library parameter types are erased inside the stdlib - find a scheme with no per-call cost on the hot path (e.g. checks only on the cold coercion branch), measure with paired bench runs.
+- (int)/(float) of an object: PHP 1 plus warning "Object of class X could not be converted to int"; ours 0, no warning.
+- `[$this, 'parent::m']` callable rejected; PHP 8.4 accepts with a deprecation.
+- deprecations never emitted: null to an internal non-nullable parameter; "Implicit conversion from float 1.5 to int loses precision" for a fractional float key.
+- declare(strict_types=1) not applied to internal-function arguments (a program-wide flag would break library-internal calls; needs per-call-site strictness).
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1146,6 +1147,7 @@ T-1080 php: trace frames for native builtins / generators; string callbacks in c
 T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small diagnostics — PARTIAL→split (SH r31, e639c597): quoted indexed subscripts on reads are arithmetic errors that abandon the line (${ia['1']}, $((..)), unset/test/read), nested subscripts, finer arithmetic diagnostics, literal kind-conversion error (top level vs function forms), compiled echo field join; 4 legs = bash 5.3 incl. stderr. nullglob needs a glob model (own ticket); LC_ALL=C policy carried over
 T-1081 kotlin: static typer gaps for reified inference; List/Nothing class names — DONE (KT r26, bb472757): static typer types an extension's this, map/mapIndexed results, first/last/single, conversions and String transforms (reified inference no longer falls back to Any); collection-interface KClasses (kotlin.collections.*), interface rendering of java classes, Nothing as java.lang.Void/void; 4 legs = kotlinc
 T-1082 ruby: eager endless Enumerators answer a Lazy; to_enum on user Enumerable; Enumerator dup/clone — DONE (RB r48, ebd5ce0b): ops on eager endless Enumerators run eagerly (cycle.take_while -> [1]), Object#to_enum/enum_for (incl. receiver-less 'return to_enum unless block_given?'), Enumerator dup/clone with frozen flag and the execution-context TypeError; 4 legs = ruby 2.6
+T-1083 php: builtin argument TypeErrors; dynamic undefined-call line; opcode-compiled builtins in traces — DONE (PHP r45, eff70048): coercive argument TypeErrors for native builtins (strlen, substr, strpos, intdiv, array_key_exists offset rule, array_* ...) with stub parameter names; call-site line stored before dynamic-call/callback raises; call_user_func(_array)/strval/intval/... lowered frameless per zend_try_compile_special_func; multi-line foreach uses the expression's last leaf line; (int)/(float) of arrays fixed; 3 legs agree with php-src. Stdlib (PHP-written) builtin arg-type audit filed
 
 # Settled — do not re-open
 
