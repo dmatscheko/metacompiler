@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-970** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-971** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -191,19 +191,11 @@ Found by the GO worker, round 16. `lbl: if x > 0 { print(1); break lbl }` → sw
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-929 php: `var_dump` of an array that holds a reference to itself never terminates · P1 · PHP · IN PROGRESS (PHP worker, round 33) [V]
-`$a = array(array(1)); $a[0][] =& $a[0]; var_dump($a);` → all legs hang (killed at 20 s); without the var_dump they agree.
-php-src bug35163.phpt EXPECT prints the slot as `&array(…)` with `*RECURSION*` (spec-only oracle). The `dumping[]` guard in
-dumpOf (php-interpreter.abnf) covers objects only, and the `&` marker of a reference slot is never printed; the same in phDumping
-(lib/php-rt.metajs) and phpDumping (abnf/jsrtphp.go). Corpus: bug35163.php, bug35163_2.php.
-
-### T-930 php: parse gaps the corpus lost or never had · P3 · PHP · IN PROGRESS (PHP worker, round 33) [V finder only]
-Oracle: php-src .phpt EXPECT. Property hooks on promoted constructor parameters (PHP 8.4, property_hooks/property_promotion,
-gh17101 - parsed in July, lost); `xor` / `and` / `or` in a const expression (`const T1 = 1 xor 0;`); interpreter only:
-`$o?->{$str . "bar"}` (nullsafe_operator/bug81216); a fully-qualified trait name in a trait adaptation, `\TraitC::exit as bye;`
-(grammar/semi_reserved_006, _008, lost since July).
-
----
+### T-970 php: `print_r` of a self-referencing array never terminates; `count($x, COUNT_RECURSIVE)`; `&` marker needs reference counts · P3 · PHP · OPEN [V spec-only]
+Found by the PHP worker, round 33 (oracle: php-src EXPECT blocks / php.net). `$x=[1,[2]]; $x[1][] = &$x[1]; print_r($x);` never
+ends (php prints `*RECURSION*` where it re-enters); print_r is in lib/php-stdlib.php, where arrays have no identity - needs an
+identity primitive. `count([1,[2,3]], COUNT_RECURSIVE)` → 4, ours 2. var_dump's `&` marker counts only holders inside the dumped
+value: `$x = 5; $a = [&$x, 1]; var_dump($a);` → php `&int(5)`, ours `int(5)` (needs real reference refcounts).
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1115,6 +1107,8 @@ T-899 metajs: a lone-surrogate needle never matches half of a surrogate pair —
 T-900 metajs: ToNumber of strings and ToPrimitive of objects are not JavaScript's - decide and record — DONE 6b2d7c8b (StringToNumber and ToPrimitive of arrays/objects implemented in all engines under the MetaJS mode flag; dialect: a function's string is [function] and ToPrimitive ignores a stored toString/valueOf, manual 7.9)
 T-901 metajs: the goja interpreter leg diverges from -frozen and node — DONE 6b2d7c8b (goja pinned on -0 products, lone-surrogate trim, code-unit split, parseInt -0, [function], own toString/valueOf; [o]+"" is T-967)
 T-926 tooling: sweep.sh misclassifications; probe.sh builds the native leg with no timeout — PARTIAL 35b11722 (jtreg compile/fail, bash extglob, find -L, probe build watchdog; TypeScript reclassification is T-968)
+T-929 php: `var_dump` of an array that holds a reference to itself never terminates — DONE eb07899c (*RECURSION* for arrays in all engines; & marker by holders within the dumped value, matching bug35163/_2/_3 EXPECT)
+T-930 php: parse gaps the corpus lost or never had — DONE 25325436 (xor operator, hooks on promoted parameters, ?->{expr} in the interp, qualified trait adaptations; also fixed: interp ||/&&/or/and used JS truthiness)
 
 # Settled — do not re-open
 
