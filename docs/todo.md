@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1040** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1042** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,11 +64,11 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep · P3 · PY · IN PROGRESS (PY worker, round 21) [V]
-Remainder of T-1020. Refused with NotImplementedError today: shift_jis, gbk, gb18030, big5, euc_jp/euc_kr, iso2022_*, cp932/949/950, hz, johab; the `\N{NAME}` escape in unicode_escape (needs the Unicode name DB); idna for labels needing nameprep (python3: `'bücher.de'.encode('idna')` → b'xn--bcher-kva.de', `b'xn--bcher-kva.de'.decode('idna')` → 'bücher.de'). unicode_escape decode should also emit CPython's DeprecationWarning on stderr for invalid escapes.
+### T-1040 python: `type(x) is range` (and enumerate/zip/map/filter/reversed) is False · P3 · PY · OPEN [V]
+python3 3.14: `type(range(3)) is range` → True; same for enumerate, zip, map, filter, reversed. Ours False in all engines: the builtin name is bound to a function while type() answers a separate class object (`__name__` and isinstance are already right). Found by PY r21.
 
-### T-1029 python: range/reversed type identity; dotted codec names accepted · P3 · PY · IN PROGRESS (PY worker, round 21) [V]
-python3 3.14: `type(range(3)).__name__` → range, `type(iter(range(3))).__name__` → range_iterator, `type(reversed([1])).__name__` → list_reverseiterator. Ours: list, list_iterator, reversed. `"x".encode("unicode.escape")` → CPython LookupError: unknown encoding; ours accepts it ('.'→'_' normalisation). Found by PY r20.
+### T-1041 python: CJK multibyte codecs, `\N{NAME}` escapes, DeprecationWarning for invalid escapes — large data · P4 · PY · OPEN [V] · NEEDS SIZE DECISION
+Remainder of T-1028; each needs a table-size decision before work starts. CJK families (shift_jis 15888 two-byte mappings, cp932 19520, euc_jp 6942, gbk 21791, gb2312 7445, gb18030 23940, big5 13710, cp950 13752, big5hkscs 18402, euc_kr 8225, cp949 17048, johab 17065, shift_jis_2004 20240, euc_jis_2004 8860; ~75K unique) ≈ 150–500 KB shared table text + per-family state machines. `\N{NAME}` needs the Unicode name DB (34137 non-algorithmic names, ~215 KB zlib / ~450 KB word-compressed). The DeprecationWarning (`<file>:<line>: DeprecationWarning: "\q" is an invalid escape sequence...` + source line, once per location, only from __main__) needs warnings machinery and call-site source lines (CORE plumbing). Tables would follow the nameprep pattern: one shared file, linked only when the program names the codec.
 
 # RB — Ruby
 
@@ -1094,6 +1094,8 @@ T-1025 php: reference counts: remaining release points — PARTIAL→split (PHP 
 T-1027 csharp: ParamName is "" (not null) when unset; `int.Parse(null)` throws FormatException — DONE (CS r4, b11a4fd7): ParamName null when unset (Argument*/user subclasses, : base(p) as param name); integral Parse(null) throws ArgumentNullException 's'. Master spec probe: 3 legs agree.
 T-1032 kotlin: enum compareTo/ranges, Boolean ranges, IntRange.endExclusive — DONE (KT r17, e394af8c): kotlin.Enum.compareTo (ordinal) → <, ranges, sorted, coerce; Boolean rangeTo/coerce; endExclusive for Int/Long/Char ranges with MAX_VALUE throw; when-in compares with Kotlin ordering. Master probe vs kotlinc 2.2.21 (20 lines): 4 legs agree.
 T-1033 ruby: Enumerable methods on classes that include Enumerable; Numeric in Integer/Float ancestry — DONE (RB r40, dc3bbb43): Enumerable surface on a user #each (and Struct) via to_a delegation, respond_to? agrees; Integer/Float/Rational/Complex under Numeric incl. methods added to Numeric. Master probe vs ruby 2.6 (40 lines: 30+ Enumerable methods, Struct, Numeric ancestry, Numeric#twice): 4 legs agree.
+T-1029 python: range/reversed type identity; dotted codec names accepted — DONE (PY r21, 07577a53): range is its own type (repr/slices/attrs/hash/errors), per-source iterator + reverse-iterator types, lazy reversed() of a user sequence, dotted codec names only via aliases. Master probe vs python3 3.14 (range surface, iterator types, reversed, idna): 4 legs agree.
+T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep — PARTIAL→split (PY r21, 07577a53): idna nameprep (RFC 3491 over Unicode 3.2, shared python-nameprep.txt; tables linked when the program names 'idna'). CJK codecs (~75K mappings), \N{} (name DB ~450 KB), DeprecationWarning (needs warnings plumbing) filed as follow-up.
 
 # Settled — do not re-open
 
