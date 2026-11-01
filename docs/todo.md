@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1065** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1066** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -100,12 +100,9 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1061 csharp: base property writes; System.Type ToString; typeof namespace · P3 · CS · IN PROGRESS (CS worker, round 10) [V]
-Spec-only (no dotnet here). All engines:
-- `base.K = v` (and `base.K += v`, `base.K++`) fails with "unknown name: base" / "variable not defined: base"; must call the base setter non-virtually.
-- `Console.WriteLine(e.GetType())` / `e.GetType().ToString()` print `[object Object]`; .NET prints the FullName (`Demo.MyEx`).
-- `typeof(MyEx).FullName` inside `namespace Demo` gives `MyEx`; must be `Demo.MyEx` (token built from the bare name at compile time).
-- Limit: A declares K with accessors, B overrides it as an auto-property, C overrides only the setter; C's getter must read B's backing value, currently reaches A's getter.
+### T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter · P3 · CS · OPEN [V]
+Spec-only. makeIncDec's field path reads/writes the raw slot instead of dispatching get/set like makeAssign (csFindAcc `__set_` / emitPropSet); the halves even disagree:
+`class A { public virtual int K { get => 7; set {} } } class B : A { public override int K { get; set; } } class D : B { public override int K { set { base.K = value + 100; } } }` then `D d = new D(); d.K++; Console.WriteLine(d.K);` -> spec 101; interpreter 0, run/native 1. Check prefix/postfix values, static properties and indexers (`a[i]++`) too.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1132,6 +1129,7 @@ T-1059 csharp: virtual auto-property overridden by an accessor property is not d
 T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-entry classes; primitive class rendering — PARTIAL→split (KT r21, 5fc41400): companion/enum-entry class identity (C$Companion, E$B, declaringJavaClass), primitive .java/.javaObjectType, member calls on objects/companions in compiled legs; 4 legs = kotlinc 2.2.21. println(Int::class) kept declined (kotlin-reflect suffix); sequence per-operation classes declined; remainder filed
 T-1060 php: Generator::throw() on a running generator — DONE (PHP r40, tests only): premise outdated - since php-src 6fa8a25a (GH-19326, PHP 8.3.25) throw() into a running generator raises only 'Cannot resume an already running generator' with no previous and discards the user exception; all engines already did this; pinned grun3-5 + oac3
 T-1052 ruby: Array </>/<=/>= should be NoMethodError; blockless/lazy Enumerators over a user #each run eagerly — PARTIAL→split (RB r44, 6febb1a8): < > <= >= dispatch as methods (NoMethodError on Array/nil/Range/..., user #<, Comparable required, Hash subset, Module ordering); blockless Enumerator over user #each deferred, Lazy over user #each stops early (first/take); 3 legs = ruby 2.6 modulo known did_you_mean/address simplifications; external next/peek remainder filed
+T-1061 csharp: base property writes; System.Type ToString; typeof namespace — DONE (CS r10, 31d2be99): base.K =/+=/++ call the base setter non-virtually; System.Type prints its FullName; typeof is namespace/outer-qualified (Demo.Outer+Inner), keyword types map to System.*; 3 legs agree with spec (probe: 31/3211 setter chain)
 
 # Settled — do not re-open
 
