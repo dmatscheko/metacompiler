@@ -168,6 +168,14 @@ namespace Demo
     class RangeArgEx : ArgumentOutOfRangeException
     {
         public RangeArgEx(string p, string m) : base(p, m) { }
+        public RangeArgEx(string p, object v, string m) : base(p, v, m) { }
+    }
+
+    // ArgumentException(string message, string paramName[, Exception inner]) through `: base`.
+    class MsgArgEx : ArgumentException
+    {
+        public MsgArgEx(string m, string p) : base(m, p) { }
+        public MsgArgEx(string m, string p, Exception i) : base(m, p, i) { }
     }
 
     class OverEx : Exception
@@ -1054,6 +1062,39 @@ namespace Demo
                           new ArgumentException(two[2], two[3]).Message == "m (Parameter 'pn')"
                           && new ArgumentNullException(two[3], two[2]).Message == "m (Parameter 'pn')");
             Exception innerEx = new InvalidOperationException(two[1]);
+            // SPEC-CITED, NOT MEASURED (dotnet/runtime 10, System/Argument*Exception.cs):
+            // a NULL message is the type's default - ArgumentNullException and
+            // ArgumentOutOfRangeException pass `message ?? SR.<default>` to base(), and
+            // ArgumentException.Message substitutes SR.Arg_ArgumentException.
+            Program.Check("exc-arg-null-msg",
+                          new ArgumentException(noName[1], two[3]).Message
+                          == "Value does not fall within the expected range. (Parameter 'pn')"
+                          && new ArgumentNullException(two[3], noName[1]).Message
+                          == "Value cannot be null. (Parameter 'pn')"
+                          && new ArgumentOutOfRangeException(two[3], noName[1]).Message
+                          == "Specified argument was out of the range of valid values. (Parameter 'pn')"
+                          && new ArgumentException(noName[1]).Message == "Value does not fall within the expected range."
+                          && new ArgumentNullException(noName[1], innerEx).Message == "Value cannot be null."
+                          && new MsgArgEx(noName[1], two[3]).Message
+                          == "Value does not fall within the expected range. (Parameter 'pn')");
+            // The three-argument forms: ArgumentException(message, paramName, inner) and
+            // ArgumentOutOfRangeException(paramName, actualValue, message), whose Message
+            // adds NewLine + "Actual value was {0}." for a non-null actualValue.
+            object[] actuals = { 5, null, true };
+            Program.Check("exc-argexc-three-arg",
+                          new ArgumentException(two[2], two[3], innerEx).Message == "m (Parameter 'pn')"
+                          && new ArgumentException(two[2], two[3], innerEx).ParamName == "pn"
+                          && new ArgumentException(two[2], two[3], innerEx).InnerException == innerEx
+                          && new MsgArgEx(two[2], two[3], innerEx).InnerException == innerEx);
+            Program.Check("exc-argrange-three-arg",
+                          new ArgumentOutOfRangeException(two[3], actuals[0], two[2]).Message
+                          == "m (Parameter 'pn')\nActual value was 5."
+                          && new ArgumentOutOfRangeException(two[3], actuals[2], noName[1]).Message
+                          == "Specified argument was out of the range of valid values. (Parameter 'pn')\nActual value was True."
+                          && new ArgumentOutOfRangeException(two[3], actuals[1], two[2]).Message == "m (Parameter 'pn')"
+                          && (int)new ArgumentOutOfRangeException(two[3], actuals[0], two[2]).ActualValue == 5
+                          && new RangeArgEx(two[3], actuals[0], two[2]).Message
+                          == "m (Parameter 'pn')\nActual value was 5.");
             Exception outerEx = new ArgumentException(two[2], innerEx);
             Program.Check("exc-inner-two-arg",
                           outerEx.Message == "m" && outerEx.InnerException == innerEx

@@ -329,6 +329,50 @@ func csExcArgFamily(n string) bool {
 	return n == "ArgumentException" || n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
 }
 
+// csExcArgNullMsg is the message an Argument* constructor stores for a null one, ""
+// for any other type. Twin of csxArgNullMsg in languages/lib/csharp-strings.js,
+// which holds the specification comment.
+func csExcArgNullMsg(n string) string {
+	switch n {
+	case "ArgumentException":
+		return "Value does not fall within the expected range."
+	case "ArgumentNullException":
+		return "Value cannot be null."
+	case "ArgumentOutOfRangeException":
+		return "Specified argument was out of the range of valid values."
+	}
+	return ""
+}
+
+// csExcCtor2 is the two-argument constructor of BCL exception n on eo. Twin of
+// csxExcCtor2 in languages/lib/csharp-strings.js, which holds the specification
+// comment; js_csexc3 builds the three-argument forms on it.
+func csExcCtor2(eo *jsObject, n string, a0, a1 interface{}) {
+	dm := csExcArgNullMsg(n)
+	_, s1 := a1.(string)
+	if dm == "" || !(s1 || isUndefOrNull(a1)) {
+		if dm != "" && isUndefOrNull(a0) {
+			a0 = dm
+		}
+		eo.set("Message", a0)
+		eo.set("InnerException", a1)
+		return
+	}
+	msg, pn := a1, a0
+	if n == "ArgumentException" {
+		msg, pn = a0, a1
+	}
+	ms, mok := msg.(string)
+	if !mok {
+		ms = dm
+	}
+	eo.set("ParamName", pn)
+	if ps, pok := pn.(string); pok && ps != "" {
+		ms += " (Parameter '" + ps + "')"
+	}
+	eo.set("Message", ms)
+}
+
 // csxExcParam is the ParamName a runtime-raised ArgumentException carries: the name
 // in its Message's " (Parameter '...')" clause, "" for none. Twin of csxExcParam in
 // languages/lib/csharp-strings.js, which holds the specification comment.
@@ -1714,32 +1758,34 @@ func init() {
 			}
 			return rt.wrapStr(base + " (Parameter '" + ps + "')")
 		}
-		// js_csexc2(eo, n, a0, a1): the two-argument constructor of BCL exception n
-		// on eo. Twin of csxExcCtor2 in languages/lib/csharp-strings.js, which holds
-		// the specification comment.
+		// js_csexc2(eo, n, a0, a1) / js_csexc3(eo, n, a0, a1, a2): the two- and
+		// three-argument constructors of BCL exception n on eo.
 		m["js_csexc2"] = func(a []uint64) uint64 {
+			if eo, ok := u(a[0]).(*jsObject); ok {
+				csExcCtor2(eo, rt.toString(u(a[1])), u(a[2]), u(a[3]))
+			}
+			return a[0]
+		}
+		m["js_csexc3"] = func(a []uint64) uint64 {
 			eo, ok := u(a[0]).(*jsObject)
 			if !ok {
 				return a[0]
 			}
 			n := rt.toString(u(a[1]))
-			a0, a1 := u(a[2]), u(a[3])
-			_, s1 := a1.(string)
-			if !csExcArgFamily(n) || !(s1 || isUndefOrNull(a1)) {
+			a0, a1, a2 := u(a[2]), u(a[3]), u(a[4])
+			switch n {
+			case "ArgumentException":
+				csExcCtor2(eo, n, a0, a1)
+				eo.set("InnerException", a2)
+			case "ArgumentOutOfRangeException":
+				csExcCtor2(eo, n, a0, a2)
+				eo.set("ActualValue", a1)
+				if !isUndefOrNull(a1) {
+					eo.set("Message", rt.cspStr(eo.props["Message"])+"\nActual value was "+rt.cspStr(a1)+".")
+				}
+			default:
 				eo.set("Message", a0)
-				eo.set("InnerException", a1)
-				return a[0]
 			}
-			msg, pn := a1, a0
-			if n == "ArgumentException" {
-				msg, pn = a0, a1
-			}
-			eo.set("ParamName", pn)
-			ms, mok := msg.(string)
-			if ps, pok := pn.(string); mok && pok && ps != "" {
-				msg = ms + " (Parameter '" + ps + "')"
-			}
-			eo.set("Message", msg)
 			return a[0]
 		}
 		// The rendering step of a string CONVERSION, used by '+', by an

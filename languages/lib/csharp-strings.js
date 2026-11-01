@@ -513,6 +513,18 @@ function csxExcParam(msg) {
     return rest.substring(0, j)
 }
 
+// The message an Argument* constructor stores for a null one: ArgumentNullException
+// and ArgumentOutOfRangeException pass `message ?? SR.<their default>` to base(),
+// and ArgumentException.Message substitutes SR.Arg_ArgumentException for a null
+// _message (SetMessageField) - dotnet/runtime 10, System/Argument*Exception.cs.
+// "" for any other type, whose null message stays null.
+function csxArgNullMsg(n) {
+    if (n == "ArgumentException") { return "Value does not fall within the expected range." }
+    if (n == "ArgumentNullException") { return "Value cannot be null." }
+    if (n == "ArgumentOutOfRangeException") { return "Specified argument was out of the range of valid values." }
+    return ""
+}
+
 // The TWO-argument constructor of BCL exception n on the object eo (dotnet/runtime,
 // System/*Exception.cs). Every type has (string? message, Exception? innerException);
 // ArgumentException adds (string? message, string? paramName), and
@@ -521,12 +533,14 @@ function csxExcParam(msg) {
 // resolution goes by the second argument's static type, so a string there is the
 // string overload; a null one is either (a null literal is ambiguous, and both
 // overloads leave the other slot null). ArgumentException.Message appends
-// " (Parameter '<name>')" for a non-empty name. The caller has already set
+// " (Parameter '<name>')" for a non-empty name; a null message on the Argument*
+// family is the type's default (csxArgNullMsg). The caller has already set
 // ParamName to null on the Argument* family. Twin of js_csexc2 in abnf/jsrtcsharp.go.
 function csxExcCtor2(eo, n, a0, a1) {
-    var named = n == "ArgumentException" || n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
-    if (!named || (a1 !== null && a1 !== undefined && typeof a1 != "string")) {
+    var dm = csxArgNullMsg(n)
+    if (dm == "" || (a1 !== null && a1 !== undefined && typeof a1 != "string")) {
         eo["Message"] = a0
+        if (dm != "" && (a0 === null || a0 === undefined)) { eo["Message"] = dm }
         eo["InnerException"] = a1
         return eo
     }
@@ -536,9 +550,34 @@ function csxExcCtor2(eo, n, a0, a1) {
         msg = a0
         pn = a1
     }
+    if (msg === null || msg === undefined) { msg = dm }
     eo["ParamName"] = pn
-    if (typeof msg == "string" && typeof pn == "string" && pn != "") { msg = msg + " (Parameter '" + pn + "')" }
+    if (typeof pn == "string" && pn != "") { msg = msg + " (Parameter '" + pn + "')" }
     eo["Message"] = msg
+    return eo
+}
+
+// The THREE-argument constructors: ArgumentException(message, paramName,
+// innerException) and ArgumentOutOfRangeException(paramName, actualValue, message),
+// whose Message adds Environment.NewLine + "Actual value was {0}." for a non-null
+// actualValue (ArgumentOutOfRange_ActualValue; NewLine is "\n" off Windows). avs is
+// actualValue's string conversion, rendered by the caller's engine. Any other type
+// keeps its first argument as the message. Twin of js_csexc3 in abnf/jsrtcsharp.go.
+function csxExcCtor3(eo, n, a0, a1, a2, avs) {
+    if (n == "ArgumentException") {
+        csxExcCtor2(eo, n, a0, a1)
+        eo["InnerException"] = a2
+        return eo
+    }
+    if (n != "ArgumentOutOfRangeException") {
+        eo["Message"] = a0
+        return eo
+    }
+    csxExcCtor2(eo, n, a0, a2)
+    eo["ActualValue"] = a1
+    if (a1 !== null && a1 !== undefined) {
+        eo["Message"] = eo["Message"] + "\nActual value was " + avs + "."
+    }
     return eo
 }
 

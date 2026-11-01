@@ -2446,9 +2446,9 @@ KwLet       = "let" KwEnd ;
     // objectName suffix is joined with Environment.NewLine, which is "\n" here and
     // "\r\n" on Windows, so there is no single right answer to converge on.
     //
-    // The TWO-argument forms are csxExcCtor2 in lib/csharp-strings.js (the second
-    // argument is a message, a param name or an inner exception by its type); every
-    // engine ignores the arguments past the first of a longer form.
+    // The TWO- and THREE-argument forms are csxExcCtor2 / csxExcCtor3 in
+    // lib/csharp-strings.js (the second argument of two is a message, a param name or
+    // an inner exception by its type).
     //
     // The twins are csExcParamName1 in languages/csharp-to-llvm-ir.abnf, and the
     // message join is js_csargmsg in languages/lib/csharp-rt.metajs and
@@ -2462,6 +2462,12 @@ KwLet       = "let" KwEnd ;
     // csExcArgFamily in languages/csharp-to-llvm-ir.abnf, languages/lib/csharp-rt.metajs
     // and abnf/jsrtcsharp.go.
     function csExcArgFamily(n) { return n == "ArgumentException" || csExcParamName1(n) }
+    // ArgumentOutOfRangeException's actualValue as its Message renders it (csxExcCtor3);
+    // "" for every other type, whose third argument is not converted.
+    function csArgActualStr(n, v) {
+        if (n != "ArgumentOutOfRangeException" || v === null || v === undefined) { return "" }
+        return csStr(v)
+    }
     function csArgParamMsg(base, pname) {
         if (pname === undefined || pname === null) { return base }
         var ps = csStr(pname)
@@ -3671,11 +3677,14 @@ KwLet       = "let" KwEnd ;
                 for (var m = 0; m < args.length; m++) { avs.push(args[m]()) }
                 var eo = {__excname: clsName, Message: msg}
                 if (csExcArgFamily(clsName)) { eo.ParamName = null }
-                // Two arguments: message and inner exception, or a param name and a
-                // message (csxExcCtor2, lib/csharp-strings.js).
+                // Two or three arguments: csxExcCtor2 / csxExcCtor3 (lib/csharp-strings.js).
                 if (avs.length == 2) { return csxExcCtor2(eo, clsName, avs[0], avs[1]) }
+                if (avs.length == 3) { return csxExcCtor3(eo, clsName, avs[0], avs[1], avs[2], csArgActualStr(clsName, avs[1])) }
                 if (avs.length > 0) {
                     if (pn1) { eo.ParamName = avs[0]; eo.Message = csArgParamMsg(msg, avs[0]) }
+                    // ArgumentException(message) is (message, paramName: null), which
+                    // also gives a null message the type's default.
+                    else if (clsName == "ArgumentException") { csxExcCtor2(eo, clsName, avs[0], null) }
                     else { eo.Message = avs[0] }
                 }
                 return eo
@@ -6046,12 +6055,17 @@ KwLet       = "let" KwEnd ;
             if (sup == null && cls.__excbase != undefined) {
                 if (csExcArgFamily(cls.__excbase)) { self.ParamName = null }
                 if (bargs.length == 2) { csxExcCtor2(self, cls.__excbase, bargs[0], bargs[1]); return }
+                if (bargs.length == 3) {
+                    csxExcCtor3(self, cls.__excbase, bargs[0], bargs[1], bargs[2], csArgActualStr(cls.__excbase, bargs[1]))
+                    return
+                }
                 if (bargs.length > 0 && csExcParamName1(cls.__excbase)) {
                     // `: base(name)` passes a PARAM NAME, as `new` does (csExcParamName1).
                     self.ParamName = bargs[0]
                     self.Message = csArgParamMsg(csExcDefMsg(cls.__excbase), bargs[0])
                     return
                 }
+                if (bargs.length > 0 && cls.__excbase == "ArgumentException") { csxExcCtor2(self, cls.__excbase, bargs[0], null); return }
                 if (bargs.length > 0) { self.Message = bargs[0]; return }
                 // The implicit ': base()' runs the BASE's parameterless constructor, so
                 // the default message is the BASE's - and for System.Exception, which

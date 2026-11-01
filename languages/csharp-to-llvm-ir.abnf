@@ -3875,6 +3875,14 @@ KwLet       = "let" KwEnd ;
                     callExt(b, "js_csexc2", [eo, emitStr(b, clsName), r0.v, r1.v])
                     return {b: b, v: eo}
                 }
+                if (args.length == 3) {
+                    var q0 = args[0](b)
+                    var q1 = args[1](q0.b)
+                    var q2 = args[2](q1.b)
+                    b = q2.b
+                    callExt(b, "js_csexc3", [eo, emitStr(b, clsName), q0.v, q1.v, q2.v])
+                    return {b: b, v: eo}
+                }
                 for (var m = 0; m < args.length; m++) {
                     var rm = args[m](b)
                     b = rm.b
@@ -3885,6 +3893,10 @@ KwLet       = "let" KwEnd ;
                         callExt(b, "js_set", [eo, emitStr(b, "Message"),
                                               callExt(b, "js_csargmsg",
                                                       [emitStr(b, csExcDefMsg(clsName)), rm.v])])
+                    } else if (m == 0 && clsName == "ArgumentException") {
+                        // ArgumentException(message) is (message, paramName: null), which
+                        // also gives a null message the type's default.
+                        callExt(b, "js_csexc2", [eo, emitStr(b, clsName), rm.v, hNull])
                     } else if (m == 0) { callExt(b, "js_set", [eo, emitStr(b, "Message"), rm.v]) }
                 }
                 return {b: b, v: eo}
@@ -6409,6 +6421,12 @@ KwLet       = "let" KwEnd ;
                 var e1 = cinit.cargs[1](e0.b)
                 b = e1.b
                 callExt(b, "js_csexc2", [thisEV, emitStr(b, excBase), e0.v, e1.v])
+            } else if (cinit != undefined && cinit != null && cinit.cargs.length == 3) {
+                var f0 = cinit.cargs[0](b)
+                var f1 = cinit.cargs[1](f0.b)
+                var f2 = cinit.cargs[2](f1.b)
+                b = f2.b
+                callExt(b, "js_csexc3", [thisEV, emitStr(b, excBase), f0.v, f1.v, f2.v])
             } else if (cinit != undefined && cinit != null && cinit.cargs.length > 0) {
                 var er = cinit.cargs[0](b)
                 b = er.b
@@ -6418,6 +6436,8 @@ KwLet       = "let" KwEnd ;
                     callExt(b, "js_set", [thisEV, emitStr(b, "ParamName"), er.v])
                     callExt(b, "js_set", [thisEV, emitStr(b, "Message"),
                                           callExt(b, "js_csargmsg", [emitStr(b, csExcDefMsg(excBase)), er.v])])
+                } else if (excBase == "ArgumentException") {
+                    callExt(b, "js_csexc2", [thisEV, emitStr(b, excBase), er.v, hNull])
                 } else { callExt(b, "js_set", [thisEV, emitStr(b, "Message"), er.v]) }
             } else if (csExcDefMsgOf(excBase) != "") {
                 // The implicit ': base()' runs the BASE's parameterless constructor, so

@@ -2406,6 +2406,13 @@ function js_csargmsg(base, pname) {
 // A BCL exception's two-argument constructor (lib/csharp-strings.js's csxExcCtor2;
 // the Go twin is js_csexc2 in abnf/jsrtcsharp.go).
 function js_csexc2(eo, n, a0, a1) { return csxExcCtor2(eo, n, a0, a1) }
+// Its three-argument constructor (csxExcCtor3), with ArgumentOutOfRangeException's
+// actualValue rendered by cpStr; the Go twin is js_csexc3 in abnf/jsrtcsharp.go.
+function js_csexc3(eo, n, a0, a1, a2) {
+    var avs = ""
+    if (n == "ArgumentOutOfRangeException") { avs = cpStr(a1) }
+    return csxExcCtor3(eo, n, a0, a1, a2, avs)
+}
 
 // The rendering step of a string CONVERSION, used by '+', by an interpolation hole
 // and by .ToString(). It converts only the values whose C# string form differs from
