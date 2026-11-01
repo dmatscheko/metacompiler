@@ -132,17 +132,17 @@ Found by the KT worker, round 11 (oracle: kotlin-stdlib 2.2.21 driven from java 
 
 # GO — Go  (oracle: `go run`)
 
-### T-984 go: an unbuffered or full-channel send never blocks; range over a nil channel runs zero times · P2 · GO · OPEN [V]
+### T-984 go: an unbuffered or full-channel send never blocks; range over a nil channel runs zero times · P2 · GO · IN PROGRESS (GO worker, round 18) [V]
 Found by the GO worker, round 17 (oracle go run). `c := make(chan int); select { case c <- 1: case <-c: }` blocks in go (no
 receiver); ours takes the send arm, and a send on a full buffered channel proceeds (chan/select3.go, 1 of 23 sub-tests).
 `for range nilch {}` in a goroutine runs zero iterations; go blocks forever (needs the static type: the value is untyped nil).
 
-### T-985 go: empty init statements misparse (`if ; cond`, `switch ; {}`); compiler reads a keyword as a variable · P2 · GO · OPEN [V]
+### T-985 go: empty init statements misparse (`if ; cond`, `switch ; {}`); compiler reads a keyword as a variable · P2 · GO · IN PROGRESS (GO worker, round 18) [V]
 Found by the GO worker, round 17 (gc accepts all). `if ; false {}` / `switch ; {}` → both halves "unknown name: if"/"switch"
 (fixedbugs/bug002-004, issue12413, bigmap.go, ddd.go, typeparam/maps, sets, slices, metrics, ifaceconv, issue46472). Compiler
 only: `if a("1")("2"); cond`, `for ; false; c <- false {}`, type-switch `case [0]string:` (bug294, gcc61273, gcc61244, reorder2.go).
 
-### T-986 go: deadlock message and exit status differ from the runtime's · P3 · GO · OPEN [V]
+### T-986 go: deadlock message and exit status differ from the runtime's · P3 · GO · IN PROGRESS (GO worker, round 18) [V]
 Found by the GO worker, round 17. go prints `fatal error: all goroutines are asleep - deadlock!` plus a goroutine trace and exits 2;
 ours prints "all goroutines are asleep - deadlock" and exits 1 (all three engines).
 
