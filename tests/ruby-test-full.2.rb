@@ -1722,6 +1722,26 @@ def s159
   check("lzy159c", z == [[3], [1], [1, 3], [1, 2, 3], [1, 2], [1, 2], [1], [1, 2], [[1, 2]], [1, 2], 2, [1, 2],
                          [2, 4, 6], [1, 2, 3, :end], [], [], Enumerator::Lazy, nil, []])
 end
+
+# ===== SECTION 160: splat of a non-Array =====
+# `*v' splices v itself when it is an Array, nothing for nil, what #to_a answers
+# when v responds to it (a Range, a Hash's pairs, an Enumerator or Lazy, a
+# Struct, a user object) and v alone otherwise - in an Array literal, a call's
+# arguments and a right-hand side alike. /usr/bin/ruby 2.6 settles each.
+S160S = Struct.new(:x, :y)
+class S160T; def to_a; [7, 8]; end; end
+def s160f(*a); a; end
+def s160
+  x = *[1, 2].each
+  y = *nil
+  z = *{z: 1}
+  check("spl160a", [*[1, 2].each_with_index] == [[1, 0], [2, 1]] && [0, *[1, 2, 3].each_slice(2), 9] == [0, [1, 2], [3], 9] &&
+        [*{a: 1, b: 2}] == [[:a, 1], [:b, 2]] && [*nil] == [] && [*5] == [5] && [*"s"] == ["s"] &&
+        [*[1, 2].lazy.map { |v| v * 2 }] == [2, 4] && [*S160S.new(1, 2)] == [1, 2] && [*S160T.new] == [7, 8] &&
+        x == [1, 2] && y == [] && z == [[:z, 1]])
+  check("spl160b", s160f(*[3, 4].each_with_index) == [[3, 0], [4, 1]] && s160f(*{k: 1}) == [[:k, 1]] &&
+        s160f(*nil, 1) == [1] && s160f(*S160T.new) == [7, 8] && s160f(*(1..2).each_slice(1)) == [[1], [2]])
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1760,5 +1780,6 @@ s156() # SECTION-CALL 156
 s157() # SECTION-CALL 157
 s158() # SECTION-CALL 158
 s159() # SECTION-CALL 159
+s160() # SECTION-CALL 160
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

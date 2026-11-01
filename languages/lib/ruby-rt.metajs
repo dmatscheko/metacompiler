@@ -10209,6 +10209,16 @@ function js_rforend(it) {
     if (it["h"]) { it["c"]["__iter"] = it["lev"] }
     return undefined
 }
+// The Array `*v' splices. Twin of js_rsplat in abnf/jsrtruby.go.
+function js_rsplat(v) {
+    if (rbIsArr(v)) { return v }
+    if (rtIsNil(v)) { return [] }
+    if (rbIsEnum(v) || js_rrespond(v, [rbSym("to_a")]) === true) {
+        var r = rbMethod(v, "to_a", [])
+        if (rbIsArr(r)) { return r }
+    }
+    return [v]
+}
 // Whether a class chain reaches the attr_writer marker mk before any other
 // setter sk. Twin of the walk in js_rattrw in abnf/jsrtruby.go.
 function rbAttrWMarked(cls, sk, mk) {

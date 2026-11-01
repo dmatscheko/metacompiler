@@ -510,6 +510,24 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return jsHUndefined
 	}
+	// js_rsplat: the Array `*v' splices. Twin of splatSeq in
+	// ruby-interpreter.abnf, which states the rule, and js_rsplat in
+	// languages/lib/ruby-rt.metajs.
+	m["js_rsplat"] = func(a []uint64) uint64 {
+		v := u(a[0])
+		if _, isArr := v.(*jsArray); isArr {
+			return a[0]
+		}
+		if isUndefOrNull(v) {
+			return w(&jsArray{})
+		}
+		if rubyIsEnum(v) || rt.rubyRespond(v, []interface{}{jsSym{s: "to_a"}}) == true {
+			if r, isArr := rt.rubyMethod(v, "to_a", nil).(*jsArray); isArr {
+				return w(r)
+			}
+		}
+		return w(&jsArray{elems: []interface{}{v}})
+	}
 	// (proc, method twin): see needsMethTwin in ruby-to-llvm-ir.abnf. Twin of
 	// js_rmtwin in languages/lib/ruby-rt.metajs.
 	m["js_rmtwin"] = func(a []uint64) uint64 {

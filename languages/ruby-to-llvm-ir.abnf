@@ -3150,10 +3150,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: arrV}
         }
     }
-    // Append every element of srcV to dstV (both runtime arrays), with a counted loop.
-    function emitSpliceInto(b, dstV, srcV) {
+    // Append what `*v' splices (js_rsplat) to dstV, with a counted loop.
+    function emitSpliceInto(b, dstV, v) {
         hidCount++
         var iName = "$spl" + hidCount
+        var srcV = callExt(b, "js_rsplat", [v])
         var lenV = callExt(b, "js_pylen", [srcV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
         var headB = curF.NewBlock("")
@@ -3452,25 +3453,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     wraps = {}
     // Unary minus is a tower operation too (-2.5 stays a Float, and a user class may
     // define -@), so it replaces the shared js_neg + 32 bit wrap.
-    // `x = *v`: an Array is copied, anything else is wrapped in a one-element Array
-    // (and nil becomes the empty Array), which is what Ruby's splat on a right side does.
+    // `x = *v' is a new Array of what `*v' splices. Twin of makeSplatRhs in
+    // ruby-interpreter.abnf.
     function makeSplatRhs(t) {
         return function(b) {
             var r = t(b)
-            b = r.b
-            var outV = callExt(b, "js_arr_new", [])
-            // An Array is spliced element by element; anything else is one element, and
-            // nil none at all - the same three cases the interpreter's makeSplatRhs has.
-            var arrB = curF.NewBlock("")
-            var elseB = curF.NewBlock("")
-            var oneB = curF.NewBlock("")
-            var doneB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, isSplatSeq(b, r.v)), arrB, elseB)
-            emitSpliceInto(arrB, outV, r.v).NewBr(doneB)
-            elseB.NewCondBr(truthy(elseB, callExt(elseB, "js_seq", [r.v, hNull])), doneB, oneB)
-            callExt(oneB, "js_arr_push", [outV, r.v])
-            oneB.NewBr(doneB)
-            return {b: doneB, v: outV}
+            var outV = callExt(r.b, "js_arr_new", [])
+            return {b: emitSpliceInto(r.b, outV, r.v), v: outV}
         }
     }
     makeNeg = function(t) {
@@ -4507,15 +4496,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function isTypeNamed(b, valV, nm) {
         return callExt(b, "js_seq", [typeNameV(b, valV), emitStr(b, nm)])
-    }
-    // What `*x' on a right-hand side SPLICES rather than wraps: an Array and a
-    // Range - `[*1..3]' is [1, 2, 3] and `a, b, c = *r' unpacks. Written as
-    // js_rbor of two name tests rather than a new extern: js_rbor already answers
-    // `bool || truthy', and both operands are pure. emitAsArray is deliberately
-    // NOT the same - MRI does not splat a bare range in `a, b = 1..3', which
-    // leaves a = 1..3 and b = nil.
-    function isSplatSeq(b, valV) {
-        return callExt(b, "js_rbor", [isTypeNamed(b, valV, "Array"), isTypeNamed(b, valV, "Range")])
     }
     // The classes of the program that declare `mname` (#deconstruct /
     // #deconstruct_keys). Emitting one js_is_type probe per declaring class is the
