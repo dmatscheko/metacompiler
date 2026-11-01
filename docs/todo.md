@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1018** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1019** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -75,13 +75,12 @@ Also tests/python-test-full.5.py peaks at ~90M steps per call (the brake is 1e8)
 
 # RB — Ruby
 
-### T-1011 ruby: `compare_by_identity`; `default_proc=` type check; nested `for` destructure; value of `for`; `lazy.class` · P3 · RB · IN PROGRESS (RB worker, round 37) [V]
-Found by the RB worker, round 36 (oracle ruby 2.6). `compare_by_identity`/`compare_by_identity?` → NoMethodError; needs an identity
-flag on the dict passed into the shared lookups (dictFind in lib/interp-core.js, rubyDictFind/dictAppend in abnf/jsrt.go, layer 2
-rbDictFind/rbDictSet) and string keys kept as objects - a CORE-shared change. `h.default_proc = 5` → TypeError "wrong default_proc
-type Integer (expected Proc)"; ours stores it. `for a, (b, c) in [[1, [2, 3]]]; p [a, b, c]; end` → ruby `[1, 2, 3]`, interpreter
-`[1, [2, 3], nil]`, compiled IndexError. `p(for e in [] do end)` → `[]`; ours nil. `[1].lazy.class` → `Enumerator::Lazy`; ours
-`Enumerator`.
+### T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(Enumerator)`; default_proc lambda arity · P3 · RB · OPEN [V]
+Found by the RB worker, round 37 (oracle ruby 2.6). `[1].each.is_a?(Enumerable)`, `[1].cycle.is_a?(Enumerable)`,
+`[1,2].lazy.kind_of?(Enumerable)` → true; ours false (rubyIsA in abnf/jsrt.go, rbIsA in layer 2, valueIsA in the interpreter need an
+Enumerator arm). `{1=>2}.to_proc.call(1)` → 2; ours nothing, so `h.default_proc = {}` stores the Hash. `[1].lazy.instance_of?(Enumerator)`
+→ false; ours true (instance_of? goes through is_a?). `h.default_proc = lambda{|x|}` → TypeError "default_proc takes two arguments
+(2 for 1)". Note: tests/ruby-test-full.rb's -frozen leg is at ~95-100M of the 100M step brake - put new sections in .2.rb or split it.
 
 # JS — JavaScript and TypeScript
 
@@ -1089,6 +1088,7 @@ T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case fo
 T-925 parse time grows exponentially with bracket nesting in seven grammars, both halves — DONE - packrat memo for pure recursive productions in abnf/parser.go ("pure" directive for peek-only guards), Go SliceAhead guard; bracket nesting linear in all seven grammars, no measurable cost
 T-1013 java: protected receiver rule, package-private constructors, untyped receivers escape the access check — DONE - protected receiver rule, constructor access (incl. protected via super/anonymous), enclosing-class call results typed; javac messages, both halves
 T-1012 bash compiled: computed `read "$n"` and computed declare operands are compile-time limitations — PARTIAL - compiled computed read/declare operands (run-time attributes via refAttrs), declare -f of brace loop bodies, function-body redirections; computed operand + attribute option filed
+T-1011 ruby: `compare_by_identity`; `default_proc=` type check; nested `for` destructure; value of `for`; `lazy.class` — DONE - for-loop targets destructure and the loop has a value, compare_by_identity (string keys by content, deliberate), default_proc= TypeError, Enumerator::Lazy class
 
 # Settled — do not re-open
 
