@@ -1901,11 +1901,14 @@ func rubyForPassMeth(m string) bool {
 // for each item. Twin of forEnumVal in ruby-interpreter.abnf, which states the
 // rule, and rbForEnumVal in languages/lib/ruby-rt.metajs.
 func (rt *jsrt) rubyForEnumVal(e *jsObject, items *jsArray, results []interface{}) interface{} {
-	if e.props["__rlazy"] == true {
-		return rubyLazyEachVal(e)
-	}
 	if items == nil {
 		items = &jsArray{}
+	}
+	if en, has := e.props["en"].(*jsObject); has && e.props["__rlazy"] == true && len(e.props["ops"].(*jsArray).elems) == 0 {
+		return rubyEnumFinish(en, items, results)
+	}
+	if e.props["__rlazy"] == true {
+		return rubyLazyEachVal(e)
 	}
 	return rubyEnumFinish(e, items, results)
 }
@@ -2229,10 +2232,15 @@ var rubyRespondNames = map[string][]string{
 		"public_send", "reduce", "reject", "reverse_each", "rewind", "select", "send", "size",
 		"slice_after", "slice_before", "sort", "sort_by", "sum", "take", "take_while", "tally", "to_a", "uniq", "with_index",
 		"with_object", "zip"},
-	"Enumerator::Lazy": {"<=>", "collect", "drop_while", "each", "each_cons", "each_slice", "entries",
-		"eql?", "equal?", "filter", "first", "force", "frozen?", "instance_of?", "instance_variables",
-		"is_a?", "itself", "kind_of?", "lazy", "map", "next", "nil?", "peek", "public_send", "reject",
-		"rewind", "select", "send", "size", "take", "take_while", "to_a"},
+	"Enumerator::Lazy": {"<=>", "all?", "any?", "chunk_while", "clone", "collect",
+		"collect_concat", "count", "detect", "drop", "drop_while", "dup", "each", "each_cons",
+		"each_slice", "each_with_index", "each_with_object", "entries", "eql?", "equal?", "filter",
+		"find", "find_all", "find_index", "first", "flat_map", "force", "freeze", "frozen?", "grep",
+		"grep_v", "group_by", "include?", "inject", "instance_of?", "instance_variables", "is_a?",
+		"itself", "kind_of?", "lazy", "map", "max", "max_by", "member?", "min", "min_by", "minmax",
+		"minmax_by", "next", "nil?", "none?", "one?", "partition", "peek", "public_send", "reduce",
+		"reject", "rewind", "select", "send", "size", "slice_when", "sort", "sort_by", "sum", "take",
+		"take_while", "to_a", "to_h", "uniq", "with_index", "with_object", "zip"},
 	"Enumerable": {"all?", "any?", "chain", "chunk", "chunk_while", "collect", "collect_concat", "count",
 		"cycle", "detect", "drop", "drop_while", "each_cons", "each_entry", "each_slice",
 		"each_with_index", "each_with_object", "entries", "filter", "find", "find_all",

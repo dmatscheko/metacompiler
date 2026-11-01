@@ -6845,7 +6845,7 @@ function rbIsEnum(v) {
 // ruby-interpreter.abnf, which state the rules.
 function rbMkLazy(kind, items, lo, hi, excl, lazy, desc) {
     return {__renum: true, __rlazy: true, items: items, pos: 0, op: "each", kind: kind, lo: lo, hi: hi, excl: excl,
-            ops: [], lazy: lazy, desc: desc, src: null, ev: null}
+            ops: [], lazy: lazy, desc: desc, src: null, ev: null, en: null}
 }
 // What Lazy#each answers after its run. Twin of lazyEachVal in
 // ruby-interpreter.abnf, which states the rule.
@@ -6858,15 +6858,34 @@ function rbLazyCopy(t, op, lazy, desc) {
     c["ops"] = rtCopyArr(t["ops"])
     if (op !== null) { c["ops"].push(op) }
     c["src"] = t["src"]
+    c["ev"] = t["ev"]
+    c["en"] = t["en"]
     return c
 }
-function rbLazyFirst(t, n) { return rbaLazyFirst(t, n, rbLazyCall, rbTruthy, rbLazyDrive, null) }
+function rbLazyFirst(t, n) { return rbaLazyFirst(t, n, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, null) }
+function rbLazyScan(t, hit) { return rbaLazyScan(t, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, hit) }
+// Twin of lazyNth in ruby-interpreter.abnf, which states the rule.
+function rbLazyNth(a) {
+    if (rbIsArr(a)) {
+        return function(i) {
+            if (i < a.length) { return a[i] }
+            return null
+        }
+    }
+    var lz = rbMethod(a, "lazy", [])
+    return function(i) {
+        var got = rbLazyFirst(lz, i + 1)
+        if (got.length > i) { return got[i] }
+        return null
+    }
+}
 // Twin of lazyCall in ruby-interpreter.abnf.
 function rbLazyCall(f, v, m) {
     if (m) { return f.apply(undefined, v) }
     return f.apply(undefined, [v])
 }
-// The #each of a Lazy's user source. Twin of lazyDrive in ruby-interpreter.abnf.
+// The #each of a Lazy's user source; answers what #each answered. Twin of
+// lazyDrive in ruby-interpreter.abnf.
 function rbLazyDrive(src, step) {
     var tag = {}
     var each = js_rblkwrap(function() {
@@ -6882,7 +6901,7 @@ function rbLazyDrive(src, step) {
         if (step(it, arguments.length > 1)) { js_rthrow([tag]) }
         return null
     })
-    js_rcatch(tag, function() { return rbMethod(src, "each", [each]) })
+    return js_rcatch(tag, function() { return rbMethod(src, "each", [each]) })
 }
 function rbRangeLazy(r) {
     var d = "#<Enumerator::Lazy: " + rbInspect(r) + ">"
@@ -6904,6 +6923,89 @@ function rbLazyMethod(t, name, args) {
     var lop = rbaLazyOp(name)
     var desc = t["desc"]
     if (lop != "" && blk !== null) { return rbLazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + desc + ":" + name + ">") }
+    // The Lazy-answering methods without a block, the streaming with_index /
+    // with_object, the early-stopping and the eager Enumerable ones, dup and
+    // clone. Twin of lazyMethod in ruby-interpreter.abnf, which states the rules.
+    var ld = "#<Enumerator::Lazy: " + desc + ":" + name
+    if (name == "uniq") { return rbLazyCopy(t, {k: "uniq", f: null, n: 0}, true, ld + ">") }
+    if ((name == "grep" || name == "grep_v") && nPos > 0) {
+        var gpat = rbArgAt(args, 0)
+        var gv = name == "grep_v"
+        var gl = rbLazyCopy(t, {k: "select", f: function(v) { return rbTruthy(js_rxwhen(gpat, v)) != gv }, n: 0}, true,
+            ld + "(" + rbInspect(gpat) + ")>")
+        if (blk !== null) { gl["ops"].push({k: "map", f: blk, n: 0}) }
+        return gl
+    }
+    if (name == "zip") {
+        var zf = []
+        var zd = ""
+        var zi = 0
+        while (zi < nPos) {
+            zf.push(rbLazyNth(args[zi]))
+            if (zi > 0) { zd = zd + ", " }
+            zd = zd + rbInspect(args[zi])
+            zi = zi + 1
+        }
+        return rbLazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + "(" + zd + ")>")
+    }
+    if (name == "drop") {
+        var dn = Math.trunc(rbToF(rbArgAt(args, 0)))
+        if (dn < 0) { rbRaiseErr(name, "ArgumentError", "attempt to drop negative size") }
+        return rbLazyCopy(t, {k: "drop", f: null, n: dn}, true, ld + "(" + dn + ")>")
+    }
+    var wix = name == "with_index" || name == "each_with_index"
+    var wob = name == "with_object" || name == "each_with_object"
+    if (wix && blk === null) {
+        if (name == "with_index" && nPos > 0) {
+            var wo = Math.trunc(rbToF(rbArgAt(args, 0)))
+            return rbLazyCopy(t, {k: "with_index", f: null, n: wo}, true, ld + "(" + wo + ")>")
+        }
+        return rbLazyCopy(t, {k: "with_index", f: null, n: 0}, true, ld + ">")
+    }
+    if (t["en"] !== null && t["ops"].length == 0 && blk !== null && (name == "each" || wix || wob)) { return rbMethod(t["en"], name, args) }
+    if ((wix || wob) && blk !== null) {
+        var wmemo = rbArgAt(args, 0)
+        var wofs = 0
+        if (wix && nPos > 0) { wofs = Math.trunc(rbToF(rbArgAt(args, 0))) }
+        var wn = [0]
+        rbaLazyFirst(t, -1, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, function(v, m) {
+            if (wob) { rbCall2(blk, v, wmemo) } else { rbCall2(blk, v, wn[0] + wofs) }
+            wn[0] = wn[0] + 1
+            return false
+        })
+        if (wob) { return wmemo }
+        return rbLazyEachVal(t)
+    }
+    if (((name == "find" || name == "detect" || name == "find_index") && blk !== null) || name == "include?"
+        || name == "member?" || (name == "find_index" && nPos > 0) || name == "any?" || name == "all?" || name == "none?") {
+        var sx = rbArgAt(args, 0)
+        var seq = name == "include?" || name == "member?" || (name == "find_index" && blk === null)
+        var sall = name == "all?"
+        var hit = rbLazyScan(t, function(v, m) {
+            var r = false
+            if (seq) { r = rbEq(v, sx) }
+            else if (blk !== null) { r = rbTruthy(rbLazyCall(blk, v, m)) }
+            else if (nPos > 0) { r = rbTruthy(js_rxwhen(sx, v)) }
+            else { r = rbTruthy(v) }
+            return r != sall
+        })
+        if (name == "find" || name == "detect") {
+            if (hit.length > 0) { return hit[1] }
+            return null
+        }
+        if (name == "find_index") {
+            if (hit.length > 0) { return hit[0] }
+            return null
+        }
+        if (name == "all?" || name == "none?") { return hit.length == 0 }
+        return hit.length > 0
+    }
+    if (rbaLazyEager(name)) { return rbArrayMethod(rbLazyFirst(t, -1), name, args) }
+    if (name == "dup" || name == "clone") {
+        var cp = rbLazyCopy(t, null, t["lazy"] === true, desc)
+        if (name == "clone" && t["__fz"] === true) { cp["__fz"] = true }
+        return cp
+    }
     if (name == "take" && t["lazy"] === true) {
         var tn = Math.trunc(rbToF(rbArgAt(args, 0)))
         return rbLazyCopy(t, {k: "take", f: null, n: tn}, true, "#<Enumerator::Lazy: " + desc + ":take(" + tn + ")>")
@@ -6918,7 +7020,10 @@ function rbLazyMethod(t, name, args) {
     if (name == "to_a" || name == "force" || name == "entries") { return rbLazyFirst(t, -1) }
     if (name == "each" && blk !== null) {
         if (t["kind"] == "each" && t["ops"].length == 0) { return rbMethod(t["src"], "each", args) }
-        rbaLazyFirst(t, -1, rbLazyCall, rbTruthy, rbLazyDrive, function(v, m) { return rbLazyCall(blk, v, m) })
+        rbaLazyFirst(t, -1, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, function(v, m) {
+            rbLazyCall(blk, v, m)
+            return false
+        })
         return rbLazyEachVal(t)
     }
     if (name == "lazy") {
@@ -6959,6 +7064,11 @@ function rbLazyMethod(t, name, args) {
 }
 
 function rbEnumMethod(t, name, args) {
+    // Twin of the freeze arm of enumMethod in ruby-interpreter.abnf.
+    if (name == "freeze") {
+        t["__fz"] = true
+        return t
+    }
     if (t["__rlazy"] === true) { return rbLazyMethod(t, name, args) }
     // A deferred Enumerator over a user #each. Twin of the arm in rubyEnumMethod in
     // abnf/jsrt.go, which states the rule.
@@ -6974,7 +7084,11 @@ function rbEnumMethod(t, name, args) {
     var items = t["items"]
     var blk = rbBlockOf(args)
     var nPos = rbNPos(args)
-    if (name == "lazy") { return rbMkLazy("arr", rtCopyArr(items), 0, null, false, true, "#<Enumerator::Lazy: " + rbEnumInspect(t) + ">") }
+    if (name == "lazy") {
+        var elz = rbMkLazy("arr", rtCopyArr(items), 0, null, false, true, "#<Enumerator::Lazy: " + rbEnumInspect(t) + ">")
+        elz["en"] = t
+        return elz
+    }
     if (name == "to_a" || name == "entries" || name == "force") { return rtCopyArr(items) }
     if (name == "size" || name == "length" || name == "count") {
         if (nPos == 0 && blk === null) { return items.length }
@@ -8898,7 +9012,7 @@ function rbMethod(target, name, args) {
     // number are frozen.
     if (name == "frozen?") {
         if (rtIsNil(target) || target === true || target === false) { return true }
-        if (rbUserObj(target)) { return target["__fz"] === true }
+        if (rbUserObj(target) || rbIsEnum(target)) { return target["__fz"] === true }
         return rbIsSym(target) || rbIsNum(target)
     }
 
@@ -10293,6 +10407,7 @@ function js_rforval(it) {
 // What `for` over an Enumerator answers. Twin of rubyForEnumVal in
 // abnf/jsrtruby.go and forEnumVal in ruby-interpreter.abnf, which states the rule.
 function rbForEnumVal(e, items, results) {
+    if (e["__rlazy"] === true && e["en"] !== null && e["ops"].length == 0) { return rbEnumFinish(e["en"], items, results) }
     if (e["__rlazy"] === true) { return rbLazyEachVal(e) }
     return rbEnumFinish(e, items, results)
 }

@@ -13,8 +13,9 @@
 // methods every object has, which respond_to? reports only with include_all.
 // Row "Enumerable" holds what an instance of a class that includes Enumerable and
 // defines #each answers: MRI 2.6's Enumerable methods, run on the Array of what
-// #each yields. Row "Enumerator::Lazy" is not Enumerator's: a Lazy dispatches
-// only its own one-value-at-a-time surface, not the eager Enumerable one.
+// #each yields. Row "Enumerator::Lazy" is not Enumerator's: a Lazy answers its
+// own one-value-at-a-time surface and only the eager Enumerable methods its
+// lazyMethod forwards.
 //
 // Included by ruby-interpreter.abnf (include("lib/ruby-respond.js")) and
 // imported by lib/ruby-rt.metajs. The Go twin's copy is rubyRespondNames in
@@ -149,10 +150,16 @@ function rbRespondRows() {
          "partition", "peek", "public_send", "reduce", "reject", "reverse_each", "rewind",
          "select", "send", "size", "slice_after", "slice_before", "sort", "sort_by", "sum", "take", "take_while", "tally",
          "to_a", "uniq", "with_index", "with_object", "zip"],
-        ["Enumerator::Lazy", "<=>", "collect", "drop_while", "each", "each_cons", "each_slice", "entries",
-         "eql?", "equal?", "filter", "first", "force", "frozen?", "instance_of?", "instance_variables",
-         "is_a?", "itself", "kind_of?", "lazy", "map", "next", "nil?", "peek", "public_send", "reject",
-         "rewind", "select", "send", "size", "take", "take_while", "to_a"],
+        ["Enumerator::Lazy", "<=>", "all?", "any?", "chunk_while", "clone", "collect",
+         "collect_concat", "count", "detect", "drop", "drop_while", "dup", "each", "each_cons",
+         "each_slice", "each_with_index", "each_with_object", "entries", "eql?", "equal?",
+         "filter", "find", "find_all", "find_index", "first", "flat_map", "force", "freeze",
+         "frozen?", "grep", "grep_v", "group_by", "include?", "inject", "instance_of?",
+         "instance_variables", "is_a?", "itself", "kind_of?", "lazy", "map", "max", "max_by",
+         "member?", "min", "min_by", "minmax", "minmax_by", "next", "nil?", "none?", "one?",
+         "partition", "peek", "public_send", "reduce", "reject", "rewind", "select", "send",
+         "size", "slice_when", "sort", "sort_by", "sum", "take", "take_while", "to_a", "to_h",
+         "uniq", "with_index", "with_object", "zip"],
         ["Enumerable", "all?", "any?", "chain", "chunk", "chunk_while", "collect", "collect_concat", "count",
          "cycle", "detect", "drop", "drop_while", "each_cons", "each_entry", "each_slice",
          "each_with_index", "each_with_object", "entries", "filter", "find", "find_all",

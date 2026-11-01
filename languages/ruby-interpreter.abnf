@@ -3173,9 +3173,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The loop answers what the Enumerator's #each would with the body as its
     // block: enumFinish over the values the body produced (each yield's `next`
-    // value or last expression), and for a Lazy lazyEachVal. Twins: js_rforval in
+    // value or last expression), and for a Lazy lazyEachVal - or, with no op
+    // pending, enumFinish of the Enumerator it was made from. Twins: js_rforval in
     // abnf/jsrtruby.go and lib/ruby-rt.metajs.
     function forEnumVal(e, items, results) {
+        if (e.__rlazy === true && e.en !== undefined && e.ops.length == 0) { return enumFinish(e.en, items, results) }
         if (e.__rlazy === true) { return lazyEachVal(e) }
         return enumFinish(e, items, results)
     }
@@ -9315,7 +9317,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // instance carry their own flag.
         if (name == "frozen?") {
             if (target === null || target === undefined || typeof target == "boolean") { return true }
-            if (isUserObj(target)) { return target.__fz === true }
+            if (isUserObj(target) || isEnum(target)) { return target.__fz === true }
             if (isBin(target)) { return target.__fz === true }
             return isRStr(target) ? target.__fz : (isSym(target) || isNumV(target))
         }
@@ -10495,7 +10497,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // What Lazy#each answers after its run: nil once an op is pending (MRI runs
     // the ops in a generator), else the receiver #lazy was called on, which ev
-    // holds. Twins: rbLazyEachVal in lib/ruby-rt.metajs, rubyLazyEachVal in
+    // holds - for a Lazy over a user #each, what that #each answered on the last
+    // run to its end. A Lazy over an Enumerator holds that Enumerator in en, and
+    // with no op pending its block-taking each methods are the Enumerator's.
+    // Twins: rbLazyEachVal in lib/ruby-rt.metajs, rubyLazyEachVal in
     // abnf/jsrtrubystr.go.
     function lazyEachVal(t) {
         if (t.ops.length > 0 || t.ev === undefined) { return null }
@@ -10506,18 +10511,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         c.ops = t.ops.slice(0)
         if (op !== null) { c.ops.push(op) }
         c.src = t.src
+        c.ev = t.ev
+        c.en = t.en
         return c
     }
-    function lazyFirst(t, n) { return rbaLazyFirst(t, n, lazyCall, rtest, lazyDrive, null) }
+    function lazyFirst(t, n) { return rbaLazyFirst(t, n, lazyCall, rtest, arrEql, lazyDrive, null) }
+    function lazyScan(t, hit) { return rbaLazyScan(t, lazyCall, rtest, arrEql, lazyDrive, hit) }
+    // zip's i-th value of an argument, nil past its end: an Array is indexed and
+    // any other is pulled as a Lazy, so an endless one still zips. Twins:
+    // rubyLazyNth in abnf/jsrtrubystr.go, rbLazyNth in lib/ruby-rt.metajs.
+    function lazyNth(a) {
+        if (Array.isArray(a)) { return function(i) { return i < a.length ? a[i] : null } }
+        var lz = anytype
+        lz = mcall(a, "lazy", [], null)
+        return function(i) {
+            var got = lazyFirst(lz, i + 1)
+            return got.length > i ? got[i] : null
+        }
+    }
     // An op's block on one value; m: v is a multi-value yield, spread over the block.
     function lazyCall(f, v, m) { return blockCall(f, m ? v : [v]) }
     // The #each of a Lazy's user source, each value (a multi-value yield packed as
     // an Array, m true) handed to step, left through catch/throw once step answers
-    // true. Twins: rubyLazyDrive in abnf/jsrtrubystr.go, rbLazyDrive in
-    // lib/ruby-rt.metajs.
+    // true; answers what #each answered. Twins: rubyLazyDrive in
+    // abnf/jsrtrubystr.go, rbLazyDrive in lib/ruby-rt.metajs.
     function lazyDrive(src, step) {
         var tag = {}
-        hostGlobals["catch"](tag, function() {
+        return hostGlobals["catch"](tag, function() {
             return mcall(src, "each", [], function() {
                 var a = argsArray(arguments)
                 var it = anytype
@@ -10543,6 +10563,81 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function lazyMethod(t, name, args, blk) {
         var lop = rbaLazyOp(name)
         if (lop != "" && blk != null) { return lazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + t.desc + ":" + name + ">") }
+        // uniq, grep / grep_v (a select, then the block's map), zip, drop and a
+        // blockless with_index / each_with_index answer a Lazy too. Twins:
+        // rubyLazyMethod in abnf/jsrtrubystr.go, rbLazyMethod in lib/ruby-rt.metajs.
+        var ld = "#<Enumerator::Lazy: " + t.desc + ":" + name
+        if (name == "uniq") { return lazyCopy(t, {k: "uniq", f: null, n: 0}, true, ld + ">") }
+        if ((name == "grep" || name == "grep_v") && args.length > 0) {
+            var gpat = anytype
+            gpat = args[0]
+            var gv = name == "grep_v"
+            var gl = lazyCopy(t, {k: "select", f: function(v) { return rtest(caseEq(gpat, v)) != gv }, n: 0}, true, ld + "(" + rinspect(gpat) + ")>")
+            if (blk != null) { gl.ops.push({k: "map", f: blk, n: 0}) }
+            return gl
+        }
+        if (name == "zip") {
+            var zf = []
+            var zd = ""
+            for (var zi = 0; zi < args.length; zi++) {
+                zf.push(lazyNth(args[zi]))
+                zd = zd + (zi > 0 ? ", " : "") + rinspect(args[zi])
+            }
+            return lazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + "(" + zd + ")>")
+        }
+        if (name == "drop") {
+            var dn = Math.trunc(toF(args[0]))
+            if (dn < 0) { raiseErr(name, "ArgumentError", "attempt to drop negative size") }
+            return lazyCopy(t, {k: "drop", f: null, n: dn}, true, ld + "(" + dn + ")>")
+        }
+        var wix = name == "with_index" || name == "each_with_index"
+        var wob = name == "with_object" || name == "each_with_object"
+        if (wix && blk == null) {
+            var wo = name == "with_index" && args.length > 0 ? Math.trunc(toF(args[0])) : 0
+            return lazyCopy(t, {k: "with_index", f: null, n: wo}, true, ld + (name == "with_index" && args.length > 0 ? "(" + wo + ")" : "") + ">")
+        }
+        if (t.en !== undefined && t.ops.length == 0 && blk != null && (name == "each" || wix || wob)) { return mcall(t.en, name, args, blk) }
+        // with_index / with_object and their each_ forms run the block as each
+        // value is made, and answer as #each does (with_object: the memo).
+        if ((wix || wob) && blk != null) {
+            var wmemo = anytype
+            wmemo = args.length > 0 ? args[0] : null
+            var wofs = wix && args.length > 0 ? Math.trunc(toF(args[0])) : 0
+            var wn = [0]
+            rbaLazyFirst(t, -1, lazyCall, rtest, arrEql, lazyDrive, function(v, m) {
+                blockCall(blk, [v, wob ? wmemo : wn[0] + wofs])
+                wn[0] = wn[0] + 1
+                return false
+            })
+            return wob ? wmemo : lazyEachVal(t)
+        }
+        // The Enumerable methods that can stop early end the run at the value that
+        // settles them; the rest run it to the end and answer over the Array.
+        if (((name == "find" || name == "detect" || name == "find_index") && blk != null) || name == "include?"
+            || name == "member?" || (name == "find_index" && args.length > 0) || name == "any?" || name == "all?" || name == "none?") {
+            var sx = anytype
+            sx = args.length > 0 ? args[0] : null
+            var seq = name == "include?" || name == "member?" || (name == "find_index" && blk == null)
+            var sall = name == "all?"
+            var hit = lazyScan(t, function(v, m) {
+                var r = anytype
+                if (seq) { r = rubyEq(v, sx) }
+                else if (blk != null) { r = lazyCall(blk, v, m) }
+                else if (args.length > 0) { r = caseEq(sx, v) }
+                else { r = v }
+                return rtest(r) != sall
+            })
+            if (name == "find" || name == "detect") { return hit.length > 0 ? hit[1] : null }
+            if (name == "find_index") { return hit.length > 0 ? hit[0] : null }
+            if (name == "all?" || name == "none?") { return hit.length == 0 }
+            return hit.length > 0
+        }
+        if (rbaLazyEager(name)) { return arrayMethod(lazyFirst(t, -1), name, args, blk) }
+        if (name == "dup" || name == "clone") {
+            var cp = lazyCopy(t, null, t.lazy, t.desc)
+            if (name == "clone" && t.__fz === true) { cp.__fz = true }
+            return cp
+        }
         if (name == "take" && t.lazy) {
             var tn = Math.trunc(toF(args[0]))
             return lazyCopy(t, {k: "take", f: null, n: tn}, true, "#<Enumerator::Lazy: " + t.desc + ":take(" + tn + ")>")
@@ -10558,7 +10653,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // source's #each does - nil once an op is pending (lazyEachVal).
         if (name == "each" && blk != null) {
             if (t.kind == "each" && t.ops.length == 0) { return mcall(t.src, "each", [], blk) }
-            rbaLazyFirst(t, -1, lazyCall, rtest, lazyDrive, function(v, m) { return lazyCall(blk, v, m) })
+            rbaLazyFirst(t, -1, lazyCall, rtest, arrEql, lazyDrive, function(v, m) {
+                lazyCall(blk, v, m)
+                return false
+            })
             return lazyEachVal(t)
         }
         if (name == "lazy") { return t.lazy ? t : lazyCopy(t, null, true, "#<Enumerator::Lazy: " + t.desc + ">") }
@@ -10587,6 +10685,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         noMethod(t, name)
     }
     function enumMethod(t, name, args, blk) {
+        // freeze sets the flag #frozen? reads, without running a deferred method.
+        if (name == "freeze") { t.__fz = true; return t }
         if (t.__rlazy === true) { return lazyMethod(t, name, args, blk) }
         // A deferred Enumerator over a user #each: #each with a block IS its method
         // with that block (so `find.each { }' stops #each early, as MRI's does), and
@@ -10599,7 +10699,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name != "inspect" && name != "to_s" && name != "class") { enumForce(t) }
         }
         var items = t.items
-        if (name == "lazy") { return mkLazy("arr", items.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + enumInspect(t) + ">") }
+        if (name == "lazy") {
+            var elz = mkLazy("arr", items.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + enumInspect(t) + ">")
+            elz.en = t
+            return elz
+        }
         if (name == "to_a" || name == "entries" || name == "force") { return items.slice(0) }
         if (name == "size" || name == "length" || name == "count") {
             if (args.length == 0 && blk == null) { return items.length }

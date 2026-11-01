@@ -11326,7 +11326,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case jsNullT, jsUndefT, bool, jsSym:
 			return true
 		case *jsObject:
-			if rubyUserObj(t) {
+			if rubyUserObj(t) || rubyIsEnum(t) {
 				fz, _ := t.props["__fz"].(bool)
 				return fz
 			}
@@ -13185,6 +13185,11 @@ func rubyIsEnum(v interface{}) bool {
 }
 
 func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) interface{} {
+	// Twin of the freeze arm of enumMethod in ruby-interpreter.abnf.
+	if name == "freeze" {
+		t.set("__fz", true)
+		return t
+	}
 	if t.props["__rlazy"] == true {
 		return rt.rubyLazyMethod(t, name, args)
 	}
@@ -13210,7 +13215,9 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 		if its == nil {
 			its = &jsArray{}
 		}
-		return rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, its.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyEnumInspect(t)+">")
+		lz := rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, its.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyEnumInspect(t)+">")
+		lz.set("en", t)
+		return lz
 	}
 	items, _ := t.props["items"].(*jsArray)
 	if items == nil {

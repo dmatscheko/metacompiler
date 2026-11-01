@@ -1878,6 +1878,77 @@ def s164
   check("in164b", rr.inspect == "#<S164R:#{rx} @me=#<S164R:#{rx} ...>>" &&
         n.inspect == "#<S164N:0x" + format("%016x", n.object_id * 2) + ">" && n.inspect == n.to_s)
 end
+# ===== SECTION 165: Enumerator::Lazy's eager Enumerable surface; zip / uniq / flat_map / grep / drop / chunk_while; freeze, dup, clone =====
+# A Lazy answers Enumerable's eager methods (sum, count, min, sort, inject,
+# group_by, ...) over all its values; find, include?, find_index, any?, all? and
+# none? stop at the value that settles them, so an endless source still answers.
+# zip, uniq, flat_map, grep, grep_v, drop, chunk_while, slice_when and a blockless
+# with_index answer a Lazy, one value at a time. with_index / each_with_object
+# with a block run it as each value is made. freeze sets frozen?, clone keeps it
+# and dup drops it. A Lazy over an Enumerator answers that Enumerator's #each
+# value, and one over a user #each what that #each answered on its last full
+# run. /usr/bin/ruby 2.6 settles each.
+class S165E
+  include Enumerable
+  def each; yield 1; yield 2; :done; end
+end
+class S165M
+  include Enumerable
+  def each; yield 1, 2; yield 3, 4; :e; end
+end
+def s165
+  l = (1..3).lazy
+  inf = (1..Float::INFINITY).lazy
+  check("lz165a", l.sum == 6 && l.count == 3 && l.count(2) == 1 && l.count { |x| x > 1 } == 2 && l.include?(2) &&
+        !l.include?(5) && l.min == 1 && l.max == 3 && l.sort == [1, 2, 3] && l.reduce(:+) == 6 &&
+        l.inject { |a, b| a * b } == 6 && l.find { |x| x > 1 } == 2 && l.detect { |x| x > 5 }.nil? &&
+        l.group_by { |x| x.odd? } == {true => [1, 3], false => [2]} && l.partition { |x| x.odd? } == [[1, 3], [2]] &&
+        l.min_by { |x| -x } == 3 && l.sum(10) == 16 && l.sum { |x| x * 2 } == 12 && l.min(2) == [1, 2] &&
+        l.minmax == [1, 3] && l.sort_by { |x| -x } == [3, 2, 1] && l.to_h { |x| [x, x * x] } == {1 => 1, 2 => 4, 3 => 9})
+  calls = []
+  f = inf.map { |x| calls << x; x * 2 }.find { |x| x > 10 }
+  check("lz165b", f == 12 && calls == [1, 2, 3, 4, 5, 6] && inf.map { |x| x * 2 }.include?(20) && inf.detect { |x| x > 10 } == 11 &&
+        inf.find_index { |x| x > 2 } == 2 && inf.find_index(4) == 3 && inf.any? { |x| x > 2 } && !inf.all? { |x| x < 5 } &&
+        !inf.none? { |x| x > 5 } && l.any?(2..2) && l.all?(Integer) && l.none?(String) && ![nil, false].lazy.any?)
+  check("lz165c", l.each_with_index { |x, i| } == (1..3) && l.each_with_object([]) { |x, a| a << x } == [1, 2, 3] &&
+        l.with_index { |x, i| } == (1..3) && l.map { |x| x }.each_with_index { |x, i| }.nil? &&
+        l.with_index.to_a == [[1, 0], [2, 1], [3, 2]] && l.with_index(1).to_a == [[1, 1], [2, 2], [3, 3]] &&
+        l.each_with_index.map { |x, i| x * i }.to_a == [0, 2, 6] && l.with_index(1).class == Enumerator::Lazy)
+  z = l.zip([4, 5, 6])
+  check("lz165d", z.class == Enumerator::Lazy && z.inspect == "#<Enumerator::Lazy: #<Enumerator::Lazy: 1..3>:zip([4, 5, 6])>" &&
+        z.to_a == [[1, 4], [2, 5], [3, 6]] && l.zip([4], 7..9).to_a == [[1, 4, 7], [2, nil, 8], [3, nil, 9]] &&
+        inf.zip(10..Float::INFINITY).first(2) == [[1, 10], [2, 11]] && l.zip(l.map { |x| x * 10 }).to_a == [[1, 10], [2, 20], [3, 30]])
+  u = [1, 1, 2].lazy.uniq
+  check("lz165e", u.inspect == "#<Enumerator::Lazy: #<Enumerator::Lazy: [1, 1, 2]>:uniq>" && u.to_a == [1, 2] && u.force == [1, 2] &&
+        inf.uniq { |x| x % 3 }.first(3) == [1, 2, 3] && [1, 1.0].lazy.uniq.to_a == [1, 1.0])
+  check("lz165f", l.flat_map { |x| [x, x] }.to_a == [1, 1, 2, 2, 3, 3] && inf.flat_map { |x| [x, -x] }.first(3) == [1, -1, 2] &&
+        inf.flat_map { |x| x }.first(3) == [1, 2, 3] && inf.flat_map { |x| [[x]] }.first(2) == [[1], [2]] &&
+        inf.take(3).flat_map { |x| [x, x] }.to_a == [1, 1, 2, 2, 3, 3] && inf.flat_map { |x| [x, x] }.take(3).to_a == [1, 1, 2] &&
+        l.collect_concat { |x| [x] * x }.to_a == [1, 2, 2, 3, 3, 3] && l.find_all { |x| x > 1 }.to_a == [2, 3])
+  g = l.grep(2..3)
+  check("lz165g", g.inspect == "#<Enumerator::Lazy: #<Enumerator::Lazy: 1..3>:grep(2..3)>" && g.to_a == [2, 3] &&
+        inf.grep(2..4) { |x| x * 10 }.first(2) == [20, 30] && inf.grep_v(2..4).first(2) == [1, 5] && l.grep(2..3).map { |x| x * 2 }.to_a == [4, 6])
+  d = l.drop(1)
+  dn = begin; l.drop(-1); rescue ArgumentError => e; e.message; end
+  check("lz165h", d.inspect == "#<Enumerator::Lazy: #<Enumerator::Lazy: 1..3>:drop(1)>" && d.to_a == [2, 3] && d.to_a == [2, 3] &&
+        inf.drop(3).first(2) == [4, 5] && l.drop(5).to_a == [] && l.take(2).drop(1).to_a == [2] && dn == "attempt to drop negative size")
+  check("lz165i", [1, 2, 4, 5].lazy.chunk_while { |a, b| b == a + 1 }.to_a == [[1, 2], [4, 5]] &&
+        inf.chunk_while { |a, b| b == a + 1 && b % 4 != 0 }.first(2) == [[1, 2, 3], [4, 5, 6, 7]] &&
+        (1..10).lazy.take(5).chunk_while { |a, b| b == a + 1 && b != 4 }.to_a == [[1, 2, 3], [4, 5]] &&
+        (1..10).lazy.slice_when { |a, b| b % 3 == 0 }.first(2) == [[1, 2], [3, 4, 5]])
+  m = S165M.new.lazy
+  check("lz165j", m.flat_map { |a, b| [a, b] }.to_a == [1, 2, 3, 4] && m.find { |a, b| b == 4 } == [3, 4] && m.include?([3, 4]) &&
+        m.zip([9]).to_a == [[1, 9], [3, nil]] && m.with_index.to_a == [[[1, 2], 0], [[3, 4], 1]] && m.drop(1).to_a == [[3, 4]])
+  fz = l.map { |x| x }.freeze
+  e = [1, 2].each
+  check("lz165k", fz.frozen? && fz.clone.frozen? && !fz.dup.frozen? && fz.clone.to_a == [1, 2, 3] && !l.frozen? &&
+        l.dup.inspect == "#<Enumerator::Lazy: 1..3>" && l.clone.class == Enumerator::Lazy && !l.dup.equal?(l) &&
+        e.freeze.equal?(e) && e.frozen? && l.respond_to?(:sum) && l.respond_to?(:zip))
+  r1 = for x in S165E.new.lazy; end
+  r2 = for x in [1, 2].each.lazy; end
+  check("lz165l", [1, 2].each.lazy.each { } == [1, 2] && r1 == :done && r2 == [1, 2] && [1, 2].map.lazy.each { |x| x * 3 } == [3, 6] &&
+        [1, 2].each_slice(1).lazy.each { |x| }.nil? && {a: 1}.each.lazy.each { |x| } == {a: 1} && [1, 2].each.lazy.each_with_index { |x, i| } == [1, 2])
+end
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -1922,5 +1993,6 @@ s161() # SECTION-CALL 161
 s162() # SECTION-CALL 162
 s163() # SECTION-CALL 163
 s164() # SECTION-CALL 164
+s165() # SECTION-CALL 165
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

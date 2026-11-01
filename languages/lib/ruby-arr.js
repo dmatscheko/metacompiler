@@ -6,19 +6,24 @@
 // each_slice / each_cons on an endless range: an Enumerator object that also
 // carries __rlazy, a SOURCE - kind "arr" (items), "cycle" (items, forever) or
 // "range" (lo, lo+1, ... up to hi; hi null is endless) or "each" (the #each of
-// a user Enumerable, src) - and the OPS map / select / reject / take_while /
-// drop_while / take / slice / cons, {k, f, n}, applied to one value at a time.
+// a user Enumerable, src) - and the OPS {k, f, n}, applied to one value at a
+// time: map / select / reject / take_while / drop_while / flat_map / chunk_while
+// / slice_when (f the block), take / drop / with_index (n the count or offset),
+// slice / cons (n the width), uniq (f the key block or null) and zip (f a list
+// of functions answering an argument's i-th value or nil).
 // rbaLazyFirst pulls the first n results (all of them when n < 0); call(f, v, m)
-// runs a block, test(v) is Ruby truthiness. A take op ends the run once its count
-// has passed it, so nothing past it is evaluated. An "each" source is PUSHED:
-// drive(src, step) runs its #each, calls step(v, m) per value and leaves #each
-// once step answers true. A multi-value yield arrives packed as an Array with m
-// true; the block of a map, take_while or drop_while gets its values spread
-// (`yield 1, 2' gives `map { |x| }' 1) and that of a select or reject the Array
-// (MRI's lazy.c), until a map or a slice makes one value of it. With emit
-// non-null each result goes to emit(v, m) instead of the answer. Go twin:
-// rubyLazyFirst in abnf/jsrtrubystr.go.
-function rbaLazyFirst(lz, n, call, test, drive, emit) {
+// runs a block, test(v) is Ruby truthiness, eql(a, b) is #eql?. A take op ends
+// the run once its count has passed it, so nothing past it is evaluated. An
+// "each" source is PUSHED: drive(src, step) runs its #each, calls step(v, m) per
+// value, leaves #each once step answers true and answers what #each answered,
+// which a run to the end records as the Lazy's ev. A multi-value yield arrives
+// packed as an Array with m true; the block of a map, take_while or drop_while
+// gets its values spread (`yield 1, 2' gives `map { |x| }' 1) and that of a
+// select or reject the Array (MRI's lazy.c), until a map or a slice makes one
+// value of it. With emit non-null each result goes to emit(v, m) instead of the
+// answer, and the run ends once emit answers true. Go twin: rubyLazyPull in
+// abnf/jsrtrubystr.go.
+function rbaLazyFirst(lz, n, call, test, eql, drive, emit) {
     var ops = lz.ops
     var st = {out: [], n: n, cnt: [], on: [], buf: [], done: n == 0, full: false, stopAt: 0 - 1, emit: emit}
     var j = 0
@@ -29,10 +34,12 @@ function rbaLazyFirst(lz, n, call, test, drive, emit) {
         j = j + 1
     }
     if (lz.kind == "each" && !st.done) {
-        drive(lz.src, function(v, m) {
-            rbaLazyRun(st, ops, v, m, 0, call, test)
+        var ev = anytype
+        ev = drive(lz.src, function(v, m) {
+            rbaLazyRun(st, ops, v, m, 0, call, test, eql)
             return st.done
         })
+        if (!st.done) { lz.ev = ev }
     }
     var i = 0
     while (lz.kind != "each" && !st.done) {
@@ -46,17 +53,17 @@ function rbaLazyFirst(lz, n, call, test, drive, emit) {
             v = lz.items[i % len]
         }
         i = i + 1
-        rbaLazyRun(st, ops, v, false, 0, call, test)
+        rbaLazyRun(st, ops, v, false, 0, call, test, eql)
     }
-    // A slice op still holding values hands them on as a last, short slice when
-    // the run ended above it: the source ran out, or a take / take_while before
-    // it stopped.
+    // A slice or chunk op still holding values hands them on as a last, short
+    // one when the run ended above it: the source ran out, or a take / take_while
+    // before it stopped.
     j = 0
     while (j < ops.length && !st.full) {
-        if (ops[j].k == "slice" && st.buf[j].length > 0 && j > st.stopAt) {
+        if (rbaLazyBuffers(ops[j].k) && st.buf[j].length > 0 && j > st.stopAt) {
             var rest = st.buf[j]
             st.buf[j] = []
-            rbaLazyRun(st, ops, rest, false, j + 1, call, test)
+            rbaLazyRun(st, ops, rest, false, j + 1, call, test, eql)
         }
         j = j + 1
     }
@@ -64,7 +71,7 @@ function rbaLazyFirst(lz, n, call, test, drive, emit) {
 }
 // One value (m: a packed multi-value yield) through ops[from..], into the
 // result unless an op holds it back.
-function rbaLazyRun(st, ops, v, m, from, call, test) {
+function rbaLazyRun(st, ops, v, m, from, call, test, eql) {
     var cur = anytype
     cur = v
     var multi = m
@@ -89,7 +96,9 @@ function rbaLazyRun(st, ops, v, m, from, call, test) {
                 st.on[j] = true
             }
         } else if (op.k == "take") {
-            if (op.n <= 0) {
+            // A count already reached also turns away the rest of a flat_map's
+            // Array.
+            if (st.cnt[j] >= op.n) {
                 rbaLazyStop(st, j)
                 return
             }
@@ -107,11 +116,70 @@ function rbaLazyRun(st, ops, v, m, from, call, test) {
             if (st.buf[j].length < op.n) { return }
             cur = st.buf[j].slice(0)
             multi = false
+        } else if (op.k == "flat_map") {
+            // An Array result is spliced in, one value per element; any other
+            // passes on as one value.
+            var fr = anytype
+            fr = call(op.f, cur, multi)
+            if (Array.isArray(fr)) {
+                var q = 0
+                while (q < fr.length && !st.full) {
+                    rbaLazyRun(st, ops, fr[q], false, j + 1, call, test, eql)
+                    q = q + 1
+                }
+                return
+            }
+            cur = fr
+            multi = false
+        } else if (op.k == "drop") {
+            if (st.cnt[j] < op.n) {
+                st.cnt[j] = st.cnt[j] + 1
+                return
+            }
+        } else if (op.k == "uniq") {
+            var key = anytype
+            key = op.f === null ? cur : call(op.f, cur, multi)
+            var u = 0
+            while (u < st.buf[j].length) {
+                if (eql(st.buf[j][u], key)) { return }
+                u = u + 1
+            }
+            st.buf[j].push(key)
+        } else if (op.k == "zip") {
+            // A multi-value yield zips its first value.
+            var row = [multi ? cur[0] : cur]
+            var z = 0
+            while (z < op.f.length) {
+                row.push(call(op.f[z], st.cnt[j], false))
+                z = z + 1
+            }
+            st.cnt[j] = st.cnt[j] + 1
+            cur = row
+            multi = false
+        } else if (op.k == "with_index") {
+            cur = [cur, st.cnt[j] + op.n]
+            st.cnt[j] = st.cnt[j] + 1
+            multi = false
+        } else if (op.k == "chunk_while" || op.k == "slice_when") {
+            // A chunk goes on once the block, given its last value and this one,
+            // splits them: answers false for chunk_while, true for slice_when.
+            var cb = st.buf[j]
+            if (cb.length > 0 && test(call(op.f, [cb[cb.length - 1], cur], true)) == (op.k == "slice_when")) {
+                st.buf[j] = [cur]
+                cur = cb
+                multi = false
+            } else {
+                cb.push(cur)
+                return
+            }
         }
         j = j + 1
     }
     if (st.emit !== null) {
-        st.emit(cur, multi)
+        if (st.emit(cur, multi) === true) {
+            st.done = true
+            st.full = true
+        }
         return
     }
     st.out.push(cur)
@@ -125,12 +193,45 @@ function rbaLazyStop(st, j) {
     if (st.stopAt < 0) { st.stopAt = j }
 }
 
-// The lazy name an op is reached by, or "" when the method is not one.
+// Does op k hold values back in st.buf until a later value releases them?
+function rbaLazyBuffers(k) { return k == "slice" || k == "chunk_while" || k == "slice_when" }
+
+// The op a Lazy method WITH A BLOCK appends, or "" when the method is not one.
 function rbaLazyOp(name) {
     if (name == "map" || name == "collect") { return "map" }
-    if (name == "select" || name == "filter") { return "select" }
-    if (name == "reject" || name == "take_while" || name == "drop_while") { return name }
+    if (name == "select" || name == "filter" || name == "find_all") { return "select" }
+    if (name == "flat_map" || name == "collect_concat") { return "flat_map" }
+    if (name == "reject" || name == "take_while" || name == "drop_while" || name == "uniq") { return name }
+    if (name == "chunk_while" || name == "slice_when") { return name }
     return ""
+}
+
+// The Enumerable methods a Lazy answers EAGERLY, over the Array of all its
+// values: MRI's Lazy inherits them from Enumerable unchanged. The ones that can
+// stop early (find, include?, any?, ...) are answered by rbaLazyScan instead.
+function rbaLazyEager(name) {
+    return name == "sum" || name == "count" || name == "min" || name == "max" || name == "minmax"
+        || name == "min_by" || name == "max_by" || name == "minmax_by" || name == "sort" || name == "sort_by"
+        || name == "reduce" || name == "inject" || name == "group_by" || name == "partition" || name == "to_h"
+        || name == "one?"
+}
+
+// find / detect / include? / member? / find_index / any? / all? / none? on a
+// Lazy: the run ends at the first value hit(v, m) accepts, so an endless source
+// still answers. [index, value] of that value, or [] when none was accepted.
+function rbaLazyScan(lz, call, test, eql, drive, hit) {
+    var res = []
+    var i = [0]
+    rbaLazyFirst(lz, -1, call, test, eql, drive, function(v, m) {
+        if (test(hit(v, m))) {
+            res.push(i[0])
+            res.push(v)
+            return true
+        }
+        i[0] = i[0] + 1
+        return false
+    })
+    return res
 }
 
 // The op a blockless each_slice / each_cons is on an Enumerator that pulls one
