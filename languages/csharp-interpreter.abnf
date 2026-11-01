@@ -1961,8 +1961,12 @@ KwLet       = "let" KwEnd ;
     // The BCL exception types are plain objects carrying __excname and Message
     // (see csBclExcNames further down), which is the shape `new
     // DivideByZeroException(msg)` builds and the shape a catch clause reads.
+    // A runtime-raised ArgumentException carries its ParamName too (csxExcParam).
     function csThrowExc(clsName, msg) {
-        throw {__exc: true, v: {__excname: clsName, Message: msg}}
+        var eo = {__excname: clsName, Message: msg}
+        var pn = csxExcParam(msg)
+        if (pn != "") { eo.ParamName = pn }
+        throw {__exc: true, v: eo}
     }
     // (a * b) mod 2^32. `(a * b) | 0` is WRONG: the exact product needs up to 62
     // bits and a double keeps only 53, so the low bits - the only ones that
@@ -3067,6 +3071,7 @@ KwLet       = "let" KwEnd ;
         // object dispatches its statics by name, so the delegate forwards to mcall0.
         // Memoised, so one method answers one delegate (20.5).
         if (o.__cstype !== undefined) {
+            csxBclStatic(o.__cstype, name)
             var bcl = function() {
                 var bargs = []
                 for (var bi = 0; bi < arguments.length; bi++) { bargs.push(arguments[bi]) }

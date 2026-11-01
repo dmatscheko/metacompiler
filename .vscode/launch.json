@@ -491,6 +491,19 @@
             "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "-code", "using System; class Program { static void Main() { string[] s = { \"x\", \"a\" }; Console.WriteLine(s[0].CompareTo(s[1])); } }", "-qq"]
         },
         {
+            "name": "CSharp interpreter, an unknown member of a BCL type read as a value SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "csharp interpreter error: 'string' does not contain a definition for 'NoSuch'",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "-code", "using System; class Program { static void Main() { var f = string.NoSuch; Console.WriteLine(\"after\"); } }", "-q"]
+        },
+        {
+            "name": "C# unknown member of a BCL type read as a value, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "-code", "using System; class Program { static void Main() { Console.WriteLine(\"before\"); var f = Math.NoSuch; Console.WriteLine(\"after\"); } }", "-q", "-exe", "tests/csharp-bcl-member.out"]
+        },
+        {
             "name": "Lua to LLVM IR -qq, a compile error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",

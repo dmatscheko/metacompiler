@@ -315,7 +315,27 @@ func (rt *jsrt) csThrow(name, msg string) {
 	o := newJSObject()
 	o.set("__excname", name)
 	o.set("Message", msg)
+	if pn := csxExcParam(msg); pn != "" {
+		o.set("ParamName", pn)
+	}
 	panic(&jsThrown{value: o})
+}
+
+// csxExcParam is the ParamName a runtime-raised ArgumentException carries: the name
+// in its Message's " (Parameter '...')" clause, "" for none. Twin of csxExcParam in
+// languages/lib/csharp-strings.js, which holds the specification comment.
+func csxExcParam(msg string) string {
+	const k = " (Parameter '"
+	i := strings.Index(msg, k)
+	if i < 0 {
+		return ""
+	}
+	rest := msg[i+len(k):]
+	j := strings.Index(rest, "')")
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // csArith is one binary arithmetic or bitwise operator on two INTEGRAL operands,
@@ -1279,8 +1299,11 @@ func init() {
 				return w(jsUndef)
 			}
 			// A BCL type object (__cstype) dispatches its statics by name, so
-			// every member read as a value is a static method group.
-			_, found := o.props["__cstype"]
+			// each static method the type declares (csxBclStatic) is a method group.
+			cst, found := o.props["__cstype"].(string)
+			if found {
+				rt.csxBclStatic(cst, name)
+			}
 			for cls := o.props["__class"]; cls != nil && !found; {
 				clsObj, ok := cls.(*jsObject)
 				if !ok {

@@ -459,6 +459,60 @@ function csxStringStatic(name, args) {
     return undefined
 }
 
+// The public static METHODS of the BCL type a __cstype object stands for (the .NET
+// API reference; Equals and ReferenceEquals are object's statics, reachable through
+// any type name), whether modelled or not. Naming any other member of the type is
+// compile-time error CS0117 (ECMA-334 12.8.7), so a method group formed on one fails
+// where it is formed rather than when the delegate is called. Twin of csxBclStatic
+// in abnf/jsrtcsstr.go.
+function csxBclStatics(t) {
+    var obj = "|Equals|ReferenceEquals|"
+    if (t == "string") {
+        return obj + "Compare|CompareOrdinal|Concat|Copy|Create|Format|Intern|IsInterned|IsNullOrEmpty|IsNullOrWhiteSpace|Join|"
+    }
+    if (t == "char") {
+        return obj + "ConvertFromUtf32|ConvertToUtf32|GetNumericValue|GetUnicodeCategory|IsAscii|IsAsciiDigit|" +
+            "IsAsciiHexDigit|IsAsciiHexDigitLower|IsAsciiHexDigitUpper|IsAsciiLetter|IsAsciiLetterLower|" +
+            "IsAsciiLetterOrDigit|IsAsciiLetterUpper|IsBetween|IsControl|IsDigit|IsHighSurrogate|IsLetter|" +
+            "IsLetterOrDigit|IsLowSurrogate|IsLower|IsNumber|IsPunctuation|IsSeparator|IsSurrogate|" +
+            "IsSurrogatePair|IsSymbol|IsUpper|IsWhiteSpace|Parse|ToLower|ToLowerInvariant|ToString|ToUpper|" +
+            "ToUpperInvariant|TryParse|"
+    }
+    var mathF = "Abs|Acos|Acosh|Asin|Asinh|Atan|Atan2|Atanh|BitDecrement|BitIncrement|Cbrt|Ceiling|CopySign|" +
+        "Cos|Cosh|Exp|Floor|FusedMultiplyAdd|IEEERemainder|ILogB|Log|Log10|Log2|Max|MaxMagnitude|Min|" +
+        "MinMagnitude|Pow|ReciprocalEstimate|ReciprocalSqrtEstimate|Round|ScaleB|Sign|Sin|SinCos|Sinh|Sqrt|" +
+        "Tan|Tanh|Truncate|"
+    if (t == "MathF") { return obj + mathF }
+    if (t == "Math") { return obj + mathF + "BigMul|Clamp|DivRem|" }
+    return obj + "Aggregate|AggregateBy|All|Any|Append|AsEnumerable|Average|Cast|Chunk|Concat|Contains|Count|" +
+        "CountBy|DefaultIfEmpty|Distinct|DistinctBy|ElementAt|ElementAtOrDefault|Empty|Except|ExceptBy|First|" +
+        "FirstOrDefault|GroupBy|GroupJoin|Index|InfiniteSequence|Intersect|IntersectBy|Join|Last|LastOrDefault|" +
+        "LeftJoin|LongCount|Max|MaxBy|Min|MinBy|OfType|Order|OrderBy|OrderByDescending|OrderDescending|" +
+        "Prepend|Range|Repeat|Reverse|RightJoin|Select|SelectMany|Sequence|SequenceEqual|Shuffle|Single|" +
+        "SingleOrDefault|Skip|SkipLast|SkipWhile|Sum|Take|TakeLast|TakeWhile|ThenBy|ThenByDescending|ToArray|" +
+        "ToDictionary|ToHashSet|ToList|ToLookup|TryGetNonEnumeratedCount|Union|UnionBy|Where|Zip|"
+}
+function csxBclStatic(t, name) {
+    if (csxBclStatics(t).indexOf("|" + name + "|") < 0) {
+        fail("'" + t + "' does not contain a definition for '" + name + "'")
+    }
+}
+
+// ArgumentException.ParamName of a BCL exception raised with a message: .NET's
+// Message is the base text + " (Parameter '<ParamName>')" whenever the name is
+// non-empty (ArgumentOutOfRangeException then appends "\nActual value was ..."), so
+// the name is read back out of that clause; "" means none (ParamName stays null).
+// Twin of csxExcParam in abnf/jsrtcsharp.go.
+function csxExcParam(msg) {
+    var k = " (Parameter '"
+    var i = msg.indexOf(k)
+    if (i < 0) { return "" }
+    var rest = msg.substring(i + k.length, msg.length)
+    var j = rest.indexOf("')")
+    if (j < 0) { return "" }
+    return rest.substring(0, j)
+}
+
 // new string(c, count) / new string(char[]) / new string(char[], start, length).
 function csxNewString(args) {
     if (args.length == 2 && csxkIsChar(args[0])) {

@@ -975,6 +975,16 @@ namespace Demo
             // the message, and it must not have moved.
             Program.Check("exc-argexc-msg-not-paramname",
                           new ArgumentException(pnames[0]).Message == "value");
+            // An argument exception the RUNTIME raises carries the name of the
+            // parameter it rejected (.NET reference source: ThrowHelper passes the
+            // name to the constructor), and the Message's clause is built from it.
+            int[] badArg = { -1, 5 };
+            string rtParam = "?";
+            try { char.ConvertFromUtf32(badArg[0]); } catch (ArgumentOutOfRangeException e) { rtParam = e.ParamName; }
+            Program.Check("exc-runtime-paramname", rtParam == "utf32");
+            rtParam = "?";
+            try { "abc".Substring(badArg[1]); } catch (ArgumentOutOfRangeException e) { rtParam = e.ParamName; }
+            Program.Check("exc-runtime-paramname-substring", rtParam == "startIndex");
             Program.Check("loop-break-out-of-try", Program.LoopBreakOutOfTry() == 3);
             Program.Check("loop-continue-out-of-try", Program.LoopContinueOutOfTry() == 4);
 

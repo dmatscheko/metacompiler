@@ -294,6 +294,8 @@ function csThrow(name, msg) {
     var o = {}
     o["__excname"] = name
     o["Message"] = msg
+    var pn = csxExcParam(msg)
+    if (pn != "") { o["ParamName"] = pn }
     throw o
 }
 
@@ -1728,13 +1730,16 @@ function js_csmg(recv, name, bound) {
         }
         return undefined
     }
-    // A BCL type object (__cstype) dispatches its statics by name, so every member
-    // read as a value is a static method group.
-    if (recv["__cstype"] === undefined) {
+    // A BCL type object (__cstype) dispatches its statics by name, so each static method
+    // the type declares (csxBclStatic), read as a value, is a static method group.
+    var cst = recv["__cstype"]
+    if (cst === undefined) {
         var cls = recv["__class"]
         if (cls === undefined || cls === null) { return undefined }
         var m = rtFindMethod(cls, name)
         if (!csIsFn(m)) { return undefined }
+    } else {
+        csxBclStatic(cst, name)
     }
     var key = "__mg_" + name
     var had = recv[key]

@@ -530,6 +530,44 @@ func (rt *jsrt) csxJoin(sep string, parts []interface{}) string {
 	return out
 }
 
+// csxBclStatic fails unless the BCL type a __cstype object stands for declares a
+// public static method `name` (CS0117). Twin of csxBclStatics / csxBclStatic in
+// languages/lib/csharp-strings.js, which holds the specification comment.
+func (rt *jsrt) csxBclStatic(t, name string) {
+	obj := "|Equals|ReferenceEquals|"
+	mathF := "Abs|Acos|Acosh|Asin|Asinh|Atan|Atan2|Atanh|BitDecrement|BitIncrement|Cbrt|Ceiling|CopySign|" +
+		"Cos|Cosh|Exp|Floor|FusedMultiplyAdd|IEEERemainder|ILogB|Log|Log10|Log2|Max|MaxMagnitude|Min|" +
+		"MinMagnitude|Pow|ReciprocalEstimate|ReciprocalSqrtEstimate|Round|ScaleB|Sign|Sin|SinCos|Sinh|Sqrt|" +
+		"Tan|Tanh|Truncate|"
+	var list string
+	switch t {
+	case "string":
+		list = obj + "Compare|CompareOrdinal|Concat|Copy|Create|Format|Intern|IsInterned|IsNullOrEmpty|IsNullOrWhiteSpace|Join|"
+	case "char":
+		list = obj + "ConvertFromUtf32|ConvertToUtf32|GetNumericValue|GetUnicodeCategory|IsAscii|IsAsciiDigit|" +
+			"IsAsciiHexDigit|IsAsciiHexDigitLower|IsAsciiHexDigitUpper|IsAsciiLetter|IsAsciiLetterLower|" +
+			"IsAsciiLetterOrDigit|IsAsciiLetterUpper|IsBetween|IsControl|IsDigit|IsHighSurrogate|IsLetter|" +
+			"IsLetterOrDigit|IsLowSurrogate|IsLower|IsNumber|IsPunctuation|IsSeparator|IsSurrogate|" +
+			"IsSurrogatePair|IsSymbol|IsUpper|IsWhiteSpace|Parse|ToLower|ToLowerInvariant|ToString|ToUpper|" +
+			"ToUpperInvariant|TryParse|"
+	case "MathF":
+		list = obj + mathF
+	case "Math":
+		list = obj + mathF + "BigMul|Clamp|DivRem|"
+	default:
+		list = obj + "Aggregate|AggregateBy|All|Any|Append|AsEnumerable|Average|Cast|Chunk|Concat|Contains|Count|" +
+			"CountBy|DefaultIfEmpty|Distinct|DistinctBy|ElementAt|ElementAtOrDefault|Empty|Except|ExceptBy|First|" +
+			"FirstOrDefault|GroupBy|GroupJoin|Index|InfiniteSequence|Intersect|IntersectBy|Join|Last|LastOrDefault|" +
+			"LeftJoin|LongCount|Max|MaxBy|Min|MinBy|OfType|Order|OrderBy|OrderByDescending|OrderDescending|" +
+			"Prepend|Range|Repeat|Reverse|RightJoin|Select|SelectMany|Sequence|SequenceEqual|Shuffle|Single|" +
+			"SingleOrDefault|Skip|SkipLast|SkipWhile|Sum|Take|TakeLast|TakeWhile|ThenBy|ThenByDescending|ToArray|" +
+			"ToDictionary|ToHashSet|ToList|ToLookup|TryGetNonEnumeratedCount|Union|UnionBy|Where|Zip|"
+	}
+	if !strings.Contains(list, "|"+name+"|") {
+		rt.fail("'" + t + "' does not contain a definition for '" + name + "'")
+	}
+}
+
 func (rt *jsrt) csxStringStatic(name string, args []interface{}) interface{} {
 	n := len(args)
 	switch {
