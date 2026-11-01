@@ -1813,6 +1813,35 @@ function swnInScope(bs, pos) {
     return false
 }
 
+// ----- a local function is visible in its whole body -----
+// swiftc lets a body call a local function above its declaration
+// (`let r = h(2); func h(...)`), so a block, a case body and a closure body
+// declare their local functions before their first statement runs. LocalFunc
+// pushes {lfun: thunk} (a pushed value is deep-copied, so a thunk cannot be
+// recognised by identity); swLfHoist moves those to the front of a statement
+// list, unwrapped, in their order. A closure body's items are {stmt: s} and keep
+// that shape.
+function swLfHoist(items) {
+    var funs = []
+    var rest = []
+    var i = 0
+    while (i < items.length) {
+        var it = items[i]
+        if (it != null && typeof it == "object" && it.lfun != undefined) { funs.push(it.lfun) }
+        else if (it != null && typeof it == "object" && it.stmt != undefined && typeof it.stmt == "object"
+                 && it.stmt.lfun != undefined) { funs.push({stmt: it.stmt.lfun}) }
+        else { rest.push(it) }
+        i = i + 1
+    }
+    if (funs.length == 0) { return items }
+    var j = 0
+    while (j < rest.length) {
+        funs.push(rest[j])
+        j = j + 1
+    }
+    return funs
+}
+
 // ----- MemoryLayout<T>.size / .stride / .alignment -----
 // The layout swiftc gives T on a 64-bit target, from T's text, or null when T is
 // not one this front end can lay out (a nominal type of the program, a generic

@@ -167,7 +167,7 @@ Program     <~~ swBrCheck(up.start, up.pos); swnCheck(); swRunQueued(); swRunTop
             = [ Hashbang ] { TopExec } ;
 TopExec     <~~ swRunTop(takeAll()) ~~>
             = TopItem ;
-TopItem     = PoundIfTop StmtSep | OpDeclTop StmtSep | FunTop StmtSep | TypeTop StmtSep
+TopItem     = PoundIfTop StmtSep | OpDeclTop StmtSep | SilgenTop StmtSep | FunTop StmtSep | TypeTop StmtSep
             | UnsupTop StmtSep | TopStmt ;
 // An operator / precedencegroup declaration is matched BEFORE the modifier-led
 // items: `prefix` is in the modifier list (it precedes `func`), so a greedy
@@ -178,6 +178,13 @@ TopItem     = PoundIfTop StmtSep | OpDeclTop StmtSep | FunTop StmtSep | TypeTop 
 // `func f` calls it.
 OpDeclTop   <~~ swDeclWrap(takeAll()) ~~> = PrecGroupDecl | OperatorDecl ;
 FunTop      <~~ push({decl: makeRegFun(pop())}) ~~> = [ Modifiers ] FunDecl ;
+// `@_silgen_name("puts") func cputs(_: UnsafePointer<CChar>) -> Int32`: a function
+// with no body, bound to an external symbol. Nothing here can call a C symbol, so
+// the declaration is recognized and reported as not implemented. With a body it is
+// an ordinary function (FunTop).
+SilgenTop   <~~ takeAll(); swDeclWrap([notImplStmt("a body-less @_silgen_name function", up.start)]) ~~>
+            = "@" "_silgen_name" KwEnd SkipParen [ Modifiers ] KwFunc FuncName [ SkipAngle ] SkipParen
+              [ FnEffects ] [ "->" Type ] [ GenWhere ] !"{" ;
 TypeTop     <~~ swDeclWrap(takeAll()) ~~> = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl ) ;
 UnsupTop    <~~ swDeclWrap(takeAll()) ~~> = [ Modifiers ] UnsupDecl ;
 TopStmt     = Statement ;
@@ -862,7 +869,7 @@ LoopLabel   = Id <~~ push({lbl: swBt(up.in)}) ~~> ":" ;
 
 // A nested function declaration inside a body: a closure over the enclosing scope
 // bound to its own name (so it can recurse and can capture surrounding locals).
-LocalFunc   <~~ push(makeLocalFunStmt(pop())) ~~>
+LocalFunc   <~~ push({lfun: makeLocalFunStmt(pop())}) ~~>
             = [ Modifiers ] FunDecl ;
 // A nested type declaration inside a body - the same struct/class/enum productions
 // as at the top level, run as a statement of the enclosing body.
@@ -911,8 +918,11 @@ Fallthrough <~~ push(makeFallthrough()) ~~>
 // A binding whose value is nil fails the whole clause; the names it binds live in
 // a fresh scope for if/while and, Swift-style, in the ENCLOSING scope for guard
 // (whose else branch is expected to leave that scope anyway).
-CplxIf      <~~ swnScope(up.start, up.pos); var ci = takeAll(); push(swLblStmt(itemLbl(ci), makeCondIf(itemsAfterLbl(ci)), false)); swBrClaim(up.start, up.pos, "if", itemLbl(ci)) ~~>
-            = [ LoopLabel ] KwIf CplxCondClause Block [ KwElse ElseBody ] ;
+CplxIf      <~~ var ci = takeAll(); push(swLblStmt(itemLbl(ci), makeCondIf(itemsAfterLbl(ci)), false)); swBrClaim(up.start, up.pos, "if", itemLbl(ci)) ~~>
+            = [ LoopLabel ] CplxIfThen [ KwElse ElseBody ] ;
+// An if's bindings are in scope in its condition and its then block, not in its
+// else branch (swiftc: "cannot find 'x' in scope").
+CplxIfThen  <~~ swnScope(up.start, up.pos) ~~> = KwIf CplxCondClause Block ;
 CplxGuard   <~~ push(makeCondGuard(takeAll())) ~~>
             = KwGuard CplxCondClause KwElse Block ;
 CplxWhile   <~~ swnScope(up.start, up.pos); var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeCondWhile(li)) ~~>
@@ -6525,7 +6535,7 @@ KwContinue  = "continue" KwEnd ;
     }
     // Overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).
     makeBlockStmt = function(items) {
-        var seq = swSeqWithDefers(items)
+        var seq = swSeqWithDefers(swLfHoist(items))
         return function() {
             scopes.push({})
             var r = seq()
@@ -6836,7 +6846,7 @@ KwContinue  = "continue" KwEnd ;
         inouts = swClInouts(params, inouts, up.start, end)
         if (rtype == "") { swDsParkRets(up.start, end) }
         swDotClaim(up.start, end, rtype)
-        var body = items.slice(start)
+        var body = swLfHoist(items.slice(start))
         return function() {
             var captured = scopes.slice(0)
             if (caps.length > 0) {
@@ -8965,7 +8975,7 @@ KwContinue  = "continue" KwEnd ;
         var swLbl = itemLbl(items)
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
-            if (typeof it == "function") {
+            if (typeof it == "function" || it.lfun != undefined) {
                 if (cur != null) { cur.body.push(it) }
             } else if (it.lbl != undefined) {
                 continue
@@ -8976,6 +8986,7 @@ KwContinue  = "continue" KwEnd ;
                 cases.push(cur)
             }
         }
+        for (var ci = 0; ci < cases.length; ci++) { cases[ci].body = swLfHoist(cases[ci].body) }
         return function() {
             var s = subj != null ? subj() : undefined
             var dflt = -1

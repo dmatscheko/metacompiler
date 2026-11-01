@@ -386,6 +386,20 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-scope.swift", "-q"]
         },
         {
+            "name": "Swift interpreter if-let binding in its else SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-iflet-else.swift:17: cannot find 'v' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-fail-test-iflet-else.swift", "-q"]
+        },
+        {
+            "name": "Swift compiler if-let binding in its else SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-iflet-else.swift:17: cannot find 'v' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-iflet-else.swift", "-q"]
+        },
+        {
             "name": "Swift interpreter undefined member of a closed type SHOULD FAIL",
             "type": "go",
             "request": "launch",

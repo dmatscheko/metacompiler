@@ -1,7 +1,7 @@
 // Swift recognition test: real-world syntax that the widened grammar PARSES.
-// Most of it now compiles; what does not is routed to notImplemented - today only
-// `await` (in fetch below) - so a normal run aborts there (nonzero exit) while a
-// run with -warn-unsupported warns on it and still succeeds (exit 0). The
+// Most of it now compiles; what does not is routed to notImplemented - `await` (in
+// fetch below) and a body-less @_silgen_name function - so a normal run aborts at
+// the first (nonzero exit) while -warn-unsupported warns and succeeds (exit 0). The
 // compiler's -q output must be byte-identical between the goja and -frozen
 // engines. This file is a SHOULD FAIL row by default.
 
@@ -137,6 +137,9 @@ func rank(_ n: Int) -> Int {
 var pending: [Int] = []
 func read(_ name: String) throws -> String { return name }
 func clean(_ raw: String) throws -> String { return raw }
+
+// A body-less function bound to a C symbol: recognized, not implemented.
+@_silgen_name("puts") func cputs(_: UnsafePointer<CChar>) -> Int32
 
 // Top level stays benign so a -warn-unsupported run exits 0.
 let cache = Cache()

@@ -6032,6 +6032,44 @@ func s159() {
         && MemoryLayout<(Bool, Int)>.size == 16 && MemoryLayout<Void>.stride == 1)
 }
 
+// ===== SECTION 160: a local function called above its declaration =====
+// A local function is visible in its whole body - a function's, a nested block's,
+// a closure's and a case body's - also above its declaration, and it captures the
+// enclosing locals by reference.
+func s160() {
+    let r = tenfold(2)
+    func tenfold(_ x: Int) -> Int { return x * 10 }
+    check("160a", r == 20)
+    var total = 0
+    if r > 0 {
+        total = bump(1)
+        func bump(_ y: Int) -> Int { return y + 1000 + r }
+    }
+    check("160b", total == 1021)
+    let f = { () -> Int in
+        let v = add100(3)
+        func add100(_ x: Int) -> Int { return x + 100 }
+        return v
+    }
+    check("160c", f() == 103)
+    var got = 0
+    switch r {
+    case 20:
+        got = seven(4)
+        func seven(_ x: Int) -> Int { return x * 7 }
+    default:
+        got = -1
+    }
+    check("160d", got == 28)
+    var n = 0
+    countUp()
+    countUp()
+    func countUp() { n += 1 }
+    check("160e", n == 2 && isEven(10) && !isEven(7))
+    func isEven(_ k: Int) -> Bool { return k == 0 ? true : isOdd(k - 1) }
+    func isOdd(_ k: Int) -> Bool { return k == 0 ? false : isEven(k - 1) }
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6192,6 +6230,7 @@ func main() {
     s157() // SECTION-CALL 157
     s158() // SECTION-CALL 158
     s159() // SECTION-CALL 159
+    s160() // SECTION-CALL 160
     print("full: \(checks) checks, \(fails) failures")
 }
 
