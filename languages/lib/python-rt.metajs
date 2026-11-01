@@ -7269,8 +7269,10 @@ var pyBBFnObjs = []      // the builtin closures (identity scan)
 var pyBBFnCodes = []     // the code for each one, same index
 
 function js_pybfn(fn, code) {
+    var c = pyToStr(code)
     pyBBFnObjs.push(fn)
-    pyBBFnCodes.push(pyToStr(code))
+    pyBBFnCodes.push(c)
+    if (c.charAt(0) == "*") { pyBuiltinClass(c.substring(1, c.length))["__bfn"] = fn }
     return fn
 }
 
@@ -11548,7 +11550,12 @@ function js_pytype(v) {
     if (cls !== null) { return cls }
     var meta = pyClassMeta(v)
     if (meta !== null) { return meta }
-    return pyBuiltinClass(pyTypeName(v))
+    // The six class-like builtins are closures, so a value they make answers
+    // the closure js_pybfn kept as __bfn: CPython's type(range(3)) is range.
+    var c = pyBuiltinClass(pyTypeName(v))
+    var f = c["__bfn"]
+    if (f !== undefined) { return f }
+    return c
 }
 
 // BaseException.add_note(self, note): appends to the instance's __notes__ list,

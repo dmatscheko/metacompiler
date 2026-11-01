@@ -4778,8 +4778,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyTypeBuiltin["$slice"] = true
     // The six builtins CPython prints as CLASSES that are NOT in pyTypeBuiltin
     // above: they answer a cursor rather than convert, so binding them to a class
-    // object would change what CALLING them does, and only their RENDERING is at
-    // stake. Everything else declBind binds prints as <built-in function NAME>.
+    // object would change what CALLING them does. The "*" code makes them render
+    // as classes and makes type() of their values answer the closure itself
+    // (js_pybfn keeps it as __bfn). Everything else declBind binds prints as
+    // <built-in function NAME>.
     //
     // This list is the whole two-form split, and it lives HERE - once per half -
     // rather than in the Go twin and layer 2 and the interpreter, which is why

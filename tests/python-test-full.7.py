@@ -362,6 +362,11 @@ def s207():
           and isinstance(rs[0], range) and not isinstance(rs[0], list) and not isinstance(rs[0], tuple)
           and isinstance(enumerate([]), enumerate) and not isinstance(reversed([1]), reversed)
           and str(type(rs[1])) == "<class 'range'>")
+    vs = [(rs[0], range), (enumerate([1]), enumerate), (zip([1]), zip), (map(abs, [1]), map),
+          (filter(None, [1]), filter), (reversed("ab"), reversed)]
+    check("rng5", [type(v) is c and v.__class__ is c and type(v) in {c} for v, c in vs] == [True] * 6
+          and list(type(rs[0])(2)) == [0, 1] and type(reversed([1])) is not reversed
+          and type(reversed(rs[0])) is not reversed)
     check("rng3", [repr(rs[1][1:]), repr(rs[1][::-1]), repr(rs[3][5:]), repr(rs[2][::-1]), repr(rs[3][::2])]
           == ["range(3, 11, 2)", "range(9, -1, -2)", "range(-2, -2, -3)", "range(4, 4, -1)", "range(10, -2, -6)"])
     check("rng4", rs[0] == range(0, 3, 1) and rs[0] != [0, 1, 2] and rs[0] != (0, 1, 2) and range(0) == range(5, 2)

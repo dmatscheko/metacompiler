@@ -18435,7 +18435,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if m := pyClassMeta(v); m != nil {
 				return w(m)
 			}
-			return w(rt.pyBuiltinClass(pyTypeName(rt, v)))
+			return w(rt.pyTypeValue(v))
 		},
 		// type(name, bases, ns), or type() at any count but one and three: the
 		// class a class statement with those bases and body would build. Twin of
@@ -19802,7 +19802,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if rt.pyBuiltinRender == nil {
 				rt.pyBuiltinRender = map[interface{}]string{}
 			}
-			rt.pyBuiltinRender[u(a[0])] = rt.toString(u(a[1]))
+			code := rt.toString(u(a[1]))
+			rt.pyBuiltinRender[u(a[0])] = code
+			if strings.HasPrefix(code, "*") {
+				rt.pyBuiltinClass(code[1:]).set("__bfn", u(a[0]))
+			}
 			return a[0]
 		},
 		// next(it[, default]): the generator protocol, or one step of a cursor.
@@ -23377,7 +23381,7 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	// x.__class__ for a value that is not a user instance - the same synthetic
 	// class object type(x) hands out, so `[].__class__ is list` holds.
 	if name == "__class__" {
-		return rt.pyBuiltinClass(pyTypeName(rt, obj))
+		return rt.pyTypeValue(obj)
 	}
 	// CPython names a TYPE OBJECT differently from a value: "type object 'list'
 	// has no attribute 'nope'", not "'type' object has no attribute 'nope'".
@@ -26310,6 +26314,20 @@ func pyShortName(n string) string {
 		}
 	}
 	return n
+}
+
+// pyTypeValue is type(v) of a builtin value as Python code sees it. The six
+// class-like builtins (range, enumerate, zip, map, filter, reversed) are
+// closures, so a value they make answers the closure itself, which js_pybfn
+// keeps as __bfn on the internal type object: CPython's type(range(3)) is range.
+// Twin of pyTypeVal in languages/python-interpreter.abnf and js_pytype in
+// lib/python-rt.metajs.
+func (rt *jsrt) pyTypeValue(v interface{}) interface{} {
+	c := rt.pyBuiltinClass(pyTypeName(rt, v))
+	if f, ok := c.props["__bfn"]; ok {
+		return f
+	}
+	return c
 }
 
 // pyBuiltinClass hands out one stable class object per builtin type name, so

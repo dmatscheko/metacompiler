@@ -1699,7 +1699,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "type") {
             if (args.length == 3) { return pyTypeNew(args[0], args[1], args[2], undefined, null) }
             if (args.length != 1) { pyListErr("TypeError", "type() takes 1 or 3 arguments") }
-            return pyTypeOf(v)
+            return pyTypeVal(v)
         }
         if (name == "complex") { return pyComplexNew(args) }
         if (name == "bytes" || name == "bytearray") { return pyBytesNew(args, name) }
@@ -3044,7 +3044,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof hostGlobals[pyBClassNames[bn1]] == "function") {
             bfnFns.push(hostGlobals[pyBClassNames[bn1]])
             bfnCodes.push("*" + pyBClassNames[bn1])
+            pyBuiltinTypeObj(pyBClassNames[bn1]).__bfn = hostGlobals[pyBClassNames[bn1]]
         }
+    }
+    // type(v) as Python code sees it. The six class-like builtins are functions
+    // here, so a value they make answers the function itself (kept as __bfn on
+    // its internal type object): CPython's type(range(3)) is range. Twin of
+    // rt.pyTypeValue in abnf/jsrt.go and js_pytype in lib/python-rt.metajs.
+    function pyTypeVal(v) {
+        var t = pyTypeOf(v)
+        if (t.__builtin === true && t.__bfn !== undefined) { return t.__bfn }
+        return t
     }
 
     function pyHasAttrOf(o, name) {
@@ -13468,7 +13478,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "__hash__" && pyValHashNone(o)) { return undefined }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return pyBoundBuiltin(o, name) }
-        if (name == "__class__") { return pyTypeOf(o) }
+        if (name == "__class__") { return pyTypeVal(o) }
         if (isSet(o)) { pyAttrErr(o, name) }
         if (pyIsProp(o)) { return pyPropAttr(o, name) }
         if ((pyIsStatic(o) || pyIsClsM(o)) && pyDescAttrHas(name)) { return pyDescAttr(o, name) }
