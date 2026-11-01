@@ -133,7 +133,7 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-1036 php: array refcount/COW for reference holders; generator eager-run and yield-in-catch bugs · P3 · PHP · OPEN [V spec-only]
+### T-1036 php: array refcount/COW for reference holders; generator eager-run and yield-in-catch bugs · P3 · PHP · IN PROGRESS (PHP worker, round 37) [V spec-only]
 Remainder of T-1025 (needs real array refcounting or COW; counts stay correct-but-high): arrays holding reference cells that die (overwritten, frame-local, temp copies) never release them; unfinished generators never release; interpreter copies by-value array params while the compiler shares them; print_r recursion depth; PHP 8 "count(): Recursion detected" warning.
 Also found by PHP r36: (1) compiler: `function g2(){ try { thrower(); } catch (Exception $e) { yield 5; } }` iterated with foreach → "yield outside of a generator" under llvm.Run and native; interpreter gives 5 (correct). (2) interpreter runs a generator to completion on `->current()`, so its frame's holders are released while PHP's generator is suspended: `$gen = g(); $gen->current(); $w = $z; $w[0] = 11; echo $z[0];` → interpreter 1, compiler and PHP 11. (3) compiler `inc($$n)` to a by-ref param probably passes by value (inferred). (4) interpreter coreDepth not restored after a generator stop-throw.
 
