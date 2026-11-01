@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1000** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1001** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -150,11 +150,13 @@ run time (the if's scope covers both branches - needs the then-block's extent).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-970 php: `print_r` of a self-referencing array never terminates; `count($x, COUNT_RECURSIVE)`; `&` marker needs reference counts · P3 · PHP · IN PROGRESS (PHP worker, round 34) [V spec-only]
-Found by the PHP worker, round 33 (oracle: php-src EXPECT blocks / php.net). `$x=[1,[2]]; $x[1][] = &$x[1]; print_r($x);` never
-ends (php prints `*RECURSION*` where it re-enters); print_r is in lib/php-stdlib.php, where arrays have no identity - needs an
-identity primitive. `count([1,[2,3]], COUNT_RECURSIVE)` → 4, ours 2. var_dump's `&` marker counts only holders inside the dumped
-value: `$x = 5; $a = [&$x, 1]; var_dump($a);` → php `&int(5)`, ours `int(5)` (needs real reference refcounts).
+### T-1000 php: reference counts are never decremented (var_dump `&`, copy of an array holding a dead frame's reference) · P3 · PHP · OPEN [V spec-only]
+Found by the PHP worker, round 34 (php-src php_var_dump / zend_array_dup_element). Cells' `rc` only rises: nothing decrements it at
+frame exit (incl. exception unwinding, generators), array overwrite/discard, or for temporary literals. Effects: `$x=5; $a=[&$x,1];
+var_dump($a);` → php `&int(5)`, ours `int(5)`; `function f(){ $x=1; $a=[&$x]; return $a; } $r=f(); $r2=$r; $r2[0]=9; echo $r[0];`
+→ php 1 (refcount 1 after f returns, the copy drops the ref), ours 9. An undercount would break phpArrCopy's sharing, so all three
+engines must decrement exactly. Also: `$b=[1]; $b[]=&$b; print_r($b)` prints one level more before *RECURSION* (the root's identity
+is lost when the argument is copied); php's "count(): Recursion detected" and print_r/var_dump warnings are not emitted.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1105,6 +1107,7 @@ T-971 ruby: smaller gaps found in round 33 — PARTIAL - nested class-body const
 T-974 java: cyclic inheritance across files, through a redefined Object, and in type-variable bounds is not refused — DONE - cyclic inheritance across files (implicit source path), via redeclared java.lang.Object, and in type-variable bounds; javac's message, both halves
 T-994 kotlin: a binary operator at the start of a line continues the previous expression — DONE - OpSameLine: a newline outside ()/[]/${} ends the statement before + - * / % and postfix ++/--; kotlinc 2.2.21 verified
 T-995 kotlin: sortedBy/sortedWith selector call counts differ from the JDK's TimSort; held map entries are snapshots — DONE - JDK 24 TimSort port (call counts and contract violation match), comparator call order, live map entry nodes with setValue
+T-970 php: `print_r` of a self-referencing array never terminates; `count($x, COUNT_RECURSIVE)`; `&` marker needs reference counts — PARTIAL - count COUNT_RECURSIVE (+ValueError, sizeof), print_r *RECURSION*, library constants without a library piece; var_dump & needs exact refcounts, filed
 
 # Settled — do not re-open
 
