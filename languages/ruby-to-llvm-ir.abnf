@@ -6752,6 +6752,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     var rubyBaseConst = makeConst
+    var rbFloSlotNext = 5
     makeConst = function(v) {
         if (v !== null && v !== undefined && typeof v == "object" && v.__unsup != undefined) {
             return notImplExpr(v.__unsup, 0)
@@ -6766,13 +6767,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var bd = v.rbig
             return function(b) { return {b: b, v: callExt(b, "js_bigint", [emitStr(b, bd)])} }
         }
-        // A boxed literal of the numeric tower: 1.5 / 3r / 2i.
+        // A boxed literal of the numeric tower: 1.5 / 3r / 2i. A Float literal is
+        // one object per SITE, as in MRI (`2.times { a << 1e300 }' appends one
+        // object twice): js_rflok slot rbFloSlotNext, past the five constants.
         if (v !== null && v !== undefined && typeof v == "object" && v.rknd != undefined) {
             var kd = v.rknd
             var xa = v.ra
             var xb = v.rb
+            var fslot = 0
+            if (kd == 1) {
+                fslot = rbFloSlotNext
+                rbFloSlotNext = rbFloSlotNext + 1
+            }
             return function(b) {
-                if (kd == 1) { return {b: b, v: callExt(b, "js_rflo", [emitNum(b, xa)])} }
+                if (kd == 1) { return {b: b, v: callExt(b, "js_rflok", [emitNum(b, fslot), emitNum(b, xa)])} }
                 if (kd == 2) { return {b: b, v: callExt(b, "js_rrat", [emitNum(b, xa), emitNum(b, xb)])} }
                 return {b: b, v: callExt(b, "js_rcpx", [emitNum(b, xa), emitNum(b, xb)])}
             }
@@ -9404,17 +9412,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The price of folding: a program that reopens `class Float' and defines a
         // constant of one of these thirteen names sees the builtin, where MRI would
         // let the redefinition win.
+        //
+        // A Float constant is ONE object (Float::NAN.equal?(Float::NAN) is true,
+        // and NaN and Infinity are not flonums): js_rflok slots 0..4, see
+        // rbFloatSlot.
         if (parts.length == 2 && parts[0] == "Float" && rbFloatConst(parts[1]) != "") {
             var fname = parts[1]
             return function(b) {
                 var kind = rbFloatConst(fname)
                 if (kind == "int") { return {b: b, v: emitNum(b, rbFloatConstNum(fname))} }
-                if (kind == "inf") {
-                    var one = callExt(b, "js_rflo", [emitNum(b, rbFloatConstNum(fname))])
-                    var zed = callExt(b, "js_rflo", [emitNum(b, 0)])
-                    return {b: b, v: callExt(b, "js_rdiv", [one, zed])}
-                }
-                return {b: b, v: callExt(b, "js_rflo", [emitNum(b, rbFloatConstNum(fname))])}
+                var fv = callExt(b, "js_rflo", [emitNum(b, rbFloatConstNum(fname))])
+                if (kind == "inf") { fv = callExt(b, "js_rdiv", [fv, callExt(b, "js_rflo", [emitNum(b, 0)])]) }
+                return {b: b, v: callExt(b, "js_rflok", [emitNum(b, rbFloatSlot(fname)), fv])}
             }
         }
         return function(b) { return rbConstPath(b, parts, top === true) }
@@ -9429,6 +9438,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (n == "DIG" || n == "MANT_DIG" || n == "MAX_EXP" || n == "MIN_EXP") { return "int" }
         if (n == "MAX_10_EXP" || n == "MIN_10_EXP" || n == "RADIX" || n == "ROUNDS") { return "int" }
         return ""
+    }
+    // The js_rflok slot of each Float-valued constant.
+    function rbFloatSlot(n) {
+        if (n == "INFINITY") { return 0 }
+        if (n == "NAN") { return 1 }
+        if (n == "MAX") { return 2 }
+        if (n == "MIN") { return 3 }
+        return 4
     }
     // No exponent literal in this dialect (manual chapter 4), so MAX / MIN /
     // EPSILON are built by arithmetic: 2^512 by repeated squaring, then

@@ -36,7 +36,7 @@ func (rt *jsrt) rubyCpRange(s string, b, e int) string {
 // rubyIntSqrt is Integer.sqrt: the floor of the square root, exact past 2**53.
 // Twins: intSqrt in ruby-interpreter.abnf, rbIntSqrt in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyIntSqrt(v interface{}) interface{} {
-	if f, isFlo := v.(jsFlo); isFlo {
+	if f, isFlo := v.(*jsFlo); isFlo {
 		v = math.Trunc(f.f)
 	}
 	n, ok := rubyBigOf(v)
@@ -320,7 +320,7 @@ func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{},
 				key = rt.rubyLazyCall(f, v, m)
 			}
 			for _, k := range st.buf[j] {
-				if rt.rubyEql(k, key) {
+				if rt.rubyEqlID(k, key) {
 					return
 				}
 			}
@@ -370,7 +370,7 @@ func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
 	hi := r.props["end"]
 	if isUndefOrNull(hi) {
 		hi = jsNull
-	} else if f, isFlo := hi.(jsFlo); isFlo && math.IsInf(f.f, 1) {
+	} else if f, isFlo := hi.(*jsFlo); isFlo && math.IsInf(f.f, 1) {
 		hi = jsNull
 	}
 	lo, loNum := r.props["begin"].(float64)
@@ -381,7 +381,7 @@ func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
 		return lz
 	}
 	_, loStr := r.props["begin"].(string)
-	loF, loFlo := r.props["begin"].(jsFlo)
+	loF, loFlo := r.props["begin"].(*jsFlo)
 	_, loBig := r.props["begin"].(*jsBigInt)
 	if loStr || loFlo || (loBig && hi == jsNull) {
 		lz := rubyMkLazy("each", &jsArray{}, 0, jsNull, false, true, d)
@@ -458,6 +458,17 @@ func (rt *jsrt) rubyLazyOut(t, lz *jsObject, name string) interface{} {
 	return &jsArray{elems: rt.rubyLazyFirst(lz, -1)}
 }
 
+// rubyLazyRunEach runs blk on each value of lz as it is made (a break leaves),
+// answering nil: each_slice / each_cons / zip with a block on a stream. Twin of
+// lazyRunEach in ruby-interpreter.abnf.
+func (rt *jsrt) rubyLazyRunEach(lz *jsObject, blk interface{}) interface{} {
+	rt.rubyLazyPull(lz, -1, func(v interface{}, m bool) bool {
+		rt.rubyLazyCall(blk, v, m)
+		return false
+	})
+	return jsNull
+}
+
 func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) interface{} {
 	pos, blk := rubyBlockArgs(args)
 	desc := t.props["desc"].(string)
@@ -532,7 +543,11 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		if len(pos) > 0 {
 			zd = "(" + zd + ")"
 		}
-		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("zip", zf, 0), true, ld+zd+">"), name)
+		zl := rubyLazyCopy(t, rubyLazyOpOf("zip", zf, 0), true, ld+zd+">")
+		if blk != nil && !lazy {
+			return rt.rubyLazyRunEach(zl, blk)
+		}
+		return rt.rubyLazyOut(t, zl, name)
 	case name == "drop":
 		dn := rt.rubyArrCountArg(name, argAt(pos, 0), false)
 		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("drop", jsNull, dn), true, ld+"("+strconv.Itoa(dn)+")>"), name)
@@ -587,7 +602,7 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			var r bool
 			switch {
 			case seq:
-				r = rt.rubyEq(v, sx)
+				r = rt.rubyEqual(v, sx)
 			case blk != nil:
 				r = rubyTruthy(rt.rubyLazyCall(blk, v, m))
 			case len(pos) > 0:
@@ -687,6 +702,9 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		}
 		return rubyLazyCopy(t, nil, true, "#<Enumerator::Lazy: "+desc+">")
 	case "each_slice", "each_cons":
+		if blk != nil && !lazy {
+			return rt.rubyLazyRunEach(rubySliceEnum(t, name, rt.rubySliceSize(name, pos), true, desc), blk)
+		}
 		if blk == nil {
 			sn := rt.rubySliceSize(name, pos)
 			sd := name + rt.rubyInspectArgs(pos) + ">"
@@ -831,7 +849,7 @@ func rubyLazySizeVal(rt *jsrt, t *jsObject) interface{} {
 		return jsNull
 	}
 	if math.IsInf(c, 1) {
-		return jsFlo{f: c}
+		return &jsFlo{f: c}
 	}
 	return c
 }
@@ -940,7 +958,7 @@ func rubyStepForever(begV, byV interface{}, flo bool, desc string) *jsObject {
 		// float64() keeps Go from fusing the product into an FMA the other
 		// engines do not make.
 		if flo {
-			return jsFlo{f: float64(i*by) + beg}
+			return &jsFlo{f: float64(i*by) + beg}
 		}
 		return beg + float64(i*by)
 	}}
@@ -960,7 +978,7 @@ func rubyAnyBig(a, b, c interface{}) bool {
 
 // rubyIntWalk is bigIntStep of ruby-interpreter.abnf, which states the rule.
 func (rt *jsrt) rubyIntWalk(from, limit, by interface{}, desc string) *jsObject {
-	if lf, isFlo := limit.(jsFlo); isFlo {
+	if lf, isFlo := limit.(*jsFlo); isFlo {
 		if math.IsNaN(lf.f) || math.IsInf(lf.f, 0) {
 			return rubyStepForever(from, by, false, desc)
 		}
@@ -1033,9 +1051,9 @@ func (rt *jsrt) rubyRangeStep(t *jsObject, m string, args []interface{}) interfa
 	if !aseq && u == 0 {
 		rt.rubyRaiseErr(m, "ArgumentError", "step can't be 0")
 	}
-	_, fb := lo.(jsFlo)
-	_, fe := hi.(jsFlo)
-	_, fs := by.(jsFlo)
+	_, fb := lo.(*jsFlo)
+	_, fe := hi.(*jsFlo)
+	_, fs := by.(*jsFlo)
 	flo := fb || fe || fs
 	_, strLo := lo.(string)
 	desc := "((" + rt.rubyInspect(t) + ")." + m + rt.rubyInspectArgs(pos) + ")"
@@ -1058,7 +1076,7 @@ func (rt *jsrt) rubyRangeStep(t *jsObject, m string, args []interface{}) interfa
 		picked := &jsArray{}
 		if flo {
 			for _, d := range rubyFloatStep(rubyToF(lo), rubyToF(hi), u, rt.truthy(t.props["excl"])) {
-				picked.elems = append(picked.elems, jsFlo{f: d})
+				picked.elems = append(picked.elems, &jsFlo{f: d})
 			}
 		} else {
 			src := rt.rubyRangeToArr(t)
@@ -1172,7 +1190,7 @@ func (rt *jsrt) rubyAseqMethod(t *jsObject, name string, args []interface{}) int
 			return bsz
 		}
 		if endless {
-			return jsFlo{f: math.Inf(1)}
+			return &jsFlo{f: math.Inf(1)}
 		}
 		return float64(len(items.elems))
 	case "each":
@@ -1191,8 +1209,8 @@ func (rt *jsrt) rubyAseqMethod(t *jsObject, name string, args []interface{}) int
 	if isUndefOrNull(q.props["e"]) {
 		rt.rubyRaiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence")
 	}
-	_, eFlo := q.props["e"].(jsFlo)
-	if _, bFlo := q.props["b"].(jsFlo); eFlo || bFlo {
+	_, eFlo := q.props["e"].(*jsFlo)
+	if _, bFlo := q.props["b"].(*jsFlo); eFlo || bFlo {
 		rubyFloDomain(rt, (rubyToF(q.props["e"])-rubyToF(q.props["b"]))/rubyToF(q.props["s"]))
 	}
 	if endless {
@@ -1782,7 +1800,7 @@ func rubyHalfAway(mode byte, head, tail string) bool {
 // once a Float joined the sum.
 func rubyIsReal(v interface{}) bool {
 	switch v.(type) {
-	case float64, jsFlo, *jsBigInt, jsRat:
+	case float64, *jsFlo, *jsBigInt, jsRat:
 		return true
 	}
 	return false
@@ -2258,7 +2276,7 @@ func rubyPackInt(v interface{}) (*big.Int, bool) {
 		return big.NewInt(int64(t)), true
 	case *jsBigInt:
 		return t.v, true
-	case jsFlo:
+	case *jsFlo:
 		i, _ := big.NewFloat(math.Trunc(rubyToF(t))).Int(nil)
 		return i, true
 	}
@@ -2276,7 +2294,7 @@ func (rt *jsrt) rubyFloBytes(v interface{}, d rubyPackDir) []byte {
 	switch t := v.(type) {
 	case float64:
 		x = t
-	case jsFlo:
+	case *jsFlo:
 		x = t.f
 	case *jsBigInt:
 		x, _ = new(big.Float).SetInt(t.v).Float64()
@@ -2612,7 +2630,7 @@ func (rt *jsrt) rubyUnpack(b, name string, args []interface{}) interface{} {
 					out.elems = append(out.elems, jsNull)
 					p = len(b)
 				case rubyFloDir(d.d):
-					out.elems = append(out.elems, jsFlo{f: rubyFloOf(b[p:p+d.size], d.be)})
+					out.elems = append(out.elems, &jsFlo{f: rubyFloOf(b[p:p+d.size], d.be)})
 					p += d.size
 				default:
 					out.elems = append(out.elems, rt.rubyIntOf(b[p:p+d.size], d.be, d.signed))

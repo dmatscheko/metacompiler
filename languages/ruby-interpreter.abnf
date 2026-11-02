@@ -8902,11 +8902,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // BasicObject#equal? - OBJECT IDENTITY. The rule is NOT a bare `===' (MRI 2.6.10,
     // the same in 3.x):
     //
-    //   a Float is a BOX here and a flonum in MRI, so identity ON THE BOX would
-    //   make 1.0.equal?(1.0) FALSE where MRI says true. The doubles are compared
-    //   instead, which also delivers MRI's `false' for NaN by construction. A `==='
-    //   would not do: this half compares two boxes by JS identity while layer 2's
-    //   `===' is the floor's strict_eq (manual 7.9), so the two halves would part.
+    //   a Float is a BOX here, and in MRI either a flonum (kept in the VALUE word,
+    //   so 1.0.equal?(1.0) is true) or a heap object (1e300, -0.0, NaN, Infinity:
+    //   equal? only to itself). So: the same box, or two boxes holding the same
+    //   flonum (floFlonum).
     //
     //   a plain String, a Rational and a Complex answer FALSE, always. MRI
     //   allocates a fresh object for each of them ("a".equal?("a") is false, and so
@@ -8920,20 +8919,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     //   Integer (a distinct object per value, which is MRI's answer for
     //   (2**70).equal?(2**70) too) and every user instance and class object.
     //
-    // Left divergent on purpose, because it is MRI's flonum REPRESENTATION showing
-    // through rather than a semantic: 1e300.equal?(1e300) and (-0.0).equal?(-0.0)
-    // are false in MRI (neither value is a flonum) and true here.
-    //
     // rbIdenticalP in languages/lib/ruby-rt.metajs and rubyIdenticalP in
     // abnf/jsrt.go are the twins.
     function identicalP(a, b) {
         if (a === null || a === undefined || b === null || b === undefined) {
             return (a === null || a === undefined) && (b === null || b === undefined)
         }
-        if (isFlo(a) || isFlo(b)) { return isFlo(a) && isFlo(b) && a.f === b.f }
+        if (isFlo(a) || isFlo(b)) { return isFlo(a) && isFlo(b) && (a === b || (a.f === b.f && floFlonum(a.f) && floFlonum(b.f))) }
         if (typeof a == "string" || typeof b == "string") { return false }
         if (isRat(a) || isCpx(a) || isRat(b) || isCpx(b)) { return false }
         return a === b
+    }
+    // Does MRI (64-bit) keep this Float in the VALUE word? +0.0, or a magnitude in
+    // [2^-255, 2^257) other than the positive 2^-255 itself - the exponent fields
+    // 0x300..0x4ff of rb_float_new_inline, read without bit access. Twins:
+    // rubyFlonum in abnf/jsrt.go, rbFlonum in lib/ruby-rt.metajs.
+    function floFlonum(f) {
+        if (f === 0) { return 1 / f > 0 }
+        var lo = Math.pow(2, 0 - 255)
+        var a = f < 0 ? -f : f
+        return a >= lo && a < Math.pow(2, 257) && f !== lo
     }
     // The class object of any value (Object#class), used by is_a? / instance_of? and
     // by the `when Integer` form of case.
@@ -8956,6 +8961,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isDict(v)) { return hostGlobals["Hash"] }
         if (isEnum(v) && v.aseq !== undefined) { return hostGlobals["Enumerator::ArithmeticSequence"] }
         if (isEnum(v)) { return hostGlobals[v.lazy === true ? "Enumerator::Lazy" : "Enumerator"] }
+        if (typeof v == "object" && v.__ryld === true) { return hostGlobals["Enumerator::Yielder"] }
         if (isUserObj(v)) { return v.__class }
         // A class object's own class is Class, a module object's is Module.
         if (isClassObj(v)) {
@@ -9108,6 +9114,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Object#to_enum / #enum_for(meth = :each, *args) on a user instance: a
     // deferred Enumerator whose values are what that method yields (enumForce).
     // Twins: rubyToEnum in abnf/jsrtruby.go, rbToEnum in lib/ruby-rt.metajs.
+    // Enumerator.new { |y| ... }: a stream Enumerator (mkLazy "each") whose source
+    // is the Enumerator::Generator {__rgen}. Its #each runs the block with an
+    // Enumerator::Yielder {__ryld} whose << / yield / call hand each value to the
+    // #each block, so first(n), take_while, lazy and next stop an endless one
+    // (lazyDrive, rbRunNext). #size is the optional argument, else nil. Twins:
+    // rubyEnumGenNew / rubyEnumGenMethod in abnf/jsrtrubystr.go, rbEnumGenNew /
+    // rbEnumGenMethod in lib/ruby-rt.metajs.
+    function enumGenNew(args, blk) {
+        var e = mkLazy("each", [], 0, null, false, false, "#<Enumerator: #<Enumerator::Generator>:each>")
+        e.src = {__rgen: true, blk: blk}
+        e.bsz = args.length > 0 ? args[0] : null
+        return e
+    }
+    function enumGenMethod(t, name, args, blk) {
+        if (t.__rgen === true && name == "each" && blk != null) { return blockCall(t.blk, [{__ryld: true, f: blk}]) }
+        if (t.__ryld === true && name == "<<") {
+            blockCall(t.f, [args[0]])
+            return t
+        }
+        if (t.__ryld === true && (name == "yield" || name == "call")) { return blockCall(t.f, args) }
+        if (t.__ryld === true && name == "to_proc") { return function() { return blockCall(t.f, argsArray(arguments)) } }
+        noMethod(t, name)
+    }
     function toEnum(t, args) {
         var meth = args.length > 0 ? rstr(args[0]) : "each"
         var e = enumAt(mkEnumOp([], "each"), t, meth, args.slice(1))
@@ -10520,6 +10549,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             noMethod(target, name)
         }
         if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
+        if (target.__rgen === true || target.__ryld === true) { return enumGenMethod(target, name, args, blk) }
         if (isEnum(target)) {
             if (blk != null && isDict(target.src) && target.__rlazy !== true) { return hashIter(target.src, target, name, args, blk) }
             return enumMethod(target, name, args, blk)
@@ -10655,6 +10685,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "new" && target === hostGlobals["Array"]) { return arrNew(args, blk) }
             if (name == "new" && target === hostGlobals["Regexp"]) { return regexNew(args) }
             if (name == "new" && target === hostGlobals["Struct"]) { return structNew(args) }
+            if (name == "new" && target === hostGlobals["Enumerator"] && blk != null) { return enumGenNew(args, blk) }
             if (name == "sqrt" && target === hostGlobals["Integer"]) { return intSqrt(args[0]) }
             // Regexp.last_match / last_match(n): $~, or its group n.
             if (name == "last_match" && target === hostGlobals["Regexp"]) {
@@ -11560,6 +11591,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return lazyFirst(lz, -1)
     }
+    // Run blk on each value of lz as it is made (a break leaves), answering nil.
+    function lazyRunEach(lz, blk) {
+        rbaLazyFirst(lz, -1, lazyCall, rtest, valEql, lazyDrive, function(v, m) {
+            lazyCall(blk, v, m)
+            return false
+        })
+        return null
+    }
     function lazyMethod(t, name, args, blk) {
         var lop = rbaLazyOp(name)
         if (name == "each_entry" && blk != null) { name = "each" }
@@ -11605,7 +11644,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 zf.push(lazyNth(args[zi]))
                 zd = zd + (zi > 0 ? ", " : "") + rinspect(args[zi])
             }
-            return lazyOut(t, lazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + (args.length > 0 ? "(" + zd + ")" : "") + ">"), name)
+            var zl = lazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + (args.length > 0 ? "(" + zd + ")" : "") + ">")
+            if (blk != null && !t.lazy) { return lazyRunEach(zl, blk) }
+            return lazyOut(t, zl, name)
         }
         if (name == "drop") {
             var dn = arrCountArg(name, args[0], false)
@@ -11707,8 +11748,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return lazyEachVal(t)
         }
         if (name == "lazy") { return t.lazy ? t : lazyCopy(t, null, true, "#<Enumerator::Lazy: " + t.desc + ">") }
-        // each_slice(n) / each_cons(n) without a block stay one value at a time.
-        // Twins: rbLazyMethod, rubyLazyMethod.
+        // each_slice(n) / each_cons(n) with a block run it on each group as it is
+        // made, so a break ends an endless source; they answer nil. Without one
+        // they stay one value at a time. Twins: rbLazyMethod, rubyLazyMethod.
+        if (rbaSliceOp(name) != "" && blk != null && !t.lazy) {
+            return lazyRunEach(lazyCopy(t, {k: rbaSliceOp(name), f: null, n: sliceSize(name, args)}, true, t.desc), blk)
+        }
         if (rbaSliceOp(name) != "" && blk == null) {
             var sn = sliceSize(name, args)
             return lazyCopy(t, {k: rbaSliceOp(name), f: null, n: sn}, t.lazy,
@@ -15973,7 +16018,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRStr(l)) { return strMutate(l, "<<", [r], null) }
         if (isBin(l)) { return binMethod(l, "<<", [r], null) }
         if (typeof l == "string") { return l + strAppendText(r) }
-        if (isUserObj(l)) { return mcall(l, "<<", [r], null) }
+        if (isUserObj(l) || (l !== null && typeof l == "object" && l.__ryld === true)) { return mcall(l, "<<", [r], null) }
         return rbin("<<", l, r)
     }
     // items = [v, op, v, op, v, ...]
@@ -16595,7 +16640,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // chain has to reach this one.
             return userIsA(v, cls)
         }
-        return userIsA(v, cls)
+        return userIsA(v, cls) || (builtinMixed && ancestorHas(isAClassOf(v), cls))
+    }
+    // The class whose ancestors decide v.is_a?, once a module was included into a
+    // builtin class (builtinMixed, set by includeInto): `class Object; include M;
+    // end' makes 5, "s" and every instance an M. Twins: rubyIsAClass in
+    // abnf/jsrt.go, rbIsAClass in lib/ruby-rt.metajs.
+    var builtinMixed = false
+    function isAClassOf(v) {
+        if (isUserObj(v)) { return v.__class }
+        return classOf(v)
     }
     function userIsA(v, cls) {
         // A class OBJECT is_a? a module it EXTENDed: `class D; extend M; end' makes
@@ -16666,9 +16720,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             c = c.__super
         }
         if (cls.__ismodule !== true) {
-            out.push(hostGlobals["Object"])
-            out.push(hostGlobals["Kernel"])
-            out.push(hostGlobals["BasicObject"])
+            // A module included into Object follows it: [Object, M, Kernel, BasicObject].
+            var roots = ["Object", "Kernel", "BasicObject"]
+            for (var r = 0; r < roots.length; r++) {
+                var rc = hostGlobals[roots[r]]
+                out.push(rc)
+                if (rc.__mixins != undefined) {
+                    for (var rm = rc.__mixins.length - 1; rm >= 0; rm--) { out.push(rc.__mixins[rm]) }
+                }
+            }
         }
         return out
     }
@@ -16952,6 +17012,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["Enumerator::Lazy"] = mkBuiltinClass("Enumerator::Lazy", hostGlobals["Enumerator"])
     hostGlobals["Enumerator"]["$c$Lazy"] = hostGlobals["Enumerator::Lazy"]
     hostGlobals["Enumerator::ArithmeticSequence"] = mkBuiltinClass("Enumerator::ArithmeticSequence", hostGlobals["Enumerator"])
+    hostGlobals["Enumerator::Yielder"] = mkBuiltinClass("Enumerator::Yielder", hostGlobals["Object"])
+    hostGlobals["Enumerator"]["$c$Yielder"] = hostGlobals["Enumerator::Yielder"]
     hostGlobals["Enumerator"]["$c$ArithmeticSequence"] = hostGlobals["Enumerator::ArithmeticSequence"]
     // What String#encode raises.
     var encErrs = ["UndefinedConversionError", "InvalidByteSequenceError", "ConverterNotFoundError"]
@@ -17054,6 +17116,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function includeInto(c, mods) {
         // A builtin class without a builtin mixin (Object, Integer, ...) has no list yet.
         if (c.__mixins == undefined) { c.__mixins = [] }
+        if (c.__builtin === true) { builtinMixed = true }
         for (var i = mods.length - 1; i >= 0; i--) {
             var m = mods[i]
             if (!mixinListHas(c.__mixins, m)) {

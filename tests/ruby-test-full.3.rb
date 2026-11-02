@@ -1333,6 +1333,96 @@ def s186
   check("ie186f", q.instance_variable_get(:@b) == 9 && (o.instance_eval { raise "boom" } rescue $!.message) == "boom")
 end
 
+# ===== SECTION 187: Float identity =====
+# A Float is equal? to another when it is the same object, or when both hold the
+# same flonum - the doubles MRI keeps in the VALUE word: +0.0 and magnitudes in
+# [2^-255, 2^257) but the positive 2^-255. NaN, the infinities, -0.0 and 1e300
+# are objects of their own, and so is every Float constant and literal SITE, read
+# twice. Array#include? / index / count / delete, Array#== and Hash#== and the
+# hash-based uniq / - / Hash keys compare identity first, so a NaN finds itself
+# while nan == nan stays false. /usr/bin/ruby 2.6 settles each.
+def s187lit; 1e300; end
+def s187
+  v = [0.0, 1e300, -0.0, 1.5, 2.0, 5e-324]
+  m = v[0] / v[0]
+  n = Float::NAN
+  check("fi187a", n.equal?(n) && Float::NAN.equal?(Float::NAN) && Float::INFINITY.equal?(Float::INFINITY) && m.equal?(m) &&
+        !(v[0] / v[0]).equal?(v[0] / v[0]) && !(v[1] * 1.0).equal?(v[1] * 1.0) && !(v[2] * 1.0).equal?(v[2] * 1.0) &&
+        (v[0] * 1.0).equal?(v[0] * 1.0) && !(v[0] * 1.0).equal?(v[2] * 1.0) && (v[3] * 1.0).equal?(v[3] * 1.0) &&
+        !(v[5] * 1.0).equal?(v[5] * 1.0) && s187lit.equal?(s187lit))
+  fl = [v[4] ** 256, v[4] ** 257, v[4] ** -255, -(v[4] ** -255), v[4] ** -256, 2.3e77 * v[4] / v[4], 2.4e77 * v[4] / v[4]]
+  check("fi187b", fl.map { |x| (x * 1.0).equal?(x * 1.0) } == [true, false, false, true, false, true, false])
+  a = []
+  2.times { a << 1e300 }
+  check("fi187c", [m].include?(m) && [m].index(m) == 0 && [m].count(m) == 1 && [m, 1].rindex(m) == 0 &&
+        !([m].include?(v[0] / v[0])) && [1.0, m].delete(m).equal?(m) && [m] == [m] && [[m]] == [[m]] &&
+        [m].eql?([m]) && !(m == m) && m != m && !m.eql?(m) && a[0].equal?(a[1]))
+  h = {m => 1}
+  h[m] = 2
+  check("fi187d", h[m] == 2 && h.key?(m) && h.size == 1 && h[v[0] / v[0]].nil? && {k: m} == {k: m} &&
+        [m, m].uniq.size == 1 && [v[0] / v[0], v[0] / v[0]].uniq.size == 2 && ([m] - [m]).empty? && ([m] & [m]).size == 1)
+end
+# ===== SECTION 188: a module included into Object or a builtin class, reflected =====
+# `class Object; include M; end' puts M after Object in every class's ancestors
+# and makes every value an M (is_a?, Module#===, include?, <=); a module included
+# into Integer sits between Integer and Numeric. /usr/bin/ruby 2.6 settles each.
+module S188M
+  def s188m; :m; end
+end
+module S188N
+  def s188n; :n; end
+end
+class Object
+  include S188M
+end
+class Integer
+  include S188N
+end
+class S188C; end
+def s188
+  v = [5, "s", nil, [1], 2.5]
+  ia = Integer.ancestors
+  check("mr188a", Object.ancestors[0, 3] == [Object, S188M, S186M] && Object.ancestors[-2, 2] == [Kernel, BasicObject] && ia.index(S188N) == ia.index(Integer) + 1 &&
+        ia.index(S188N) < ia.index(Numeric) && ia.index(S188M) == ia.index(Object) + 1 &&
+        String.ancestors.index(S188M) == String.ancestors.index(Object) + 1)
+  check("mr188b", Integer.include?(S188M) && Integer.include?(S188N) && String.include?(S188M) && !String.include?(S188N) &&
+        Object.include?(S188M) && Array.include?(S188M) && (Integer < S188N) == true && (Integer <= S188M) == true &&
+        (String < S188N).nil?)
+  check("mr188c", v.all? { |x| x.is_a?(S188M) } && v[0].is_a?(S188N) && v[0].kind_of?(S188N) && !v[1].is_a?(S188N) &&
+        S188M === v[1] && S188N === v[0] && !(S188N === v[1]) && S188C.new.is_a?(S188M) && !S188C.new.is_a?(S188N) &&
+        (case v[0] when S188N then :n else :x end) == :n && v[0].s188n == :n && v[3].s188m == :m)
+end
+# ===== SECTION 189: Enumerator.new and endless slices / zips with a breaking block =====
+# Enumerator.new { |y| ... } yields what the block feeds its Yielder (<<, yield,
+# call), external next/peek/rewind included, and an endless generator stops at a
+# break or a first(n). each_slice / each_cons / zip on an endless source with a
+# block run the block group by group. /usr/bin/ruby 2.6 settles each.
+def s189
+  e = Enumerator.new { |y| y << 1 << 2; y.yield 3; :done }
+  a = [e.next, e.next, e.next]
+  r = begin; e.next; rescue StopIteration => x; x.result; end
+  e.rewind
+  check("eg189a", a == [1, 2, 3] && r == :done && e.peek == 1 && e.to_a == [1, 2, 3] && e.each { |v| v } == :done &&
+        Enumerator.new(3) { |y| y << 1 }.size == 3 && e.size.nil? && e.lazy.map { |v| v * 10 }.to_a == [10, 20, 30])
+  g = Enumerator.new { |y| y.yield 1, 2; y.yield 3, 4 }
+  check("eg189b", g.to_a == [[1, 2], [3, 4]] && g.map { |p, q| p + q } == [3, 7] && e.select(&:odd?) == [1, 3] &&
+        e.sort.reverse == [3, 2, 1] && e.sum == 6 && e.reduce(:+) == 6 && !e.include?(9) && e.each_with_index.to_a == [[1, 0], [2, 1], [3, 2]])
+  n = Enumerator.new { |y| i = 0; loop { y << (i += 1) } }
+  s = []
+  n.each { |v| s << v; break if v > 3 }
+  c = 0
+  z = Enumerator.new { |y| c += 1; y << c }
+  check("eg189c", s == [1, 2, 3, 4] && n.lazy.map { |v| v * v }.select(&:even?).first(3) == [4, 16, 36] &&
+        n.find { |v| v > 5 } == 6 && n.each_slice(3).first(2) == [[1, 2, 3], [4, 5, 6]] && n.take(3) == [1, 2, 3] &&
+        n.each_with_index.first(2) == [[1, 0], [2, 1]] && z.first == 1 && z.first == 2 && c == 2)
+  sl = []
+  n.each_slice(2) { |q| sl << q; break if sl.size == 2 }
+  co = []
+  n.each_cons(3) { |q| co << q; break if co.size == 2 }
+  zp = []
+  n.zip(n) { |q| zp << q; break if zp.size == 2 }
+  check("eg189d", sl == [[1, 2], [3, 4]] && co == [[1, 2, 3], [2, 3, 4]] && zp == [[1, 1], [2, 2]])
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1366,5 +1456,8 @@ s126() # SECTION-CALL 126
 s184() # SECTION-CALL 184
 s185() # SECTION-CALL 185
 s186() # SECTION-CALL 186
+s187() # SECTION-CALL 187
+s188() # SECTION-CALL 188
+s189() # SECTION-CALL 189
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

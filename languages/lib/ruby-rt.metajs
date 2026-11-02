@@ -3842,7 +3842,7 @@ function rbPyEqual(x, y) {
     // that == compares field by field - so `[1.0] == [1.0]` needs this arm to be
     // true natively too. rbEq settles two numbers without reaching this function
     // again.
-    if (rbIsNum(x) && rbIsNum(y)) { return rbEq(x, y) }
+    if (rbIsNum(x) && rbIsNum(y)) { return x === y || rbEq(x, y) }
     if (rbIsBox(x) || rbIsBox(y)) { return rbBinEq(x, y) }
     if ((typeof x == "object" && rtTag(x, "__rstr")) || (typeof y == "object" && rtTag(y, "__rstr"))) { return rbSV(x) === rbSV(y) }
     // A Range is a VALUE for the same reason a boxed number is: two range literals
@@ -3947,11 +3947,14 @@ function rbEq(l, r) {
 }
 
 // The first position at which an element is Ruby-== to v, or -1. Array#include?,
-// #index and #find_index are all defined on ==.
+// #index and #find_index are all defined on MRI's rb_equal: identity first, so a
+// NaN finds itself while `nan == nan' stays false. The same `===' guard stands
+// before every rbEq / rbEql a collection runs (count, delete, Array#==, uniq,
+// Array#eql? ...). Twin of rubyEqual / rubyEqlID in abnf/jsrt.go.
 function rbArrIndex(t, v) {
     var i = 0
     while (i < t.length) {
-        if (rbEq(t[i], v)) { return i }
+        if (t[i] === v || rbEq(t[i], v)) { return i }
         i = i + 1
     }
     return 0 - 1
@@ -3970,7 +3973,7 @@ function rbEql(a, b) {
         if (a.length != b.length) { return false }
         var i = 0
         while (i < a.length) {
-            if (!rbEql(a[i], b[i])) { return false }
+            if (a[i] !== b[i] && !rbEql(a[i], b[i])) { return false }
             i = i + 1
         }
         return true
@@ -3984,7 +3987,7 @@ function rbEql(a, b) {
         while (j < ak.length) {
             var at = rbDictFind(bk, ak[j])
             if (at < 0) { return false }
-            if (!rbEql(av[j], b["vals"][at])) { return false }
+            if (av[j] !== b["vals"][at] && !rbEql(av[j], b["vals"][at])) { return false }
             j = j + 1
         }
         return true
@@ -4205,10 +4208,13 @@ function rbIncludersPut(m, nm, fn) {
     }
     return undefined
 }
+// Set once a module is included into a builtin class (rbIsA reads it).
+var rbBuiltinMixed = false
 // Module#include run at run time: the program's module m mixed into the class c.
 // Twin of rubyInclude in abnf/jsrtruby.go, which states the rule.
 function js_rinclude(c, m) {
     if (!rbIsObj(m)) { return null }
+    if (typeof c["__rbuiltin"] == "string") { rbBuiltinMixed = true }
     var nm = m["__name"]
     if (c["$mix$" + nm] === m) { return null }
     var own = {}
@@ -4532,18 +4538,27 @@ function rbFindMethod(v, name) {
 // BasicObject#equal? - OBJECT IDENTITY.
 //
 // The rule is NOT a bare `===' and the reasoning is at identicalP in
-// languages/ruby-interpreter.abnf, which carries the row table: a Float
-// compares by its DOUBLE (MRI's flonum makes 1.0.equal?(1.0) true, and NaN false
-// falls out), a String / Rational / Complex is always false (MRI allocates a fresh
+// languages/ruby-interpreter.abnf, which carries the row table: a Float is
+// the same box, or two boxes of one flonum (rbFlonum), a String / Rational /
+// Complex is always false (MRI allocates a fresh
 // object per value and this model has no identity for any of them), and everything
 // else is a reference or an interned value, where identity is exactly right.
 // rubyIdenticalP in abnf/jsrt.go is the other twin.
 function rbIdenticalP(a, b) {
     if (rtIsNil(a) || rtIsNil(b)) { return rtIsNil(a) && rtIsNil(b) }
-    if (rbIsFlo(a) || rbIsFlo(b)) { return rbIsFlo(a) && rbIsFlo(b) && a["f"] === b["f"] }
+    if (rbIsFlo(a) || rbIsFlo(b)) { return rbIsFlo(a) && rbIsFlo(b) && (a === b || (a["f"] === b["f"] && rbFlonum(a["f"]) && rbFlonum(b["f"]))) }
     if (typeof a == "string" || typeof b == "string") { return false }
     if (rbIsRat(a) || rbIsCpx(a) || rbIsRat(b) || rbIsCpx(b)) { return false }
     return a === b
+}
+
+// Does MRI keep this Float in the VALUE word? Twin of floFlonum in
+// ruby-interpreter.abnf, which has the rule.
+function rbFlonum(f) {
+    if (f === 0) { return 1 / f > 0 }
+    var lo = Math.pow(2, 0 - 255)
+    var a = f < 0 ? -f : f
+    return a >= lo && a < Math.pow(2, 257) && f !== lo
 }
 
 // rubyClassName: the builtin class a runtime value belongs to ("" when none).
@@ -4839,14 +4854,25 @@ function rbIsA(v, cls) {
         // (Struct.new(:a)'s superclass is Struct): the chain walk below.
         if (typeof v != "object") { return false }
     }
-    if (!rbIsObj(v)) { return false }
-    var c = v["__class"]
-    while (c !== undefined && c !== null) {
-        if (c === cls) { return true }
-        if (!rbIsObj(c)) { return false }
-        c = c["__super"]
+    if (rbIsObj(v)) {
+        var c = v["__class"]
+        while (c !== undefined && c !== null) {
+            if (c === cls) { return true }
+            if (!rbIsObj(c)) { break }
+            c = c["__super"]
+        }
     }
-    return false
+    return rbBuiltinMixed && rbAncestorHas(rbIsAClass(v), cls)
+}
+
+// The class whose ancestors decide v.is_a?, once a module was included into a
+// builtin class (rbBuiltinMixed, set by js_rinclude). Twin of rubyIsAClass in
+// abnf/jsrt.go, which states the rule.
+function rbIsAClass(v) {
+    if (rbIsObj(v) && v["__class"] !== undefined && v["__class"] !== null) { return v["__class"] }
+    var n = rbValueClassName(v)
+    if (n != "") { return rbBuiltinClass(n) }
+    return null
 }
 
 // ----- Module#ancestors and the module relational operators -----
@@ -4882,7 +4908,9 @@ function rbAncestors(cls) {
             // name chase stops before them rather than duplicating them.
             var bn = c["__name"]
             while (typeof bn == "string" && bn != "" && !rbRootAncestor(bn)) {
-                out.push(rbBuiltinClass(bn))
+                var bc = rbBuiltinClass(bn)
+                out.push(bc)
+                rbPushAll(out, bc["__mixorder"])
                 var bmx = rbBuiltinMixin(bn)
                 if (bmx != "") { out.push(rbBuiltinClass(bmx)) }
                 bn = rbExcParentOf(bn)
@@ -4896,9 +4924,15 @@ function rbAncestors(cls) {
         c = c["__super"]
     }
     if (cls["__ismodule"] !== true) {
-        out.push(rbBuiltinClass("Object"))
-        out.push(rbBuiltinClass("Kernel"))
-        out.push(rbBuiltinClass("BasicObject"))
+        // A module included into Object follows it: [Object, M, Kernel, BasicObject].
+        var roots = ["Object", "Kernel", "BasicObject"]
+        var ri = 0
+        while (ri < roots.length) {
+            var rc = rbBuiltinClass(roots[ri])
+            out.push(rc)
+            rbPushAll(out, rc["__mixorder"])
+            ri = ri + 1
+        }
     }
     return out
 }
@@ -5586,7 +5620,7 @@ function rbBin(op, l, r) {
                 var drop = false
                 var b = 0
                 while (b < r.length) {
-                    if (rbEql(l[a], r[b])) {
+                    if (l[a] === r[b] || rbEql(l[a], r[b])) {
                         drop = true
                         break
                     }
@@ -5616,6 +5650,7 @@ function rbBin(op, l, r) {
             return l
         }
         if (typeof l == "string") { return l + rbStrAppendText(r) }
+        if (rbIsObj(l) && l["__ryld"] === true) { return rbEnumGenMethod(l, op, [r]) }
     }
     return rbNumBin(op, l, r)
 }
@@ -6999,7 +7034,7 @@ function rbArrSub(t, from, len) {
 function rbArrHas(a, v) {
     var i = 0
     while (i < a.length) {
-        if (rbEql(a[i], v)) { return true }
+        if (a[i] === v || rbEql(a[i], v)) { return true }
         i = i + 1
     }
     return false
@@ -7456,6 +7491,15 @@ function rbLazySize(t) {
     if (c == inf) { return rbMkFlo(inf) }
     return c
 }
+// Run blk on each value of lz as it is made, answering nil. Twin of lazyRunEach
+// in ruby-interpreter.abnf.
+function rbLazyRunEach(lz, blk) {
+    rbaLazyFirst(lz, 0 - 1, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, function(v, m) {
+        rbLazyCall(blk, v, m)
+        return false
+    })
+    return null
+}
 function rbLazyMethod(t, name, args) {
     var blk = rbBlockOf(args)
     var nPos = rbNPos(args)
@@ -7501,7 +7545,9 @@ function rbLazyMethod(t, name, args) {
             zi = zi + 1
         }
         if (nPos > 0) { zd = "(" + zd + ")" }
-        return rbLazyOut(t, rbLazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + zd + ">"), name)
+        var zl = rbLazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + zd + ">")
+        if (blk !== null && t["lazy"] !== true) { return rbLazyRunEach(zl, blk) }
+        return rbLazyOut(t, zl, name)
     }
     if (name == "drop") {
         var dn = rbArrCountArg(name, rbArgAt(args, 0), false)
@@ -7548,7 +7594,7 @@ function rbLazyMethod(t, name, args) {
         var hits1 = [0]
         var hit = rbLazyScan(t, function(v, m) {
             var r = false
-            if (seq) { r = rbEq(v, sx) }
+            if (seq) { r = v === sx || rbEq(v, sx) }
             else if (blk !== null) { r = rbTruthy(rbLazyCall(blk, v, m)) }
             else if (nPos > 0) { r = rbTruthy(js_rxwhen(sx, v)) }
             else { r = rbTruthy(v) }
@@ -7621,8 +7667,12 @@ function rbLazyMethod(t, name, args) {
         if (t["lazy"] === true) { return t }
         return rbLazyCopy(t, null, true, "#<Enumerator::Lazy: " + desc + ">")
     }
-    // each_slice(n) / each_cons(n) without a block stay one value at a time. Twins:
+    // each_slice(n) / each_cons(n) with a block run it on each group as it is
+    // made and answer nil; without one they stay one value at a time. Twins:
     // lazyMethod in ruby-interpreter.abnf, rubyLazyMethod in abnf/jsrtrubystr.go.
+    if (rbaSliceOp(name) != "" && blk !== null && t["lazy"] !== true) {
+        return rbLazyRunEach(rbLazyCopy(t, {k: rbaSliceOp(name), f: null, n: rbSliceSize(name, args, nPos)}, true, desc), blk)
+    }
     if (rbaSliceOp(name) != "" && blk === null) {
         var sn = rbSliceSize(name, args, args.length)
         var lz = t["lazy"] === true
@@ -8052,7 +8102,7 @@ function rbHashMethod(o, keys, vals, name, args) {
         if (nPos != 1) { rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given " + nPos + ", expected 1)") }
         if (name == "index") { rbHidxWarn() }
         while (i < vals.length) {
-            if (rbEq(vals[i], rbArgAt(args, 0))) { return rbKeyOut(keys[i]) }
+            if (vals[i] === rbArgAt(args, 0) || rbEq(vals[i], rbArgAt(args, 0))) { return rbKeyOut(keys[i]) }
             i = i + 1
         }
         return null
@@ -8273,7 +8323,7 @@ function rbArrayMethod(t, name, args) {
         while (ri >= 0) {
             if (blk !== null && nPos == 0) {
                 if (rbTruthy(rbCall1(blk, t[ri]))) { return ri }
-            } else if (rbEq(t[ri], rbPosAt(args, nPos, 0))) { return ri }
+            } else if (t[ri] === rbPosAt(args, nPos, 0) || rbEq(t[ri], rbPosAt(args, nPos, 0))) { return ri }
             ri = ri - 1
         }
         return null
@@ -8292,7 +8342,7 @@ function rbArrayMethod(t, name, args) {
             var dup = false
             var uj = 0
             while (uj < uk.length) {
-                if (rbEql(uk[uj], ukey)) { dup = true; break }
+                if (uk[uj] === ukey || rbEql(uk[uj], ukey)) { dup = true; break }
                 uj = uj + 1
             }
             if (!dup) {
@@ -8512,7 +8562,7 @@ function rbArrayMethod(t, name, args) {
         var cn = 0
         var cj = 0
         while (cj < t.length) {
-            if (rbEq(t[cj], args[0])) { cn = cn + 1 }
+            if (t[cj] === args[0] || rbEq(t[cj], args[0])) { cn = cn + 1 }
             cj = cj + 1
         }
         return cn
@@ -8938,7 +8988,7 @@ function rbArrayMethod(t, name, args) {
         hit = null
         var di = 0
         while (di < t.length) {
-            if (rbEq(t[di], rbPosAt(args, nPos, 0))) { hit = t[di] } else { kept.push(t[di]) }
+            if (t[di] === rbPosAt(args, nPos, 0) || rbEq(t[di], rbPosAt(args, nPos, 0))) { hit = t[di] } else { kept.push(t[di]) }
             di = di + 1
         }
         rbArrReplace(t, kept)
@@ -9164,7 +9214,7 @@ function rbArrayMethod(t, name, args) {
     if (name == "assoc") {
         var si2 = 0
         while (si2 < t.length) {
-            if (rbIsArr(t[si2]) && t[si2].length > 0 && rbEq(t[si2][0], rbPosAt(args, nPos, 0))) { return t[si2] }
+            if (rbIsArr(t[si2]) && t[si2].length > 0 && (t[si2][0] === rbPosAt(args, nPos, 0) || rbEq(t[si2][0], rbPosAt(args, nPos, 0)))) { return t[si2] }
             si2 = si2 + 1
         }
         return null
@@ -9962,6 +10012,7 @@ function rbMethod(target, name, args) {
         rbNoMethod(target, name)
     }
     if (rbIsArr(target)) { return rbArrayMethod(target, name, args) }
+    if (rbIsObj(target) && (target["__rgen"] === true || target["__ryld"] === true)) { return rbEnumGenMethod(target, name, args) }
     if (rbIsEnum(target)) {
         var esrc = target["src"]
         if (rbIsDict(esrc) && target["__rlazy"] !== true && rbBlockOf(args) !== null) { return rbHashIter(esrc, target, name, args) }
@@ -10389,6 +10440,16 @@ function js_sym(name) { return rbSym(rbStr(name)) }
 
 // The three boxes of the numeric tower.
 function js_rflo(v) { return rbMkFlo(rbToF(v)) }
+// A Float that is one object per source site: slots 0..4 are Float::INFINITY /
+// NAN / MAX / MIN / EPSILON, the rest the Float literals. The first read boxes v
+// (a number or a Float box) and every later one answers that box. Twin of
+// js_rflok in abnf/jsrt.go.
+var rbFloK = []
+function js_rflok(i, v) {
+    while (rbFloK.length <= i) { rbFloK.push(null) }
+    if (rbFloK[i] === null) { rbFloK[i] = rbMkFlo(rbToF(v)) }
+    return rbFloK[i]
+}
 function js_rrat(n, d) { return rbMkRat(rbToF(n), rbToF(d)) }
 function js_rcpx(re, im) { return rbMkCpx(re, im) }
 
@@ -10613,7 +10674,7 @@ function rbHashRel(op, l, r) {
     var i = 0
     while (i < ak.length) {
         var at = rbDictFind(bk, ak[i])
-        if (at < 0 || !rbEq(a["vals"][i], b["vals"][at])) { return false }
+        if (at < 0 || (a["vals"][i] !== b["vals"][at] && !rbEq(a["vals"][i], b["vals"][at]))) { return false }
         i = i + 1
     }
     return true
@@ -11601,6 +11662,39 @@ function rbStrIndex(xs, s) {
     }
     return 0 - 1
 }
+// Enumerator.new { |y| ... } and its Generator / Yielder. Twins: enumGenNew /
+// enumGenMethod in ruby-interpreter.abnf, which state the rule, rubyEnumGenNew /
+// rubyEnumGenMethod in abnf/jsrtruby.go.
+function rbEnumGenNew(pos, blk) {
+    var e = rbMkLazy("each", [], 0, null, false, false, "#<Enumerator: #<Enumerator::Generator>:each>")
+    e["src"] = {__rgen: true, blk: blk}
+    e["bsz"] = null
+    if (pos.length > 0) { e["bsz"] = pos[0] }
+    return e
+}
+function rbEnumGenMethod(t, name, args) {
+    var blk = rbBlockOf(args)
+    if (t["__rgen"] === true && name == "each" && blk !== null) { return t["blk"].apply(undefined, [{__ryld: true, f: blk}]) }
+    if (t["__ryld"] === true) {
+        var f = t["f"]
+        if (name == "<<") {
+            f.apply(undefined, [rbArgAt(args, 0)])
+            return t
+        }
+        if (name == "yield" || name == "call") { return f.apply(undefined, rbPosArgs(args)) }
+        if (name == "to_proc") {
+            return function() {
+                var a = []
+                var i = 0
+                while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
+                return f.apply(undefined, a)
+            }
+        }
+        if (name == "class") { return rbBuiltinClass("Enumerator::Yielder") }
+    }
+    rbNoMethod(t, name)
+    return null
+}
 function js_rnew(cls, args) {
     var argv = []
     if (rbIsArr(args)) { argv = args }
@@ -11616,6 +11710,7 @@ function js_rnew(cls, args) {
             if (bn == "Hash") { return rbNewHash(argv) }
             if (bn == "Regexp") { return rbRegexNew(argv) }
             if (bn == "Struct") { return rbStructNew(argv) }
+            if (bn == "Enumerator" && rbBlockOf(argv) !== null) { return rbEnumGenNew(rbPosArgs(argv), rbBlockOf(argv)) }
             return rbExc(cls, argv)
         }
     }

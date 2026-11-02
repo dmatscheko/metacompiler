@@ -508,6 +508,10 @@ type jsrt struct {
 	// rubyMTwins maps a Proc to the same body compiled in the method convention,
 	// which define_method installs in its place. Filled by js_rmtwin.
 	rubyMTwins map[interface{}]interface{}
+	// rubyBuiltinMixed: a module was included into a builtin class (rubyIsA).
+	rubyBuiltinMixed bool
+	// rubyFloK holds the per-site Float boxes of js_rflok once built.
+	rubyFloK []*jsFlo
 
 	// rubyOids is Object#object_id's table: the values numbered so far, in order
 	// (see rubyObjectId in jsrtruby.go).
@@ -1753,6 +1757,10 @@ func (rt *jsrt) wrap(v interface{}) uint64 {
 		// Every member read builds a fresh one, so interning it by identity
 		// would only grow the intern map.
 		return rt.alloc(v)
+	case *jsFlo:
+		// Every Float operation makes a fresh box; identity is the pointer, not
+		// the handle, so interning would only grow the map.
+		return rt.alloc(v)
 	}
 
 	rv := reflect.ValueOf(v)
@@ -1925,7 +1933,7 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 	switch t := v.(type) {
 	case jsChar: // Kotlin's Char does arithmetic and compares as its code.
 		return float64(t.code)
-	case jsFlo: // Ruby's boxed Float / Rational / Complex are numbers.
+	case *jsFlo: // Ruby's boxed Float / Rational / Complex are numbers.
 		return t.f
 	case jsPhpFlo: // PHP's boxed float.
 		return t.f
@@ -2032,7 +2040,7 @@ func (rt *jsrt) toString(v interface{}) string {
 			return rt.toString(t.str)
 		}
 		return rubyBinText(t.b)
-	case jsFlo: // Ruby's Float keeps its decimal point (1000.0), unlike an Integer.
+	case *jsFlo: // Ruby's Float keeps its decimal point (1000.0), unlike an Integer.
 		return rubyFloStr(t.f)
 	case jsPhpFlo: // PHP prints a float without a fraction as an integer ((string)3.0 == "3").
 		return phpFloStr(t.f)
@@ -2096,7 +2104,7 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 		return t.text()
 	case jsSym: // print/println show the symbol's name.
 		return t.s
-	case jsFlo, jsRat, jsCpx: // print/println show Ruby's rendering (1000.0, 1/2, 0+2i).
+	case *jsFlo, jsRat, jsCpx: // print/println show Ruby's rendering (1000.0, 1/2, 0+2i).
 		return rt.rubyStr(v)
 	case jsPhpFlo: // print/println show PHP's rendering (3.0 prints as 3).
 		return phpFloStr(t.f)
@@ -2250,6 +2258,15 @@ func (rt *jsrt) strictEq(a, b interface{}) bool {
 	case *jsBigInt:
 		bt, ok := b.(*jsBigInt)
 		return ok && at.v.Cmp(bt.v) == 0
+	case *jsFlo:
+		// Ruby's Float box keys like the double it holds (0.0 and -0.0 are one
+		// key), and the same box is the same key even holding NaN, as MRI's
+		// identity-first hash compare finds it.
+		bt, ok := b.(*jsFlo)
+		return ok && (at == bt || at.f == bt.f)
+	case jsCpx:
+		bt, ok := b.(jsCpx)
+		return ok && rt.strictEq(at.re, bt.re) && rt.strictEq(at.im, bt.im)
 	default:
 		// Objects, arrays, closures and Go natives compare by identity.
 		return identityEq(a, b)
@@ -4749,7 +4766,7 @@ func rubyNumRank(v interface{}) int {
 		return 0
 	case jsRat:
 		return 1
-	case jsFlo:
+	case *jsFlo:
 		return 2
 	case jsCpx:
 		return 3
@@ -4767,7 +4784,7 @@ func rubyToF(v interface{}) float64 {
 		return t
 	case jsRat:
 		return rubyRatToF(t)
-	case jsFlo:
+	case *jsFlo:
 		return t.f
 	case jsCpx:
 		return rubyToF(t.re)
@@ -4891,7 +4908,7 @@ func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
 			if y.IsInt64() && y.Int64() >= -4096 {
 				return rt.rubyRatPow(rt.rubyAsRat(l), y), true
 			}
-			return jsFlo{f: crPow(rubyToF(l), rubyToF(r))}, true
+			return &jsFlo{f: crPow(rubyToF(l), rubyToF(r))}, true
 		}
 		if !y.IsInt64() || y.Int64() > 4096 {
 			return crPow(rubyToF(l), rubyToF(r)), true
@@ -5257,22 +5274,22 @@ func (rt *jsrt) rubyNumDigitOp(t float64, big *jsBigInt, isInt bool, mode byte, 
 	}
 	if nd > 0 {
 		if t != t || math.IsInf(t, 0) || t == 0 {
-			return jsFlo{f: t}
+			return &jsFlo{f: t}
 		}
 		switch mode {
 		case 'r', 'e', 'd':
-			return jsFlo{f: rubyFloDigitRound(t, nd, mode)}
+			return &jsFlo{f: rubyFloDigitRound(t, nd, mode)}
 		case 'f':
-			return jsFlo{f: rubyFloDigitFloor(t, nd)}
+			return &jsFlo{f: rubyFloDigitFloor(t, nd)}
 		case 't':
 			// #truncate at a POSITIVE ndigits is toward zero: floor above, ceil
 			// below.
 			if t < 0 {
-				return jsFlo{f: rubyFloDigitCeil(t, nd)}
+				return &jsFlo{f: rubyFloDigitCeil(t, nd)}
 			}
-			return jsFlo{f: rubyFloDigitFloor(t, nd)}
+			return &jsFlo{f: rubyFloDigitFloor(t, nd)}
 		}
-		return jsFlo{f: rubyFloDigitCeil(t, nd)}
+		return &jsFlo{f: rubyFloDigitCeil(t, nd)}
 	}
 	rubyFloDomain(rt, t)
 	// ndigits == 0 rounds the DOUBLE; a NEGATIVE one truncates first and then
@@ -5411,7 +5428,7 @@ func (rt *jsrt) rubyAsRat(v interface{}) jsRat {
 	if r, ok := v.(jsRat); ok {
 		return r
 	}
-	if f, ok := v.(jsFlo); ok {
+	if f, ok := v.(*jsFlo); ok {
 		return rt.rubyRatOfFlo(f.f)
 	}
 	if n, ok := v.(float64); ok {
@@ -5700,7 +5717,7 @@ func pyBigOperand(v interface{}) (*big.Int, bool) {
 // to a double. An arithmetic operator must NOT use this - there the Float wins
 // the rank and the Integer converts, which is the tower's rule.
 func rubyBigCmpOf(v interface{}) (*big.Int, bool) {
-	if f, ok := v.(jsFlo); ok {
+	if f, ok := v.(*jsFlo); ok {
 		if math.IsNaN(f.f) || math.IsInf(f.f, 0) || f.f != math.Trunc(f.f) {
 			return nil, false
 		}
@@ -6192,25 +6209,25 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		x, y := rubyToF(l), rubyToF(r)
 		switch op {
 		case "+":
-			return jsFlo{f: x + y}
+			return &jsFlo{f: x + y}
 		case "-":
-			return jsFlo{f: x - y}
+			return &jsFlo{f: x - y}
 		case "*":
-			return jsFlo{f: x * y}
+			return &jsFlo{f: x * y}
 		case "/":
-			return jsFlo{f: x / y}
+			return &jsFlo{f: x / y}
 		case "%":
 			// Numeric#% on a Rational: Numeric#div raises on a zero divisor.
 			if _, isRat := l.(jsRat); isRat && y == 0 {
 				rt.rubyRaiseErr(op, "ZeroDivisionError", "divided by 0")
 			}
-			return jsFlo{f: rubyFloMod(x, y)}
+			return &jsFlo{f: rubyFloMod(x, y)}
 		case "**":
 			if x < 0 && math.Floor(y) != y {
 				re, im := rubyPolarPi(crPow(-x, y), y)
-				return jsCpx{re: jsFlo{f: re}, im: jsFlo{f: im}}
+				return jsCpx{re: &jsFlo{f: re}, im: &jsFlo{f: im}}
 			}
-			return jsFlo{f: crPow(x, y)}
+			return &jsFlo{f: crPow(x, y)}
 		}
 		// A Float or Rational receiver has no bit operators (<< >> & | ^). Twin of
 		// numBin in ruby-interpreter.abnf and rbNumBin in lib/ruby-rt.metajs.
@@ -6271,7 +6288,7 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 			if y >= -4096 {
 				return rt.rubyRatPow(rubyMkRat(x, 1), big.NewInt(int64(y)))
 			}
-			return jsFlo{f: crPow(x, y)}
+			return &jsFlo{f: crPow(x, y)}
 		}
 		if p := crPow(x, y); !rubyOver53(p) {
 			return p
@@ -6795,6 +6812,9 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 	if isCallable(l) && (op == ">>" || op == "<<") {
 		return rt.rubyProcCompose(l, r, op == ">>")
 	}
+	if o, isObj := l.(*jsObject); isObj && op == "<<" && o.props["__ryld"] == true {
+		return rt.rubyEnumGenMethod(o, op, []interface{}{r})
+	}
 	if rubyUserObj(l) {
 		// An exception instance that defines no + of its own concatenates as its
 		// message, the same rule radd of ruby-interpreter.abnf applies - so
@@ -6888,7 +6908,7 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			for _, e := range la.elems {
 				drop := false
 				for _, x := range ra.elems {
-					if rt.rubyEql(e, x) {
+					if rt.rubyEqlID(e, x) {
 						drop = true
 						break
 					}
@@ -6964,10 +6984,10 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		}
 		return rt.rubyIntFromF(math.Trunc(x)), true
 	case "to_f":
-		if f, ok := t.(jsFlo); ok {
+		if f, ok := t.(*jsFlo); ok {
 			return f, true
 		}
-		return jsFlo{f: x}, true
+		return &jsFlo{f: x}, true
 	case "to_r":
 		return rt.rubyAsRat(t), true
 	case "to_c":
@@ -6983,8 +7003,8 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			}
 			return r, true
 		}
-		if _, ok := t.(jsFlo); ok {
-			return jsFlo{f: math.Abs(x)}, true
+		if _, ok := t.(*jsFlo); ok {
+			return &jsFlo{f: math.Abs(x)}, true
 		}
 		return math.Abs(x), true
 	// #floor / #ceil / #round all take an optional ndigits, and only a POSITIVE
@@ -7065,10 +7085,10 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			if rubyToF(by) == 0 && nblk != nil {
 				rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0")
 			}
-			_, fb := by.(jsFlo)
-			_, ft := t.(jsFlo)
+			_, fb := by.(*jsFlo)
+			_, ft := t.(*jsFlo)
 			desc := "(" + rt.rubyInspect(t) + ".step" + rt.rubyAseqArgs(npos) + ")"
-			if lf, isFlo := lim.(jsFlo); isUndefOrNull(lim) || rubyToF(by) == 0 || (isFlo && math.IsInf(lf.f, 1) == (rubyToF(by) > 0) && math.IsInf(lf.f, 0)) {
+			if lf, isFlo := lim.(*jsFlo); isUndefOrNull(lim) || rubyToF(by) == 0 || (isFlo && math.IsInf(lf.f, 1) == (rubyToF(by) > 0) && math.IsInf(lf.f, 0)) {
 				se := rubyStepForever(t, by, fb || ft, desc)
 				if nblk == nil {
 					if !isFlo || fb || ft {
@@ -7081,9 +7101,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 				rt.rubyMethod(se, "each", []interface{}{rubyBlkWrap(nblk)})
 				return t, true
 			}
-			if _, fl := lim.(jsFlo); fb || fl || ft {
+			if _, fl := lim.(*jsFlo); fb || fl || ft {
 				for _, d := range rubyFloatStep(x, rubyToF(lim), rubyToF(by), false) {
-					nl.elems = append(nl.elems, jsFlo{f: d})
+					nl.elems = append(nl.elems, &jsFlo{f: d})
 				}
 			} else if rubyAnyBig(t, lim, by) {
 				we := rt.rubyIntWalk(t, lim, by, desc)
@@ -7146,7 +7166,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		return rt.rubyNumDivOp(t, name, args), true
 	case "fdiv":
 		if _, isCpx := t.(jsCpx); !isCpx {
-			return jsFlo{f: rubyIntFdiv(t, argAt(args, 0))}, true
+			return &jsFlo{f: rubyIntFdiv(t, argAt(args, 0))}, true
 		}
 	case "**":
 		return rt.rubyBin("**", t, argAt(args, 0)), true
@@ -7229,8 +7249,10 @@ func (rt *jsrt) rubyBigMethod(t *jsBigInt, name string, args []interface{}) (int
 // languages/ruby-interpreter.abnf; rbIdenticalP in languages/lib/ruby-rt.metajs is
 // the other twin. Three kinds of value need saying:
 //
-//	a jsFlo compares by its DOUBLE, because MRI's Float is a flonum and
-//	1.0.equal?(1.0) is true there; NaN's `false` falls out of that.
+//	a *jsFlo is the same object when it is the same box, or when both hold the
+//	same flonum (rubyFlonum): MRI keeps those in the VALUE word, so
+//	1.0.equal?(1.0) is true, while 1e300, -0.0, NaN and Infinity are heap
+//	objects, equal? only to themselves.
 //
 //	a string, a jsRat and a jsCpx answer FALSE always. MRI allocates a fresh
 //	object per value ("a".equal?("a") and (1r/3r).equal?(1r/3r) are both false)
@@ -7247,10 +7269,10 @@ func rubyIdenticalP(a, b interface{}) bool {
 	if isUndefOrNull(a) || isUndefOrNull(b) {
 		return isUndefOrNull(a) && isUndefOrNull(b)
 	}
-	af, aIsFlo := a.(jsFlo)
-	bf, bIsFlo := b.(jsFlo)
+	af, aIsFlo := a.(*jsFlo)
+	bf, bIsFlo := b.(*jsFlo)
 	if aIsFlo || bIsFlo {
-		return aIsFlo && bIsFlo && af.f == bf.f
+		return aIsFlo && bIsFlo && (af == bf || (af.f == bf.f && rubyFlonum(af.f) && rubyFlonum(bf.f)))
 	}
 	switch a.(type) {
 	case string, jsRat, jsCpx:
@@ -7261,6 +7283,30 @@ func rubyIdenticalP(a, b interface{}) bool {
 		return false
 	}
 	return a == b
+}
+
+// rubyFlonum answers whether MRI (64-bit) keeps a Float in the VALUE word rather
+// than on the heap: +0.0, or an exponent field in [0x300, 0x4ff] other than the
+// positive 2^-255 itself (rb_float_new_inline). Twins: floFlonum in
+// ruby-interpreter.abnf, rbFlonum in lib/ruby-rt.metajs.
+func rubyFlonum(f float64) bool {
+	b := math.Float64bits(f)
+	e := b >> 60 & 7
+	return b == 0 || (b != 0x3000000000000000 && (e == 3 || e == 4))
+}
+
+// rubyEqual is MRI's rb_equal, the == that Array#include?, #index, #count,
+// #delete, Array#== and Hash#== run: identity first, so a NaN is found by
+// itself while `nan == nan` stays false. rubyEqlID is rb_eql likewise, what
+// hash keying, #uniq, #-, #& and Array#eql? run. Twins: rubyEq in
+// ruby-interpreter.abnf (identity first itself), the `===` guards in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyEqual(a, b interface{}) bool {
+	return rubyIdenticalP(a, b) || rt.rubyEq(a, b)
+}
+
+func (rt *jsrt) rubyEqlID(a, b interface{}) bool {
+	return rubyIdenticalP(a, b) || rt.rubyEql(a, b)
 }
 
 // rubyClassName is Ruby's #class for the values that are not user instances: the
@@ -7277,7 +7323,7 @@ func rubyClassName(v interface{}) string {
 		return "Integer"
 	case *jsBigInt:
 		return "Integer"
-	case jsFlo:
+	case *jsFlo:
 		return "Float"
 	case jsRat:
 		return "Rational"
@@ -7362,8 +7408,8 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 	// namespace object (makeScopedConst in ruby-to-llvm-ir.abnf, lookupConst in
 	// ruby-interpreter.abnf).
 	if name == "Math" {
-		c.set("$c$PI", jsFlo{f: math.Pi})
-		c.set("$c$E", jsFlo{f: math.E})
+		c.set("$c$PI", &jsFlo{f: math.Pi})
+		c.set("$c$E", &jsFlo{f: math.E})
 		c.set("$c$DomainError", rt.rubyBuiltinClass("Math::DomainError"))
 	}
 	if name == "Enumerator" {
@@ -7438,18 +7484,18 @@ func rubyMathCall(name string, rt *jsrt, args []interface{}) (interface{}, bool)
 		"log2": math.Log2, "log10": math.Log10,
 	}
 	if fn, ok := one[name]; ok {
-		return jsFlo{f: fn(a(0))}, true
+		return &jsFlo{f: fn(a(0))}, true
 	}
 	switch name {
 	case "atan2":
-		return jsFlo{f: math.Atan2(a(0), a(1))}, true
+		return &jsFlo{f: math.Atan2(a(0), a(1))}, true
 	case "hypot":
-		return jsFlo{f: math.Hypot(a(0), a(1))}, true
+		return &jsFlo{f: math.Hypot(a(0), a(1))}, true
 	case "log":
 		if len(args) > 1 {
-			return jsFlo{f: math.Log(a(0)) / math.Log(a(1))}, true
+			return &jsFlo{f: math.Log(a(0)) / math.Log(a(1))}, true
 		}
-		return jsFlo{f: math.Log(a(0))}, true
+		return &jsFlo{f: math.Log(a(0))}, true
 	}
 	return nil, false
 }
@@ -7585,7 +7631,7 @@ func (rt *jsrt) rubyRangeEndless(r *jsObject) {
 // (range_each), endless or not. Twin of the check in rangeToA of
 // ruby-interpreter.abnf.
 func (rt *jsrt) rubyRangeWalkable(r *jsObject) {
-	if _, isFlo := r.props["begin"].(jsFlo); isFlo {
+	if _, isFlo := r.props["begin"].(*jsFlo); isFlo {
 		rt.rubyRaiseErr("each", "TypeError", "can't iterate from Float")
 	}
 }
@@ -7596,7 +7642,7 @@ func rubyRangeUnbounded(r *jsObject) bool {
 		return false
 	}
 	hi := r.props["end"]
-	f, isFlo := hi.(jsFlo)
+	f, isFlo := hi.(*jsFlo)
 	return isUndefOrNull(hi) || (isFlo && math.IsInf(f.f, 1))
 }
 
@@ -7627,7 +7673,7 @@ func (rt *jsrt) rubyRangeLen(r *jsObject) float64 {
 	if !rubyRangeNumeric(r) {
 		return float64(len(rt.rubyRangeToArr(r).elems))
 	}
-	if loF, isFlo := lo.(jsFlo); isFlo {
+	if loF, isFlo := lo.(*jsFlo); isFlo {
 		return rubyFloatStepSize(loF.f, rubyToF(hi), 1, r.props["excl"] == true)
 	}
 	if rubyRangeWide(lo, hi) {
@@ -7741,7 +7787,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	// A Float range cannot be walked, but without a block it answers the same
 	// Enumerators, whose #size is counted and whose iteration raises the walk's
 	// TypeError.
-	_, floLo := t.props["begin"].(jsFlo)
+	_, floLo := t.props["begin"].(*jsFlo)
 	if strOpen || rubyRangeUnbounded(t) || (blk == nil && floLo) {
 		if blk != nil && rubyRangeStreams(name) {
 			en := rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, "#<Enumerator: "+rt.rubyInspect(t)+":each>")
@@ -8122,24 +8168,36 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 		// Otherwise a compiled class may inherit from the builtin
 		// (Struct.new(:a)'s superclass is Struct): the chain walk below.
 	}
-	for c := interface{}(nil); ; {
-		o, isObj := v.(*jsObject)
-		if !isObj {
-			return false
-		}
-		c = o.props["__class"]
-		for c != nil {
+	if o, isObj := v.(*jsObject); isObj {
+		for c := o.props["__class"]; c != nil; {
 			if c == cls {
 				return true
 			}
 			co, isO := c.(*jsObject)
 			if !isO {
-				return false
+				break
 			}
 			c = co.props["__super"]
 		}
-		return false
 	}
+	return rt.rubyBuiltinMixed && rt.rubyAncestorHas(rt.rubyIsAClass(v), cls)
+}
+
+// rubyIsAClass is the class whose ancestors decide v.is_a?, once a module was
+// included into a builtin class (rubyBuiltinMixed): `class Object; include M;
+// end' makes 5, "s" and every instance an M, and `class Integer; include N;
+// end' every Integer an N. Twins: isAClassOf in ruby-interpreter.abnf, rbIsAClass
+// in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyIsAClass(v interface{}) interface{} {
+	if o, isObj := v.(*jsObject); isObj {
+		if c, has := o.props["__class"]; has && c != nil {
+			return c
+		}
+	}
+	if n := rt.rubyValueClassName(v); n != "" {
+		return rt.rubyBuiltinClass(n)
+	}
+	return nil
 }
 
 // ----- Module#ancestors and the module relational operators -----
@@ -8191,7 +8249,9 @@ func (rt *jsrt) rubyAncestors(cls interface{}) *jsArray {
 			// Object / Kernel / BasicObject close EVERY class's list below, so the
 			// name chase stops before them rather than duplicating them.
 			for bn, _ := co.props["__name"].(string); bn != "" && !rubyRootAncestor(bn); bn = rubyExcParent[bn] {
-				out.elems = append(out.elems, rt.rubyBuiltinClass(bn))
+				bc := rt.rubyBuiltinClass(bn)
+				out.elems = append(out.elems, bc)
+				rubyPushAll(out, bc.props["__mixorder"])
 				if mx := rubyBuiltinMixin(bn); mx != "" {
 					out.elems = append(out.elems, rt.rubyBuiltinClass(mx))
 				}
@@ -8204,8 +8264,12 @@ func (rt *jsrt) rubyAncestors(cls interface{}) *jsArray {
 		c = co.props["__super"]
 	}
 	if isMod, _ := clsObj.props["__ismodule"].(bool); !isMod {
-		out.elems = append(out.elems, rt.rubyBuiltinClass("Object"),
-			rt.rubyBuiltinClass("Kernel"), rt.rubyBuiltinClass("BasicObject"))
+		// A module included into Object follows it: [Object, M, Kernel, BasicObject].
+		for _, root := range []string{"Object", "Kernel", "BasicObject"} {
+			rc := rt.rubyBuiltinClass(root)
+			out.elems = append(out.elems, rc)
+			rubyPushAll(out, rc.props["__mixorder"])
+		}
 	}
 	return out
 }
@@ -8232,7 +8296,7 @@ func (rt *jsrt) rubyAncestorHas(cls interface{}, m interface{}) bool {
 // lib/ruby-rt.metajs.
 func (rt *jsrt) rubyRel(op string, l, r interface{}) interface{} {
 	switch l.(type) {
-	case float64, jsFlo, jsRat, *jsBigInt, string, *jsRStr, *jsRBin, jsSym:
+	case float64, *jsFlo, jsRat, *jsBigInt, string, *jsRStr, *jsRBin, jsSym:
 	default:
 		if rubyUserObj(l) {
 			if m, own := rubyFindMethod(l, op); own {
@@ -8293,7 +8357,7 @@ func (rt *jsrt) rubyHashRel(op string, l, r interface{}) bool {
 	}
 	for i := range ak.elems {
 		at := rt.rubyDictFind(bk, ak.elems[i])
-		if at < 0 || !rt.rubyEq(av.elems[i], bv.elems[at]) {
+		if at < 0 || !rt.rubyEqual(av.elems[i], bv.elems[at]) {
 			return false
 		}
 	}
@@ -8900,7 +8964,7 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 			rt.rubyRaiseErr(name, "ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
 		}
 		// A Float converts as Float#to_i does.
-		if f, isFlo := v.(jsFlo); isFlo {
+		if f, isFlo := v.(*jsFlo); isFlo {
 			rubyFloDomain(rt, f.f)
 			return rt.rubyIntFromF(math.Trunc(f.f))
 		}
@@ -8911,11 +8975,11 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 		}
 		if s, isStr := v.(string); isStr {
 			if f, ok := rubyStrToDbl(s, true); ok {
-				return jsFlo{f: f}
+				return &jsFlo{f: f}
 			}
 			rt.rubyRaiseErr(name, "ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
 		}
-		return jsFlo{f: rubyToF(v)}
+		return &jsFlo{f: rubyToF(v)}
 	}
 	return v
 }
@@ -9772,8 +9836,8 @@ func (rt *jsrt) rubyNeg(v interface{}) interface{} {
 	switch t := v.(type) {
 	case float64:
 		return -t
-	case jsFlo:
-		return jsFlo{f: -t.f}
+	case *jsFlo:
+		return &jsFlo{f: -t.f}
 	case jsRat:
 		return rubyRatNeg(t)
 	case jsCpx:
@@ -9831,7 +9895,7 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 		return rubyIntStr(t)
 	case *jsBigInt:
 		return t.v.String()
-	case jsFlo:
+	case *jsFlo:
 		return rubyFloStr(t.f)
 	case jsRat:
 		return rubyRatText(t)
@@ -10346,7 +10410,7 @@ func (rt *jsrt) rubyStructEq(l, r interface{}) bool {
 			return false
 		}
 		for i := range la.elems {
-			if !rt.rubyEq(la.elems[i], ra.elems[i]) {
+			if !rt.rubyEqual(la.elems[i], ra.elems[i]) {
 				return false
 			}
 		}
@@ -10359,7 +10423,7 @@ func (rt *jsrt) rubyStructEq(l, r interface{}) bool {
 		}
 		for i := range lk.elems {
 			at := rt.rubyDictFind(rk, lk.elems[i])
-			if at < 0 || !rt.rubyEq(lv.elems[i], rv.elems[at]) {
+			if at < 0 || !rt.rubyEqual(lv.elems[i], rv.elems[at]) {
 				return false
 			}
 		}
@@ -10443,7 +10507,7 @@ func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 		return -1
 	}
 	for i, e := range keys.elems {
-		if rubyValueKey(e) && rt.rubyEql(e, k) {
+		if rubyValueKey(e) && rt.rubyEqlID(e, k) {
 			return i
 		}
 	}
@@ -10465,7 +10529,7 @@ func (rt *jsrt) rubyEql(a, b interface{}) bool {
 				return false
 			}
 			for i := range la.elems {
-				if !rt.rubyEql(la.elems[i], lb.elems[i]) {
+				if !rt.rubyEqlID(la.elems[i], lb.elems[i]) {
 					return false
 				}
 			}
@@ -10479,7 +10543,7 @@ func (rt *jsrt) rubyEql(a, b interface{}) bool {
 			}
 			for i := range ak.elems {
 				at := rt.rubyDictFind(bk, ak.elems[i])
-				if at < 0 || !rt.rubyEql(av.elems[i], bv.elems[at]) {
+				if at < 0 || !rt.rubyEqlID(av.elems[i], bv.elems[at]) {
 					return false
 				}
 			}
@@ -10500,7 +10564,7 @@ func (rt *jsrt) rubyEql(a, b interface{}) bool {
 // Array#include?, #index and #find_index are all defined on ==.
 func (rt *jsrt) rubyArrIndex(t *jsArray, v interface{}) int {
 	for i, e := range t.elems {
-		if rt.rubyEq(e, v) {
+		if rt.rubyEqual(e, v) {
 			return i
 		}
 	}
@@ -10641,7 +10705,7 @@ func (rt *jsrt) rubyCmpName(v interface{}) string {
 		return "nil"
 	}
 	switch v.(type) {
-	case bool, float64, jsFlo, jsSym:
+	case bool, float64, *jsFlo, jsSym:
 		return rt.rubyInspect(v)
 	}
 	return rubyOwnerName(v)
@@ -10977,7 +11041,7 @@ func (rt *jsrt) rubyFmtUserConv(v interface{}, n1, n2 string) (interface{}, bool
 
 func rubyFmtIsNumV(v interface{}) bool {
 	switch v.(type) {
-	case float64, *jsBigInt, jsFlo, jsRat, jsCpx:
+	case float64, *jsBigInt, *jsFlo, jsRat, jsCpx:
 		return true
 	}
 	return false
@@ -11043,7 +11107,7 @@ func (rt *jsrt) rubyLongArg(frame string, v interface{}) int {
 		bad = (n > 0 && c >= 0) || (n < 0 && c < 0)
 	}
 	if bad {
-		if _, isFlo := v.(jsFlo); isFlo {
+		if _, isFlo := v.(*jsFlo); isFlo {
 			rt.rubyRaiseErr(frame, "RangeError", "float "+rt.rubyFormat("%-.10g", v)+" out of range of integer")
 		}
 		rt.rubyRaiseErr(frame, "RangeError", "bignum too big to convert into `long'")
@@ -11807,7 +11871,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "to_i":
 			return float64(0)
 		case "to_f":
-			return jsFlo{f: 0}
+			return &jsFlo{f: 0}
 		}
 	}
 	if rubyIsNum(target) {
@@ -11864,7 +11928,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return rt.rubyBigNarrow(n)
 		case "to_f":
 			f, _ := rubyStrToDbl(o, false)
-			return jsFlo{f: f}
+			return &jsFlo{f: f}
 		case "upcase":
 			return caseMapMode(o, caseUpper|caseFull)
 		case "downcase":
@@ -12030,6 +12094,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case *jsArray:
 		return rt.rubyArrayMethod(o, name, args)
 	case *jsObject:
+		if o.props["__rgen"] == true || o.props["__ryld"] == true {
+			return rt.rubyEnumGenMethod(o, name, args)
+		}
 		if rubyIsEnum(o) {
 			if src, isObj := o.props["src"].(*jsObject); isObj && o.props["__rlazy"] != true {
 				if _, _, isDict := dictParts(src); isDict {
@@ -12417,7 +12484,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 // in [0,n), and `rand(a..b)` the range's own low end.
 func rubyRand(v interface{}) interface{} {
 	if isUndefOrNull(v) {
-		return jsFlo{f: 0}
+		return &jsFlo{f: 0}
 	}
 	// A closed range reaches the compiler halves already materialized as an array.
 	if a, isArr := v.(*jsArray); isArr {
@@ -12431,8 +12498,8 @@ func rubyRand(v interface{}) interface{} {
 			return o.props["begin"]
 		}
 	}
-	if _, isFlo := v.(jsFlo); isFlo || rubyToF(v) == 0 {
-		return jsFlo{f: 0}
+	if _, isFlo := v.(*jsFlo); isFlo || rubyToF(v) == 0 {
+		return &jsFlo{f: 0}
 	}
 	return float64(0)
 }
@@ -12910,7 +12977,7 @@ func (rt *jsrt) rubyStrSubseq(t string, start, length interface{}) interface{} {
 // comparison), not == - like Array#- and Array#uniq and unlike #include?.
 func (rt *jsrt) rubyArrHas(a []interface{}, v interface{}) bool {
 	for _, e := range a {
-		if rt.rubyEql(e, v) {
+		if rt.rubyEqlID(e, v) {
 			return true
 		}
 	}
@@ -13232,7 +13299,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			rt.rubyHidxWarn()
 		}
 		for i := range vals.elems {
-			if rt.rubyEq(vals.elems[i], argAt(pos, 0)) {
+			if rt.rubyEqual(vals.elems[i], argAt(pos, 0)) {
 				return rt.rubyKeyOut(keys.elems[i]), true
 			}
 		}
@@ -13929,7 +13996,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 				if rubyTruthy(rt.call(blk, jsUndef, []interface{}{t.elems[i]})) {
 					return float64(i)
 				}
-			} else if rt.rubyEq(t.elems[i], argAt(pos, 0)) {
+			} else if rt.rubyEqual(t.elems[i], argAt(pos, 0)) {
 				return float64(i)
 			}
 		}
@@ -13948,7 +14015,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 			dup := false
 			for _, k := range seen {
-				if rt.rubyEql(k, key) {
+				if rt.rubyEqlID(k, key) {
 					dup = true
 					break
 				}
@@ -14031,7 +14098,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			if blk != nil {
 				v = rt.call(blk, jsUndef, []interface{}{e})
 			}
-			_, vFlo := v.(jsFlo)
+			_, vFlo := v.(*jsFlo)
 			if !kahan && vFlo && rubyIsReal(s) {
 				kahan, kf, kc = true, rubyToF(s), 0
 			}
@@ -14040,7 +14107,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 				continue
 			}
 			if kahan {
-				s, kahan = jsFlo{f: kf}, false
+				s, kahan = &jsFlo{f: kf}, false
 			}
 			if rubyIsNum(s) && !rubyIsNum(v) {
 				panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("TypeError"),
@@ -14049,7 +14116,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			s = rt.rubyBin("+", s, v)
 		}
 		if kahan {
-			return jsFlo{f: kf + kc}
+			return &jsFlo{f: kf + kc}
 		}
 		return s
 	// ----- the rest of the Array / Enumerable surface -----
@@ -14179,7 +14246,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		n := 0
 		for _, e := range t.elems {
-			if rt.rubyEq(e, pos[0]) {
+			if rt.rubyEqual(e, pos[0]) {
 				n++
 			}
 		}
@@ -14637,7 +14704,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		kept := []interface{}{}
 		var hit interface{} = jsNull
 		for _, e := range t.elems {
-			if rt.rubyEq(e, argAt(pos, 0)) {
+			if rt.rubyEqual(e, argAt(pos, 0)) {
 				hit = e
 			} else {
 				kept = append(kept, e)
@@ -14808,7 +14875,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			mid := (lo + hi) / 2
 			v := rt.call(blk, jsUndef, []interface{}{t.elems[mid]})
 			switch v.(type) {
-			case float64, jsFlo:
+			case float64, *jsFlo:
 				f := rubyToF(v)
 				if f == 0 {
 					return t.elems[mid]
@@ -14839,7 +14906,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return rubyMkEnumOp(out, "gen")
 	case "assoc":
 		for _, e := range t.elems {
-			if row, isArr := e.(*jsArray); isArr && len(row.elems) > 0 && rt.rubyEq(row.elems[0], argAt(pos, 0)) {
+			if row, isArr := e.(*jsArray); isArr && len(row.elems) > 0 && rt.rubyEqual(row.elems[0], argAt(pos, 0)) {
 				return row
 			}
 		}
@@ -16666,7 +16733,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// ----- Ruby's numeric tower and operators (see the jsFlo/jsRat/jsCpx types) -----
 		// Only ruby-to-llvm-ir.abnf emits these; every other grammar keeps the shared
 		// js_jadd/js_sub/... operators, whose semantics are untouched by them.
-		"js_rflo":  func(a []uint64) uint64 { return w(jsFlo{f: rt.toNumber(u(a[0]))}) },
+		"js_rflo":  func(a []uint64) uint64 { return w(&jsFlo{f: rt.toNumber(u(a[0]))}) },
+		// A Float that is one object per source site (the Float constants, the
+		// Float literals). Twin of js_rflok in lib/ruby-rt.metajs.
+		"js_rflok": func(a []uint64) uint64 {
+			i := int(rt.toNumber(u(a[0])))
+			for len(rt.rubyFloK) <= i {
+				rt.rubyFloK = append(rt.rubyFloK, nil)
+			}
+			if rt.rubyFloK[i] == nil {
+				rt.rubyFloK[i] = &jsFlo{f: rubyToF(u(a[1]))}
+			}
+			return w(rt.rubyFloK[i])
+		},
 		"js_rrat":  func(a []uint64) uint64 { return w(rubyMkRat(rt.toNumber(u(a[0])), rt.toNumber(u(a[1])))) },
 		"js_rcpx":  func(a []uint64) uint64 { return w(jsCpx{re: u(a[0]), im: u(a[1])}) },
 		"js_radd":  func(a []uint64) uint64 { return w(rt.rubyBin("+", u(a[0]), u(a[1]))) },
