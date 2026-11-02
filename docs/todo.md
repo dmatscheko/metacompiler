@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.size, Object instance methods + top-level define_method, uncaught-exception backtrace "from" lines · P3 · RB · OPEN [V]
+### T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.size, Object instance methods + top-level define_method, uncaught-exception backtrace "from" lines · P3 · RB · IN PROGRESS (RB worker, round 63) [V]
 
 Found while working T-1145. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected.
 
