@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1137** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1138** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,17 +69,17 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index, Float-range eager enumerator sizes, endless Range#size · P3 · RB · IN PROGRESS (RB worker, round 59) [V]
+### T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-integer ranges, zero slice size, endless Float range slices · P3 · RB · OPEN [V]
 
-Found while working T-1132. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected.
+Found while working T-1135. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8.
 
-1. `5.send(:-@)`, `5.send(:+@)`, `5.send(:~)` and `5.5.send(:-@)` give -5, 5, -6 and -5.5 in MRI. Ours raise NoMethodError, so `5.method(:-@).call` fails too. The Integer respond row lists `-@` and `+@`, but they do not dispatch by name.
-2. `5.respond_to?(:<<)`, `(:>>)` and `(:~)` are true in MRI; ours give false. As a result `5.method(:<<)` raises NameError, while MRI's `5.method(:<<).call(1)` is 10. `5.send(:<<, 1)` itself already works.
-3. `{a: 1}.index(1)` returns `:a` in MRI 2.6 and writes `warning: Hash#index is deprecated; use Hash#key` to stderr (check the exact prefix with the oracle). Ours raise NoMethodError.
-4. Non-lazy Enumerators over a Float range raise TypeError when they are created. MRI gives `(1.0..3.0).each.size` 3, `.map.size` 3 and `.each_slice(2).size` 2, and raises only when the enumerator is iterated.
-5. `(1.0..).size` and `(1..).size` abort the program with "cannot take the length of an endless range", a fatal error that cannot be rescued. MRI gives Infinity. This is related to the documented deliberate divergence in ruby-rt.metajs, where Range#size on a non-numeric range returns the count because the `.size` lowering and the for-in trip count depend on it. Reconsider whether `.size` can be separated from the internal trip count, so that `("a".."c").size` can be nil as in MRI.
+1. In the compiled engines, `h.send(:index, 1)` and `h.method(:index).call(1)` do not print `warning: Hash#index is deprecated; use Hash#key`, because those paths carry no call site. The interpreter does print it. Stdout already agrees.
+2. The warning names the first line of the statement, not the line of the call. MRI names the later line in `x = h\n  .index(1)`; all our engines name the first. More generally, check whether other run-time warnings have the same multi-line attribution.
+3. Big-integer ranges: `(2**70..2**70+3).size`, `#count` and `#length` loop forever in the interpreter, because its range walk increments a double that can no longer change. MRI gives 4. Check the compiled engines too.
+4. `(1.0..3.0).each_slice(0)` and `each_cons(0)` raise TypeError in ours. MRI raises ArgumentError `invalid slice size` (or `invalid size` for each_cons) when the enumerator is created. Check Integer ranges and arrays too.
+5. `(1.0..).each_slice(2).size` raises FloatDomainError in MRI. Ours has not been probed.
 
-Verify with `tests/probe.sh ruby` on all four legs; new sections go in tests/ruby-test-full.2.rb or .3.rb.
+Verify with `tests/probe.sh ruby` on all four legs, and diff the `.err` files.
 
 # JS — JavaScript and TypeScript
 
@@ -1200,6 +1200,7 @@ T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::top
 T-1131 bash: readonly/export on NAME[SUB], declare -g -x through circular nameref, scalar store to circular array nameref, compiled readonly-nameref assignment, test -nt/-ot/-ef — merged d006faf6: readonly/export NAME[SUB] not a valid identifier, readonly -n ignores -n, declare -g -x keeps export in interp, scalar store to circular array nameref dropped, compiled stores through readonly namerefs reach the target, test -nt/-ot/-ef over the file model (two existing different files answer false by design: no mtimes), quoted-subscript message; 4-leg probe + stderr match bash 5.3; matrix 605/605; bench +0.02%
 T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#method, tally/Symbol#name not in 2.6, interp Integer#+ Method#call, Range freeze — merged 524ac88f: blockless take_while/drop_while consumers stop on nil like MRI, String-range nil sizes, Float-range lazy sizes, Proc/Method#method via send, tally/Symbol#name removed (not in 2.6), interp Integer Method#call, Range freeze flag, chunk_while/slice_* nil sizes, exclusive Float-end ranges fixed; 4-leg probe matches ruby 2.6; matrix 605/605; bench 0.00%
 T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level lateinit isInitialized, ::f for a lambda-holding val — merged da2fe104: array class = least common supertype of the elements (class/interface/enum/exception/library graphs), kotlin.* and lambda FunctionN element classes, compiled top-level lateinit isInitialized, ::f for a lambda-holding val is a property ref, Box::name prints property, array simpleName; static-typing residues documented; 4-leg probe matches kotlinc 2.2.21; kotlin gates green; bench +0.03% (under the 1.05% noise floor)
+T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index, Float-range eager enumerator sizes, endless Range#size — merged e9110a33: -@/+@/~ by name (send/method), Integer << >> ~ in respond/arity tables, Hash#index with deprecation warning (compiled via js_rhidxwarn at .index sites), Float-range eager enumerators with sizes, Range#size per MRI range_size separated from the for-in trip count (endless -> Infinity, non-numeric -> nil); 4-leg probe matches ruby 2.6 stdout + stderr except the multi-line call-site line (filed); matrix 605/605; bench +0.04%
 
 # Settled — do not re-open
 
