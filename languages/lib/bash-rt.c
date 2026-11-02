@@ -9444,6 +9444,9 @@ int rt_prefix_ref(char *n, char *v, int at)
         return 0;
     }
     i = rt_varslot_new(t == 0 || rt_indbr(t) > 0 ? n : t);
+    /* No slot (a name that is no identifier, which bash refuses before it can
+     * become a nameref's value, or a full table): nothing to bind. */
+    if (i < 0) return 0;
     rt_push_local(i);
     if (t == 0) rt_nmark(n, 0);
     t = varnames[i];
