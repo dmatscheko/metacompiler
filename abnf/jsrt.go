@@ -8273,6 +8273,9 @@ func (rt *jsrt) rubyDelegArr(arr *jsArray, recv interface{}, name string, args [
 // languages/lib/ruby-rt.metajs.
 func (rt *jsrt) rubyNoMethodDesc(t interface{}) string {
 	cn := rt.rubyClassNameRT(t)
+	if rubyAseqOf(t) != nil {
+		cn = "Enumerator::ArithmeticSequence"
+	}
 	if o, isObj := t.(*jsObject); isObj && cn == "" {
 		cn = "Object"
 		if _, isCls := o.props["__isclass"]; isCls {
@@ -10322,6 +10325,17 @@ func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 	if b, isBin := k.(*jsRBin); isBin {
 		for i, e := range keys.elems {
 			if rubyBinEq(b, e) {
+				return i
+			}
+		}
+		return -1
+	}
+	// An ArithmeticSequence keys by eql? on what its #hash hashes. Twin of
+	// core.keyEq in ruby-interpreter.abnf.
+	if kq := rubyAseqOf(k); kq != nil {
+		kc := &jsArray{elems: []interface{}{kq.props["x"], kq.props["b"], kq.props["e"], kq.props["s"]}}
+		for i, e := range keys.elems {
+			if eq := rubyAseqOf(e); eq != nil && rt.rubyEqlDeep(kc, &jsArray{elems: []interface{}{eq.props["x"], eq.props["b"], eq.props["e"], eq.props["s"]}}) {
 				return i
 			}
 		}

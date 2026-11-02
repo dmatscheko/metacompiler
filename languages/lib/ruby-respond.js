@@ -150,6 +150,17 @@ function rbRespondRows() {
          "partition", "peek", "public_send", "reduce", "reject", "reverse_each", "rewind",
          "select", "send", "size", "slice_after", "slice_before", "sort", "sort_by", "sum", "take", "take_while", "tally",
          "to_a", "uniq", "with_index", "with_object", "zip"],
+        ["Enumerator::ArithmeticSequence", "<=>", "all?", "any?", "begin", "chain", "chunk",
+         "clone", "collect", "collect_concat", "count", "cycle", "detect", "drop",
+         "drop_while", "dup", "each", "each_cons", "each_slice", "each_with_index",
+         "each_with_object", "end", "entries", "eql?", "equal?", "exclude_end?", "filter",
+         "find", "find_index", "first", "flat_map", "freeze", "frozen?", "grep", "grep_v",
+         "group_by", "include?", "inject", "instance_of?", "instance_variables", "is_a?",
+         "itself", "kind_of?", "last", "lazy", "map", "max", "max_by", "member?", "min",
+         "min_by", "minmax", "minmax_by", "next", "nil?", "none?", "one?", "partition",
+         "peek", "public_send", "reduce", "reject", "reverse_each", "rewind", "select",
+         "send", "size", "slice_after", "slice_before", "sort", "sort_by", "step", "sum",
+         "take", "take_while", "tally", "to_a", "uniq", "with_index", "with_object", "zip"],
         ["Enumerator::Lazy", "<=>", "all?", "any?", "chunk_while", "clone", "collect",
          "collect_concat", "count", "detect", "drop", "drop_while", "dup", "each", "each_cons",
          "each_slice", "each_with_index", "each_with_object", "entries", "eql?", "equal?",
@@ -262,7 +273,9 @@ function rbOwnRows() {
         ["MatchData", "==", "[]", "begin", "captures", "end", "hash", "inspect", "length",
          "named_captures", "names", "post_match", "pre_match", "size", "to_a", "to_s"],
         ["Enumerator", "each", "each_with_index", "each_with_object", "inspect", "next",
-         "peek", "rewind", "size", "with_index", "with_object"]
+         "peek", "rewind", "size", "with_index", "with_object"],
+        ["Enumerator::ArithmeticSequence", "==", "===", "begin", "each", "end", "eql?",
+         "exclude_end?", "first", "hash", "inspect", "last", "size", "step"]
     ]
 }
 // The own names of builtin class cls (row 0 is its name), or [] for a class

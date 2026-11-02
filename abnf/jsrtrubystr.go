@@ -327,6 +327,8 @@ func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{},
 			v = &jsArray{elems: []interface{}{v, float64(st.cnt[j]) + rubyToF(op.props["n"])}}
 			st.cnt[j]++
 			m = false
+		case "with_object":
+			v, m = &jsArray{elems: []interface{}{v, f}}, false
 		case "chunk_while", "slice_when":
 			cb := st.buf[j]
 			if len(cb) > 0 && rubyTruthy(rt.rubyLazyCall(f, &jsArray{elems: []interface{}{cb[len(cb)-1], v}}, true)) == (op.props["k"] == "slice_when") {
@@ -436,6 +438,8 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 	lazy := t.props["lazy"] == true
 	if k := rubyLazyOp(name); k != "" && blk != nil {
 		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf(k, blk, 0), true, "#<Enumerator::Lazy: "+desc+":"+name+">"), name)
+	} else if blk == nil && !lazy && rubyPassOp(k) {
+		return rubyLazyCopy(t, nil, false, "#<Enumerator: "+desc+":"+name+">")
 	}
 	// The Lazy-answering methods without a block, the streaming with_index /
 	// with_object, the early-stopping and the eager Enumerable ones, freeze, dup
@@ -488,6 +492,12 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			return rubyLazyCopy(t, rubyLazyOpOf("with_index", jsNull, wo), lazy, wd+"("+strconv.Itoa(wo)+")>")
 		}
 		return rubyLazyCopy(t, rubyLazyOpOf("with_index", jsNull, 0), lazy, wd+">")
+	case wob && blk == nil && len(pos) > 0:
+		wd := "#<Enumerator: " + desc + ":" + name
+		if lazy {
+			wd = ld
+		}
+		return rubyLazyCopy(t, rubyLazyOpOf("with_object", pos[0], 0), lazy, wd+"("+rt.rubyInspect(pos[0])+")>")
 	}
 	if en, has := t.props["en"]; has && len(ops) == 0 && blk != nil && (name == "each" || wix || wob) {
 		return rt.rubyMethod(en, name, args)
@@ -652,6 +662,12 @@ func rubyLazyOp(name string) string {
 		return name
 	}
 	return ""
+}
+
+// rubyPassOp: the ops whose blockless call on an eager stream passes its values
+// through. Twin of rbaPassOp in languages/lib/ruby-arr.js.
+func rubyPassOp(op string) bool {
+	return op == "map" || op == "select" || op == "reject" || op == "flat_map"
 }
 
 // rubyLazyBuffers: op k holds values back until a later one releases them. Twin
@@ -857,11 +873,15 @@ func (rt *jsrt) rubyAseqMethod(t *jsObject, name string, args []interface{}) int
 		}
 		return t
 	}
-	if endless && rubyToF(q.props["s"]) == 0 {
-		rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
+	if isUndefOrNull(q.props["e"]) {
+		rt.rubyRaiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence")
+	}
+	_, eFlo := q.props["e"].(jsFlo)
+	if _, bFlo := q.props["b"].(jsFlo); eFlo || bFlo {
+		rubyFloDomain(rt, (rubyToF(q.props["e"])-rubyToF(q.props["b"]))/rubyToF(q.props["s"]))
 	}
 	if endless {
-		rt.rubyRaiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence")
+		rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
 	}
 	n := len(items.elems)
 	if len(pos) == 0 {

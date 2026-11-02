@@ -2431,6 +2431,54 @@ def s176
         f.next == 1.0 && v[0].step(v[4].to_f, v[5]).first.is_a?(Integer) && v[0].step(0, 1).first.nil?)
 end
 
+# ===== SECTION 177: ArithmeticSequence respond_to?, Hash key, blockless map / with_object, #last =====
+# An ArithmeticSequence answers respond_to? for its own methods and an
+# Enumerator's, and is a Hash key by eql? of begin / end / step / exclude_end?.
+# Without a block, map / select / reject / flat_map of an endless one answer an
+# Enumerator over its values (Floats toward a Float end) and each_with_object
+# pairs the Integers with the memo. #last is (end - begin).div(step) steps from
+# begin: an infinite or NaN Float quotient raises FloatDomainError, only a
+# missing end is "endless". /usr/bin/ruby 2.6 settles each.
+def s177
+  v = [1, 10, 3, 2, Float::INFINITY, nil, 0, 1.0, Float::NAN, :m]
+  a = v[0].step(v[1], v[2])
+  check("as177a", [a.respond_to?(:first), a.respond_to?(:begin), a.respond_to?(:each), a.respond_to?(:step),
+                   a.respond_to?(:exclude_end?), a.respond_to?(:last), a.respond_to?(:map), a.respond_to?(:force),
+                   a.respond_to?(:foo)] == [true, true, true, true, true, true, true, false, false] &&
+        Enumerator::ArithmeticSequence.instance_methods(false).sort ==
+          [:==, :===, :begin, :each, :end, :eql?, :exclude_end?, :first, :hash, :inspect, :last, :size, :step] &&
+        s175err { a.foo }.start_with?("NoMethodError undefined method `foo' for (1.step(10, 3)):Enumerator::ArithmeticSequence"))
+  h = {a => :a}
+  h[v[0].step(v[1], v[2])] = :c
+  check("as177b", h[v[0].step(v[1], v[2])] == :c && h[(v[0]..v[1]).step(v[2])] == :c && h.size == 1 &&
+        h[v[7].step(v[1], v[2])].nil? && h[(v[0]...v[1]).step(v[2])].nil? && h[v[0].step(v[1], v[3])].nil? &&
+        h.key?((v[0]..v[1]).step(v[2])) && a.eql?(v[7].step(v[1], v[2])))
+  e = v[0].step(v[4], v[3])
+  check("as177c", e.map.first(1) == [1.0] && e.each_with_object([]).first(1) == [[1, []]] &&
+        e.map.inspect == "#<Enumerator: (1.step(Infinity, 2)):map>" &&
+        e.with_object(v[9]).inspect == "#<Enumerator: (1.step(Infinity, 2)):with_object(:m)>" &&
+        e.select.first(2) == [1.0, 3.0] && e.reject.first(2) == [1.0, 3.0] && e.flat_map.first(2) == [1.0, 3.0] &&
+        e.map.with_index.first(2) == [[1.0, 0], [3.0, 1]] && e.with_object(v[9]).first == [1, :m] &&
+        v[0].step.map.first(2) == [1, 2] && (v[0]..v[5]).step(v[3]).each_with_object(v[9]).first(2) == [[1, :m], [3, :m]] &&
+        [v[0], v[3]].cycle.map.first(3) == [1, 2, 1] && (v[0]..v[5]).lazy.each_with_object([]).first(2) == [[1, []], [2, []]])
+  m = []
+  v[0].step.each_with_object(m).each { |x, o| o << x; break if x > 2 }
+  check("as177d", m == [1, 2, 3] &&
+        v[0].step.each_with_object(v[9]).inspect == "#<Enumerator: (1.step):each_with_object(:m)>" &&
+        (v[0]..v[5]).lazy.each_with_object([]).inspect == "#<Enumerator::Lazy: #<Enumerator::Lazy: 1..>:each_with_object([])>")
+  check("as177e", s175err { e.last } == "FloatDomainError Infinity" && s175err { e.last(2) } == "FloatDomainError Infinity" &&
+        s175err { v[0].step(-v[4], v[3]).last } == "FloatDomainError -Infinity" &&
+        s175err { v[0].step(v[4], v[6]).last } == "FloatDomainError Infinity" &&
+        s175err { v[0].step(v[8], v[3]).last } == "FloatDomainError NaN" &&
+        s175err { v[0].step(v[1].to_f, v[6]).last } == "FloatDomainError Infinity" &&
+        s175err { v[0].step(v[1], v[6]).last } == "ZeroDivisionError divided by 0" &&
+        s175err { v[0].step(v[1], v[6].to_f).last } == "ZeroDivisionError divided by 0" &&
+        s175err { (v[0]..v[4]).step(v[3]).last } == "FloatDomainError Infinity" &&
+        s175err { (v[0]..v[5]).step(v[3]).last } == "RangeError cannot get the last element of endless arithmetic sequence" &&
+        s175err { v[0].step(v[5], v[3]).last } == "RangeError cannot get the last element of endless arithmetic sequence" &&
+        v[0].step(v[1], v[2]).last == 10 && v[7].step(v[1], v[2]).last(2) == [7.0, 10.0])
+end
+
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -2487,5 +2535,6 @@ s173() # SECTION-CALL 173
 s174() # SECTION-CALL 174
 s175() # SECTION-CALL 175
 s176() # SECTION-CALL 176
+s177() # SECTION-CALL 177
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

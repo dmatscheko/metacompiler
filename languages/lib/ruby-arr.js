@@ -9,6 +9,7 @@
 // a user Enumerable, src) - and the OPS {k, f, n}, applied to one value at a
 // time: map / select / reject / take_while / drop_while / flat_map / chunk_while
 // / slice_when (f the block), take / drop / with_index (n the count or offset),
+// with_object (f the memo),
 // step (every n-th value from the first, a String range's #step),
 // slice / cons (n the width), uniq (f the key block or null) and zip (f a list
 // of functions answering an argument's i-th value or nil).
@@ -165,6 +166,9 @@ function rbaLazyRun(st, ops, v, m, from, call, test, eql) {
             cur = [cur, st.cnt[j] + op.n]
             st.cnt[j] = st.cnt[j] + 1
             multi = false
+        } else if (op.k == "with_object") {
+            cur = [cur, op.f]
+            multi = false
         } else if (op.k == "chunk_while" || op.k == "slice_when") {
             // A chunk goes on once the block, given its last value and this one,
             // splits them: answers false for chunk_while, true for slice_when.
@@ -209,6 +213,13 @@ function rbaLazyOp(name) {
     if (name == "reject" || name == "take_while" || name == "drop_while" || name == "uniq") { return name }
     if (name == "chunk_while" || name == "slice_when") { return name }
     return ""
+}
+
+// The ops whose blockless call on an eager stream passes its values through
+// unchanged (Enumerable's RETURN_SIZED_ENUMERATOR). Go twin: rubyPassOp in
+// abnf/jsrtrubystr.go.
+function rbaPassOp(op) {
+    return op == "map" || op == "select" || op == "reject" || op == "flat_map"
 }
 
 // The Enumerable methods a Lazy answers EAGERLY, over the Array of all its

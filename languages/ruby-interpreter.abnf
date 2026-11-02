@@ -6184,9 +6184,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             || name == "size" || name == "==" || name == "eql?" || name == "===" || name == "each"
             || name == "dup" || name == "clone" || name == "class" || name == "hash"
     }
-    // The ArithmeticSequence methods an Enumerator has not (aseqOwns). An endless
-    // one has no last element; a step of 0 makes the count of steps a division by
-    // zero. Twins: rbAseqMethod, rubyAseqMethod.
+    // The ArithmeticSequence methods an Enumerator has not (aseqOwns). #last is
+    // (end - begin).div(step) steps from begin (arith_seq_last): without an end
+    // there is none, a Float difference floors a quotient that may be infinite
+    // or NaN (FloatDomainError), and an Integer one divided by a 0 step raises
+    // ZeroDivisionError. Twins: rbAseqMethod, rubyAseqMethod.
     function aseqMethod(t, name, args, blk) {
         var q = t.aseq
         if (name == "begin") { return q.b }
@@ -6209,8 +6211,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { for (var i = 0; i < t.items.length; i++) { blockCall(blk, [t.items[i]]) } }
             return t
         }
-        if (endless && toF(q.s) == 0) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
-        if (endless) { raiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence") }
+        if (q.e === null || q.e === undefined) { raiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence") }
+        if (isFlo(q.e) || isFlo(q.b)) { floDomainGuard((toF(q.e) - toF(q.b)) / toF(q.s)) }
+        if (endless) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
         var n = t.items.length
         if (args.length == 0) { return n == 0 ? null : t.items[n - 1] }
         var ln = Math.trunc(toF(args[0]))
@@ -11021,8 +11024,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function lazyMethod(t, name, args, blk) {
         var lop = rbaLazyOp(name)
         if (lop != "" && blk != null) { return lazyOut(t, lazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + t.desc + ":" + name + ">"), name) }
+        // Without a block, map / select / reject / flat_map of an eager stream
+        // answer an Enumerator yielding the same values. Twins: rbLazyMethod,
+        // rubyLazyMethod.
+        if (blk == null && !t.lazy && rbaPassOp(lop)) { return lazyCopy(t, null, false, "#<Enumerator: " + t.desc + ":" + name + ">") }
         // uniq, grep / grep_v (a select, then the block's map), zip, drop and a
-        // blockless with_index / each_with_index answer a Lazy too. Twins:
+        // blockless with_index / with_object and their each_ forms answer a Lazy
+        // too. Twins:
         // rubyLazyMethod in abnf/jsrtrubystr.go, rbLazyMethod in lib/ruby-rt.metajs.
         var ld = "#<Enumerator::Lazy: " + t.desc + ":" + name
         if (name == "uniq") { return lazyOut(t, lazyCopy(t, {k: "uniq", f: null, n: 0}, true, ld + ">"), name) }
@@ -11054,6 +11062,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var wo = name == "with_index" && args.length > 0 ? Math.trunc(toF(args[0])) : 0
             var wd = (t.lazy ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + t.desc + ":" + name
             return lazyCopy(t, {k: "with_index", f: null, n: wo}, t.lazy, wd + (name == "with_index" && args.length > 0 ? "(" + wo + ")" : "") + ">")
+        }
+        if (wob && blk == null && args.length > 0) {
+            var wod = (t.lazy ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + t.desc + ":" + name + "(" + rinspect(args[0]) + ")>"
+            return lazyCopy(t, {k: "with_object", f: args[0], n: 0}, t.lazy, wod)
         }
         if (t.en !== undefined && t.ops.length == 0 && blk != null && (name == "each" || wix || wob)) { return mcall(t.en, name, args, blk) }
         // with_index / with_object and their each_ forms run the block as each
@@ -16742,6 +16754,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A Range is a VALUE key for the same reason an Array is: two range
         // literals are two objects.
         if (isRange(a) && isRange(b)) { return rangeEq(a, b) }
+        // An ArithmeticSequence keys by eql? on what its #hash hashes, so
+        // 1.step(10, 3) and (1..10).step(3) are one key and 1.0.step(10, 3) is
+        // another. Twins: rbDictFind, rubyDictFind.
+        if (isEnum(a) && a.aseq !== undefined && isEnum(b) && b.aseq !== undefined) {
+            return valEql([a.aseq.x, a.aseq.b, a.aseq.e, a.aseq.s], [b.aseq.x, b.aseq.b, b.aseq.e, b.aseq.s])
+        }
         if (!isBig(a) || !isBig(b)) { return false }
         return bigCmp(a, b) == 0
     }
