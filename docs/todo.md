@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1141** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1142** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,15 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-integer ranges, zero slice size, endless Float range slices · P3 · RB · IN PROGRESS (RB worker, round 60) [V]
+### T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer endless ranges · P3 · RB · OPEN [V]
 
-Found while working T-1135. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8.
+Found while working T-1137. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8.
 
-1. In the compiled engines, `h.send(:index, 1)` and `h.method(:index).call(1)` do not print `warning: Hash#index is deprecated; use Hash#key`, because those paths carry no call site. The interpreter does print it. Stdout already agrees.
-2. The warning names the first line of the statement, not the line of the call. MRI names the later line in `x = h\n  .index(1)`; all our engines name the first. More generally, check whether other run-time warnings have the same multi-line attribution.
-3. Big-integer ranges: `(2**70..2**70+3).size`, `#count` and `#length` loop forever in the interpreter, because its range walk increments a double that can no longer change. MRI gives 4. Check the compiled engines too.
-4. `(1.0..3.0).each_slice(0)` and `each_cons(0)` raise TypeError in ours. MRI raises ArgumentError `invalid slice size` (or `invalid size` for each_cons) when the enumerator is created. Check Integer ranges and arrays too.
-5. `(1.0..).each_slice(2).size` raises FloatDomainError in MRI. Ours has not been probed.
+1. Kernel#warn is missing in all three engines. `warn "hi"` raises NoMethodError "undefined method `warn' for main:Object"; MRI writes `hi` and a newline to `$stderr`. Cover several arguments, arrays (one line per element), `warn` with no arguments (prints nothing), and the return value nil. Check `uplevel:` too, which MRI 2.6 supports.
+2. Assigning an object with #write to `$stderr` does not capture output in any engine. MRI routes rb_warn and Kernel#warn through `$stderr.write`, so a custom object receives the warning text. The oracle's `W` equals the warning text plus "hi\n". Also check `$stderr.puts` and a StringIO-like object, if StringIO is supported.
+3. Not probed: a big-Integer begin with a nil or Infinity end, such as `(2**70..).each` / `.first(2)` / `.size` and `(2**70..Float::INFINITY).first(2)`. `rangeUnbounded` only accepts a plain-number begin.
 
 Verify with `tests/probe.sh ruby` on all four legs, and diff the `.err` files.
 
@@ -1201,6 +1199,7 @@ T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index
 T-1136 kotlin: uninitialized top-level lateinit read, lambda `is FunctionN`, lambda javaClass.name, array ::class — merged b2479ff9: uninitialized lateinit reads throw (top-level/local/template; check only at lateinit reads when null, js_ktlatechk), stray top-level lateinit flag no longer leaks onto the next class property, lambda/function arity for is FunctionN (implicit it, receivers, !is, when), null is List<*>? true, lambda javaClass.name relation, array ::class names; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench +0.03%
 T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, other stores to circular array nameref, valueless readonly nameref stores, nested brackets in computed decl operands — merged c92fc735: NAME[SUB]=(list) abandons the line (declares array under declare/local/export/readonly), export/readonly through circular local nameref act on the global with bash's warnings, stores to circular array nameref leave it alone, value-before-readonly check for valueless readonly namerefs, nested-bracket subscripts in declaration operands; full-syntax ratchet split into 7 parts (part 5 was pushed over the brake); 4-leg probe + stderr match bash 5.3; matrix 605/605; bench -0.04%
 T-1138 kotlin: static Array<T>::class, KClass no-reflect suffix decision, function-reference javaClass and member-ref arity, receiver-lambda arity — merged d520bee5: static Array<T>::class (incl. nested/primitive element arrays), function-reference javaClass stand-in, reference arity for program methods/props/constructors (js_ktrefarity), receiver-param lambda arity, explicit it-parameter scoping; also fixed compiled js_ktrecvlam passing the receiver twice (two invalid-Kotlin feature tests corrected); 4-leg probe matches kotlinc 2.2.21; kotlin gates green; bench +0.04%
+T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-integer ranges, zero slice size, endless Float range slices — merged 8b79ec7b: Hash#index warning from the runtime arm at the running site (send/method/public_send; site fn registered once via js_rsitefn, no per-call extern), later-line call sites for warnings and backtraces in all engines, big-Integer ranges walk/count exactly, Range#length NoMethodError and Float-range count TypeError per MRI, each_slice/each_cons size checks with implicit conversion; 4-leg probe matches ruby 2.6 stdout + stderr; matrix 605/605; bench +0.02%
 
 # Settled — do not re-open
 
