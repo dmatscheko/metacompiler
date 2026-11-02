@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1168 kotlin: System.err, `java` name shadowing in qualified java.lang rewrites · P3 · KT · OPEN [V]
+### T-1168 kotlin: System.err, `java` name shadowing in qualified java.lang rewrites · P3 · KT · IN PROGRESS (KT worker, round 55) [V]
 Found while closing T-1165; oracle kotlinc 2.2.21.
 - All engines: `System.err` is not modelled (`System.err.println("e")` should write "e" to stderr, exit 0; also `java.lang.System.err`, `System.err::println`). Compare stderr against the oracle's.
 - Both engines: the `java.lang.System.x` / `java.lang.X::name` rewrites ignore a program binding named `java` (a local, parameter or property, or `object java`). Probe what kotlinc accepts and keep ours consistent with it; if kotlinc rejects every such shadowing form, record it as a non-issue.
