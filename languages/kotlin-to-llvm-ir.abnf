@@ -4828,7 +4828,7 @@ KwContract  = "contract" KwEnd ;
                     // in its own block when the receiver is not null; a phi merges.
                     var doB = curF.NewBlock("")
                     var mergeB = curF.NewBlock("")
-                    var isNull = callExt(b, "js_eq", [cur, hNull])
+                    var isNull = callExt(b, "js_seq", [cur, hNull])
                     b.NewCondBr(truthy(b, isNull), mergeB, doB)
                     var rs = emitSuffixT(doB, cur, s)
                     rs.b.NewBr(mergeB)
@@ -5737,7 +5737,7 @@ KwContract  = "contract" KwEnd ;
     function emitNnCheck(b, v) {
         var npeB = curF.NewBlock("")
         var nnB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_eq", [v, hNull])), npeB, nnB)
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), npeB, nnB)
         callExt(npeB, "js_throw", [callExt(npeB, "js_ktnewexc", [emitStr(npeB, "NullPointerException"), hNull])])
         npeB.NewRet(hUndef)
         return nnB
@@ -5770,7 +5770,7 @@ KwContract  = "contract" KwEnd ;
     function emitSafeStep(b, o, skips) {
         var skipB = curF.NewBlock("")
         var goB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_eq", [o, hNull])), skipB, goB)
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [o, hNull])), skipB, goB)
         skips.push(skipB)
         return goB
     }

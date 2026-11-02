@@ -2139,7 +2139,7 @@ QualRefBase <~~ push(stripWs(up.in)) ~~>
 // (Kotlin's rule), which is why it pushes its own "fun" return target while its body
 // walks.
 AnonFun     <~~ ktNoteBody(up.start, up.pos); push(makeAnonFun(takeAll())); retLblPop() ~~>
-            = [ ContextClause ] KwFun <~~ retLblPush("", "fun") ~~> { TypeAnno } [ SkipAngle ] [ RecvSeg { RecvSeg } ] [ KId ] [ SkipAngle ] ParamList [ ":" Type ] [ ContractClause ] [ WhereClause ] [ FunBody ] ;
+            = [ ContextClause ] KwFun <~~ retLblPush("", "fun") ~~> { TypeAnno } [ SkipAngle ] [ RecvSeg { RecvSeg } ] [ KId ] [ SkipAngle ] ParamList [ ":" Type ] [ ContractClause ] [ WhereClause ] [ Block | "=" ExprBody ] ;
 
 // A supertype list. A supertype is a SUPERCLASS when it carries a constructor-argument
 // list (`: Shape12(id)`), an INTERFACE otherwise (`: Named12`), and an interface
@@ -3116,7 +3116,7 @@ NotMemberKw = :script(~~ "pure";
         if (Array.isArray(v)) { kAdoptAll(v, vty) }
         else if (kIsSet(v)) { kAdoptAll(v.keys, vty) }
         else if (kIsMap(v)) { kAdoptAll(v.keys, kty); kAdoptAll(v.vals, vty) }
-        else if (v !== null && v !== undefined && typeof v == "object" && v.second !== undefined) {
+        else if (v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "second")) {
             v.first = kAdoptVal(v.first, kty)
             v.second = kAdoptVal(v.second, vty)
         }
@@ -4581,7 +4581,7 @@ NotMemberKw = :script(~~ "pure";
             if (c.op == "mapNotNull") {
                 var mv = anytype
                 mv = c.fn(v)
-                if (mv !== null && mv !== undefined) { return kCursorSet(c, mv) }
+                if (mv !== null) { return kCursorSet(c, mv) }
             } else if ((c.fn(v) === true) == (c.op == "filter")) { return kCursorSet(c, v) }
         }
         return false
@@ -5022,11 +5022,11 @@ NotMemberKw = :script(~~ "pure";
     hostGlobals["require"] = function(ok, msg) { kContract(ok, msg, "IllegalArgumentException", "Failed requirement.") }
     hostGlobals["check"] = function(ok, msg) { kContract(ok, msg, "IllegalStateException", "Check failed.") }
     hostGlobals["requireNotNull"] = function(v, msg) {
-        kContract(v !== null && v !== undefined, msg, "IllegalArgumentException", "Required value was null.")
+        kContract(v !== null, msg, "IllegalArgumentException", "Required value was null.")
         return v
     }
     hostGlobals["checkNotNull"] = function(v, msg) {
-        kContract(v !== null && v !== undefined, msg, "IllegalStateException", "Required value was null.")
+        kContract(v !== null, msg, "IllegalStateException", "Required value was null.")
         return v
     }
     function kContract(ok, msg, cname, dflt) {
@@ -5137,14 +5137,14 @@ NotMemberKw = :script(~~ "pure";
     hostGlobals["listOfNotNull"] = function() {
         var out = []
         for (var i = 0; i < arguments.length; i++) {
-            if (arguments[i] !== null && arguments[i] !== undefined) { out.push(arguments[i]) }
+            if (arguments[i] !== null) { out.push(arguments[i]) }
         }
         return out
     }
     hostGlobals["setOfNotNull"] = function() {
         var s = kMakeSet()
         for (var i = 0; i < arguments.length; i++) {
-            if (arguments[i] !== null && arguments[i] !== undefined) { kSetAdd(s, arguments[i]) }
+            if (arguments[i] !== null) { kSetAdd(s, arguments[i]) }
         }
         return s
     }
@@ -6082,7 +6082,8 @@ NotMemberKw = :script(~~ "pure";
     function kIsPair(v) {
         if (v === null || v === undefined || typeof v != "object" || Array.isArray(v)) { return false }
         if (v.__dict === true || v.__isclass !== undefined) { return false }
-        if (v.first === undefined || v.second === undefined) { return false }
+        // A Unit component is undefined, so the shape test asks for the keys.
+        if (!hasOwn(v, "first") || !hasOwn(v, "second")) { return false }
         // The COMPILED half builds a real Pair class instance where this one builds a
         // plain object; both are a Pair, and a user class that merely has `first` and
         // `second` is not (only Kotlin's own two tuple names are accepted).
@@ -7433,7 +7434,7 @@ NotMemberKw = :script(~~ "pure";
             for (i = 0; kForNext(es, i, n0); i++) {
                 var mv = anytype
                 mv = f(es[i])
-                if (mv !== null && mv !== undefined) { out.push(mv) }
+                if (mv !== null) { out.push(mv) }
             }
             return {v: out}
         }
@@ -7704,7 +7705,7 @@ NotMemberKw = :script(~~ "pure";
         if (name == "filterNotNull" || name == "requireNoNulls") {
             out = []
             for (i = 0; i < es.length; i++) {
-                if (es[i] === null || es[i] === undefined) {
+                if (es[i] === null) {
                     if (name == "requireNoNulls") { fail("null element in requireNoNulls()") }
                     continue
                 }
@@ -9541,7 +9542,7 @@ NotMemberKw = :script(~~ "pure";
         }
         return function() {
             var v = items[0]()
-            for (var i = 1; i < items.length && (v === null || v === undefined); i++) v = items[i]()
+            for (var i = 1; i < items.length && v === null; i++) v = items[i]()
             return v
         }
     }
@@ -9633,7 +9634,7 @@ NotMemberKw = :script(~~ "pure";
                 var s = suffixes[i]
                 // A ?. suffix on a null receiver yields null; the argument
                 // expressions of a skipped call do not run (like in Kotlin).
-                if (s.safe && (cur === undefined || cur === null)) { cur = null; continue }
+                if (s.safe && cur === null) { continue }
                 if (s.kind == "mcall") {
                     var spec = kevalArgs(s.args)
                     // An explicit type argument the method actually uses -
@@ -9671,7 +9672,7 @@ NotMemberKw = :script(~~ "pure";
                     cur = s.t()
                 } else if (s.kind == "nn") {
                     // x!! (Intrinsics.checkNotNull): a message-less NullPointerException.
-                    if (cur === undefined || cur === null) { kRaise("NullPointerException", null) }
+                    if (cur === null) { kRaise("NullPointerException", null) }
                 } else if (s.kind == "refsfx") {
                     // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an
                     // arbitrary expression. The value in hand is that receiver, so the
@@ -9917,7 +9918,7 @@ NotMemberKw = :script(~~ "pure";
                 var obj = anytype
                 obj = baseT()
                 // `f()?.p = v` on a null receiver skips the write and its right-hand side.
-                if (last.safe === true && (obj === null || obj === undefined)) { return null }
+                if (last.safe === true && obj === null) { return null }
                 var v = anytype
                 var old = anytype
                 if (last.kind == "field") {

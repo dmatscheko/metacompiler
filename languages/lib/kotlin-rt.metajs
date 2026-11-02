@@ -861,13 +861,25 @@ function ktIsEntry(v) {
     return v["__entry"] === true
 }
 
+// A present key, including one holding undefined (a Unit value): keysOf lists the
+// own keys, which the Go twin reads as a props lookup.
+function k0HasKey(o, k) {
+    if (o[k] !== undefined) { return true }
+    var ks = keysOf(o)
+    var i = 0
+    for (i = 0; i < ks.length; i = i + 1) {
+        if (ks[i] === k) { return true }
+    }
+    return false
+}
+
 // ktIsPair (jsrtkotlin.go 3171). The compiler half's `to` builds a real Pair
 // CLASS instance while the interpreter's builds a plain object, so both shapes
 // are recognized; a user class that happens to have first/second is NOT a Pair.
 function ktIsPair(v) {
     if (!k0IsRec(v)) { return false }
-    if (v["first"] === undefined) { return false }
-    if (v["second"] === undefined) { return false }
+    if (!k0HasKey(v, "first")) { return false }
+    if (!k0HasKey(v, "second")) { return false }
     var cls = v["__class"]
     if (!rtIsNil(cls)) {
         if (!ktIsObj(cls)) { return false }
@@ -5899,7 +5911,7 @@ function k3FilterNotNull(es, req) {
     var e = anytype
     for (i = 0; i < es.length; i = i + 1) {
         e = es[i]
-        if (e === undefined || e === null) {
+        if (e === null) {
             if (req) { fail("null element in requireNoNulls()") }
         } else { out.push(e) }
     }
@@ -6479,7 +6491,7 @@ function k4DerivedPull(c, src) {
         if (op == "takeWhile") { return fn(v) === true && k4CursorSet(c, v) }
         if (op == "mapNotNull") {
             var mv = fn(v)
-            if (!rtIsNil(mv)) { return k4CursorSet(c, mv) }
+            if (mv !== null) { return k4CursorSet(c, mv) }
         } else {
             if ((fn(v) === true) == (op == "filter")) { return k4CursorSet(c, v) }
         }
@@ -9739,7 +9751,7 @@ function k4Contract(name, args) {
     if (name == "requireNotNull") { notNull = true }
     if (name == "checkNotNull") { notNull = true }
     if (notNull) {
-        ok = !rtIsNil(k4At(args, 0))
+        ok = k4At(args, 0) !== null
         dflt = "Required value was null."
     }
     if (!ok) {
@@ -9988,7 +10000,7 @@ function ktGlobalFn(name) {
             var out = []
             var i = 0
             while (i < arguments.length) {
-                if (!rtIsNil(arguments[i])) { out.push(arguments[i]) }
+                if (arguments[i] !== null) { out.push(arguments[i]) }
                 i = i + 1
             }
             return out

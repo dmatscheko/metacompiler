@@ -6734,7 +6734,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "filterNotNull", "requireNoNulls":
 		out := []interface{}{}
 		for _, e := range es {
-			if isUndefOrNull(e) {
+			if e == jsNull {
 				if name == "requireNoNulls" {
 					rt.fail("null element in requireNoNulls()")
 				}
@@ -10562,7 +10562,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			}
 			ok := rt.truthy(argAt(args, 0))
 			if name == "requireNotNull" || name == "checkNotNull" {
-				ok = !isUndefOrNull(argAt(args, 0))
+				ok = argAt(args, 0) != jsNull
 				dflt = "Required value was null."
 			}
 			if !ok {
@@ -10641,7 +10641,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			out := &jsArray{}
 			for _, v := range args {
-				if !isUndefOrNull(v) {
+				if v != jsNull {
 					out.elems = append(out.elems, v)
 				}
 			}
@@ -12657,7 +12657,7 @@ func (rt *jsrt) ktDerivedPull(c, src *jsObject) bool {
 		case "takeWhile":
 			return rt.ktCall(fn, v) == true && ktCursorSet(c, v)
 		case "mapNotNull":
-			if mv := rt.ktCall(fn, v); !isUndefOrNull(mv) {
+			if mv := rt.ktCall(fn, v); mv != jsNull {
 				return ktCursorSet(c, mv)
 			}
 		default:

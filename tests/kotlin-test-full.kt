@@ -7728,6 +7728,17 @@ fun s175() {
         emptyArray<String>().javaClass.name == "[Ljava.lang.String;" && arrayOf<Any>(n[1]).javaClass.name == "[Ljava.lang.Object;" &&
         arrayOfNulls<Int>(n[2]).javaClass.name == "[Ljava.lang.Integer;" && emptyArray<List<Int>>().javaClass.name == "[Ljava.util.List;" &&
         emptyArray<Array<Int>>().javaClass.name == "[[Ljava.lang.Integer;" && arrayOf(n[1]).javaClass.name == "[Ljava.lang.Integer;")
+    // Unit is a value, never null: ?., ?:, !!, the NotNull operations and a Pair keep it.
+    val u = unit175()
+    val p = "k" to u
+    check("unit175g", (u?.toString() ?: "was null") == "kotlin.Unit" && (u ?: n[1]) is Unit && u!! is Unit &&
+        listOf(u, null).filterNotNull().size == 1 && listOf(u, null).mapNotNull { it }.size == 1 &&
+        listOfNotNull(u, null).size == 1 && requireNotNull(u) is Unit && checkNotNull(u) is Unit &&
+        p.toString() == "(k, kotlin.Unit)" && mapOf(p).size == 1 && mapOf(p).containsKey("k"))
+    // An anonymous function's block body leaves a following `;` to the statement.
+    var ran = false
+    val f = fun(): Unit {}; run { ran = f() == Unit }
+    check("anon175h", ran && f().toString() == "kotlin.Unit")
 }
 
 
