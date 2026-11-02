@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1122** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1123** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -104,12 +104,13 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.util classes; RandomAccess · P3 · KT · IN PROGRESS (KT worker, round 35) [V]
+### T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/SingletonList); emptyArray class · P3 · KT · OPEN [V]
 
-Oracle: kotlinc 2.2.21.
-- After a structural change to the parent, `s[0]` and `for (x in s)` on a stale subList must throw ConcurrentModificationException. Ours returns the old element / iterates the old window. Adding the check to layer 2's `js_ktindex` would put an `arrProps` host call on the hottest path, so first add a cheap "has props" test to the index-read fast path, then measure with tests/bench.sh kotlin --paired. All three engines must agree.
-- Casts to concrete java.util classes are unchecked. `intArrayOf(1,2).asList() as java.util.ArrayList<Int>` must throw ClassCastException; ours lets it through. Check `as ArrayList`, `as LinkedHashMap`, `as HashSet` etc. against the runtime's JVM class names (`__jc` / kind table).
-- `intArrayOf(1).asList() is RandomAccess` is true; ours says false. Look for other marker interfaces that are cheap to answer from the class table.
+Oracle: kotlinc 2.2.21. All three engines differ:
+- `(Unit as Any).toString()` prints `kotlin.Unit`. Ours throws "NullPointerException: null cannot be cast to non-null type kotlin.Any"; Unit must not count as null in casts.
+- `Any()` fails with "unknown name: Any". It must construct a plain object of class java.lang.Object, with toString `java.lang.Object@<hash>`, equality by identity and a hashCode.
+- `listOf(1,2).filter { false }.toList().javaClass.name` is kotlin.collections.EmptyList, and with one element java.util.Collections$SingletonList. Ours says java.util.ArrayList. Check which stdlib ops (toList, toSet, toMap, filter+toList…) return EmptyList/Singleton* vs ArrayList, and keep the read-only rules consistent with T-1106's table.
+- `emptyArray<Int>().javaClass.name` is `[Ljava.lang.Integer;`; ours is `[Ljava.lang.Object;`.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1170,6 +1171,7 @@ T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (in
 T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primitive asList cast — DONE r34 (847bd188): subList as a live two-way window on the __lnk mechanism (structural parent change -> CME on next use), List/Map replaceAll, primitive asList read-only (CCE on cast); master-probed vs kotlinc 2.2.21. Stale index-read/for CME left (hot path) -> follow-up
 T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for step — DONE r53 (fd4ce498): Enumerator::ArithmeticSequence (inspect/class/begin/end/step/last/size/==), endless String ranges, Float-range TypeError, each_entry, MRI's split Range#step messages; master-probed vs ruby 2.6
 T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and local resolution; declare -ft; LC_ALL=C case mapping — DONE r37 (2fb2fdcc, 25e42574): arithmetic-text expansion errors abandon the line unprefixed, circular-nameref @a/@A warning counts, circular local nameref reads/scalar stores/unset resolve to the global, declare -ft/-F/-pf, stray UTF-8 continuation bytes in compiled strip/case; paired bench -0.03% after the rt_var-caller fix. LC_ALL=C case mapping NOT done: needs the general locale model (user POLICY decision)
+T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.util classes; RandomAccess — DONE r35 (7f42e176): stale subList index read / for / iterators / indices throw CME (paired bench -0.02%), casts to concrete java.util classes checked with JVM messages, RandomAccess/Cloneable/Serializable markers per JVM class and program supertypes; master-probed vs kotlinc 2.2.21
 
 # Settled — do not re-open
 
