@@ -7050,15 +7050,16 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			if len(sp) > 1 {
 				by = sp[1]
 			}
-			if rubyToF(by) == 0 {
+			if rubyToF(by) == 0 && nblk != nil {
 				rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0")
 			}
 			_, fb := by.(jsFlo)
 			_, ft := t.(jsFlo)
-			if lf, isFlo := lim.(jsFlo); isUndefOrNull(lim) || (isFlo && math.IsInf(lf.f, 1) == (rubyToF(by) > 0) && math.IsInf(lf.f, 0)) {
-				se := rubyStepForever(x, rubyToF(by), fb || ft, "#<Enumerator: "+rt.rubyInspect(t)+":step"+rt.rubyInspectArgs(npos)+">")
+			desc := "(" + rt.rubyInspect(t) + ".step" + rt.rubyAseqArgs(npos) + ")"
+			if lf, isFlo := lim.(jsFlo); isUndefOrNull(lim) || rubyToF(by) == 0 || (isFlo && math.IsInf(lf.f, 1) == (rubyToF(by) > 0) && math.IsInf(lf.f, 0)) {
+				se := rubyStepForever(x, rubyToF(by), fb || ft, desc)
 				if nblk == nil {
-					return se, true
+					return rubyMkAseq(se, t, lim, by, false, desc), true
 				}
 				rt.rubyMethod(se, "each", []interface{}{rubyBlkWrap(nblk)})
 				return t, true
@@ -7071,6 +7072,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 				for v, lim, b := x, rubyToF(lim), rubyToF(by); (b > 0 && v <= lim) || (b < 0 && v >= lim); v += b {
 					nl.elems = append(nl.elems, v)
 				}
+			}
+			if nblk == nil {
+				return rubyMkAseq(rubyEnumAt(rubyMkEnum(nl), t, name, npos), t, lim, by, false, desc), true
 			}
 		case "times":
 			for i := 0.0; i < x; i++ {
@@ -7318,6 +7322,7 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 	}
 	if name == "Enumerator" {
 		c.set("$c$Lazy", rt.rubyBuiltinClass("Enumerator::Lazy"))
+		c.set("$c$ArithmeticSequence", rt.rubyBuiltinClass("Enumerator::ArithmeticSequence"))
 	}
 	// Regexp's option bits, the second argument of Regexp.new.
 	if name == "Regexp" {
@@ -7514,11 +7519,21 @@ func (rt *jsrt) rubyRangeText(r *jsObject, insp bool) string {
 // in MRI too; the message is ruby-interpreter.abnf's, so all three engines agree.
 func (rt *jsrt) rubyRangeToArr(r *jsObject) *jsArray {
 	lo, hi := r.props["begin"], r.props["end"]
+	rt.rubyRangeWalkable(r)
 	if isUndefOrNull(lo) || isUndefOrNull(hi) {
 		rt.fail("cannot convert an endless range to an array")
 	}
 	excl, _ := r.props["excl"].(bool)
 	return rt.rubyRangeArr(lo, hi, excl)
+}
+
+// A Float has no #succ, so a range beginning at one cannot be walked
+// (range_each), endless or not. Twin of the check in rangeToA of
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyRangeWalkable(r *jsObject) {
+	if _, isFlo := r.props["begin"].(jsFlo); isFlo {
+		rt.rubyRaiseErr("each", "TypeError", "can't iterate from Float")
+	}
 }
 
 // rubyRangeUnbounded: an Integer begin and an end of nil or +Infinity.
@@ -7543,9 +7558,8 @@ func rubyRangeNumeric(r *jsObject) bool {
 // THE ARITHMETIC HERE MUST BE rubyRangeArr'S, EXACTLY. rubyRangeArr walks
 // `i = lo; i <= hi; i++', so element i is lo + i and the count is
 // floor(hi - lo) + 1 - NOT trunc(hi) - trunc(lo) + 1, which is the same for
-// integers and differs for a FLOAT range: `(1.5..3.5).to_a' is [1.5, 2.5, 3.5]
-// here. (MRI raises TypeError for both - a known divergence of rubyRangeArr -
-// but the two paths of ONE value model have to agree with each other.)
+// integers and differs for a FLOAT range: `(1.5..3.5).size' is 3. Walking a
+// Float range raises TypeError (rubyRangeWalkable), so rubyRangeAt does too.
 func rubyRangeSpan(r *jsObject) float64 {
 	h := rubyToF(r.props["end"])
 	if excl, _ := r.props["excl"].(bool); excl {
@@ -7579,6 +7593,7 @@ func (rt *jsrt) rubyRangeAt(r *jsObject, i int) interface{} {
 		}
 		return a.elems[i]
 	}
+	rt.rubyRangeWalkable(r)
 	if i < 0 || float64(i) >= rt.rubyRangeLen(r) {
 		rt.fail("range index out of range: %d", i)
 	}
@@ -7605,13 +7620,25 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	if name == "lazy" {
 		return rt.rubyRangeLazy(t)
 	}
+	if name == "step" {
+		return rt.rubyRangeStep(t, args)
+	}
 	pos, blk := rubyBlockArgs(args)
 	endless := isUndefOrNull(t.props["begin"]) || isUndefOrNull(t.props["end"])
-	// An Integer range ending in nil or +Infinity has no Array, so its block
-	// methods (rbaRangeStreams of lib/ruby-arr.js), #step and each_slice /
-	// each_cons run on an Enumerator that makes one value at a time. Twin of the
-	// arm in rangeMethod.
-	if rubyRangeUnbounded(t) {
+	if name == "each_entry" && blk != nil {
+		name = "each"
+	}
+	// An endless String range walks String#succ until a break ends it, and it
+	// streams as an unbounded Integer range does. Twin of the arms in rangeMethod.
+	lo, strOpen := t.props["begin"].(string)
+	strOpen = strOpen && isUndefOrNull(t.props["end"])
+	if strOpen && name == "each" && blk != nil {
+		for {
+			rt.call(blk, jsUndef, []interface{}{lo})
+			lo = rubyStrSucc(lo)
+		}
+	}
+	if strOpen || rubyRangeUnbounded(t) {
 		if blk != nil && rubyRangeStreams(name) {
 			en := rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, "#<Enumerator: "+rt.rubyInspect(t)+":each>")
 			if sv := rt.rubyLazyMethod(en, name, args); name != "each" {
@@ -7620,28 +7647,21 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 			return t
 		}
 		if name == "size" && len(pos) == 0 {
+			if strOpen {
+				return jsNull
+			}
 			return jsFlo{f: math.Inf(1)}
 		}
-		var ue *jsObject
-		lo := t.props["begin"].(float64)
-		// A Float end or step makes Float values, as a Float range's #step does.
-		if by := argAt(pos, 0); name == "step" && len(pos) > 0 && rubyToF(by) > 0 {
-			_, fe := t.props["end"].(jsFlo)
-			_, fs := by.(jsFlo)
-			ue = rubyStepForever(lo, rubyToF(by), fe || fs, "#<Enumerator: "+rt.rubyInspect(t)+":step"+rt.rubyInspectArgs(pos)+">")
+		if strOpen && name == "first" && len(pos) > 0 {
+			return &jsArray{elems: rt.rubyLazyFirst(rt.rubyRangeLazy(t).(*jsObject), int(math.Trunc(rubyToF(pos[0]))))}
 		}
 		if sn := int(math.Trunc(rubyToF(argAt(pos, 0)))); rubySliceOp(name) != "" && len(pos) > 0 && sn > 0 {
-			ue = rubySliceEnum(rt.rubyRangeLazy(t).(*jsObject), name, sn, false,
+			ue := rubySliceEnum(rt.rubyRangeLazy(t).(*jsObject), name, sn, false,
 				"#<Enumerator: "+rt.rubyInspect(t)+":"+name+"("+strconv.Itoa(sn)+")>")
-		}
-		if ue != nil && blk == nil {
-			return ue
-		}
-		if ue != nil {
-			rt.rubyMethod(ue, "each", []interface{}{rubyBlkWrap(blk)})
-			if name == "step" {
-				return t
+			if blk == nil {
+				return ue
 			}
+			rt.rubyMethod(ue, "each", []interface{}{rubyBlkWrap(blk)})
 			return jsNull
 		}
 	}
@@ -7708,42 +7728,6 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		if len(pos) == 0 {
 			return t.props["end"]
 		}
-	// Range#step(n): every n-th element.
-	// Without a block MRI answers an ArithmeticSequence; the nearest thing in this
-	// value model is an Enumerator, which answers #to_a and #each the same way.
-	// A Float bound or step walks doubles (rubyFloatStep).
-	case "step":
-		picked := &jsArray{}
-		_, fb := t.props["begin"].(jsFlo)
-		_, fe := t.props["end"].(jsFlo)
-		if _, fs := argAt(pos, 0).(jsFlo); fb || fe || fs {
-			unit := rubyToF(argAt(pos, 0))
-			if unit < 0 {
-				rt.rubyRaiseErr(name, "ArgumentError", "step can't be negative")
-			}
-			if unit == 0 {
-				rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0")
-			}
-			for _, d := range rubyFloatStep(rubyToF(t.props["begin"]), rubyToF(t.props["end"]), unit, rt.truthy(t.props["excl"])) {
-				picked.elems = append(picked.elems, jsFlo{f: d})
-			}
-		} else {
-			by := int(math.Trunc(rubyToF(argAt(pos, 0))))
-			if by <= 0 {
-				rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0 or negative")
-			}
-			src := rt.rubyRangeToArr(t)
-			for i := 0; i < len(src.elems); i += by {
-				picked.elems = append(picked.elems, src.elems[i])
-			}
-		}
-		if blk != nil {
-			for _, v := range picked.elems {
-				rt.call(blk, jsUndef, []interface{}{v})
-			}
-			return t
-		}
-		return rubyMkEnum(picked)
 	}
 	// An endless range has no sequence, so only the two questions that do not need
 	// one can be answered; MRI agrees that (1..).min is 1 and (1..).max raises.
@@ -7998,6 +7982,8 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 			return kind == "Array" || kind == "Hash" || kind == "Range" || kind == "Enumerator"
 		case "Enumerator::Lazy":
 			return rubyIsLazyEnum(v)
+		case "Enumerator::ArithmeticSequence":
+			return rubyAseqOf(v) != nil
 		}
 		// Otherwise a compiled class may inherit from the builtin
 		// (Struct.new(:a)'s superclass is Struct): the chain walk below.
@@ -10185,6 +10171,9 @@ func (rt *jsrt) rubyEq(l, r interface{}) bool {
 			return rt.rubyRangeEq(lo, ro)
 		}
 	}
+	if lo, isL := l.(*jsObject); isL && rubyAseqOf(lo) != nil {
+		return rubyTruthy(rt.rubyAseqMethod(lo, "==", []interface{}{r}))
+	}
 	if rubyUserObj(l) {
 		if m, ok := rubyFindMethod(l, "=="); ok {
 			return rubyTruthy(rt.call(m, jsUndef, []interface{}{l, r}))
@@ -11246,6 +11235,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if kind := rt.rubyClassNameRT(target); kind != "" {
 			if kind == "Enumerator" && rubyIsLazyEnum(target) {
 				kind = "Enumerator::Lazy"
+			}
+			if kind == "Enumerator" && rubyAseqOf(target) != nil {
+				kind = "Enumerator::ArithmeticSequence"
 			}
 			if name == "class" {
 				return rt.rubyBuiltinClass(kind)
@@ -13201,6 +13193,9 @@ func (rt *jsrt) rubyEnumSrc(t *jsArray) interface{} {
 }
 
 func (rt *jsrt) rubyEnumInspect(e *jsObject) string {
+	if q := rubyAseqOf(e); q != nil {
+		return q.props["desc"].(string)
+	}
 	if e.props["__rlazy"] == true {
 		return e.props["desc"].(string)
 	}
@@ -13293,6 +13288,9 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	if name == "freeze" {
 		t.set("__fz", true)
 		return t
+	}
+	if t.props["aseq"] != nil && rubyAseqOwns(name) {
+		return rt.rubyAseqMethod(t, name, args)
 	}
 	if t.props["__rlazy"] == true {
 		return rt.rubyLazyMethod(t, name, args)

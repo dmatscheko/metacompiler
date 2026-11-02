@@ -2341,6 +2341,55 @@ def s174
         v[0].step(by: v[5], to: 7).to_a == [1, 4, 7])
 end
 
+# ===== SECTION 175: endless Float / String ranges, each_entry, ArithmeticSequence =====
+# A range beginning at a Float cannot be iterated, endless or not (TypeError);
+# it still has a size. An endless String range walks String#succ until a break.
+# each_entry on a range is each. Numeric#step and a numeric Range#step without a
+# block answer an Enumerator::ArithmeticSequence: #inspect shows the call in
+# parentheses, and it has begin / end / step / exclude_end? / last / size / ==.
+# Only iterating rejects a step of 0 or below. A non-numeric Range#step stays an
+# Enumerator. /usr/bin/ruby 2.6 settles each.
+def s175err
+  yield
+  "none"
+rescue => e
+  "#{e.class} #{e.message}"
+end
+def s175
+  v = [2.5, 4, "a", "y", 1, nil, 10, 3, 0, -1, 0.5, 1.0, 2.0]
+  check("ar175a", s175err { (v[0]..).each { } } == "TypeError can't iterate from Float" &&
+        s175err { (v[0]..v[1]).each { } } == "TypeError can't iterate from Float" &&
+        s175err { (v[0]..v[1]).to_a } == "TypeError can't iterate from Float" &&
+        s175err { for x in (v[0]..v[1]) do end } == "TypeError can't iterate from Float" &&
+        (v[0]..v[1]).size == 2 && (v[0]..v[1]).include?(3))
+  check("ar175b", (v[2]..).each { |s| break s if s.size > 1 } == "aa" && (v[3]..).first(3) == ["y", "z", "aa"] &&
+        (v[2]..).find { |s| s.size > 1 } == "aa" && (v[2]..).size.nil? &&
+        (v[4]..v[5]).each_entry { |s| break s if s > 2 } == 3 && (v[4]..v[7]).each_entry { } == (1..3))
+  a = v[4].step(v[6], v[7])
+  r = (v[4]..v[6]).step(v[7])
+  check("ar175c", a.inspect == "(1.step(10, 3))" && r.inspect == "((1..10).step(3))" &&
+        a.class == Enumerator::ArithmeticSequence && r.is_a?(Enumerator) &&
+        Enumerator::ArithmeticSequence.superclass == Enumerator &&
+        v[4].step(v[6], v[8]).inspect == "(1.step(10, 0))" && v[4].step(v[6], by: v[7]).inspect == "(1.step(10, by: 3))" &&
+        (v[11]..v[12]).step(v[10]).inspect == "((1.0..2.0).step(0.5))" && (v[4]...).step(2).inspect == "((1...).step(2))" &&
+        (v[2].."e").step(2).inspect == "#<Enumerator: \"a\"..\"e\":step(2)>" &&
+        a.lazy.inspect == "#<Enumerator::Lazy: (1.step(10, 3))>" && a.each_slice(2).inspect == "#<Enumerator: (1.step(10, 3)):each_slice(2)>")
+  check("ar175d", a.begin == 1 && a.end == 10 && a.step == 3 && !a.exclude_end? && (v[4]...v[6]).step(v[7]).exclude_end? &&
+        a.first == 1 && a.last == 10 && a.last(2) == [7, 10] && a.size == 4 && a.to_a == [1, 4, 7, 10] &&
+        (v[4]...v[6]).step(v[7]).last == 7 && (v[4]...v[6]).step(v[7]).size == 3 &&
+        a == r && a == v[4].step(v[6], v[7]) && a != v[4].step(v[6], 4) && a != [1, 4, 7, 10] &&
+        a.each { } .equal?(a) && (v[11]..v[12]).step(v[10]).size == 3 && 10.step(1, -3).last == 1)
+  check("ar175e", (v[4]..).step(2).size == Float::INFINITY && (v[4]..).step(2).end.nil? &&
+        s175err { (v[4]..).step(2).last } == "RangeError cannot get the last element of endless arithmetic sequence" &&
+        v[4].step(v[6], v[8]).first(2) == [1, 1] && v[4].step(v[6], v[8]).size == Float::INFINITY &&
+        (v[4]..v[6]).step(v[9]).to_a == [] && (v[4]..v[6]).step(v[9]).size == 0 && (v[4]..v[6]).step(v[8]).first(2) == [1, 1] &&
+        s175err { (v[4]..v[6]).step(v[8]) { } } == "ArgumentError step can't be 0" &&
+        s175err { (v[4]..v[6]).step(v[9]) { } } == "ArgumentError step can't be negative" &&
+        s175err { v[4].step(v[6], v[8]) { break } } == "ArgumentError step can't be 0" &&
+        s175err { a.dup } == "TypeError allocator undefined for Enumerator::ArithmeticSequence")
+end
+
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -2394,5 +2443,6 @@ s171() # SECTION-CALL 171
 s172() # SECTION-CALL 172
 s173() # SECTION-CALL 173
 s174() # SECTION-CALL 174
+s175() # SECTION-CALL 175
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

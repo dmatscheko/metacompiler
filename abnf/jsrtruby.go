@@ -63,6 +63,7 @@ func init() {
 	// Enumerator::Lazy < Enumerator: not an exception, but the table is where a
 	// builtin class's superclass and ancestors are read from by name.
 	rubyExcParent["Enumerator::Lazy"] = "Enumerator"
+	rubyExcParent["Enumerator::ArithmeticSequence"] = "Enumerator"
 	// The numeric classes are Numerics, and Numeric brings in Comparable.
 	for _, n := range []string{"Integer", "Float", "Rational", "Complex"} {
 		rubyExcParent[n] = "Numeric"
@@ -126,11 +127,17 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			counted = true
 		default:
 			_, _, isDict := dictParts(v)
-			_, isRng := rubyIsRange(v)
+			rng, isRng := rubyIsRange(v)
+			// An endless String range's #size is nil: rubyRangeMethod answers it.
+			if isRng {
+				_, loStr := rng.props["begin"].(string)
+				isRng = !loStr || !isUndefOrNull(rng.props["end"])
+			}
 			// The #size of an Enumerator over a user #each (deferred or
-			// to_enum's), and a Lazy's over one, is nil: rubyEnumMethod answers it.
+			// to_enum's), and a Lazy's over one, is nil, and an
+			// ArithmeticSequence's may be Infinity: rubyEnumMethod answers them.
 			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rco"] != true &&
-				v.(*jsObject).props["kind"] != "each")
+				v.(*jsObject).props["kind"] != "each" && rubyAseqOf(v) == nil)
 		}
 		if counted {
 			return pylen(a[:1])

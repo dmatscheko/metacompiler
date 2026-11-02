@@ -360,6 +360,12 @@ func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
 		lz.set("ev", r)
 		return lz
 	}
+	if _, loStr := r.props["begin"].(string); loStr && hi == jsNull {
+		lz := rubyMkLazy("each", &jsArray{}, 0, jsNull, false, true, d)
+		lz.set("src", r)
+		lz.set("ev", r)
+		return lz
+	}
 	lz := rubyMkLazy("arr", rt.rubyRangeToArr(r), 0, jsNull, false, true, d)
 	lz.set("ev", r)
 	return lz
@@ -686,6 +692,172 @@ func rubyStepForever(beg, by float64, flo bool, desc string) *jsObject {
 	}}
 	e.set("ops", &jsArray{elems: []interface{}{rubyLazyOpOf("map", f, 0)}})
 	return e
+}
+
+// rubyRangeStep is rangeStep of ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyRangeStep(t *jsObject, args []interface{}) interface{} {
+	pos, blk := rubyBlockArgs(args)
+	var by interface{} = float64(1)
+	if len(pos) > 0 {
+		by = pos[0]
+	}
+	u := rubyToF(by)
+	lo, hi := t.props["begin"], t.props["end"]
+	num := rubyIsNum(lo) && (isUndefOrNull(hi) || rubyIsNum(hi))
+	aseq := blk == nil && num
+	if !aseq && u < 0 {
+		rt.rubyRaiseErr("step", "ArgumentError", "step can't be negative")
+	}
+	if !aseq && u == 0 {
+		rt.rubyRaiseErr("step", "ArgumentError", "step can't be 0")
+	}
+	_, fb := lo.(jsFlo)
+	_, fe := hi.(jsFlo)
+	_, fs := by.(jsFlo)
+	flo := fb || fe || fs
+	desc := "((" + rt.rubyInspect(t) + ").step" + rt.rubyInspectArgs(pos) + ")"
+	var e *jsObject
+	switch {
+	case u < 0:
+		e = rubyMkEnum(&jsArray{})
+	case num && (u == 0 || isUndefOrNull(hi) || rubyRangeUnbounded(t)):
+		e = rubyStepForever(rubyToF(lo), u, flo, desc)
+	default:
+		picked := &jsArray{}
+		if flo {
+			for _, d := range rubyFloatStep(rubyToF(lo), rubyToF(hi), u, rt.truthy(t.props["excl"])) {
+				picked.elems = append(picked.elems, jsFlo{f: d})
+			}
+		} else {
+			src := rt.rubyRangeToArr(t)
+			for i := 0; i < len(src.elems); i += int(math.Trunc(u)) {
+				picked.elems = append(picked.elems, src.elems[i])
+			}
+		}
+		e = rubyEnumAt(rubyMkEnum(picked), t, "step", pos)
+	}
+	if blk != nil {
+		rt.rubyMethod(e, "each", []interface{}{rubyBlkWrap(blk)})
+		return t
+	}
+	if !aseq {
+		return e
+	}
+	return rubyMkAseq(e, lo, hi, by, rt.truthy(t.props["excl"]), desc)
+}
+
+// rubyMkAseq is mkAseq of ruby-interpreter.abnf, which states the rule: the
+// Enumerator e made an Enumerator::ArithmeticSequence.
+func rubyMkAseq(e *jsObject, b, en, s interface{}, x bool, desc string) *jsObject {
+	q := newJSObject()
+	q.set("b", b)
+	q.set("e", en)
+	q.set("s", s)
+	q.set("x", x)
+	q.set("desc", desc)
+	e.set("aseq", q)
+	return e
+}
+
+func rubyAseqOf(v interface{}) *jsObject {
+	if o, isObj := v.(*jsObject); isObj && rubyIsEnum(o) {
+		q, _ := o.props["aseq"].(*jsObject)
+		return q
+	}
+	return nil
+}
+
+// rubyAseqArgs is aseqArgs of ruby-interpreter.abnf: a trailing to: / by: Hash
+// shows as keywords.
+func (rt *jsrt) rubyAseqArgs(args []interface{}) string {
+	if len(args) == 0 {
+		return ""
+	}
+	parts := []string{}
+	for i, a := range args {
+		if keys, vals, isDict := dictParts(a); isDict && i == len(args)-1 {
+			for k, key := range keys.elems {
+				parts = append(parts, rt.rubyStr(key)+": "+rt.rubyInspect(vals.elems[k]))
+			}
+			continue
+		}
+		parts = append(parts, rt.rubyInspect(a))
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+func rubyAseqOwns(name string) bool {
+	switch name {
+	case "begin", "end", "step", "exclude_end?", "last", "size", "==", "eql?", "===", "each", "dup", "clone", "class":
+		return true
+	}
+	return false
+}
+
+// rubyAseqMethod is aseqMethod of ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyAseqMethod(t *jsObject, name string, args []interface{}) interface{} {
+	q := t.props["aseq"].(*jsObject)
+	pos, blk := rubyBlockArgs(args)
+	switch name {
+	case "begin":
+		return q.props["b"]
+	case "end":
+		return q.props["e"]
+	case "step":
+		return q.props["s"]
+	case "exclude_end?":
+		return q.props["x"]
+	case "class":
+		return rt.rubyBuiltinClass("Enumerator::ArithmeticSequence")
+	case "dup", "clone":
+		rt.rubyRaiseErr(name, "TypeError", "allocator undefined for Enumerator::ArithmeticSequence")
+	case "==", "eql?", "===":
+		o := rubyAseqOf(argAt(pos, 0))
+		return o != nil && rt.rubyEq(q.props["b"], o.props["b"]) && rt.rubyEq(q.props["e"], o.props["e"]) &&
+			rt.rubyEq(q.props["s"], o.props["s"]) && q.props["x"] == o.props["x"]
+	}
+	endless := t.props["__rlazy"] == true
+	items, _ := t.props["items"].(*jsArray)
+	switch name {
+	case "size":
+		if endless {
+			return jsFlo{f: math.Inf(1)}
+		}
+		return float64(len(items.elems))
+	case "each":
+		if blk == nil {
+			return t
+		}
+		if endless {
+			rt.rubyLazyMethod(t, "each", []interface{}{rubyBlkWrap(blk)})
+		} else {
+			for _, v := range items.elems {
+				rt.call(blk, jsUndef, []interface{}{v})
+			}
+		}
+		return t
+	}
+	if endless && rubyToF(q.props["s"]) == 0 {
+		rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
+	}
+	if endless {
+		rt.rubyRaiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence")
+	}
+	n := len(items.elems)
+	if len(pos) == 0 {
+		if n == 0 {
+			return jsNull
+		}
+		return items.elems[n-1]
+	}
+	ln := int(math.Trunc(rubyToF(pos[0])))
+	if ln < 0 {
+		rt.rubyRaiseErr(name, "ArgumentError", "negative array size")
+	}
+	if ln > n {
+		ln = n
+	}
+	return &jsArray{elems: append([]interface{}{}, items.elems[n-ln:]...)}
 }
 
 // rubyInspectArgs is inspectArgs of ruby-interpreter.abnf: "(a, b)", "" for none.

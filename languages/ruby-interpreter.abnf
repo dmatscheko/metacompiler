@@ -5845,6 +5845,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rng === true }
     // "a".succ: increment the last character, carrying into the ones before it.
     function rangeToA(r) {
+        // A Float has no #succ, so a range beginning at one cannot be walked
+        // (range_each), endless or not.
+        if (isFlo(r.lo)) { raiseErr("each", "TypeError", "can't iterate from Float") }
         if (r.hi === null || r.hi === undefined || r.lo === null || r.lo === undefined) {
             fail("cannot convert an endless range to an array")
         }
@@ -5937,32 +5940,38 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // materialized array, membership stays lazy (an endless range has no array).
     function rangeMethod(t, name, args, blk) {
         if (name == "lazy") { return rangeLazy(t) }
-        // An Integer range ending in nil or +Infinity has no Array, so its block
-        // methods (rbaRangeStreams), #step and each_slice / each_cons run on an
-        // Enumerator that makes one value at a time, which a break, a hit or
-        // first(n) ends. Twins: rbRangeMethod, rubyRangeMethod.
-        if (typeof t.lo == "number" && (t.hi === null || t.hi === undefined || (isFlo(t.hi) && toF(t.hi) > 0 && toF(t.hi) - toF(t.hi) != 0))) {
+        if (name == "step") { return rangeStep(t, args, blk) }
+        // Enumerable#each_entry yields each value as one, which for a Range is #each.
+        if (name == "each_entry" && blk != null) { name = "each" }
+        // An endless String range walks String#succ until a break ends it.
+        var strOpen = typeof t.lo == "string" && (t.hi === null || t.hi === undefined)
+        if (strOpen && name == "each" && blk != null) {
+            var sc = t.lo
+            while (true) {
+                blockCall(blk, [sc])
+                sc = rbsSucc(sc)
+            }
+        }
+        // An Integer range ending in nil or +Infinity, or an endless String range,
+        // has no Array, so its block methods (rbaRangeStreams), first(n) and
+        // each_slice / each_cons run on an Enumerator that makes one value at a
+        // time, which a break, a hit or first(n) ends. Twins: rbRangeMethod,
+        // rubyRangeMethod.
+        if (strOpen || rangeUnbounded(t)) {
             if (blk != null && rbaRangeStreams(name)) {
                 var sv = anytype
                 sv = mcall(lazyCopy(rangeLazy(t), null, false, "#<Enumerator: " + rinspect(t) + ":each>"), name, args, blk)
                 return name == "each" ? t : sv
             }
-            if (name == "size" && args.length == 0) { return mkFlo(Math.pow(2, 1024)) }
-            var ue = anytype
-            ue = null
-            // A Float end or step makes Float values, as a Float range's #step does.
-            if (name == "step" && args.length > 0 && toF(args[0]) > 0) {
-                ue = stepForever(t.lo, args[0], isFlo(t.hi) || isFlo(args[0]), "#<Enumerator: " + rinspect(t) + ":step" + inspectArgs(args) + ">")
-            }
+            if (name == "size" && args.length == 0) { return strOpen ? null : mkFlo(Math.pow(2, 1024)) }
+            if (strOpen && name == "first" && args.length > 0) { return lazyFirst(rangeLazy(t), Math.trunc(toF(args[0]))) }
             if (rbaSliceOp(name) != "" && args.length > 0 && Math.trunc(toF(args[0])) > 0) {
                 var rsn = Math.trunc(toF(args[0]))
-                ue = lazyCopy(rangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
+                var ue = lazyCopy(rangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
                     "#<Enumerator: " + rinspect(t) + ":" + name + "(" + rsn + ")>")
-            }
-            if (ue !== null && blk == null) { return ue }
-            if (ue !== null) {
+                if (blk == null) { return ue }
                 mcall(ue, "each", [], blk)
-                return name == "step" ? t : null
+                return null
             }
         }
         if (name == "to_a" || name == "entries" || name == "to_ary") { return rangeToA(t) }
@@ -5993,31 +6002,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "==" || name == "eql?" || name == "equal?") {
             return isRange(args[0]) && rangeEq(t, args[0])
         }
-        // Range#step(n): every n-th element. Without a block MRI answers an
-        // ArithmeticSequence; the nearest thing in this value model is an Enumerator,
-        // which answers #to_a and #each the same way.
-        // A Float bound or step walks doubles (rbnFloatStep).
-        if (name == "step") {
-            var picked = []
-            if (isFlo(t.lo) || isFlo(t.hi) || isFlo(args[0])) {
-                var fu = toF(args[0])
-                if (fu < 0) { raiseErr(name, "ArgumentError", "step can't be negative") }
-                if (fu == 0) { raiseErr(name, "ArgumentError", "step can't be 0") }
-                var fs = rbnFloatStep(toF(t.lo), toF(t.hi), fu, t.excl === true)
-                for (var fi = 0; fi < fs.length; fi++) { picked.push(mkFlo(fs[fi])) }
-            } else {
-                var by = Math.trunc(toF(args[0]))
-                if (by <= 0) { raiseErr(name, "ArgumentError", "step can't be 0 or negative") }
-                var src = anytype
-                src = rangeToA(t)
-                for (var pi = 0; pi < src.length; pi += by) { picked.push(src[pi]) }
-            }
-            if (blk != null) {
-                for (var pj = 0; pj < picked.length; pj++) { blockCall(blk, [picked[pj]]) }
-                return t
-            }
-            return mkEnum(picked)
-        }
         // An endless (or beginless) range has no sequence, so only the two
         // questions that do not need one can be answered; MRI agrees that (1..).min
         // is 1 and (1..).max raises; materializing first would never end.
@@ -6043,6 +6027,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Range#size / #min / #max on their own: arrayMethod has no `size' arm, and
         // #min of an EMPTY range is nil in MRI ((1..-1).min), not the low bound.
         if (args.length == 0 && blk == null) {
+            // A Float range cannot be walked but has a size: the count of the
+            // values lo, lo + 1, ... (rubyRangeLen in abnf/jsrt.go).
+            if (isFlo(t.lo) && (name == "size" || name == "length" || name == "count")) {
+                return Math.max(0, Math.floor(toF(t.hi) - (t.excl === true ? 1 : 0) - toF(t.lo)) + 1)
+            }
             var ra = anytype
             ra = rangeToA(t)
             // #size, #length and #count all answer the ELEMENT COUNT, and that is
@@ -6057,6 +6046,48 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // #each answers the RECEIVER in MRI, and the receiver is the range.
         if (name == "each" && blk != null) { return t }
         return av
+    }
+    // An Integer begin and an end of nil or +Infinity: no Array, only a stream.
+    function rangeUnbounded(t) {
+        return typeof t.lo == "number" && (t.hi === null || t.hi === undefined || (isFlo(t.hi) && toF(t.hi) > 0 && toF(t.hi) - toF(t.hi) != 0))
+    }
+    // Range#step(n = 1). Without a block a numeric range answers an
+    // ArithmeticSequence whatever the step, since only iterating rejects a step
+    // of 0 or below (range_step's check_step_domain); any other range answers an
+    // Enumerator. A Float bound or step walks doubles (rbnFloatStep); a step of
+    // 0 or an unbounded range never ends. Twins: rbRangeStep in
+    // lib/ruby-rt.metajs, rubyRangeStep in abnf/jsrtrubystr.go.
+    function rangeStep(t, args, blk) {
+        var by = anytype
+        by = args.length > 0 ? args[0] : 1
+        var u = toF(by)
+        var num = isNumV(t.lo) && (t.hi === null || t.hi === undefined || isNumV(t.hi))
+        var aseq = blk == null && num
+        if (!aseq && u < 0) { raiseErr("step", "ArgumentError", "step can't be negative") }
+        if (!aseq && u == 0) { raiseErr("step", "ArgumentError", "step can't be 0") }
+        var flo = isFlo(t.lo) || isFlo(t.hi) || isFlo(by)
+        var desc = "((" + rinspect(t) + ").step" + inspectArgs(args) + ")"
+        var e = anytype
+        if (u < 0) { e = mkEnum([]) }
+        else if (num && (u == 0 || t.hi === null || t.hi === undefined || rangeUnbounded(t))) { e = stepForever(t.lo, by, flo, desc) }
+        else {
+            var picked = []
+            if (flo) {
+                var fs = rbnFloatStep(toF(t.lo), toF(t.hi), u, t.excl === true)
+                for (var fi = 0; fi < fs.length; fi++) { picked.push(mkFlo(fs[fi])) }
+            } else {
+                var src = anytype
+                src = rangeToA(t)
+                for (var pi = 0; pi < src.length; pi += Math.trunc(u)) { picked.push(src[pi]) }
+            }
+            e = enumAt(mkEnum(picked), t, "step", args)
+        }
+        if (blk != null) {
+            mcall(e, "each", [], blk)
+            return t
+        }
+        if (!aseq) { return e }
+        return mkAseq(e, t.lo, t.hi, by, t.excl === true, desc)
     }
     // Numeric#step(limit, by = 1): Integers, or doubles when any of the three is a
     // Float (rbnFloatStep). Twins: the step arms of rbNumMethod and rubyNumMore.
@@ -6077,14 +6108,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (pos.length > 0) { lim = pos[0] }
         if (pos.length > 1) { sby = pos[1] }
-        if (toF(sby) == 0) { raiseErr("step", "ArgumentError", "step can't be 0") }
+        // Without a block a step of 0 is not checked: the ArithmeticSequence
+        // repeats self forever.
+        if (toF(sby) == 0 && blk != null) { raiseErr("step", "ArgumentError", "step can't be 0") }
+        var desc = "(" + rinspect(t) + ".step" + aseqArgs(args) + ")"
         // A nil limit, or an infinite one the step runs toward, never ends
         // (num_step's inf), and the values stay Integers unless self or the step
         // is a Float.
-        if (lim === null || lim === undefined || (isFlo(lim) && toF(lim) - toF(lim) != 0 && (toF(lim) > 0) == (toF(sby) > 0))) {
+        if (lim === null || lim === undefined || toF(sby) == 0 || (isFlo(lim) && toF(lim) - toF(lim) != 0 && (toF(lim) > 0) == (toF(sby) > 0))) {
             var se = anytype
-            se = stepForever(t, sby, isFlo(t) || isFlo(sby), "#<Enumerator: " + rinspect(t) + ":step" + inspectArgs(args) + ">")
-            if (blk == null) { return se }
+            se = stepForever(t, sby, isFlo(t) || isFlo(sby), desc)
+            if (blk == null) { return mkAseq(se, t, lim, sby, false, desc) }
             mcall(se, "each", [], blk)
             return t
         }
@@ -6095,9 +6129,66 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         } else {
             sl = rbnIntStep(t, toF(lim), toF(sby))
         }
-        if (blk == null) { return enumAt(mkEnum(sl), t, "step", args) }
+        if (blk == null) { return mkAseq(enumAt(mkEnum(sl), t, "step", args), t, lim, sby, false, desc) }
         for (var ski = 0; ski < sl.length; ski++) { blockCall(blk, [sl[ski]]) }
         return t
+    }
+    // Enumerator::ArithmeticSequence, what Numeric#step and a numeric Range#step
+    // answer without a block: an Enumerator over the values (e) that also keeps
+    // begin / end / step / exclude_end? and the call that made it, which #inspect
+    // shows in parentheses - (1.step(10, 3)), ((1..10).step(3)). Twins: rbMkAseq
+    // in lib/ruby-rt.metajs, rubyMkAseq in abnf/jsrtrubystr.go.
+    function mkAseq(e, b, en, s, x, desc) {
+        e.aseq = {b: b, e: en, s: s, x: x, desc: desc}
+        return e
+    }
+    // The call's arguments as written: a trailing to: / by: Hash shows as keywords.
+    function aseqArgs(args) {
+        if (args.length == 0) { return "" }
+        var ia = []
+        for (var i = 0; i < args.length; i++) {
+            if (i == args.length - 1 && isDict(args[i])) {
+                for (var k = 0; k < args[i].keys.length; k++) { ia.push(rstr(args[i].keys[k]) + ": " + rinspect(args[i].vals[k])) }
+            } else { ia.push(rinspect(args[i])) }
+        }
+        return "(" + ia.join(", ") + ")"
+    }
+    function aseqOwns(name) {
+        return name == "begin" || name == "end" || name == "step" || name == "exclude_end?" || name == "last"
+            || name == "size" || name == "==" || name == "eql?" || name == "===" || name == "each"
+            || name == "dup" || name == "clone" || name == "class"
+    }
+    // The ArithmeticSequence methods an Enumerator has not (aseqOwns). An endless
+    // one has no last element; a step of 0 makes the count of steps a division by
+    // zero. Twins: rbAseqMethod, rubyAseqMethod.
+    function aseqMethod(t, name, args, blk) {
+        var q = t.aseq
+        if (name == "begin") { return q.b }
+        if (name == "end") { return q.e }
+        if (name == "step") { return q.s }
+        if (name == "exclude_end?") { return q.x }
+        if (name == "class") { return hostGlobals["Enumerator::ArithmeticSequence"] }
+        if (name == "dup" || name == "clone") { raiseErr(name, "TypeError", "allocator undefined for Enumerator::ArithmeticSequence") }
+        if (name == "==" || name == "eql?" || name == "===") {
+            var o = args[0]
+            return isEnum(o) && o.aseq !== undefined && rubyEq(q.b, o.aseq.b) && rubyEq(q.e, o.aseq.e)
+                && rubyEq(q.s, o.aseq.s) && q.x === o.aseq.x
+        }
+        var endless = t.__rlazy === true
+        if (name == "size") { return endless ? mkFlo(Math.pow(2, 1024)) : t.items.length }
+        if (name == "each") {
+            if (blk == null) { return t }
+            if (endless) { lazyMethod(t, "each", [], blk) }
+            else { for (var i = 0; i < t.items.length; i++) { blockCall(blk, [t.items[i]]) } }
+            return t
+        }
+        if (endless && toF(q.s) == 0) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
+        if (endless) { raiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence") }
+        var n = t.items.length
+        if (args.length == 0) { return n == 0 ? null : t.items[n - 1] }
+        var ln = Math.trunc(toF(args[0]))
+        if (ln < 0) { raiseErr(name, "ArgumentError", "negative array size") }
+        return t.items.slice(Math.max(0, n - ln))
     }
     // The never-ending step from beg by `by': an Enumerator that makes each value
     // as it is pulled - a Float one as i * by + beg (ruby_float_step) - so a break
@@ -8040,6 +8131,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // and after it ran, as does a Lazy over one; iterating a deferred one runs
         // its method.
         if (isEnum(v)) {
+            if (v.aseq !== undefined && name != null) { return aseqMethod(v, "size", [], null) }
             if (v.__rlazy === true && v.kind == "each") { return null }
             if (v.__rco === true && name != null) { return null }
             if (v.__rdefer === true) { enumForce(v) }
@@ -8431,6 +8523,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "function") { return hostGlobals[isMethodVal(v) ? "Method" : "Proc"] }
         if (Array.isArray(v)) { return hostGlobals["Array"] }
         if (isDict(v)) { return hostGlobals["Hash"] }
+        if (isEnum(v) && v.aseq !== undefined) { return hostGlobals["Enumerator::ArithmeticSequence"] }
         if (isEnum(v)) { return hostGlobals[v.lazy === true ? "Enumerator::Lazy" : "Enumerator"] }
         if (isUserObj(v)) { return v.__class }
         // A class object's own class is Class, a module object's is Module.
@@ -10746,6 +10839,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function enumSrc(t) { return nmDeleg.arr === t ? nmDeleg.recv : t }
     function enumInspect(e) {
+        if (e.aseq !== undefined) { return e.aseq.desc }
         if (e.__rlazy === true) { return e.desc }
         if (e.meth == undefined) { return "#<Enumerator: " + rinspect(e.items) + ">" }
         var d = "#<Enumerator: " + rinspect(e.src) + ":" + e.meth
@@ -10866,8 +10960,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             })
         })
     }
-    // Range#lazy: an Integer range is walked one value at a time; any other is
-    // materialized first.
+    // Range#lazy: an Integer range is walked one value at a time, an endless
+    // String range is pulled from its own #each; any other is materialized first.
     function rangeLazy(r) {
         var d = "#<Enumerator::Lazy: " + rinspect(r) + ">"
         var hi = anytype
@@ -10875,7 +10969,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isFlo(hi) && toF(hi) > 0 && toF(hi) - toF(hi) != 0) { hi = null }
         var lz = anytype
         if (typeof r.lo == "number" && (hi === null || typeof hi == "number")) { lz = mkLazy("range", [], r.lo, hi, r.excl === true, true, d) }
-        else { lz = mkLazy("arr", rangeToA(r), 0, null, false, true, d) }
+        else if (typeof r.lo == "string" && hi === null) {
+            lz = mkLazy("each", [], 0, null, false, true, d)
+            lz.src = r
+        } else { lz = mkLazy("arr", rangeToA(r), 0, null, false, true, d) }
         lz.ev = r
         return lz
     }
@@ -11022,6 +11119,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function enumMethod(t, name, args, blk) {
         // freeze sets the flag #frozen? reads, without running a deferred method.
         if (name == "freeze") { t.__fz = true; return t }
+        if (t.aseq !== undefined && aseqOwns(name)) { return aseqMethod(t, name, args, blk) }
         if (t.__rlazy === true) { return lazyMethod(t, name, args, blk) }
         if (name == "dup" || name == "clone") { return enumCopy(t, name == "clone") }
         if (t.__rco === true && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
@@ -15669,6 +15767,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (n == "Hash") { return isDict(v) }
             if (n == "Enumerator") { return isEnum(v) }
             if (n == "Enumerator::Lazy") { return isEnum(v) && v.lazy === true }
+            if (n == "Enumerator::ArithmeticSequence") { return isEnum(v) && v.aseq !== undefined }
             if (n == "Range") { return isRange(v) }
             if (n == "Regexp") { return isRegex(v) }
             if (n == "MatchData") { return isMatchD(v) }
@@ -16052,6 +16151,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Enumerator::Lazy < Enumerator, the class of what #lazy answers.
     hostGlobals["Enumerator::Lazy"] = mkBuiltinClass("Enumerator::Lazy", hostGlobals["Enumerator"])
     hostGlobals["Enumerator"]["$c$Lazy"] = hostGlobals["Enumerator::Lazy"]
+    hostGlobals["Enumerator::ArithmeticSequence"] = mkBuiltinClass("Enumerator::ArithmeticSequence", hostGlobals["Enumerator"])
+    hostGlobals["Enumerator"]["$c$ArithmeticSequence"] = hostGlobals["Enumerator::ArithmeticSequence"]
     // What String#encode raises.
     var encErrs = ["UndefinedConversionError", "InvalidByteSequenceError", "ConverterNotFoundError"]
     for (var eei = 0; eei < encErrs.length; eei++) {
@@ -16440,6 +16541,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRStr(l) || isRStr(r)) { return rubyEq(rsText(l), rsText(r)) }
         if (isNumV(l) && isNumV(r)) { return numEq(l, r) }
         if (isRange(l) && isRange(r)) { return rubyEq(l.lo, r.lo) && rubyEq(l.hi, r.hi) && l.excl === r.excl }
+        if (isEnum(l) && l.aseq !== undefined) { return aseqMethod(l, "==", [r], null) }
         if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return rtest(mcall(l, "==", [r], null)) }
         // Comparable#==: <=> answers 0. Twin of comparableMethods in the compiler.
         if (isUserObj(l) && typeof lookupMethod(l.__class, "<=>") == "function" && userIsA(l, hostGlobals["Comparable"])) {
