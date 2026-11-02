@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1138** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1139** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -107,16 +107,17 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1136 kotlin: uninitialized top-level lateinit read, lambda `is FunctionN`, lambda javaClass.name, array ::class · P3 · KT · IN PROGRESS (KT worker, round 40) [V]
+### T-1138 kotlin: static Array<T>::class, KClass no-reflect suffix decision, function-reference javaClass and member-ref arity, receiver-lambda arity · P3 · KT · OPEN [V]
 
-Found while working T-1133. The oracle is kotlinc 2.2.21 (stdlib only).
+Found while working T-1136. The oracle is kotlinc 2.2.21 (stdlib only).
 
-1. Reading an uninitialized top-level `lateinit var` prints `null` in all engines. kotlinc throws UninitializedPropertyAccessException with the message `lateinit property late has not been initialized`. Repro: `lateinit var late: String; fun main() { try { println(late) } catch (e: UninitializedPropertyAccessException) { println(e.message) } }`. Check the class-member lateinit case too.
-2. `{1} is Function0<*>` and `{x: Int -> x} is Function1<*, *>` are false in all engines; kotlinc says true. Lambdas now record their arity (fnMetaSet / js_jsfnmeta), which makes this feasible. Check `!is` and `when` arms too.
-3. `{ 1 }.javaClass.name` fails: the interpreter with "property .name of null", llvm.Run with "member 'name' of undefined". kotlinc prints an unreproducible lambda class name, so assert a relation instead (it is non-empty, and it agrees with toString's prefix before `@`).
-4. `a::class.java.name` and `a::class` on an array print `Array` and `class Array` in all engines. kotlinc prints `[LDog;` and `class [LDog; (Kotlin reflection is not available)`. `.javaClass` is already right.
+1. The static type literal `Array<Dog>::class` prints `class Array<Dog>` in all engines; the oracle prints `class [LDog; (Kotlin reflection is not available)`. As a result, `Array<Dog>::class.java.name` gives `Array<Dog>` where the oracle gives `[LDog;`, and `arr::class == Array<Dog>::class` is false where the oracle says true. Fixing it needs the element type's JVM binary name resolved for a static type argument (see ktProgBin).
+2. `::two.javaClass.name` fails in all engines with "member 'name' of undefined". The oracle prints an unreproducible `P5Kt$main$r$1`, so assert a relation: it is non-empty, and it agrees with toString's prefix.
+3. Member references such as `Dog::bark` answer `is FunctionN` with arity 0. They should count the receiver: `Dog::bark` with no parameters is Function1.
+4. A lambda passed to a receiver-typed parameter (`apply { }`, `fun f(b: Int.() -> Int)`) records no receiver arity. Only a declared `val x: R.() -> T` does.
+5. An explicit lambda parameter named `it` is still noted as a use of the implicit `it`. That can give an enclosing parameterless lambda arity 1 (`{ { it: Int -> it } }`).
 
-Known static-typing residues (not fixable at run time, do not work on them): `arrayOf(1, 2L)` is Long and `arrayOf(listOf(1))` is List in the oracle.
+Not in scope: the `(Kotlin reflection is not available)` suffix on KClass toString. Section 138 of tests/kotlin-test-full.kt documents that we leave it out. That is a user-level decision, because a KClass and its java Class are currently the same handle.
 
 Verify with `tests/probe.sh kotlin` on all four legs.
 
@@ -1201,6 +1202,7 @@ T-1131 bash: readonly/export on NAME[SUB], declare -g -x through circular namere
 T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#method, tally/Symbol#name not in 2.6, interp Integer#+ Method#call, Range freeze — merged 524ac88f: blockless take_while/drop_while consumers stop on nil like MRI, String-range nil sizes, Float-range lazy sizes, Proc/Method#method via send, tally/Symbol#name removed (not in 2.6), interp Integer Method#call, Range freeze flag, chunk_while/slice_* nil sizes, exclusive Float-end ranges fixed; 4-leg probe matches ruby 2.6; matrix 605/605; bench 0.00%
 T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level lateinit isInitialized, ::f for a lambda-holding val — merged da2fe104: array class = least common supertype of the elements (class/interface/enum/exception/library graphs), kotlin.* and lambda FunctionN element classes, compiled top-level lateinit isInitialized, ::f for a lambda-holding val is a property ref, Box::name prints property, array simpleName; static-typing residues documented; 4-leg probe matches kotlinc 2.2.21; kotlin gates green; bench +0.03% (under the 1.05% noise floor)
 T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index, Float-range eager enumerator sizes, endless Range#size — merged e9110a33: -@/+@/~ by name (send/method), Integer << >> ~ in respond/arity tables, Hash#index with deprecation warning (compiled via js_rhidxwarn at .index sites), Float-range eager enumerators with sizes, Range#size per MRI range_size separated from the for-in trip count (endless -> Infinity, non-numeric -> nil); 4-leg probe matches ruby 2.6 stdout + stderr except the multi-line call-site line (filed); matrix 605/605; bench +0.04%
+T-1136 kotlin: uninitialized top-level lateinit read, lambda `is FunctionN`, lambda javaClass.name, array ::class — merged b2479ff9: uninitialized lateinit reads throw (top-level/local/template; check only at lateinit reads when null, js_ktlatechk), stray top-level lateinit flag no longer leaks onto the next class property, lambda/function arity for is FunctionN (implicit it, receivers, !is, when), null is List<*>? true, lambda javaClass.name relation, array ::class names; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench +0.03%
 
 # Settled — do not re-open
 
