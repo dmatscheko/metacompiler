@@ -759,27 +759,40 @@ function dpPrintCmd(c, ind, inline) {
     return ""
 }
 
-// The diagnostic for the first option letter keyword kw does not take (bash 5.3: export
-// and readonly take -aAfnp, the others -aAfFgiIlnprtux), its usage line included, or "".
-// flags are the option words joined, their signs kept.
 // Does a declaration with these options change an attribute a readonly variable keeps?
-// bash 5.3 refuses -a/-A/-i/-l/-u/-n and +a/+A/+i/+l/+u on one ("NAME: readonly
-// variable", status 1, none of the line's attributes applied); -x, -g, -r and +n are
-// allowed, and so is everything `readonly` and `export` do.
+// bash 5.3 refuses -a/-A/-i/-l/-u/-c/-n and +a/+A/+i/+l/+u/+c on one ("NAME: readonly
+// variable", status 1, none of the line's attributes applied); -x, -g, -r, -t, +t and +n
+// are allowed, and so is everything `readonly` and `export` do.
 function bashDeclRoAttr(kw, flags, plus) {
     if (kw == "export" || kw == "readonly" || flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0) { return false }
     var i
     for (i = 0; i < flags.length; i++) {
-        if ("aAilun".indexOf(flags.charAt(i)) >= 0) { return true }
+        if ("aAilucn".indexOf(flags.charAt(i)) >= 0) { return true }
     }
     for (i = 0; i < plus.length; i++) {
-        if ("aAilu".indexOf(plus.charAt(i)) >= 0) { return true }
+        if ("aAiluc".indexOf(plus.charAt(i)) >= 0) { return true }
     }
     return false
 }
 
+// The case attribute (u, l, c or "") a declaration with these options leaves on a name that
+// held cur. A name holds at most one: each of -u, -l and -c turns the other two off, a +X
+// turns X off, and off wins over on (bash 5.3: `declare -ul x` and `declare -c +c x` leave
+// none, `declare -u x; declare -c x` leaves -c).
+function bashDeclCase(cur, flags, plus) {
+    var on = ""
+    var k
+    for (k = 0; k < 3; k++) { if (flags.indexOf("ulc".charAt(k)) >= 0) { on = on + "ulc".charAt(k) } }
+    if (on.length > 1) { return "" }
+    var r = (on != "") ? on : cur
+    return (r != "" && plus.indexOf(r) >= 0) ? "" : r
+}
+
+// The diagnostic for the first option letter keyword kw does not take (bash 5.3: export
+// and readonly take -aAfnp, the others -aAcfFgiIlnprtux, though the usage line leaves -c
+// out), its usage line included, or "". flags are the option words joined, their signs kept.
 function bashDeclBadOpt(kw, flags) {
-    var ok = (kw == "export" || kw == "readonly") ? "aAfnp" : "aAfFgiIlnprtux"
+    var ok = (kw == "export" || kw == "readonly") ? "aAfnp" : "aAcfFgiIlnprtux"
     var i
     for (i = 0; i < flags.length; i++) {
         var ch = flags.charAt(i)

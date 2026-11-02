@@ -993,6 +993,129 @@ s122() {
   check slc1 "$r" '1+1 abc
 2'
 }
+# ===== SECTION 123: the capcase and trace attributes =====
+# declare -c keeps every later value of a name capitalized: the first character upper, the
+# rest lower, for an element, an append, `read`, `printf -v` and a nameref's store alike. A
+# name holds one of -u, -l and -c: each turns the others off, two at once leave none, and +X
+# wins over -X. -t (trace) changes no value; both show in declare -p and ${v@a}, in bash's
+# order a i n r t x c l u. A readonly name refuses -c but takes -t. Every expected value is
+# bash 5.3's.
+s123() {
+  local r
+  r=$(declare -c a=hELLO; echo "$a"; a="wORLD foo"; echo "$a"; a+=bAR; declare -p a
+    declare -c g="" h=1aBC i=" aB"; declare -p g h i
+    declare -cu b=xyZ; declare -cl c=XyZ; declare -c +c d=aB; declare +c -c e=aB; declare -p b c d e
+    declare -u f=abc; declare -c f; f=qWE; declare -p f; declare -l f; f=QwE; declare -p f
+    declare -ac n=(hELLO wORLD); n+=(eF); n[5]=zZ; declare -p n
+    declare -A m; declare -c m; m[k]=vAL; m[k]+=xX; declare -p m
+    local -a k=( xX yY ); declare -c k; k[2]=zZ; declare -p k
+    declare -n r=a; r=nEW; declare -p a
+    read -r a <<< "bAR baZ"; declare -p a; printf -v a '%s' yY; declare -p a
+    for a in oNe tWO; do :; done; declare -p a
+    declare -ic q=3+4; declare -p q)
+  check scc1 "$r" 'Hello
+World foo
+declare -c a="World foobar"
+declare -c g=""
+declare -c h="1abc"
+declare -c i=" ab"
+declare -- b="xyZ"
+declare -- c="XyZ"
+declare -- d="aB"
+declare -- e="aB"
+declare -c f="Qwe"
+declare -l f="qwe"
+declare -ac n=([0]="Hello" [1]="World" [2]="Ef" [5]="Zz")
+declare -Ac m=([k]="Valxx" )
+declare -ac k=([0]="xX" [1]="yY" [2]="Zz")
+declare -c a="New"
+declare -c a="Bar baz"
+declare -c a="Yy"
+declare -c a="Two"
+declare -ic q="7"'
+  r=$(declare -t t=5; declare -p t; declare -tx x=1; declare -p x; declare +t t; declare -p t
+    declare -tcxir b=1; declare -p b; echo "${b@a}"; declare -ta d=(1); declare -p d
+    declare -tc y; echo "${y@a}|"; declare -t v=1; echo "${v@A}"
+    s123f() { local -c l=mIXED; declare -p l; local -t lt=1; declare -p lt; declare -t t; echo "${t@a}"; }
+    s123f; declare -p t
+    declare -t u=1; unset u; u=2; declare -p u
+    declare -t w; ( declare +t w; declare -p w ); declare -p w)
+  check sct1 "$r" 'declare -t t="5"
+declare -tx x="1"
+declare -- t="5"
+declare -irtxc b="1"
+irtxc
+declare -at d=([0]="1")
+tc|
+declare -t v='"'"'1'"'"'
+declare -c l="Mixed"
+declare -t lt="1"
+t
+declare -- t="5"
+declare -- u="2"
+declare -- w
+declare -t w'
+  r=$( (declare -r o=1; declare -c o; echo "c=$?"; declare +c o; echo "c=$?"; declare -t o; echo "t=$?"; declare -p o) 2>&1); local ln=$LINENO
+  check scr1 "$r" "$0: line $ln: declare: o: readonly variable
+c=1
+$0: line $ln: declare: o: readonly variable
+c=1
+t=0
+declare -rt o=\"1\""
+}
+# ===== SECTION 124: prefix and suffix removal with a star =====
+# ${v#p} ${v##p} ${v%p} ${v%%p} for patterns holding a "*": the shortest and the longest
+# match, with "?", bracket expressions, escapes and several stars, on a subject longer
+# than the pattern many times over. Every expected value is bash 5.3's.
+s124() {
+  local r p s='/usr/lib/a.b: line 12: x.tar.gz: y' l=''
+  local -a ps=('*: line *: ' '*/' '*.' '*.*' '*[ab]' '*[!.]' '*\:' '*?' '*??' '**' '*' '*x*' '*b*' '*z' '*/*/' '?*:' '*[[:digit:]] ')
+  for p in "${ps[@]}"; do r="$r|${s#$p}|${s##$p}|${s%$p}|${s%%$p}"; done
+  check sst1 "$r" '|x.tar.gz: y|y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|usr/lib/a.b: line 12: x.tar.gz: y|a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|b: line 12: x.tar.gz: y|gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar||/a.b: line 12: x.tar.gz: y|r.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: || line 12: x.tar.gz: y| y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: ||sr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz:||/usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: y||.tar.gz: y||/usr/lib/a.b: line 12: ||/a.b: line 12: x.tar.gz: y||/usr/lib/a.||: y|: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|lib/a.b: line 12: x.tar.gz: y|a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y| line 12: x.tar.gz: y| y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y'
+  for p in a b c d e f g h; do l="$l$p$p$p$p$p$p$p$p$p$p:"; done
+  check sst2 "${l#*h:}|${l##*:}|${l%:*}|${l%%:*}|${l#*d?d}|${l%d*}|${l%%d*}" '||aaaaaaaaaa:bbbbbbbbbb:cccccccccc:dddddddddd:eeeeeeeeee:ffffffffff:gggggggggg:hhhhhhhhhh|aaaaaaaaaa|ddddddd:eeeeeeeeee:ffffffffff:gggggggggg:hhhhhhhhhh:|aaaaaaaaaa:bbbbbbbbbb:cccccccccc:ddddddddd|aaaaaaaaaa:bbbbbbbbbb:cccccccccc:'
+}
+# ===== SECTION 125: expansion errors in a case word, a case pattern and [[ ]] =====
+# An expansion error in the word or a pattern of a case abandons the command, so a
+# subshell holding it ends with status 1; a bad substitution names the whole word. The
+# patterns are expanded only up to the first that matches, and ;& runs the next body
+# without expanding its patterns. In [[ ]] an operand's expansion error abandons the
+# command too, while its own arithmetic only fails it; && and || expand only what they
+# need. Every expected value is bash 5.3's.
+s125() {
+  local e f w nl=$'\n' x=abc
+  e=$( (case a${#x-a}b in x) ;; esac; echo no) 2>&1; echo "st=$?"); w="$0: line $LINENO: a\${#x-a}b: bad substitution${nl}st=1"
+  f=$( (case x in a${#x-a}b) echo m ;; x) echo x ;; esac) 2>&1; echo "st=$?"); e="$e$nl$f"; w="$w$nl$0: line $LINENO: a\${#x-a}b: bad substitution${nl}st=1"
+  f=$( (case x in x|a${#x-a}b) echo hit ;; esac) 2>&1; echo "st=$?"); e="$e$nl$f"; w="$w${nl}hit${nl}st=0"
+  f=$( (case a${s125u?unset}b in x) ;; esac) 2>&1; echo "st=$?"); e="$e$nl$f"; w="$w$nl$0: line $LINENO: s125u: unset${nl}st=1"
+  f=$( (case x in x) echo one ;& y$(echo side >&2)) echo two ;; esac; case x in y|x|$(echo lazy >&2)) echo three ;; esac) 2>&1); e="$e$nl$f"; w="$w${nl}one${nl}two${nl}three"
+  check scw1 "$e" "$w"
+  e=$( ([[ x == a${#x-a}b ]]; echo no) 2>&1; echo "st=$?"); w="$0: line $LINENO: a\${#x-a}b: bad substitution${nl}st=1"
+  f=$( ([[ -n $((1/0)) ]]; echo no) 2>&1; echo "st=$?"); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 1/0: division by 0 (error token is \"0\")${nl}st=1"
+  f=$( ([[ 1/0 -eq 1 ]]; echo "in=$?") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: [[: 1/0: division by 0 (error token is \"0\")${nl}in=1"
+  f=$( ([[ x == x || a${#x-a}b == y ]]; echo "a=$?"; [[ x == y && $(echo no >&2) == y ]]; echo "b=$?") 2>&1); e="$e$nl$f"; w="$w${nl}a=0${nl}b=1"
+  check scw2 "$e" "$w"
+}
+# ===== SECTION 126: circular namerefs: how often bash warns =====
+# Through a circular chain of namerefs the count and the keys (${#REF[@]}, ${!REF[@]})
+# warn once and an element or the elements twice; an @-transform reads an empty value
+# after one warning. Inside a function a nameref to itself is declared with two warnings.
+# Every expected value is bash 5.3's.
+s126() {
+  local e f l w nl=$'\n' c=': warning: p: circular name reference'
+  e=$( (declare -n p=q q=p; echo "${#p[@]}|${#p[*]}|${!p[@]}|${#p[1]}") 2>&1); l=$LINENO
+  w="$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c${nl}0|0||0"
+  f=$( (declare -n p=q q=p; echo "${p[@]}|${p@Q}|${p@U}") 2>&1); e="$e$nl$f"; l=$LINENO
+  w="$w$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl||"
+  check snc1 "$e" "$w"
+  s126f() { local -n l=l; echo "${#l[@]}"; declare -p l; }; l=$LINENO
+  e=$( (s126f) 2>&1)
+  check snc2 "$e" "$0: line $l: local: warning: l: circular name reference
+$0: line $l: warning: l: circular name reference
+$0: line $l: warning: l: circular name reference
+0
+declare -n l=\"l\""
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -1028,5 +1151,9 @@ s119  # SECTION-CALL 119
 s120  # SECTION-CALL 120
 s121  # SECTION-CALL 121
 s122  # SECTION-CALL 122
+s123  # SECTION-CALL 123
+s124  # SECTION-CALL 124
+s125  # SECTION-CALL 125
+s126  # SECTION-CALL 126
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -121,7 +121,7 @@ CasePats    <~~ push({pats: takeAll()}) ~~> = CasePat { "|" CasePat } ;
 // A case PATTERN is a word whose QUOTED parts are literal (`'*')` matches only "*"): the
 // quoting-aware segments of [[ == ]]'s right hand side (PatSq, PatDq, PatAnsi, PatEsc). Twin of
 // CasePat in bash-interpreter.abnf.
-CasePat     <~~ push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
+CasePat     <~~ badClaim(up.start, up.pos, true); push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
 CaseFirst   = Tilde | CaseSeg ;
 CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | PatEsc | BraceLit | ExtGlob | EgPfxLit | BareSeg ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
@@ -849,7 +849,7 @@ CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x
 // The right hand side of == / != inside [[ ]] is a PATTERN, and a quoted part of it is
 // literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
 CondBin     <~~ push(mkCondBin(takeAll())) ~~> = NsWord CondBinOp PatWord ;
-PatWord     <~~ push(mkNsWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
+PatWord     <~~ badClaim(up.start, up.pos, true); push(mkNsWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
 PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ExtGlob | EgPfxLit | BareSeg ;
 PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
@@ -1555,9 +1555,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // rt_case would hand back a fresh string that no longer compares equal to it.
     function storeVarRaw(b, name, v) { b.NewStore(v, varPtr(b, name)) }
     function attrCase(b, name, v) {
-        if (attrOn(upVars, name)) { return b.NewCall(rtCase, [v, one, emptyPtr(b)]) }
-        if (attrOn(loVars, name)) { return b.NewCall(rtCase, [v, llvm.constant.NewInt(i32, 3), emptyPtr(b)]) }
-        return v
+        var cl = caseLetter(name)
+        if (cl == "") { return v }
+        return b.NewCall(rtCase, [v, llvm.constant.NewInt(i32, (cl == "u") ? 1 : ((cl == "l") ? 3 : 4)), emptyPtr(b)])
     }
 
     // The `local` save stack and the capture stack are private to the runtime; only their
@@ -1694,7 +1694,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `varnames`; the emitter only fills that table in main's entry block.
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1, 0, 0])
     var rtNrefBase = rtDecl("rt_nref_base", true, [1])
-    var rtNrefElems = rtDecl("rt_nref_elems", true, [1])
+    var rtNrefElems = rtDecl("rt_nref_elems", true, [1, 0])
     var rtNrefArr = rtDecl("rt_nref_arr", true, [1, 0, 0])
     var rtNrefCirc = rtDecl("rt_nref_circ", false, [])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
@@ -2305,7 +2305,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // array and any other NAME[SUB], whose name and subscript come from the target (cell.nm,
     // cell.sub). A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-interpreter.abnf.
     function mkParamExp(items) {
-        var name = "", indp = false, hasIdx = false, bare = true, pfx = false
+        var name = "", indp = false, hasIdx = false, bare = true, pfx = false, lenp = false
         var idxIt = null
         var wordObjs = []
         var rest = []
@@ -2319,6 +2319,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (it.hasIdx != undefined) { hasIdx = true; idxIt = it; continue }
                 if (it.op != undefined || it.pe != undefined || it.xf != undefined) { bare = false }
                 if (it.pfx != undefined) { pfx = true }
+                if (it.lenp != undefined) { lenp = true }
             }
             rest.push(it)
         }
@@ -2336,7 +2337,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var pcName = name
             pc.fn = function(b) {
                 if (!attrOn(refVars, pcName)) { return pcFn(b) }
-                rcell.nm = b.NewCall(rtNrefElems, gepStr(b, pcName))
+                rcell.nm = b.NewCall(rtNrefElems, [gepStr(b, pcName), (lenp || indp) ? one : zero])
                 return rpc.fn(b)
             }
             return pc
@@ -2810,7 +2811,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (xf != "") {
             return {c: undefined, fn: function(b) {
                 var t0 = targetOf(b); b = t0.b
-                var nmv = (!indirect && attrOn(refVars, name)) ? b.NewCall(rtNrefName, [gepStr(b, name), one]) : ((t0.v != null) ? t0.v : gepStr(b, name))
+                var nmv = (!indirect && attrOn(refVars, name)) ? b.NewCall(rtNrefName, [gepStr(b, name), llvm.constant.NewInt(i32, 2)]) : ((t0.v != null) ? t0.v : gepStr(b, name))
                 var v0 = valOf(b, t0.v)
                 return {b: b, v: applyXf(b, v0, b.NewCall(rtIsset, v0), nmv)}
             }}
@@ -4101,7 +4102,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return at
     }
-    // The attributes rt_attrv applies to an element of `name`: 1 -i, 2 -u, 4 -l.
+    // The attributes rt_attrv applies to an element of `name`: 1 -i, 2 -u, 4 -l, 6 -c.
     function elemAttrs(name) {
         return (attrOn(intVars, name) ? 1 : 0) + (attrOn(upVars, name) ? 2 : 0) + (attrOn(loVars, name) ? 4 : 0)
     }
@@ -4207,7 +4208,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var boBody = function(b) { emitDiag(b, gepStr(b, badOpt)); storeStatusI(b, 2); return b }
                 return (redirs.length == 0) ? boBody : mkRedirected([boBody].concat(redirs))
             }
-            if (opts.indexOf("I") >= 0 || opts.indexOf("t") >= 0) { fail(kw + " " + opts + " is not supported") }
+            if (opts.indexOf("I") >= 0) { fail(kw + " " + opts + " is not supported") }
         }
         // Operands that are constant words (`declare -a 'b[1]=x'`) spell a declaration known now.
         if (anyDyn) {
@@ -4242,8 +4243,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         var assoc = (flags.indexOf("A") >= 0)
-        var upper = (flags.indexOf("u") >= 0)
-        var lower = (flags.indexOf("l") >= 0)
+        var trace = (flags.indexOf("t") >= 0)
         var integer = (flags.indexOf("i") >= 0)
         var global = (flags.indexOf("g") >= 0)
         // The kind and scope the literal of name j is assigned under: the declaration's own,
@@ -4371,7 +4371,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (u = curFrame.undo; u < attrUndo.length && ge == null; u++) {
                 if (attrUndo[u].name == nm) { ge = attrUndo[u] }
             }
-            var sv = {name: nm, i: attrOn(intVars, nm), u: attrOn(upVars, nm), l: attrOn(loVars, nm), r: attrOn(roVars, nm), n: attrOn(refVars, nm)}
+            var sv = {name: nm, i: attrOn(intVars, nm), u: attrOn(upVars, nm), l: attrOn(loVars, nm), t: attrOn(trVars, nm), r: attrOn(roVars, nm), n: attrOn(refVars, nm)}
             if (ge != null && locOwn("$" + nm)) {
                 attrUndo.push(ge)
                 attrUnwind(attrUndo.length - 1)
@@ -4381,7 +4381,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = declOne(b, j, v)
             b.NewCall(rtGlobSwap, id)
             if (ge != null) {
-                ge.i = attrOn(intVars, nm); ge.u = attrOn(upVars, nm); ge.l = attrOn(loVars, nm); ge.r = attrOn(roVars, nm); ge.n = attrOn(refVars, nm)
+                ge.i = attrOn(intVars, nm); ge.u = attrOn(upVars, nm); ge.l = attrOn(loVars, nm); ge.t = attrOn(trVars, nm)
+                ge.r = attrOn(roVars, nm); ge.n = attrOn(refVars, nm)
                 attrUndo.push(sv)
                 attrUnwind(attrUndo.length - 1)
             }
@@ -4495,10 +4496,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // return) unless -g is given; `export` and `readonly` always act on the global.
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
             var fresh = localize && curFrame != null && !locOwn("$" + names[j])
-            // A nameref to itself is refused outside a function, and nothing is declared
-            // (bash 5.3; inside one bash only warns, which is not modelled): a literal value
-            // here, a computed one when it is stored (selfRef). Twin of the same check in
-            // makeDecl in bash-interpreter.abnf.
+            // A nameref to itself is refused outside a function, and nothing is declared: a
+            // literal value here, a computed one when it is stored (selfRef). Inside one it is
+            // declared with two warnings (bash 5.3). Twin of the same check in makeDecl in
+            // bash-interpreter.abnf.
             var selfMsg = kw + ": " + names[j] + ": nameref variable self references not allowed\n"
             var selfRef = isRef && curFrame == null && asgs[j] != null
             if (selfRef && v == null && asgs[j].valT != null && asgs[j].valT.c != undefined) {
@@ -4533,6 +4534,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     intVars[key] = false
                     upVars[key] = false
                     loVars[key] = false
+                    trVars[key] = false
                     refVars[key] = false
                 }
                 // Lexically first and in no loop, it is the first at run time too; otherwise
@@ -4547,19 +4549,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 } else { freshLocal(b, j) }
             }
             if (integer) { intVars["$" + names[j]] = true }
-            if (upper) { upVars["$" + names[j]] = true; loVars["$" + names[j]] = false }
-            if (lower) { loVars["$" + names[j]] = true; upVars["$" + names[j]] = false }
-            // +i +u +l +n take the attribute away (+x +a +A change nothing here).
+            var cl = bashDeclCase(caseLetter(names[j]), flags, plus)
+            upVars["$" + names[j]] = cl == "u" || cl == "c"
+            loVars["$" + names[j]] = cl == "l" || cl == "c"
+            if (trace) { trVars["$" + names[j]] = true }
+            // +i +t +n take the attribute away (+x +a +A change nothing here).
             if (plus.indexOf("i") >= 0) { intVars["$" + names[j]] = false }
-            if (plus.indexOf("u") >= 0) { upVars["$" + names[j]] = false }
-            if (plus.indexOf("l") >= 0) { loVars["$" + names[j]] = false }
+            if (plus.indexOf("t") >= 0) { trVars["$" + names[j]] = false }
             if (plus.indexOf("n") >= 0) { refVars["$" + names[j]] = false; b.NewCall(rtNmark, [gepStr(b, names[j]), zero]) }
             if (isRef && isArray) { fail("a nameref declared with -a or -A is not supported by this compiler") }
             // The value of a declaration with -n is the reference's own: the name it refers to.
             if (isRef) { refVars["$" + names[j]] = false }
             if (setRo) { roVars["$" + names[j]] = true }
             // A name with an attribute has a slot, where refAttrs looks for it.
-            if (integer || upper || lower || setRo) { getVarId(names[j]) }
+            if (integer || cl != "" || setRo) { getVarId(names[j]) }
             // A value that names no variable, for a nameref itself, fails the declaration
             // (rt_decl_nref). Twin of the same check in declOneN in bash-interpreter.abnf.
             var refJoin = null
@@ -4626,6 +4629,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     okB.NewCall(rtNmark, [gepStr(okB, names[j]), one])
                     okB.NewBr(joinB)
                     b = joinB
+                }
+                if (isRef && curFrame != null) {
+                    var warnB = curF.NewBlock(""), goB = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [loadVar(b, names[j]), gepStr(b, names[j])]), zero), warnB, goB)
+                    emitDiag(warnB, gepStr(warnB, kw + ": warning: " + names[j] + ": circular name reference\n"))
+                    emitDiag(warnB, gepStr(warnB, "warning: " + names[j] + ": circular name reference\n"))
+                    warnB.NewBr(goB)
+                    b = goB
                 }
             }
             else if (localize && curFrame == null) { storeVarRaw(b, names[j], unsetPtr(b)) }
@@ -4915,7 +4926,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // dynamic; the two agree whenever an attribute is declared and used in the same function.
     var intVars = {}      // names declared with `declare -i`
     var upVars = {}       // `declare -u`
-    var loVars = {}       // `declare -l`
+    var loVars = {}       // `declare -l`; a `declare -c` name is in both (caseLetter)
+    var trVars = {}       // `declare -t`: shown by `declare -p` and ${v@a}, otherwise inert
     var roVars = {}       // `readonly` / -r: an assignment, `local` or `unset` fails (roRefused)
     // `declare -n` / `local -n`: a NAMEREF, lexical like the others. A read (varString), an
     // assignment (storeVar, emitAssign) and an unset of the name act on the variable its value
@@ -4980,17 +4992,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(m, k)) { return false }
         return m[k]
     }
-    // The SCALAR attribute letters of a name, in bash's own order (i, l, u; the array letter
-    // goes in front of them): `declare -iu n` prints `declare -iu`.
-    // In bash's order, i n r l u; rt_xletters puts in the n of a nameref and the x of an
+    // The SCALAR attribute letters of a name, in bash's own order (the array letter goes in
+    // front of them): `declare -iu n` prints `declare -iu`.
+    // In bash's order, i n r t x c l u; rt_xletters puts in the n of a nameref and the x of an
     // exported name, both run-time marks (a computed nameref may be refused when it runs).
     function scalarAttrLetters(name) {
         var out = ""
         if (attrOn(intVars, name)) { out = out + "i" }
         if (attrOn(roVars, name)) { out = out + "r" }
-        if (attrOn(loVars, name)) { out = out + "l" }
-        if (attrOn(upVars, name)) { out = out + "u" }
-        return out
+        if (attrOn(trVars, name)) { out = out + "t" }
+        return out + caseLetter(name)
+    }
+    // The case attribute's letter: c, l, u or none. Twin of caseLetter in
+    // bash-interpreter.abnf.
+    function caseLetter(name) {
+        var up = attrOn(upVars, name)
+        var lo = attrOn(loVars, name)
+        if (up && lo) { return "c" }
+        return lo ? "l" : (up ? "u" : "")
     }
     // The undo log makeFuncDef unwinds: one entry per name declared inside a function body or a
     // ( LIST ) / $( LIST ) (counted by subDepth). The associative kind is a run-time mark
@@ -4998,7 +5017,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var subDepth = 0
     var attrUndo = []
     function attrPushUndo(name) {
-        attrUndo.push({name: name, i: attrOn(intVars, name), u: attrOn(upVars, name), l: attrOn(loVars, name), r: attrOn(roVars, name),
+        attrUndo.push({name: name, i: attrOn(intVars, name), u: attrOn(upVars, name), l: attrOn(loVars, name), t: attrOn(trVars, name), r: attrOn(roVars, name),
                        n: attrOn(refVars, name)})
     }
     // The locals a function's code declares, lexically (curFrame.locs): each with the
@@ -5019,6 +5038,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             intVars["$" + e.name] = e.i
             upVars["$" + e.name] = e.u
             loVars["$" + e.name] = e.l
+            trVars["$" + e.name] = e.t
             roVars["$" + e.name] = e.r
             refVars["$" + e.name] = e.n
         }
@@ -5667,28 +5687,44 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function foldCondOr(items) {
         if (items.length == 1) { return items[0] }
-        return function(b) {
-            var v = zero
-            var i
-            for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = b.NewOr(v, r.v) }
-            return {b: b, v: v}
-        }
+        return function(b) { return condShort(b, items, true) }
     }
     function foldCondAnd(items) {
         if (items.length == 1) { return items[0] }
-        return function(b) {
-            var v = one
-            var i
-            for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = b.NewAnd(v, r.v) }
-            return {b: b, v: v}
+        return function(b) { return condShort(b, items, false) }
+    }
+    // The operands of || (or, with or false, &&) left to right, each only while the answer
+    // is still open, as bash evaluates them. Twin of foldCondOr and foldCondAnd in
+    // bash-interpreter.abnf.
+    function condShort(b, items, or) {
+        var r = items[0](b)
+        var i
+        for (i = 1; i < items.length; i++) {
+            var fromB = r.b
+            var restB = curF.NewBlock(""), joinB = curF.NewBlock("")
+            fromB.NewCondBr(fromB.NewICmp(or ? llvm.enum.IPredNE : llvm.enum.IPredEQ, r.v, zero), joinB, restB)
+            var r2 = items[i](restB)
+            r2.b.NewBr(joinB)
+            r = {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(or ? one : zero, fromB), llvm.ir.NewIncoming(r2.v, r2.b)])}
         }
+        return r
     }
     function mkCondNot(t) {
         return function(b) { var r = t(b); return {b: r.b, v: r.b.NewXor(r.v, one)} }
     }
+    // An operand of [[ ]], expanded. An error of its expansion abandons the line as a
+    // subscript's does (arith_err 2), while the command's own arithmetic only fails it.
+    // Twin of condWord in bash-interpreter.abnf.
+    function condWord(b, w) {
+        var r = evalWord(b, w)
+        if (w.c != undefined) { return r }
+        var ae = r.b.NewLoad(i32, gArithErr)
+        r.b.NewStore(r.b.NewSelect(r.b.NewICmp(llvm.enum.IPredNE, ae, zero), llvm.constant.NewInt(i32, 2), zero), gArithErr)
+        return r
+    }
     function mkCondSingle(w) {
         return function(b) {
-            var r = evalWord(b, w)
+            var r = condWord(b, w)
             return {b: r.b, v: r.b.NewZExt(isNonEmptyStr(r.b, r.v), i32)}
         }
     }
@@ -5696,7 +5732,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var op = items[0].cop
         var w = items[1]
         return function(b) {
-            var r = evalWord(b, w)
+            var r = condWord(b, w)
             b = r.b
             var st = testUnaryIR(b, op, {v: r.v, c: w.c}, true)
             return {b: b, v: b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, st, zero), i32)}
@@ -5763,8 +5799,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkCondMatch(items) {
         var lw = items[0], rw = items[2]
         return function(b) {
-            var rl = evalWord(b, lw); b = rl.b
-            var rr = evalWord(b, rw); b = rr.b
+            var rl = condWord(b, lw); b = rl.b
+            var rr = condWord(b, rw); b = rr.b
             var subj = rl.v
             var caps = slotOf(capsTy)
             var capsPtr = b.NewGetElementPtr(capsTy, caps, zero, zero)
@@ -5844,8 +5880,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkCondBin(items) {
         var lw = items[0], op = items[1].cop, rw = items[2]
         return function(b) {
-            var rl = evalWord(b, lw); b = rl.b
-            var rr = evalWord(b, rw); b = rr.b
+            var rl = condWord(b, lw); b = rl.b
+            var rr = condWord(b, rw); b = rr.b
             // == and != glob-match their right hand side inside [[ ]]; = is a synonym of ==.
             if (op == "==" || op == "=") { return {b: b, v: b.NewCall(rtGlobX, [rr.v, rl.v])} }
             if (op == "!=") { return {b: b, v: b.NewXor(b.NewCall(rtGlobX, [rr.v, rl.v]), one)} }
@@ -7026,6 +7062,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         intVars["$" + sp0.name] = false
                         upVars["$" + sp0.name] = false
                         loVars["$" + sp0.name] = false
+                        trVars["$" + sp0.name] = false
                         refVars["$" + sp0.name] = false
                         // A local unset in the function that declared it stays declared
                         // (rt_arr_smark). Twin of localHere in bash-interpreter.abnf.
@@ -7380,12 +7417,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // clause's BODY without testing it, ";;" ends the case. The status is the last body
     // command's, 0 when no clause matched or the body is empty (`false; case x in x) ;; esac`
     // is 0). Twin of makeCase in bash-interpreter.abnf.
+    // An expansion error in the word or a pattern of a case abandons it (bash 5.3:
+    // `( case a${#x-a}b in x) ;; esac ); echo $?` prints 1). Twin of makeCase in
+    // bash-interpreter.abnf.
+    function caseWordCheck(b, w) { return (w.c == undefined) ? emitAbortCheck(b) : b }
     function makeCase(items) {
         var subjT = items[0]
         var clauses = items.slice(1)
         return function(b) {
             var r0 = evalWord(b, subjT)
-            b = r0.b
+            b = caseWordCheck(r0.b, subjT)
             var subj = r0.v
             var merge = curF.NewBlock("")
             var i
@@ -7393,15 +7434,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = 0; i < clauses.length; i++) { bodies.push(curF.NewBlock("")) }
             for (i = 0; i < clauses.length; i++) {
                 var cl = clauses[i]
-                var hit = zero
+                var nextB = curF.NewBlock("")
                 var k
+                // The patterns are expanded in turn up to the first that matches.
                 for (k = 0; k < cl.pats.length; k++) {
                     var rp = evalWord(b, cl.pats[k])
-                    b = rp.b
-                    hit = b.NewOr(hit, b.NewCall(rtGlob, [rp.v, subj]))
+                    b = caseWordCheck(rp.b, cl.pats[k])
+                    var missB = (k + 1 < cl.pats.length) ? curF.NewBlock("") : nextB
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtGlob, [rp.v, subj]), zero), bodies[i], missB)
+                    b = missB
                 }
-                var nextB = curF.NewBlock("")
-                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, hit, zero), bodies[i], nextB)
                 storeStatusI(bodies[i], 0)
                 var tb = cl.body(bodies[i])
                 if (cl.cterm == ";;&") { tb.NewBr(nextB) }
@@ -7724,15 +7766,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var hn = asgs[k].aname
             if (asgs[k].bad != null || attrOn(roVars, hn)) { continue }
             b.NewCall(rtArrClear, gepStr(b, hn))
-            hid.push({n: "$" + hn, i: attrOn(intVars, hn), u: attrOn(upVars, hn), l: attrOn(loVars, hn)})
-            intVars["$" + hn] = false; upVars["$" + hn] = false; loVars["$" + hn] = false
+            hid.push({n: "$" + hn, i: attrOn(intVars, hn), u: attrOn(upVars, hn), l: attrOn(loVars, hn), t: attrOn(trVars, hn)})
+            intVars["$" + hn] = false; upVars["$" + hn] = false; loVars["$" + hn] = false; trVars["$" + hn] = false
         }
         return hid
     }
     function unhidePrefix(hid) {
         var k
         for (k = hid.length - 1; k >= 0; k--) {
-            intVars[hid[k].n] = hid[k].i; upVars[hid[k].n] = hid[k].u; loVars[hid[k].n] = hid[k].l
+            intVars[hid[k].n] = hid[k].i; upVars[hid[k].n] = hid[k].u; loVars[hid[k].n] = hid[k].l; trVars[hid[k].n] = hid[k].t
         }
     }
     // The bindings of the evals being emitted, innermost last. `unset NAME` in the string
@@ -7748,7 +7790,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var h = sc.hid[k]
             if (h.n == "$" + name && h.gone != true) {
                 b.NewCall(rtUnsetEnv, [llvm.constant.NewInt(i32, getVarId(name)), b.NewLoad(i32, sc.depth)])
-                intVars[h.n] = h.i; upVars[h.n] = h.u; loVars[h.n] = h.l
+                intVars[h.n] = h.i; upVars[h.n] = h.u; loVars[h.n] = h.l; trVars[h.n] = h.t
                 h.gone = true
                 return true
             }

@@ -2346,6 +2346,16 @@ int rt_globat(char *p, char *s, int i, int n)
     return r;
 }
 
+/* int rt_globsfx(char *p, char *s): rt_globat of the whole of s, a suffix of the
+ * subject that needs no copy since it already ends where the subject does. */
+int rt_globsfx(char *p, char *s)
+{
+    long mark = h_pos[0];
+    int r = rt_glob(p, s);
+    rt_hset(0, mark);
+    return r;
+}
+
 /* int rt_matchlen(char *p, char *s, int len, int i, int pl): end index of the
  * LONGEST match of p starting at i, or -1; len is rt_strlen(s) and pl is
  * rt_patlen(p). rt_glob steps the subject by rt_cpw, so a match of pl
@@ -2384,7 +2394,7 @@ int rt_matchend(char *p, char *s)
         hi = len - pl;
     }
     while (i <= hi) {
-        if (rt_isbound(s, i) != 0 && rt_globat(p, s, i, len - i) != 0) return i;
+        if (rt_isbound(s, i) != 0 && rt_globsfx(p, s + i) != 0) return i;
         i = i + 1;
     }
     return -1;
@@ -2395,8 +2405,129 @@ int rt_matchend(char *p, char *s)
 /* The grammar loads `read_eof` by name for the `read` builtin's status. */
 int read_eof;
 
+/* 1 when p holds an extglob group, which only rt_glob matches. A "(" after one
+ * of @?*+! inside a bracket or after a backslash counts too: that only sends
+ * the pattern down the slower road. */
+int rt_hasegrp(char *p)
+{
+    int i = 0;
+    if (opt_extglob == 0 && eg_force == 0) return 0;
+    while (p[i] != 0) {
+        int c = (int)(unsigned char)p[i];
+        if ((c == 64 || c == 63 || c == 42 || c == 43 || c == 33) && p[i + 1] == 40) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* Put pattern offset q into the state set st, with the offsets after the "*"
+ * run it starts: a star also matches nothing. */
+void rt_nfa_add(char *p, char *st, int q)
+{
+    while (st[q] == 0) {
+        st[q] = 1;
+        if (p[q] != 42) return;
+        q = q + 1;
+    }
+}
+
+/* The end of the shortest (or, with shortest 0, the longest) prefix of s that
+ * the extglob-free pattern p matches, or -1, found in ONE walk over s: the set
+ * of pattern offsets reachable after each character, each element matched as
+ * rt_glob matches it. Trying every prefix with rt_glob instead costs the square
+ * of the length whenever p has a "*". A prefix must end on a character boundary
+ * (rt_isbound), and the walk steps the subject as rt_glob does (rt_cpw). */
+int rt_pfxwalk(char *p, char *s, int len, int shortest)
+{
+    long mark = h_pos[0];
+    int plen = rt_strlen(p);
+    char *cur = rt_bump(plen + 1);
+    char *nxt = rt_bump(plen + 1);
+    char *sw;
+    int i = 0;
+    int best = -1;
+    int q;
+    int live = 1;
+    q = 0;
+    while (q <= plen) {
+        cur[q] = 0;
+        nxt[q] = 0;
+        q = q + 1;
+    }
+    rt_nfa_add(p, cur, 0);
+    while (live != 0) {
+        int sc;
+        int scw;
+        if (cur[plen] != 0 && rt_isbound(s, i) != 0) {
+            best = i;
+            if (shortest != 0) break;
+        }
+        if (i >= len) break;
+        sc = rt_gch(s + i);
+        scw = rt_cpw(s + i);
+        live = 0;
+        q = 0;
+        while (q < plen) {
+            if (cur[q] != 0) {
+                int pc = (int)(unsigned char)p[q];
+                int cr = pc == 91 ? rt_class(p + q, sc) : -1;
+                if (pc == 42) rt_nfa_add(p, nxt, q);
+                else if (pc == 63) rt_nfa_add(p, nxt, q + 1);
+                else if (cr >= 0) {
+                    if ((cr & 1) != 0) rt_nfa_add(p, nxt, q + cr / 2);
+                } else if (pc == 92 && p[q + 1] != 0) {
+                    if (rt_gch(p + q + 1) == sc) rt_nfa_add(p, nxt, q + 1 + rt_cpw(p + q + 1));
+                } else if (rt_gch(p + q) == sc) rt_nfa_add(p, nxt, q + rt_cpw(p + q));
+            }
+            q = q + 1;
+        }
+        q = 0;
+        while (q <= plen) {
+            cur[q] = nxt[q];
+            nxt[q] = 0;
+            if (cur[q] != 0) live = 1;
+            q = q + 1;
+        }
+        i = i + scw;
+    }
+    rt_hset(0, mark);
+    return best;
+}
+
+/* The start of the shortest (or, with shortest 0, the longest) suffix of s that
+ * the extglob-free pattern "*" q matches, or -1. Such a suffix matches exactly
+ * when it begins at or before the last start i at which q matches all the rest
+ * of s, so the longest is all of s and the shortest begins on the last
+ * character boundary at or before i. The starts are rt_glob's: every one the
+ * subject reaches stepping by rt_cpw, and the end. */
+int rt_sfxstar(char *q, char *s, int len, int shortest)
+{
+    long mark = h_pos[0];
+    char *at = rt_bump(len + 1);
+    int i = 0;
+    while (i <= len) {
+        at[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < len) {
+        at[i] = 1;
+        i = i + rt_cpw(s + i);
+    }
+    at[len] = 1;
+    i = len;
+    while (i >= 0 && (at[i] == 0 || rt_glob(q, s + i) == 0)) i = i - 1;
+    rt_hset(0, mark);
+    if (i < 0) return -1;
+    if (shortest == 0) return 0;
+    while (rt_isbound(s, i) == 0) i = i - 1;
+    return i;
+}
+
 /* rt_strip: ${v#p} / ${v##p} / ${v%p} / ${v%%p}; mode 0 = #, 1 = ##, 2 = %, 3 = %%.
- * A trial length t walks 0..len; k is t for the ascending modes (# and %%) and
+ * A pattern with a "*" and no extglob group strips a prefix found by
+ * rt_pfxwalk, and a suffix by rt_sfxstar when it starts with the "*". Otherwise
+ * a trial length t walks 0..len; k is t for the ascending modes (# and %%) and
  * len - t for the descending ones (## and %), so the first hit is the shortest
  * or the longest match as required. */
 char *rt_strip(char *s, char *p, int mode) {
@@ -2405,11 +2536,16 @@ char *rt_strip(char *s, char *p, int mode) {
     int asc = (mode == 0) || (mode == 3);
     int pl = rt_patlen(p);
     int t = 0;
+    if (pl < 0 && rt_hasegrp(p) == 0 && (isPre || p[0] == 42)) {
+        int kw = isPre ? rt_pfxwalk(p, s, len, mode == 0) : rt_sfxstar(p + 1, s, len, mode == 2);
+        if (kw < 0) return s;
+        return isPre ? rt_substr(s, kw, -1) : rt_substr(s, 0, kw);
+    }
     while (t <= len) {
         int k = asc ? t : len - t;
         int clen = isPre ? k : len - k;
         int fits = pl < 0 || (clen >= pl && clen <= 4 * pl);
-        if (fits && rt_isbound(s, k) != 0 && rt_globat(p, s, isPre ? 0 : k, clen) != 0) {
+        if (fits && rt_isbound(s, k) != 0 && (isPre ? rt_globat(p, s, 0, clen) : rt_globsfx(p, s + k)) != 0) {
             return isPre ? rt_substr(s, k, -1) : rt_substr(s, 0, k);
         }
         t = t + 1;
@@ -2601,6 +2737,7 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
 #include "case-simple.h"
 
 /* rt_case: ${v^} / ${v^^} / ${v,} / ${v,,}; mode 0 = ^, 1 = ^^, 2 = ",", 3 = ",,".
+ * Mode 4 is `declare -c`: the first character upper, every other one lower.
  *
  * It walks CODEPOINTS, not bytes, and maps each one as towupper / towlower do: the
  * Unicode SIMPLE mapping (case-simple.h), one character for one, so "ß" stays and
@@ -2609,8 +2746,8 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
 char *rt_case(char *s, int mode, char *pat) {
     int len = rt_strlen(s);
     char *dst = rt_bump(len + len + 1);
-    int up = mode < 2;
-    int all = (mode == 1) || (mode == 3);
+    int up = mode < 2 || mode == 4;
+    int all = mode != 0 && mode != 2;
     int i = 0;
     int o = 0;
     int first = 1;
@@ -2670,6 +2807,7 @@ char *rt_case(char *s, int mode, char *pat) {
         }
         i = i + w;
         first = 0;
+        if (mode == 4) up = 0;
     }
     dst[o] = 0;
     return dst;
@@ -5630,9 +5768,9 @@ int rt_take_subbad(void) {
 }
 
 /* The value an element store keeps under its array's attributes `at` (1 -i,
- * 2 -u, 4 -l; bash 5.3 applies them to every element as to a scalar): -i
- * evaluates v as arithmetic and, when old is not 0, adds old's value
- * (`n[1]+=EXPR`); -u / -l map the case of old and v appended. An arithmetic
+ * 2 -u, 4 -l, both -c; bash 5.3 applies them to every element as to a scalar):
+ * -i evaluates v as arithmetic and, when old is not 0, adds old's value
+ * (`n[1]+=EXPR`); -u / -l / -c map the case of old and v appended. An arithmetic
  * error is left in arith_err for the caller, which then stores nothing. Twin of
  * elemVal in bash-interpreter.abnf. */
 char *rt_attrv(char *old, char *v, int at) {
@@ -5643,6 +5781,7 @@ char *rt_attrv(char *old, char *v, int at) {
         return rt_int2str(n);
     }
     if (old != 0) v = rt_strcat(old, v);
+    if ((at & 6) == 6) return rt_case(v, 4, empty);
     if ((at & 2) != 0) return rt_case(v, 1, empty);
     if ((at & 4) != 0) return rt_case(v, 3, empty);
     return v;
@@ -6348,7 +6487,9 @@ char *rt_nref_end(char *n)
  * that is unset or empty. A circular chain is "invalid indirect expansion"
  * instead of the warning, which abandons the line. A computed nameref the
  * declaration refused is no nameref when it runs: ${!REF} is then the
- * indirection through its value, and ${REF@A} (own) names n itself. */
+ * indirection through its value, and ${REF@A} (own) names n itself. For an
+ * @-transform (own 2) a circular chain names no variable, "", silently: reading
+ * the value through n is what warns. */
 char *rt_nref_name(char *n, int own)
 {
     int i = rt_varslot(n);
@@ -6358,6 +6499,7 @@ char *rt_nref_name(char *n, int own)
     nref_quiet = 1;
     e = rt_nref_end(n);
     nref_quiet = 0;
+    if (e == 0 && own == 2) return empty;
     if (e == 0) {
         rt_berr("", n, "invalid indirect expansion");
         arith_err = 1;
@@ -6380,18 +6522,18 @@ int rt_unset_ref(char *n, int ro)
     return rt_unset_name(e);
 }
 
-/* The attribute letters `at` (bash's order: a/A i n r x l u) with the n of a
+/* The attribute letters `at` (bash's order: a/A i n r t x c l u) with the n of a
  * nameref and the x of an exported NAME put in their places. */
 char *rt_xletters(char *nm, char *at) {
     int i = 0;
     int mk = rt_arr_marks(nm);
     if ((mk & 32) != 0) {
-        while (at[i] != 0 && at[i] != 114 && at[i] != 108 && at[i] != 117) i = i + 1;
+        while (at[i] != 0 && at[i] != 114 && at[i] != 116 && at[i] != 99 && at[i] != 108 && at[i] != 117) i = i + 1;
         at = rt_strcat(rt_strcat(rt_substr(at, 0, i), "n"), rt_substr(at, i, -1));
         i = 0;
     }
     if ((mk & 16) == 0) return at;
-    while (at[i] != 0 && at[i] != 108 && at[i] != 117) i = i + 1;
+    while (at[i] != 0 && at[i] != 99 && at[i] != 108 && at[i] != 117) i = i + 1;
     return rt_strcat(rt_strcat(rt_substr(at, 0, i), "x"), rt_substr(at, i, -1));
 }
 
@@ -8497,13 +8639,14 @@ char *rt_nref_base(char *n)
 
 /* The array a subscripted read through the nameref n reads: the end of its
  * chain, or "" (never set) for an end NAME[SUB], which names no variable, and
- * for a circular chain, which bash warns about twice. Twin of the nameref arm of
+ * for a circular chain, which bash warns about twice for an element or the
+ * elements and once (once 1) for their count or keys. Twin of the nameref arm of
  * mkParamExp in bash-interpreter.abnf. */
-char *rt_nref_elems(char *n)
+char *rt_nref_elems(char *n, int once)
 {
     char *t = rt_nref_end(n);
     if (t == 0) {
-        if (nref_quiet == 0) rt_berr("warning", n, "circular name reference");
+        if (nref_quiet == 0 && once == 0) rt_berr("warning", n, "circular name reference");
         return empty;
     }
     if (rt_indbr(t) > 0) return empty;

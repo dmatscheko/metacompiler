@@ -129,7 +129,7 @@ CaseOpen    = "(" | NotEsac ;
 CasePats    <~~ push({pats: takeAll()}) ~~> = CasePat { "|" CasePat } ;
 // A case PATTERN is a word whose QUOTED parts are literal (`'*')` matches only "*"): the
 // quoting-aware segments of [[ == ]]'s right hand side (PatSq, PatDq, PatAnsi, PatEsc).
-CasePat     <~~ push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
+CasePat     <~~ badClaim(up.start, up.pos, true); push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
 CaseFirst   = Tilde | CaseSeg ;
 CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | PatEsc | BraceLit | ExtGlob | EgPfxLit | BareSeg ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
@@ -926,7 +926,7 @@ CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x
 // The right hand side of == / != inside [[ ]] is a PATTERN, and a quoted part of it is
 // literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
 CondBin     <~~ push(mkCondBin(takeAll())) ~~> = NsWord CondBinOp PatWord ;
-PatWord     <~~ push(mkNsWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
+PatWord     <~~ badClaim(up.start, up.pos, true); push(mkNsWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
 PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ExtGlob | EgPfxLit | BareSeg ;
 PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
@@ -1605,8 +1605,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // upper/lower-cases every later write too, including one made by `read` or a `for` head,
     // which is why this sits in setVarVal rather than in makeDecl.
     function attrCase(name, val) {
-        if (attrOn(upVars, name)) { return caseMap(val, "^^", "") }
-        if (attrOn(loVars, name)) { return caseMap(val, ",,", "") }
+        var up = attrOn(upVars, name)
+        var lo = attrOn(loVars, name)
+        if (up && lo) { return caseMap(caseMap(val, ",,", ""), "^", "") }
+        if (up) { return caseMap(val, "^^", "") }
+        if (lo) { return caseMap(val, ",,", "") }
         return val
     }
     function snapshotVars() {
@@ -1730,6 +1733,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         intVars["$" + e.name] = e.ai
         upVars["$" + e.name] = e.au
         loVars["$" + e.name] = e.al
+        trVars["$" + e.name] = e.at
         dclVars["$" + e.name] = e.ad
         roVars["$" + e.name] = e.ar
         exVars["$" + e.name] = e.ax
@@ -1798,7 +1802,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var val = quietVal(name)
         noRef = noRef - 1
         return {name: name, had: had, val: val, an: attrOn(refVars, name),
-                ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
+                ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name), at: attrOn(trVars, name),
                 ad: attrOn(dclVars, name), ar: attrOn(roVars, name), ax: attrOn(exVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false, nb: 1024, hv: {}}}
     }
     // The saved entry holding NAME's GLOBAL binding while a local or a prefix binding hides
@@ -1824,7 +1828,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         act()
         var now = bindingOf(name)
         ge.had = now.had; ge.val = now.val; ge.ai = now.ai; ge.au = now.au; ge.al = now.al
-        ge.ad = now.ad; ge.ar = now.ar; ge.hasArr = now.hasArr; ge.arr = now.arr
+        ge.at = now.at; ge.ad = now.ad; ge.ar = now.ar; ge.hasArr = now.hasArr; ge.arr = now.arr
         restoreLocal(cur)
     }
 
@@ -2349,17 +2353,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // grammar, so they are absent here too; -a/-A/-i/-u/-l are answered.
     // bash answers ALL of them, in the order a/A, i, l, u: `declare -ai x` is `ai` and
     // `declare -iu n` is `iu`.
-    // The attribute letters in bash's order: a/A i n r x l u.
+    // The attribute letters in bash's order: a/A i n r t x c l u.
     function varAttrs(name) {
         var out = ""
         if (isArr(name)) { out = arrs[arrKey(name)].assoc ? "A" : "a" }
         if (attrOn(intVars, name)) { out = out + "i" }
         if (attrOn(refVars, name)) { out = out + "n" }
         if (attrOn(roVars, name)) { out = out + "r" }
+        if (attrOn(trVars, name)) { out = out + "t" }
         if (attrOn(exVars, name)) { out = out + "x" }
-        if (attrOn(loVars, name)) { out = out + "l" }
-        if (attrOn(upVars, name)) { out = out + "u" }
-        return out
+        return out + caseLetter(name)
+    }
+    // The case attribute's letter: c, l, u or none (upVars and loVars both hold a -c name).
+    function caseLetter(name) {
+        var up = attrOn(upVars, name)
+        var lo = attrOn(loVars, name)
+        if (up && lo) { return "c" }
+        return lo ? "l" : (up ? "u" : "")
     }
     // ---- declare -p ----------------------------------------------------------------
     // `declare -p NAME` reproduces the declaration bash would need to recreate the
@@ -2461,6 +2471,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         intVars["$" + name] = false
         upVars["$" + name] = false
         loVars["$" + name] = false
+        trVars["$" + name] = false
         dclVars["$" + name] = false
         roVars["$" + name] = false
         exVars["$" + name] = false
@@ -2683,7 +2694,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // first use, once per target text. A plain NAME is handed to the scalar arms through
     // `cell`. A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-to-llvm-ir.abnf.
     function mkParamExp(items) {
-        var name = "", indp = false, hasIdx = false, bare = true, pfx = false
+        var name = "", indp = false, hasIdx = false, bare = true, pfx = false, lenp = false
         var idxAll0 = anytype
         idxAll0 = null
         var idxAq0 = null
@@ -2698,6 +2709,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.hasIdx != undefined) { hasIdx = true; idxAll0 = idxAllItem(it); idxAq0 = idxAqItem(it); continue }
             if (it.op != undefined || it.pe != undefined || it.xf != undefined) { bare = false }
             if (it.pfx != undefined) { pfx = true }
+            if (it.lenp != undefined) { lenp = true }
             rest.push(it)
         }
         if (indp && (pfx || (bare && !hasIdx))) { return paramCore(items, null) }
@@ -2715,9 +2727,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (rn == pn) { return plain() }
                 // A subscript applies to a variable named NAME[SUB] itself, which never
                 // exists (bash 5.3: declare -n e=a[1]; ${e[0]} is empty): "", never set.
-                // Through a circular chain bash warns a second time. Twin of rt_nref_elems.
+                // Through a circular chain bash warns a second time, except for the count or
+                // the keys (${#REF[@]}, ${!REF[@]}). Twin of rt_nref_elems.
                 if (hasIdx && rn.indexOf("[") > 0) { rn = "" }
-                else if (hasIdx && rn == "" && !refQuiet) { diagErr("warning: " + pn + ": circular name reference\n") }
+                else if (hasIdx && rn == "" && !lenp && !indp && !refQuiet) { diagErr("warning: " + pn + ": circular name reference\n") }
                 var rk = "$" + rn
                 if (!hasOwn(byRef, rk)) {
                     var its = []
@@ -3183,7 +3196,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (opts != "") {
             var badOpt = bashDeclBadOpt(kw, opts)
             if (badOpt != "") { return declBadOpt(badOpt, redirs, ln) }
-            if (opts.indexOf("I") >= 0 || opts.indexOf("t") >= 0) { fail(kw + " " + opts + " is not supported") }
+            if (opts.indexOf("I") >= 0) { fail(kw + " " + opts + " is not supported") }
         }
         // Option words after an operand that mark array literals (bashDeclLate): each name's
         // marks in lates, the words themselves reported in place by lateDiag.
@@ -3216,8 +3229,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         var assoc = (flags.indexOf("A") >= 0)
-        var upper = (flags.indexOf("u") >= 0)
-        var lower = (flags.indexOf("l") >= 0)
+        var trace = (flags.indexOf("t") >= 0)
         var integer = (flags.indexOf("i") >= 0)
         var global = (flags.indexOf("g") >= 0)
         // The kind and scope the literal of name k is assigned under: the declaration's own,
@@ -3283,9 +3295,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
             // -n declares the reference itself, whatever it referred to before. A nameref
-            // to itself is refused outside a function and nothing is declared (bash 5.3;
-            // inside one bash only warns, which is not modelled). Twin of the same check in
-            // makeDecl in bash-to-llvm-ir.abnf.
+            // to itself is refused outside a function and nothing is declared; inside one it
+            // is declared with two warnings (bash 5.3). Twin of the same check in makeDecl in
+            // bash-to-llvm-ir.abnf.
             var nk = "$" + names[k]
             // -a or -A of a nameref that refers to nothing makes it a plain array.
             if (!isRef && bareArr && attrOn(refVars, names[k])) { refVars[nk] = false }
@@ -3335,6 +3347,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 diagErr(kw + ": " + names[k] + ": nameref variable self references not allowed\n")
                 roFail = true
                 return
+            }
+            if (isRef && varsHas[nk] && vars[nk] == names[k]) {
+                diagErr(kw + ": warning: " + names[k] + ": circular name reference\n")
+                diagErr("warning: " + names[k] + ": circular name reference\n")
             }
             if (isRef) {
                 noRef = noRef - 1
@@ -3405,12 +3421,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (clean) { unsetVar(names[k]) }
             }
             if (integer) { intVars["$" + names[k]] = true }
-            if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
-            if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
-            // +i +u +l take the attribute away (+x +a +A +n change nothing here).
+            var cl = bashDeclCase(caseLetter(names[k]), flags, plus)
+            upVars["$" + names[k]] = cl == "u" || cl == "c"
+            loVars["$" + names[k]] = cl == "l" || cl == "c"
+            if (trace) { trVars["$" + names[k]] = true }
+            // +i +t take the attribute away (+x +a +A +n change nothing here).
             if (plus.indexOf("i") >= 0) { intVars["$" + names[k]] = false }
-            if (plus.indexOf("u") >= 0) { upVars["$" + names[k]] = false }
-            if (plus.indexOf("l") >= 0) { loVars["$" + names[k]] = false }
+            if (plus.indexOf("t") >= 0) { trVars["$" + names[k]] = false }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
             if ((bareArr || darrs[k] != null) && asgs[k] == null) {
                 // A local scalar declared an array again becomes an empty one (bash 5.3), set
@@ -4067,6 +4084,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var intVars = {}   // names declared with `declare -i`: their assignments are arithmetic
     var upVars = {}    // `declare -u`: EVERY later assignment is upper-cased, not just the first
     var loVars = {}    // `declare -l`: likewise, lower-cased
+    // `declare -c` (capcase: the first character upper, the rest lower) is a name in BOTH maps,
+    // since bash lets a name hold only one of -u, -l and -c (caseAttrs).
+    // `declare -t`: the trace attribute, which only DEBUG and RETURN traps act on; here it
+    // is shown by `declare -p` and ${v@a}.
+    var trVars = {}
     // DECLARED WITHOUT A VALUE: `declare x` leaves x unset, yet `declare -p x` prints
     // `declare -- x`. So does a local unset in the frame that declared it - bash keeps the
     // local binding, unset, until the function returns.
@@ -4156,7 +4178,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ak = arrKey(nm)
             var hadA = hasOwn(arrs, ak) && arrs[ak] != null
             out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false, nb: 1024, hv: {}},
-                      ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm), ad: attrOn(dclVars, nm),
+                      ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm), at: attrOn(trVars, nm), ad: attrOn(dclVars, nm),
                       ar: attrOn(roVars, nm), ax: attrOn(exVars, nm), an: attrOn(refVars, nm)})
         }
         return out
@@ -4169,6 +4191,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             intVars["$" + nm] = snap[i].ai
             upVars["$" + nm] = snap[i].au
             loVars["$" + nm] = snap[i].al
+            trVars["$" + nm] = snap[i].at
             dclVars["$" + nm] = snap[i].ad
             roVars["$" + nm] = snap[i].ar
             exVars["$" + nm] = snap[i].ax
@@ -8144,6 +8167,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             var s = wordJoin(subjT())
+            // An expansion error in the word or a pattern abandons the case (bash 5.3:
+            // `( case a${#x-a}b in x) ;; esac ); echo $?` prints 1).
+            var ab = takeAbort()
+            if (ab != null) { return ab }
             var i = 0
             var fall = false
             var last = 0
@@ -8152,7 +8179,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var cl = clauses[i]
                 var hit = fall
                 var k
-                for (k = 0; k < cl.pats.length; k++) { if (globMatch(wordJoin(cl.pats[k]()), s)) { hit = true } }
+                for (k = 0; k < cl.pats.length && !hit; k++) {
+                    hit = globMatch(wordJoin(cl.pats[k]()), s)
+                    ab = takeAbort()
+                    if (ab != null) { return ab }
+                }
                 fall = false
                 if (hit) {
                     var r = anytype
@@ -8399,11 +8430,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     function mkCondNot(t) { return function() { return !t() } }
-    function mkCondSingle(w) { return function() { return wordJoin(w()) != "" } }
+    // An operand of [[ ]], expanded. An error of its expansion (an arithmetic one, a bad
+    // substitution) abandons the line as a subscript's does (arSubErr), while the
+    // command's own arithmetic only fails it: bash 5.3 prints 1 for
+    // `( [[ $((1/0)) == x ]]; echo no ); echo $?` and no for `[[ 1/0 -eq 1 ]]; echo no`.
+    // Twin of condWord in bash-to-llvm-ir.abnf.
+    function condWord(w) {
+        var v = wordJoin(w())
+        if (arithErr) { arSubErr = true }
+        return v
+    }
+    function mkCondSingle(w) { return function() { return condWord(w) != "" } }
     function mkCondUn(items) {
         var op = items[0].cop
         var w = items[1]
-        return function() { return testUnary(op, wordJoin(w()), true) == 0 }
+        return function() { return testUnary(op, condWord(w), true) == 0 }
     }
     // [[ STR =~ ERE ]] : a successful match fills BASH_REMATCH with the whole match and the
     // capture groups, and a failed one empties it (bash).
@@ -8422,8 +8463,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkCondMatch(items) {
         var lT = items[0], rT = items[2]
         return function() {
-            var subj = wordJoin(lT())
-            var src = wordJoin(rT())
+            var subj = condWord(lT)
+            var src = condWord(rT)
             var re = bashRegex(src)
             // A pattern that does not compile is not fatal in bash: it reports on standard
             // error and gives the [[ ]] status 2.
@@ -8507,8 +8548,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkCondBin(items) {
         var l = items[0], op = items[1].cop, r = items[2]
         return function() {
-            var lv = wordJoin(l())
-            var rv = wordJoin(r())
+            var lv = condWord(l)
+            var rv = condWord(r)
             // == and != glob-match their right hand side inside [[ ]]; = is a synonym of ==.
             if (op == "==" || op == "=") { return globMatchX(rv, lv) }
             if (op == "!=") { return !globMatchX(rv, lv) }
