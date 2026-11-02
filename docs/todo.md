@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1121** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1122** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -136,15 +136,15 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and local resolution; declare -ft; LC_ALL=C case mapping · P3 · SH · IN PROGRESS (SH worker, round 37) [V]
+### T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local -n drops -i; compiled declare -f listing · P3 · SH · OPEN [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
-- `(( $((1/0)) ))` and `(( ${#x-a} ))`: bash abandons the command and prints the inner message without the "((: " prefix. Both our engines continue with status 1 and add the prefix.
-- Through a circular nameref, `${p@a}` / `${p@A}` warn 3 times (4 for `[@]`) in bash; we warn once (twice).
-- `l=G; f(){ local -n l=l; echo ${#l[@]} $l; }; f`: bash resolves the circular local to the global and prints "1 G"; we print "0 ". With `local -n l; l=l`, only our interpreter warns.
-- `declare -ft` (function trace attribute) is still "not supported".
-- Under LC_ALL=C, case mapping (-u/-l/-c, ${x^^}) must leave non-ASCII bytes alone; our engines map é as UTF-8.
-- Compiled engine only: stray UTF-8 continuation bytes in a strip (rt_isbound) differ from the interpreter and the oracle. This predates r36.
+- Through a circular local nameref (`f(){ local -n a=a; ...; }`), an element store `a[1]=Q` warns twice and stores to the global a. An array literal `a=(n m)` warns once and replaces the global. `(( l = 5 ))` and `let l+=1` each miss one "circular" warning. Interpreter only: `${l:=DEF}` misses the max-depth warning.
+- `${v~}` and `${v~~}` (case toggle of the first / every character) give "bad substitution" in both engines; bash supports them. Under the current UTF-8 model, toggle ASCII letters; leave non-ASCII as is until the LC_ALL policy decision.
+- `local -i n; local -n n=m`: bash drops -i (`declare -n n="m"`); we keep `-in n="0"`.
+- Compiler: `declare -f` / `-ft` with no names prints every function in the program, so it refuses the whole program when any body holds something the printer can't handle (an unclosed `$(`). Print only what bash would, or limit the refusal to the functions actually listed.
+
+Keep any change to hot runtime functions (rt_var, rt_getvar_byname, rt_setvar_byname) cost-neutral. Adding a caller to rt_var cost 1.7% on every program in r37; check with `tests/bench.sh bash --draws 5 --paired`.
 
 # C — C subset
 
@@ -1169,6 +1169,7 @@ T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-
 T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (interp); endless Range#each hangs — DONE r52 (78148037): LocalJumpError#reason/#exit_value, super with a literal block / &nil / implicit block in both engines, endless Integer ranges and Numeric#step (nil/INF limit, to:/by:) via lazy one-value enumerators; master-probed vs ruby 2.6
 T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primitive asList cast — DONE r34 (847bd188): subList as a live two-way window on the __lnk mechanism (structural parent change -> CME on next use), List/Map replaceAll, primitive asList read-only (CCE on cast); master-probed vs kotlinc 2.2.21. Stale index-read/for CME left (hot path) -> follow-up
 T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for step — DONE r53 (fd4ce498): Enumerator::ArithmeticSequence (inspect/class/begin/end/step/last/size/==), endless String ranges, Float-range TypeError, each_entry, MRI's split Range#step messages; master-probed vs ruby 2.6
+T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and local resolution; declare -ft; LC_ALL=C case mapping — DONE r37 (2fb2fdcc, 25e42574): arithmetic-text expansion errors abandon the line unprefixed, circular-nameref @a/@A warning counts, circular local nameref reads/scalar stores/unset resolve to the global, declare -ft/-F/-pf, stray UTF-8 continuation bytes in compiled strip/case; paired bench -0.03% after the rt_var-caller fix. LC_ALL=C case mapping NOT done: needs the general locale model (user POLICY decision)
 
 # Settled — do not re-open
 
