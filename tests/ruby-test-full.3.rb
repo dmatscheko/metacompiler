@@ -1,4 +1,4 @@
-# Full-syntax test: Ruby - part 3, SECTIONs 97 to 126. tests/ruby-test-full.rb
+# Full-syntax test: Ruby - part 3, SECTIONs 97 to 126 and 184 onward. tests/ruby-test-full.rb
 # leaves the -frozen interpreter leg too little of the IR interpreter's step
 # brake (-max-steps, 100M per call) for them; see that file for the
 # conventions.
@@ -1123,6 +1123,74 @@ def s126
   check("ob126d", e == "private method `s126pv' called for 3:Integer")
   check("ob126e", S126DM == :s126dm && s126dm(2) == 6 && v[0].s126dm(5) == 15)
 end
+# ===== SECTION 184: repeat counts, nil as self, NaN against big Integers, big walks =====
+# String#* and Array#* take their count as a C long: a Float truncates, a big one
+# or a non-finite Float is a RangeError, a count past the length cap is "argument
+# too big", and an empty receiver answers at once. A method a program gives
+# Object, run on nil, sees nil as self, bare calls included. A NaN against an
+# Integer or Float is false under every relation and nil under <=>; a Rational's
+# relations raise, as do between? and clamp, which compare min with max first.
+# upto / downto / step with a bound past 2**53 walk exact Integers one at a time
+# and know their exact size. /usr/bin/ruby 2.6 settles each.
+class Object
+  def s184me; self; end
+  def s184via; s184me; end
+  def s184d; "#{self.class} #{inspect}" + to_s; end
+end
+def s184err
+  yield
+rescue => e
+  "#{e.class} #{e.message}"
+end
+def s184
+  c = [2.9, -0.5, -1.5, 2**64, 2**62, 1e30, Float::NAN, 2**60]
+  check("rp184a", "abc" * c[0] == "abcabc" && "abc" * c[1] == "" && [1, 2] * c[0] == [1, 2, 1, 2] && [1, 2] * c[1] == [] &&
+        "ab".b * c[0] == "abab" && s184err { "a" * c[2] } == "ArgumentError negative argument" &&
+        s184err { "a" * c[3] } == "RangeError bignum too big to convert into `long'" &&
+        s184err { "ab" * c[4] } == "ArgumentError argument too big" && s184err { [1, 2] * c[4] } == "ArgumentError argument too big" &&
+        s184err { [1] * c[7] } == "ArgumentError argument too big" && s184err { "a" * c[5] } == "RangeError float 1e+30 out of range of integer" &&
+        s184err { [1] * c[6] } == "RangeError float NaN out of range of integer" && "" * c[4] == "" && [] * c[4] == [])
+  s = "xy"
+  s *= c[0]
+  check("rp184b", s == "xyxy")
+  n = [nil, false, 3]
+  check("ns184c", n[0].s184me.nil? && n[0].s184via.nil? && n[0].s184d == "NilClass nil" && n[1].s184d == "FalseClass falsefalse" &&
+        n[2].s184via == 3 && s184me.to_s == "main")
+  b = [Float::NAN, 2**64, 3r/2, 1]
+  check("nb184d", !(b[0] < b[1]) && !(b[1] < b[0]) && !(b[0] >= b[1]) && (b[0] <=> b[1]).nil? && (b[1] <=> b[0]).nil? &&
+        !(b[0] == b[1]) && !(b[1] == b[0]) && b[1] != b[0] && !(b[0] == b[0]) && !b[0].eql?(b[0]) && !(b[3] > b[0]))
+  check("nb184e", s184err { b[2] < b[0] } == "ArgumentError comparison of Rational with NaN failed" &&
+        s184err { b[1].between?(b[0], 2**65) } == "ArgumentError comparison of Integer with NaN failed" &&
+        s184err { b[1].clamp(b[0], 2**65) } == "ArgumentError comparison of Float with Integer failed" &&
+        s184err { b[3].clamp(5, 2) } == "ArgumentError min argument must be smaller than max argument" &&
+        !b[3].between?(b[1], b[0]) && b[1].clamp(1, 5) == 5 && b[3].clamp(b[3], b[1]) == 1)
+  a = b[1]
+  e = 1.upto(a)
+  q = 1.step(2**70, 2**65)
+  r = (a..a + 10).step(3)
+  check("bw184f", e.size == a && e.first(2) == [1, 2] && e.inspect == "#<Enumerator: 1:upto(18446744073709551616)>" &&
+        a.upto(a + 3).map { |x| x - a } == [0, 1, 2, 3] && a.upto(a - 1).size == 0 && a.downto(-a).size == 2 * a + 1 &&
+        a.upto(a + 2).reverse_each.to_a == [a + 2, a + 1, a] && q.size == 32 && q.last == 31 * 2**65 + 1 &&
+        q.inspect == "(1.step(1180591620717411303424, 36893488147419103232))" && 1.step(a, 3).size == 6148914691236517206 &&
+        r.to_a == [a, a + 3, a + 6, a + 9] && r.last(2) == [a + 6, a + 9] && a.upto(1.8446744073709552e19 + 5000).count == 4097)
+  t = 0
+  1.upto(a) { |i| t += i; break if i == 4 }
+  w = []
+  a.step(a + 20, 7) { |x| w << x - a }
+  check("bw184g", t == 10 && w == [0, 7, 14] && a.downto(1).first(2) == [a, a - 1] && a.step(1, -(2**62)).size == 4)
+  m = "ArgumentError array size too big"
+  check("fc184h", s184err { (1..Float::INFINITY).lazy.map { |x| x * 2 }.first(c[7]) } == m && s184err { [1, 2].each.first(c[4]) } == m &&
+        s184err { (1..3).first(c[7]) } == m && s184err { 1.step.first(c[3] - 1) } == "RangeError bignum too big to convert into `long'" &&
+        s184err { 3.times.first(c[7]) } == m && s184err { { a: 1 }.first(c[7]) } == m && [1, 2, 3].first(c[7]) == [1, 2, 3] &&
+        (1..3).lazy.take(c[7]).to_a == [1, 2, 3] && s184err { (1..3).first(-1) } == "ArgumentError negative array size (or size too big)")
+  x = [1, 2, 3, 4]
+  check("ca184i", x[c[0]] == 3 && x[c[1]] == 1 && x[c[2]] == 4 && x.fetch(c[0]) == 3 && x.fetch(c[2]) == 4 && 10.to_s(c[0]) == "1010" &&
+        (2**64).to_s(c[0] + 14) == "10000000000000000" && s184err { 10.to_s(c[1] + 1.4) } == "ArgumentError invalid radix 0" &&
+        s184err { a.to_s(37) } == "ArgumentError invalid radix 37" && Array.new(c[0], 0) == [0, 0] &&
+        s184err { Array.new(c[2]) } == "ArgumentError negative array size" && s184err { x.min(c[2]) } == "ArgumentError negative size (-1)" &&
+        s184err { x.max(c[2]) } == "ArgumentError negative size (-1)" && s184err { x.sample(c[2]) } == "ArgumentError negative sample number" &&
+        x.sample(c[1]) == [] && x.max(c[0]) == [4, 3])
+end
 
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
@@ -1154,5 +1222,6 @@ s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
 s125() # SECTION-CALL 125
 s126() # SECTION-CALL 126
+s184() # SECTION-CALL 184
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

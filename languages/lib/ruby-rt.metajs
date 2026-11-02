@@ -377,9 +377,7 @@ function rbBinMethod(t, name, args) {
     if (name == "+") { return rbBinCat(t, rbArgAt(args, 0)) }
     if (name == "==" || name == "===" || name == "eql?") { return rbBinEq(t, rbArgAt(args, 0)) }
     if (name == "*") {
-        var times = Math.trunc(rbToF(rbArgAt(args, 0)))
-        if (times < 0) { rbRaiseErr("*", "ArgumentError", "negative argument") }
-        return rbEncStr(rtRepeat(b, times), enc)
+        return rbEncStr(rtRepeat(b, rbRepeatCount(rbArgAt(args, 0), b.length, false)), enc)
     }
     if (name == "unpack" || name == "unpack1") { return rbStrUnpack(b, name, args) }
     if (name == "encode" || (name == "scrub" && blk === null)) { return rbStrEncode(b, enc, name, args) }
@@ -1134,7 +1132,7 @@ function rbABigBaseStr(v, base) {
 // unknown.
 function rbABigMethod(t, name, args) {
     if (name == "to_s" || name == "inspect") {
-        if (args.length > 0) { return rbABigBaseStr(t, Math.trunc(rbToF(args[0]))) }
+        if (args.length > 0) { return rbABigBaseStr(t, rbToSRadix(args[0])) }
         return rtABigStr(t)
     }
     // An Integer is already floored, ceilinged, truncated and rounded, at any
@@ -2951,6 +2949,15 @@ function rbLongArg(frame, v) {
     }
     return n
 }
+// The count of String#* and Array#*, unit the receiver's length in bytes or
+// elements. Twin of repeatCount in ruby-interpreter.abnf, which states the rule.
+function rbRepeatCount(v, unit, arr) {
+    var n = rbLongArg("*", v)
+    if (n < 0) { rbRaiseErr("*", "ArgumentError", "negative argument") }
+    if (unit * n >= Math.pow(2, arr ? 60 : 63)) { rbRaiseErr("*", "ArgumentError", "argument too big") }
+    if (unit == 0) { return 0 }
+    return n
+}
 
 // The size argument of each_slice / each_cons, of the n positional ones in
 // args. Twin of sliceSize in ruby-interpreter.abnf, which states the rule.
@@ -3861,7 +3868,11 @@ function rbEq(l, r) {
     if (rbIsNum(l) && rbIsNum(r)) {
         if (rbIsCpx(l) || rbIsCpx(r)) { return rbEq(rbReOf(l), rbReOf(r)) && rbEq(rbImOf(l), rbImOf(r)) }
         if (typeof l != "number" || typeof r != "number") {
-            if (rbIsBig(l) || rbIsBig(r) || rbRatExactPair(l, r)) { return rbNumCmp(l, r) == 0 }
+            if (rbIsBig(l) || rbIsBig(r) || rbRatExactPair(l, r)) {
+                // rbNumCmp reads a NaN as equal; a NaN equals nothing.
+                if ((rbIsFlo(l) && l["f"] !== l["f"]) || (rbIsFlo(r) && r["f"] !== r["f"])) { return false }
+                return rbNumCmp(l, r) == 0
+            }
         }
         return rbToF(l) == rbToF(r)
     }
@@ -5157,6 +5168,7 @@ function rbRangeMethod(t, name, args) {
     if (name == "first" && npos > 0) {
         var fcn = rbLongArg("first", args[0])
         if (fcn < 0) { rbRaiseErr("first", "ArgumentError", "negative array size (or size too big)") }
+        rbAryCap("first", args[0], fcn)
         args = [fcn]
     }
     if (strOpen && name == "each" && blk !== null) {
@@ -5323,6 +5335,11 @@ function rbRangeStep(t, m, args) {
     else if (num && (u == 0 || rtIsNil(hi) || rbRangeUnbounded(t))) { e = rbStepForever(rbToF(lo), u, flo, desc) }
     else if (typeof lo == "string" && rtIsNil(hi)) {
         e = rbLazyCopy(rbRangeLazy(t), {k: "step", f: null, n: Math.trunc(u)}, false, "#<Enumerator: " + rbInspect(t) + ":" + m + rbInspectArgs(args, npos) + ">")
+    } else if (!flo && (rbIsBig(lo) || rbIsBig(hi) || rbIsBig(by)) && (typeof lo == "number" || rbIsBig(lo)) && (typeof hi == "number" || rbIsBig(hi))) {
+        var whi = anytype
+        whi = hi
+        if (t["excl"] === true) { whi = rbBin("-", hi, 1) }
+        e = rbIntWalk(lo, whi, by, desc)
     } else {
         var picked = []
         if (flo) {
@@ -5332,11 +5349,6 @@ function rbRangeStep(t, m, args) {
                 picked.push(rbMkFlo(fs[fi]))
                 fi = fi + 1
             }
-        } else if ((rbIsBig(lo) || rbIsBig(hi) || rbIsBig(by)) && (typeof lo == "number" || rbIsBig(lo)) && (typeof hi == "number" || rbIsBig(hi))) {
-            var whi = anytype
-            whi = hi
-            if (t["excl"] === true) { whi = rbBin("-", hi, 1) }
-            picked = rbIntWalk(lo, whi, by)
         } else {
             var src = rbRangeToArr(t)
             var si = 0
@@ -5409,15 +5421,17 @@ function rbAseqMethod(t, name, args) {
         if (o === null) { return false }
         return rbEq(q["b"], o["b"]) && rbEq(q["e"], o["e"]) && rbEq(q["s"], o["s"]) && q["x"] === o["x"]
     }
-    var endless = t["__rlazy"] === true
+    var walk = t["__rlazy"] === true && t["bsz"] !== undefined
+    var endless = t["__rlazy"] === true && !walk
     var items = t["items"]
     if (name == "size") {
+        if (walk) { return t["bsz"] }
         if (endless) { return rbMkFlo(Math.pow(2, 1024)) }
         return items.length
     }
     if (name == "each") {
         if (blk === null) { return t }
-        if (endless) { rbLazyMethod(t, "each", [js_rblkwrap(blk)]) }
+        if (endless || walk) { rbLazyMethod(t, "each", [js_rblkwrap(blk)]) }
         else {
             var i = 0
             while (i < items.length) {
@@ -5430,6 +5444,15 @@ function rbAseqMethod(t, name, args) {
     if (rtIsNil(q["e"])) { rbRaiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence") }
     if (rbIsFlo(q["e"]) || rbIsFlo(q["b"])) { rbFloDomain((rbToF(q["e"]) - rbToF(q["b"])) / rbToF(q["s"])) }
     if (endless) { rbRaiseErr(name, "ZeroDivisionError", "divided by 0") }
+    if (walk) {
+        if (npos == 0) {
+            if (rbCmp(t["bsz"], 0) == 0) { return null }
+            return rbIntWalkLast(t, 1)[0]
+        }
+        var wn = Math.trunc(rbToF(args[0]))
+        if (wn < 0) { rbRaiseErr(name, "ArgumentError", "negative array size") }
+        return rbIntWalkLast(t, wn)
+    }
     var n = items.length
     if (npos == 0) {
         if (n == 0) { return null }
@@ -5495,9 +5518,7 @@ function rbBin(op, l, r) {
     }
     if (op == "*") {
         if (typeof l == "string") {
-            var n = Math.trunc(rbToF(r))
-            if (n < 0) { rbRaiseErr("*", "ArgumentError", "negative argument") }
-            return rbMkRStr(rtRepeat(l, n), false)
+            return rbMkRStr(rtRepeat(l, rbRepeatCount(r, byteLen(l), false)), false)
         }
         // Array#* is repetition with an Integer and JOIN with a String.
         if (rbIsArr(l) && typeof r == "string") { return rbArrJoin(l, r) }
@@ -5505,8 +5526,7 @@ function rbBin(op, l, r) {
         if (rbIsArr(l)) {
             var rep = []
             var t = 0
-            var times = Math.trunc(rbImplicitInt("*", r, ""))
-            if (times < 0) { rbRaiseErr("*", "ArgumentError", "negative argument") }
+            var times = rbRepeatCount(r, l.length, true)
             while (t < times) {
                 var j = 0
                 while (j < l.length) {
@@ -6196,8 +6216,8 @@ function rbNumMethod(t, name, args) {
         // Past 2^53 rtBaseStr converts through int64 and SATURATES, so the exact
         // expansion does the base conversion instead.
         if (isInt && args.length > 0) {
-            if (rbAIsExact(x)) { return rtBaseStr(x, Math.trunc(rbToF(args[0]))) }
-            return rbABigBaseStr(rtABigFromNum(x), Math.trunc(rbToF(args[0])))
+            if (rbAIsExact(x)) { return rtBaseStr(x, rbToSRadix(args[0])) }
+            return rbABigBaseStr(rtABigFromNum(x), rbToSRadix(args[0]))
         }
         // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes.
         if (name == "inspect") { return rbInspect(t) }
@@ -6345,16 +6365,21 @@ function rbNumMethod(t, name, args) {
             rbLazyMethod(se, "each", [js_rblkwrap(sblk)])
             return t
         }
+        var flt = rbIsFlo(sby) || rbIsFlo(lim) || rbIsFlo(t)
+        if (!flt && (rbIsBig(t) || rbIsBig(lim) || rbIsBig(sby))) {
+            var we = rbIntWalk(t, lim, sby, desc)
+            if (sblk === null) { return rbMkAseq(we, t, lim, sby, false, desc) }
+            rbLazyMethod(we, "each", [js_rblkwrap(sblk)])
+            return t
+        }
         var sl = []
-        if (rbIsFlo(sby) || rbIsFlo(lim) || rbIsFlo(t)) {
+        if (flt) {
             var sf = rbnFloatStep(x, rbToF(lim), rbToF(sby), false)
             var sfi = 0
             while (sfi < sf.length) {
                 sl.push(rbMkFlo(sf[sfi]))
                 sfi = sfi + 1
             }
-        } else if (rbIsBig(t) || rbIsBig(lim) || rbIsBig(sby)) {
-            sl = rbIntWalk(t, lim, sby)
         } else {
             sl = rbnIntStep(x, rbToF(lim), rbToF(sby))
         }
@@ -6369,17 +6394,7 @@ function rbNumMethod(t, name, args) {
     if ((name == "upto" || name == "downto") && rbNPos(args) == 0) {
         rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)")
     }
-    if ((name == "upto" || name == "downto") && (rbIsBig(t) || rbIsBig(rbArgAt(args, 0)))) {
-        var wblk = rbBlockOf(args)
-        var wl = rbIntWalk(t, rbArgAt(args, 0), name == "upto" ? 1 : -1)
-        if (wblk === null) { return rbEnumAt(rbMkEnum(wl), t, name, args) }
-        var wi = 0
-        while (wi < wl.length) {
-            rbCall1(wblk, wl[wi])
-            wi = wi + 1
-        }
-        return t
-    }
+    if ((name == "upto" || name == "downto") && (rbIsBig(t) || rbIsBig(rbArgAt(args, 0)))) { return rbBigUpDown(t, name, args) }
     if (name == "upto") {
         var ublk = rbBlockOf(args)
         var u = x
@@ -6985,7 +7000,8 @@ function rbArrNew(args) {
     var out = []
     if (pos.length > 0 && rbIsArr(pos[0])) { return rtCopyArr(pos[0]) }
     var n = 0
-    if (pos.length > 0) { n = Math.trunc(rbToF(pos[0])) }
+    if (pos.length > 0) { n = rbLongArg("initialize", pos[0]) }
+    if (n < 0) { rbRaiseErr("initialize", "ArgumentError", "negative array size") }
     var i = 0
     while (i < n) {
         if (blk !== null) { out.push(rbCall1(blk, i)) }
@@ -7260,16 +7276,49 @@ function rbStepForeverBig(beg, by, desc) {
     return e
 }
 // Twin of bigIntStep in ruby-interpreter.abnf, which states the rule.
-function rbIntWalk(from, limit, by) {
+function rbIntWalk(from, limit, by, desc) {
+    if (rbIsFlo(limit)) {
+        var lf = limit["f"]
+        if (lf - lf != 0) { return rbStepForeverBig(from, by, desc) }
+        var r = Math.ceil(lf)
+        if (rbCmp(by, 0) > 0) { r = Math.floor(lf) }
+        return rbIntWalk(from, rbIntFromF(r), by, desc)
+    }
+    var n = anytype
+    n = rbBin("+", rbBin("/", rbBin("-", limit, from), by), 1)
+    if (rbCmp(n, 0) < 0) { n = 0 }
+    var hi = anytype
+    hi = null
+    if (!rbIsBig(n)) { hi = n }
+    var e = rbMkLazy("range", [], 0, hi, true, false, desc)
+    e["ops"].push({k: "map", f: function(i) { return rbBin("+", from, rbBin("*", i, by)) }, n: 0})
+    e["bsz"] = n
+    return e
+}
+// Twin of bigIntStepLast in ruby-interpreter.abnf.
+function rbIntWalkLast(e, k) {
     var out = []
-    var v = anytype
-    v = from
-    var up = rbToF(by) > 0
-    while (up ? rbCmp(v, limit) <= 0 : rbCmp(v, limit) >= 0) {
-        out.push(v)
-        v = rbBin("+", v, by)
+    var n = anytype
+    n = e["bsz"]
+    var i = anytype
+    i = rbBin("-", n, k)
+    if (rbCmp(i, 0) < 0) { i = 0 }
+    var f = e["ops"][0]["f"]
+    while (rbCmp(i, n) < 0) {
+        out.push(rbLazyCall(f, i, false))
+        i = rbBin("+", i, 1)
     }
     return out
+}
+// Twin of bigUpDown in ruby-interpreter.abnf.
+function rbBigUpDown(t, name, args) {
+    var by = 1
+    if (name == "downto") { by = 0 - 1 }
+    var we = rbIntWalk(t, rbArgAt(args, 0), by, "#<Enumerator: " + rbInspect(t) + ":" + name + rbInspectArgs(args, rbNPos(args)) + ">")
+    var blk = rbBlockOf(args)
+    if (blk === null) { return we }
+    rbLazyMethod(we, "each", [js_rblkwrap(blk)])
+    return t
 }
 // "(a, b)" of the first n arguments' #inspect, "" for none.
 function rbInspectArgs(args, n) {
@@ -7534,6 +7583,8 @@ function rbLazyMethod(t, name, args) {
     if (name == "size") { return rbLazySize(t) }
     if (name == "inspect" || name == "to_s") { return desc }
     if (name == "class") { return rbBuiltinClass(t["lazy"] === true ? "Enumerator::Lazy" : "Enumerator") }
+    // Twin of the bigIntStep-walk arm of lazyMethod in ruby-interpreter.abnf.
+    if (t["bsz"] !== undefined && !rtIsNil(t["hi"])) { return rbArrayMethod(rbLazyFirst(t, -1), name, args) }
     rbNoMethod(t, name)
     return null
 }
@@ -8328,7 +8379,8 @@ function rbArrayMethod(t, name, args) {
     if (name == "min" || name == "max") {
         var wantMax = name == "max"
         if (nPos > 0) {
-            var mn = Math.trunc(rbToF(args[0]))
+            var mn = rbLongArg(name, args[0])
+            if (mn < 0) { rbRaiseErr(name, "ArgumentError", "negative size (" + mn + ")") }
             var masc = rbMSort(t, blk, false)
             if (!wantMax) { return rbArrSub(masc, 0, mn) }
             var mdesc = []
@@ -8517,7 +8569,8 @@ function rbArrayMethod(t, name, args) {
             if (t.length == 0) { return null }
             return t[0]
         }
-        var sn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
+        var sn = rbLongArg(name, rbPosAt(args, nPos, 0))
+        if (sn < 0) { rbRaiseErr(name, "ArgumentError", "negative sample number") }
         if (sn > t.length) { sn = t.length }
         return rbArrSub(t, 0, sn)
     }
@@ -9083,7 +9136,7 @@ function rbArrayMethod(t, name, args) {
     if (name == "freeze" || name == "itself") { return t }
     // Array#fetch. Twin of arrayMethod in ruby-interpreter.abnf.
     if (name == "fetch") {
-        var fx = rbToF(rbArgAt(args, 0))
+        var fx = rbLongArg(name, rbArgAt(args, 0))
         var fj = fx
         if (fx < 0) { fj = fx + t.length }
         if (fj >= 0 && fj < t.length) { return t[fj] }
@@ -9689,22 +9742,24 @@ function rbMethod(target, name, args) {
         }
     }
     // Comparable#between? and #clamp are defined by <=> ALONE, so Integer, Float,
-    // Rational and String all answer them off ONE pair of arms. rbSpaceship is the
+    // Rational and String all answer them off ONE pair of arms. rbCmp is the
     // whole rule and it is big-aware. A user class that defines either method
     // itself still wins: its own dispatch is below.
     if (name == "between?" || name == "clamp") {
+        // Each <=> raises on nil, in MRI's order. Twin of cmpClamp and the
+        // between? arm in ruby-interpreter.abnf.
         if (!rbUserObj(target)) {
-            var cmpLo = rbSpaceship(target, rbArgAt(args, 0))
-            var cmpHi = rbSpaceship(target, rbArgAt(args, 1))
-            if (cmpLo !== null && cmpHi !== null) {
-                if (name == "between?") {
-                    if (cmpLo < 0) { return false }
-                    return cmpHi <= 0
-                }
-                if (cmpLo < 0) { return rbArgAt(args, 0) }
-                if (cmpHi > 0) { return rbArgAt(args, 1) }
-                return target
+            var lo = rbArgAt(args, 0)
+            var hi = rbArgAt(args, 1)
+            if (name == "between?") {
+                if (rbCmp(target, lo) < 0) { return false }
+                return rbCmp(target, hi) <= 0
             }
+            if (rbCmp(lo, hi) > 0) { rbRaiseErr("clamp", "ArgumentError", "min argument must be smaller than max argument") }
+            var c = rbCmp(target, lo)
+            if (c < 0) { return lo }
+            if (c > 0 && rbCmp(target, hi) > 0) { return hi }
+            return target
         }
     }
     // NilClass's conversions. MRI answers "" / "nil" / [] / 0 / 0.0, so they must
@@ -10411,23 +10466,27 @@ function js_req(l, r) {
     return rbEq(l, r)
 }
 function js_rne(l, r) { return !rbEq(l, r) }
-// < > <= >=: an Integer or a plain String compares directly. Every other receiver
+// < > <= >=: two Integers or two plain Strings compare directly. Every other pair
 // goes through rbRel, so a `while i < n' loop pays no call for it - in MetaJS A
 // CALL IS A SCOPE FRAME.
 function js_rlt(l, r) {
-    if (typeof l != "number" && typeof l != "string") { return rbRel("<", l, r) }
+    if (typeof l == "number" && typeof r == "number") { return l < r }
+    if (typeof l != "string" || typeof r != "string") { return rbRel("<", l, r) }
     return rbCmp(l, r) < 0
 }
 function js_rgt(l, r) {
-    if (typeof l != "number" && typeof l != "string") { return rbRel(">", l, r) }
+    if (typeof l == "number" && typeof r == "number") { return l > r }
+    if (typeof l != "string" || typeof r != "string") { return rbRel(">", l, r) }
     return rbCmp(l, r) > 0
 }
 function js_rle(l, r) {
-    if (typeof l != "number" && typeof l != "string") { return rbRel("<=", l, r) }
+    if (typeof l == "number" && typeof r == "number") { return l <= r }
+    if (typeof l != "string" || typeof r != "string") { return rbRel("<=", l, r) }
     return rbCmp(l, r) <= 0
 }
 function js_rge(l, r) {
-    if (typeof l != "number" && typeof l != "string") { return rbRel(">=", l, r) }
+    if (typeof l == "number" && typeof r == "number") { return l >= r }
+    if (typeof l != "string" || typeof r != "string") { return rbRel(">=", l, r) }
     return rbCmp(l, r) >= 0
 }
 // The comparison operators on any receiver. Twin of rubyRel in abnf/jsrt.go, which
@@ -10445,7 +10504,13 @@ function rbRel(op, l, r) {
     } else if (!((rbIsNum(l) && !rbIsCpx(l)) || typeof l == "string" || rtTag(l, "__rstr") || rtTag(l, "__rbin") || rbIsSym(l))) {
         rbNoMethod(l, op)
     }
-    var c = rbCmp(l, r)
+    // Twin of the nil arm of relOp in ruby-interpreter.abnf.
+    var c = anytype
+    c = rbSpaceship(l, r)
+    if (c === null) {
+        if (rbIsNum(l) && !rbIsRat(l) && rbIsNum(r) && !rbIsCpx(r)) { return false }
+        c = rbCmp(l, r)
+    }
     if (op == "<") { return c < 0 }
     if (op == ">") { return c > 0 }
     if (op == "<=") { return c <= 0 }
@@ -11915,7 +11980,10 @@ function rbEnumRun(t, name, args) {
         limit = 0
         if (pos.length > 0) { limit = rbLongArg(name, pos[0]) } else if (name == "first") { limit = 1 }
         if (limit < 0) { rbRaiseErr(name, "ArgumentError", "attempt to take negative size") }
-        if (pos.length > 0) { cargs = [limit] }
+        if (pos.length > 0) {
+            if (name == "first") { rbAryCap(name, pos[0], limit) }
+            cargs = [limit]
+        }
     }
     var answers = []
     var hits = [0]
@@ -12185,6 +12253,13 @@ function rbStrToInum(s, base0, badcheck) {
 function rbRadixArg(v, negOK) {
     var b = Math.trunc(rbToF(v))
     if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { rbRaiseErr("", "ArgumentError", "invalid radix " + b) }
+    return b
+}
+// The base of Integer#to_s. Twin of toSRadix in ruby-interpreter.abnf, which
+// states the rule.
+function rbToSRadix(v) {
+    var b = Math.trunc(rbImplicitInt("to_s", v, ""))
+    if (b < 2 || b > 36) { rbRaiseErr("to_s", "ArgumentError", "invalid radix " + b) }
     return b
 }
 
@@ -12640,7 +12715,17 @@ function rbArrCountArg(name, v, enumFirst) {
         if (name == "take" || enumFirst) { rbRaiseErr(name, "ArgumentError", "attempt to take negative size") }
         rbRaiseErr(name, "ArgumentError", name == "drop" ? "attempt to drop negative size" : "negative array size")
     }
+    if (enumFirst && name == "first") { rbAryCap(name, v, n) }
     return n
+}
+// An Enumerable#first count past ARY_MAX_SIZE. Twin of aryCap in
+// ruby-interpreter.abnf, which states the rule.
+function rbAryCap(name, v, n) {
+    var lim = Math.pow(2, 60)
+    if (n < lim) { return undefined }
+    if (n == lim && rbIsBig(v) && rtABigCmp(rbABigOperand(v), rtABigFromNum(n)) < 0) { return undefined }
+    rbRaiseErr(name, "ArgumentError", "array size too big")
+    return undefined
 }
 // A receiver-less send(:name, ...) - see js_rselfsend in abnf/jsrtruby.go.
 function js_rselfsend(scope, self, args) {

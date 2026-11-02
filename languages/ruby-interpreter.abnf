@@ -2791,7 +2791,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return null
     }
-    function makeSelf() { return function() { return ivarSelf() } }
+    // `self`: what the innermost scope binding it holds - nil too, in a method a
+    // program added to Object run on nil - and MRI's main where none does.
+    function selfValue() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "self")) { return scopes[i]["self"] }
+        }
+        return mainObj
+    }
+    function makeSelf() { return function() { return selfValue() } }
     function makeScopedConst(text, top) {
         var name = stripWs(text)
         return function() {
@@ -4006,7 +4014,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "+") { return binCat(t, args[0]) }
         if (name == "==" || name == "===" || name == "eql?") { return binEq(t, args[0]) }
-        if (name == "*") { return encStr(strRepeat(b, Math.trunc(toF(args[0]))), enc) }
+        if (name == "*") { return encStr(strRepeat(b, repeatCount(args[0], b.length, false)), enc) }
         if (name == "unpack" || name == "unpack1") { return strUnpack(b, name, args) }
         if (name == "encode" || (name == "scrub" && blk == null)) { return strEncode(b, enc, name, args) }
         // Case mapping maps the ASCII letters of bytes that are not UTF-8 text;
@@ -4401,6 +4409,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function radixArg(v, negOK) {
         var b = trunc0(toF(v))
         if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { raiseErr("", "ArgumentError", "invalid radix " + b) }
+        return b
+    }
+    // The base of Integer#to_s, an int (NUM2INT truncates a Float) in 2..36.
+    // Twins: rubyToSRadix in abnf/jsrtruby.go, rbToSRadix in lib/ruby-rt.metajs.
+    function toSRadix(v) {
+        var b = Math.trunc(implicitInt("to_s", v, ""))
+        if (b < 2 || b > 36) { raiseErr("to_s", "ArgumentError", "invalid radix " + b) }
         return b
     }
     function kernelConv(name, argv) {
@@ -5707,18 +5722,40 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The COUNT of first / last / pop / shift / take / drop, which MRI refuses
     // below zero. Enumerable#first, which a Hash or Enumerator delegating here
-    // runs, words it as take does. Twins: rubyArrCountArg in abnf/jsrt.go,
-    // rbArrCountArg in lib/ruby-rt.metajs.
+    // runs, words it as take does, and caps it as aryCap does. Twins:
+    // rubyArrCountArg in abnf/jsrt.go, rbArrCountArg in lib/ruby-rt.metajs.
     function arrCountArg(name, v, enumFirst) {
         var n = longArg(name, v)
         if (n < 0) {
             if (name == "take" || enumFirst) { raiseErr(name, "ArgumentError", "attempt to take negative size") }
             raiseErr(name, "ArgumentError", name == "drop" ? "attempt to drop negative size" : "negative array size")
         }
+        if (enumFirst && name == "first") { aryCap(name, v, n) }
         return n
     }
-    function arrRepeat(l, times) {
-        var n = Math.trunc(toF(times))
+    // Enumerable#first(n) allocates its n-slot answer up front (rb_ary_new2), so
+    // n past ARY_MAX_SIZE (2^60 - 1) is "array size too big" before any element
+    // is taken. n is v as a long; a big v that rounds to 2^60 is compared
+    // exactly. Twins: rubyAryCap in abnf/jsrt.go, rbAryCap in lib/ruby-rt.metajs.
+    function aryCap(name, v, n) {
+        var lim = Math.pow(2, 60)
+        if (n > lim || n == lim && !(isBig(v) && bigCmp(bigOf(v), bigOf(n)) < 0)) {
+            raiseErr(name, "ArgumentError", "array size too big")
+        }
+    }
+    // The count of String#* and Array#* (rb_str_times, rb_ary_times): a C long,
+    // refused below zero, and refused as "argument too big" when the answer would
+    // pass the length cap - LONG_MAX bytes for a String, ARY_MAX_SIZE (2^60 - 1)
+    // elements for an Array. unit is the receiver's length in those units; an
+    // empty receiver answers 0, so `[] * 2**62' does not loop 2^62 times.
+    // Twins: rubyRepeatCount in abnf/jsrt.go, rbRepeatCount in lib/ruby-rt.metajs.
+    function repeatCount(v, unit, arr) {
+        var n = longArg("*", v)
+        if (n < 0) { raiseErr("*", "ArgumentError", "negative argument") }
+        if (unit * n >= Math.pow(2, arr ? 60 : 63)) { raiseErr("*", "ArgumentError", "argument too big") }
+        return unit == 0 ? 0 : n
+    }
+    function arrRepeat(l, n) {
         var out = []
         for (var t = 0; t < n; t++) { for (var j = 0; j < l.length; j++) { out.push(l[j]) } }
         return out
@@ -5740,9 +5777,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Array#* is repetition with an Integer and JOIN with a String.
             if (op == "*" && typeof r == "string") { return arrJoin(l, r) }
             if (op == "*") {
-                var times = implicitInt("*", r, "")
-                if (times < 0) { raiseErr("*", "ArgumentError", "negative argument") }
-                return arrRepeat(l, times)
+                return arrRepeat(l, repeatCount(r, l.length, true))
             }
             // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand
             // order, both dedupe, and both compare with eql? like Array#- above.
@@ -5850,6 +5885,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var s = spaceship(l, r)
         if (s === null || s === undefined) { cmpFail(l, r) }
         return s
+    }
+    // Comparable#clamp (cmp_clamp): min against max first, then the receiver
+    // against min and, only when it is above min, against max - each a <=> that
+    // raises on nil. Twins: rubyClamp in abnf/jsrt.go, rbClamp in
+    // lib/ruby-rt.metajs.
+    function cmpClamp(t, lo, hi) {
+        if (rcmp(lo, hi) > 0) { raiseErr("clamp", "ArgumentError", "min argument must be smaller than max argument") }
+        var c = rcmp(t, lo)
+        if (c == 0) { return t }
+        if (c < 0) { return lo }
+        return rcmp(t, hi) > 0 ? hi : t
     }
     // Integer.sqrt: the floor of the square root, exact past 2**53 by Newton's
     // iteration, which only decreases from n. Twins: rbIntSqrt in
@@ -6072,6 +6118,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "first" && args.length > 0) {
             var fcn = longArg("first", args[0])
             if (fcn < 0) { raiseErr("first", "ArgumentError", "negative array size (or size too big)") }
+            aryCap("first", args[0], fcn)
             args = [fcn]
         }
         if (strOpen && name == "each" && blk != null) {
@@ -6228,13 +6275,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         else if (num && (u == 0 || t.hi === null || t.hi === undefined || rangeUnbounded(t))) { e = stepForever(t.lo, by, flo, desc) }
         else if (typeof t.lo == "string" && (t.hi === null || t.hi === undefined)) {
             e = lazyCopy(rangeLazy(t), {k: "step", f: null, n: Math.trunc(u)}, false, "#<Enumerator: " + rinspect(t) + ":" + m + inspectArgs(args) + ">")
+        } else if (!flo && (isBig(t.lo) || isBig(t.hi) || isBig(by)) && (typeof t.lo == "number" || isBig(t.lo)) && (typeof t.hi == "number" || isBig(t.hi))) {
+            e = bigIntStep(t.lo, t.excl === true ? numBin("-", t.hi, 1) : t.hi, by, desc)
         } else {
             var picked = []
             if (flo) {
                 var fs = rbnFloatStep(toF(t.lo), toF(t.hi), u, t.excl === true)
                 for (var fi = 0; fi < fs.length; fi++) { picked.push(mkFlo(fs[fi])) }
-            } else if ((isBig(t.lo) || isBig(t.hi) || isBig(by)) && (typeof t.lo == "number" || isBig(t.lo)) && (typeof t.hi == "number" || isBig(t.hi))) {
-                picked = bigIntStep(t.lo, t.excl === true ? numBin("-", t.hi, 1) : t.hi, by)
             } else {
                 var src = anytype
                 src = rangeToA(t)
@@ -6290,12 +6337,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             mcall(se, "each", [], blk)
             return t
         }
+        var flt = isFlo(sby) || isFlo(lim) || isFlo(t)
+        if (!flt && (isBig(t) || isBig(lim) || isBig(sby))) {
+            var we = anytype
+            we = bigIntStep(t, lim, sby, desc)
+            if (blk == null) { return mkAseq(we, t, lim, sby, false, desc) }
+            mcall(we, "each", [], blk)
+            return t
+        }
         var sl = []
-        if (isFlo(sby) || isFlo(lim) || isFlo(t)) {
+        if (flt) {
             var sf = rbnFloatStep(toF(t), toF(lim), toF(sby), false)
             for (var sfi = 0; sfi < sf.length; sfi++) { sl.push(mkFlo(sf[sfi])) }
-        } else if (isBig(t) || isBig(lim) || isBig(sby)) {
-            sl = bigIntStep(t, lim, sby)
         } else {
             sl = rbnIntStep(t, toF(lim), toF(sby))
         }
@@ -6347,17 +6400,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return isEnum(o) && o.aseq !== undefined && rubyEq(q.b, o.aseq.b) && rubyEq(q.e, o.aseq.e)
                 && rubyEq(q.s, o.aseq.s) && q.x === o.aseq.x
         }
-        var endless = t.__rlazy === true
-        if (name == "size") { return endless ? mkFlo(Math.pow(2, 1024)) : t.items.length }
+        // A bigIntStep walk is a stream that carries its count in bsz.
+        var walk = t.__rlazy === true && t.bsz !== undefined
+        var endless = t.__rlazy === true && !walk
+        if (name == "size") { return walk ? t.bsz : endless ? mkFlo(Math.pow(2, 1024)) : t.items.length }
         if (name == "each") {
             if (blk == null) { return t }
-            if (endless) { lazyMethod(t, "each", [], blk) }
+            if (endless || walk) { lazyMethod(t, "each", [], blk) }
             else { for (var i = 0; i < t.items.length; i++) { blockCall(blk, [t.items[i]]) } }
             return t
         }
         if (q.e === null || q.e === undefined) { raiseErr(name, "RangeError", "cannot get the last element of endless arithmetic sequence") }
         if (isFlo(q.e) || isFlo(q.b)) { floDomainGuard((toF(q.e) - toF(q.b)) / toF(q.s)) }
         if (endless) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
+        if (walk) {
+            if (args.length == 0) { return numCmp(t.bsz, 0) == 0 ? null : bigIntStepLast(t, 1)[0] }
+            var wn = Math.trunc(toF(args[0]))
+            if (wn < 0) { raiseErr(name, "ArgumentError", "negative array size") }
+            return bigIntStepLast(t, wn)
+        }
         var n = t.items.length
         if (args.length == 0) { return n == 0 ? null : t.items[n - 1] }
         var ln = Math.trunc(toF(args[0]))
@@ -6378,18 +6439,45 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         else { e.ops.push({k: "map", f: function(i) { return b + i * u }, n: 0}) }
         return e
     }
-    // Integer#step / #upto / #downto when the receiver, the limit or the step is
-    // past 2**53, where a double cannot count: exact Integers from from toward
-    // limit. Twins: rubyIntWalk in abnf/jsrtrubystr.go, rbIntWalk in
-    // lib/ruby-rt.metajs.
-    function bigIntStep(from, limit, by) {
+    // Integer#step / #upto / #downto and Range#step when the receiver, the limit
+    // or the step is past 2**53, where a double cannot count: an Enumerator that
+    // makes the exact Integers from `from' toward `limit' as they are pulled, never
+    // an Array (`1.upto(2**64)' has 2**64 of them). bsz holds the exact count,
+    // (limit - from) / by + 1 floored at 0; a count past 2**53 cannot be walked to
+    // its end, so that stream runs endless. Twins: rubyIntWalk in
+    // abnf/jsrtrubystr.go, rbIntWalk in lib/ruby-rt.metajs.
+    function bigIntStep(from, limit, by, desc) {
+        if (isFlo(limit)) {
+            var lf = toF(limit)
+            if (lf - lf != 0) { return stepForever(from, by, false, desc) }
+            return bigIntStep(from, intFromF(numCmp(by, 0) > 0 ? Math.floor(lf) : Math.ceil(lf)), by, desc)
+        }
+        var n = anytype
+        n = numBin("+", numBin("/", numBin("-", limit, from), by), 1)
+        if (numCmp(n, 0) < 0) { n = 0 }
+        var e = mkLazy("range", [], 0, isBig(n) ? null : n, true, false, desc)
+        e.ops.push({k: "map", f: function(i) { return numBin("+", from, numBin("*", i, by)) }, n: 0})
+        e.bsz = n
+        return e
+    }
+    // Integer#upto / #downto where the receiver or the limit is past 2**53.
+    function bigUpDown(t, name, args, blk) {
+        var we = anytype
+        we = bigIntStep(t, args[0], name == "upto" ? 1 : -1, "#<Enumerator: " + rinspect(t) + ":" + name + inspectArgs(args) + ">")
+        if (blk == null) { return we }
+        mcall(we, "each", [], blk)
+        return t
+    }
+    // The last k values of a bigIntStep walk (all of them for k null). Twins:
+    // rubyIntWalkLast in abnf/jsrtrubystr.go, rbIntWalkLast in lib/ruby-rt.metajs.
+    function bigIntStepLast(e, k) {
         var out = []
-        var v = anytype
-        v = from
-        var up = numCmp(by, 0) > 0
-        while (up ? numCmp(v, limit) <= 0 : numCmp(v, limit) >= 0) {
-            out.push(v)
-            v = numBin("+", v, by)
+        var i = anytype
+        i = numBin("-", e.bsz, k)
+        if (numCmp(i, 0) < 0) { i = 0 }
+        while (numCmp(i, e.bsz) < 0) {
+            out.push(e.ops[0].f(i))
+            i = numBin("+", i, 1)
         }
         return out
     }
@@ -6769,9 +6857,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         raiseErr("+", "TypeError", "no implicit conversion of " + fmtConvName(r) + " into String")
         return ""
     }
-    // "ab" * 3, and the format operator "%d-%d" % [3, 4] (Kernel#format).
+    // "ab" * 3, n checked by repeatCount, and the format operator "%d-%d" % [3, 4]
+    // (Kernel#format).
     function strRepeat(s, n) {
-        if (n < 0) { raiseErr("*", "ArgumentError", "negative argument") }
         var out = ""
         for (var i = 0; i < n; i++) { out += s }
         return out
@@ -8448,6 +8536,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof o == "string" && (typeof i == "string" || isRStr(i) || isRegex(i))) { return strPatAt(o, i, undefined) }
         if (typeof o == "string") { return rbsCharAt(o, Math.trunc(toF(i))) }
         if (o === null || o === undefined) { fail("index of nil") }
+        // Any index but an Integer is taken as a long (rb_ary_aref1's NUM2LONG).
+        if ((typeof i != "number" || i % 1 != 0) && Array.isArray(o)) { return rindex(o, longArg("[]", i)) }
         if (i < 0) { i += o.length }
         if (i < 0 || i >= o.length) { return null }
         return o[i]
@@ -9160,7 +9250,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (kind == 4) {
             limit = args.length == 0 ? (name == "first" ? 1 : 0) : longArg(name, args[0])
             if (limit < 0) { raiseErr(name, "ArgumentError", "attempt to take negative size") }
-            if (args.length > 0) { cargs = [limit] }
+            if (args.length > 0) {
+                if (name == "first") { aryCap(name, args[0], limit) }
+                cargs = [limit]
+            }
         }
         var answers = []
         var hits = [0]
@@ -9393,7 +9486,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // cannot terminate at this size or has no exact form in this value model;
     // they fall through to numberMethod's error, which names the method.
     function bigMethod(t, name, args, blk) {
-        if (name == "to_s" || name == "inspect") { return args.length > 0 ? bigBaseStr(t, toF(args[0])) : bigStr(t) }
+        if (name == "to_s" || name == "inspect") { return args.length > 0 ? bigBaseStr(t, toSRadix(args[0])) : bigStr(t) }
         if (name == "to_i" || name == "to_int") { return t }
         if (name == "truncate") { return numDigitOp(0, t, true, "t", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
         // An Integer is already floored, ceilinged and rounded at every ndigits
@@ -9437,10 +9530,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "upto" || name == "downto") {
             if (args.length == 0) { raiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)") }
-            var bl = bigIntStep(t, args[0], name == "upto" ? 1 : -1)
-            if (blk == null) { return enumAt(mkEnum(bl), t, name, args) }
-            for (var bk = 0; bk < bl.length; bk++) { blockCall(blk, [bl[bk]]) }
-            return t
+            return bigUpDown(t, name, args, blk)
         }
         return numberMethod(t, name, args, blk)
     }
@@ -10044,6 +10134,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // lib/ruby-rt.metajs.
         if (name == "eql?" && !(isUserObj(target) && singRespond(target, name))) {
             if (isUserObj(target) || isClassObj(target)) { return identicalP(target, args[0]) }
+            if (isNaNV(target)) { return false }
             return valEql(target, args[0])
         }
         // Object#hash / #object_id, unless a user class defines its own.
@@ -10066,9 +10157,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // defines either itself still wins, because its own dispatch is below.
         if ((name == "between?" || name == "clamp") && !isUserObj(target)) {
             if (name == "between?") { return rcmp(target, args[0]) >= 0 && rcmp(target, args[1]) <= 0 }
-            if (rcmp(target, args[0]) < 0) { return args[0] }
-            if (rcmp(target, args[1]) > 0) { return args[1] }
-            return target
+            return cmpClamp(target, args[0], args[1])
         }
         if (isBin(target)) { return binMethod(target, name, args, blk) }
         // A box answers the identity-bearing methods itself and every other one on
@@ -10148,7 +10237,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             noMethod(target, name)
         }
         if (typeof target == "number") {
-            if (name == "to_s" || name == "inspect") { return args.length > 0 ? baseStr(target, toF(args[0])) : intStr(target) }
+            if (name == "to_s" || name == "inspect") { return args.length > 0 ? baseStr(target, toSRadix(args[0])) : intStr(target) }
             if (name == "to_i" || name == "to_int") { return intFromF(Math.floor(target)) }
             // #truncate takes an ndigits like #floor and #round - `1234.truncate(-2)`
             // is 1200.
@@ -10199,9 +10288,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 raiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)")
             }
             if (name == "times" || name == "upto" || name == "downto") {
+                if (name != "times" && isBig(args[0])) { return bigUpDown(target, name, args, blk) }
                 var nl = []
                 if (name == "times") { for (var ni = 0; ni < target; ni++) { nl.push(ni) } }
-                if (name != "times" && isBig(args[0])) { nl = bigIntStep(target, args[0], name == "upto" ? 1 : -1) }
                 else if (name == "upto") { for (var ui = target; ui <= toF(args[0]); ui++) { nl.push(ui) } }
                 else if (name == "downto") { for (var wi = target; wi >= toF(args[0]); wi--) { nl.push(wi) } }
                 if (blk == null) { return enumAt(mkEnum(nl), target, name, args) }
@@ -11005,7 +11094,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function arrNew(args, blk) {
         var out = []
         if (args.length > 0 && Array.isArray(args[0])) { return arrReplace(out, args[0]) }
-        var n = args.length == 0 ? 0 : Math.trunc(toF(args[0]))
+        var n = args.length == 0 ? 0 : longArg("initialize", args[0])
+        if (n < 0) { raiseErr("initialize", "ArgumentError", "negative array size") }
         for (var i = 0; i < n; i++) {
             if (blk != null) { out.push(blockCall(blk, [i])) }
             else if (args.length > 1) { out.push(args[1]) }
@@ -11516,6 +11606,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "size") { return lazySize(t) }
         if (name == "inspect" || name == "to_s") { return t.desc }
         if (name == "class") { return classOf(t) }
+        // A bigIntStep walk that ends answers the rest of Enumerable over its Array.
+        if (t.bsz !== undefined && t.hi !== null) { return arrayMethod(lazyFirst(t, -1), name, args, blk) }
         noMethod(t, name)
     }
     function enumMethod(t, name, args, blk) {
@@ -11856,7 +11948,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var wantMax = name == "max"
             var mcmp = arrCmpFn(blk)
             if (args.length > 0) {
-                var mn = Math.trunc(toF(args[0]))
+                var mn = longArg(name, args[0])
+                if (mn < 0) { raiseErr(name, "ArgumentError", "negative size (" + mn + ")") }
                 var masc = arrSortWith(t, mcmp)
                 if (!wantMax) { return arrSub(masc, 0, mn) }
                 // max(n) answers the n largest in DESCENDING order.
@@ -11998,7 +12091,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // MRI's would not be reproducible either.
         if (name == "sample") {
             if (args.length == 0) { return t.length == 0 ? null : t[0] }
-            var sn = Math.trunc(toF(args[0]))
+            var sn = longArg(name, args[0])
+            if (sn < 0) { raiseErr(name, "ArgumentError", "negative sample number") }
             if (sn > t.length) { sn = t.length }
             return arrSub(t, 0, sn)
         }
@@ -12421,7 +12515,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // IndexError naming the bounds -n...n. Twins: rubyArrayMethod in
         // abnf/jsrt.go, rbArrayMethod in lib/ruby-rt.metajs.
         if (name == "fetch") {
-            var fx = toF(args[0])
+            var fx = longArg(name, args[0])
             var fj = fx < 0 ? fx + t.length : fx
             if (fj >= 0 && fj < t.length) { return t[fj] }
             if (args.length > 1) { return args[1] }
@@ -13631,7 +13725,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function applyRuby(op, a, b) {
         if (op == "+=") { return radd(a, b) }
         if (op == "-=") { return rbin("-", a, b) }
-        if (op == "*=") { if (typeof a == "string" || isRStr(a)) { return strRepeat(rsText(a), toF(b)) } return rbin("*", a, b) }
+        if (op == "*=") { if (typeof a == "string" || isRStr(a)) { var ta = rsText(a); return strRepeat(ta, repeatCount(b, byteLen(ta), false)) } return rbin("*", a, b) }
         if (op == "/=") { return rbin("/", a, b) }
         if (op == "%=") { return rbin("%", a, b) }
         if (op == "**=") { return rbin("**", a, b) }
@@ -14217,7 +14311,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var bdepth = blockStack.length
         var mscope = {}
         scopes = [globalScope, mscope]
-        if (self !== undefined && self !== null) { declVar("self", self) }
+        if (self !== undefined) { declVar("self", self) }
         declVar("$blk", currentBlock())
         declVar("$defclass", fn.owner)
         declVar("$mname", fn.name)
@@ -14268,7 +14362,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return markParamArity(function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
-            return invokeRuby(fn, null, args)
+            return invokeRuby(fn, undefined, args)
         }, fn.params)
     }
     function makeMethodClosure(fn) {
@@ -14894,6 +14988,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // implicit receiver), which is how `intro` reaches the overridden `speak`.
     function selfMethod(name) {
         var s = findSelf()
+        // nil as self: inside a method a program added to Object, run on nil.
+        if (s === null && selfValue() === null) {
+            var nm = anytype
+            nm = builtinSelfMethod(s, name)
+            return nm !== undefined ? nm : objectExt(name)
+        }
         if (s === null || s === undefined) { return undefined }
         if (s.__isclass === true) {
             var cm = lookupMethod(s, "$s$" + name)
@@ -15067,9 +15167,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var cls = anytype
             if (existing != undefined && existing != null && existing.__isclass === true && existing.__builtin !== true) {
                 cls = existing
-            } else if (existing == undefined && supName == null && curClass === null && reopenableBuiltin(name)) {
+            } else if (supName == null && curClass === null && reopenableBuiltin(name) && (existing == undefined || existing === hostGlobals[name])) {
                 // Reopening a BUILTIN class (`class String; def shout ...`) adds to the
-                // builtin's own object, which mcall asks for a builtin value.
+                // builtin's own object, which mcall asks for a builtin value - the
+                // second time too, when the first has bound it as a constant here.
                 cls = hostGlobals[name]
                 builtinReopened = true
             } else {
@@ -17162,13 +17263,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A user class's own #== answers whatever it returns, unconverted; only the
     // comparisons built on it (!=, Array#==, include?) read it as a truth value.
     // Twins: js_req in abnf/jsrt.go and lib/ruby-rt.metajs.
+    // Float#== is not identity: a NaN is unequal to itself, where rubyEq (MRI's
+    // rb_equal, which include? runs) answers identity first.
     binOps["=="] = function(l, r) {
         if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return mcall(l, "==", [r], null) }
+        if (l === r && isNaNV(l)) { return false }
         return rubyEq(l, r)
     }
     // != calls #== even on the receiver itself, where rubyEq answers identity first.
     binOps["!="] = function(l, r) {
         if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return !rtest(mcall(l, "==", [r], null)) }
+        if (l === r && isNaNV(l)) { return true }
         return !rubyEq(l, r)
     }
     // === is the case-equality operator: membership for a range, is_a? for a class
@@ -17203,7 +17308,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (isDict(l)) { return hashRel(op, l, r) }
         if (!((isNumV(l) && !isCpx(l)) || typeof l == "string" || isRStr(l) || isSym(l))) { noMethod(l, op) }
-        var c = rcmp(l, r)
+        // An Integer or a Float against a real number <=> leaves nil (a NaN is on a
+        // side) is false for every relation. A Rational's relations are
+        // Comparable's, which raise.
+        var c = anytype
+        c = spaceship(l, r)
+        if (c === null || c === undefined) {
+            if (isNumV(l) && !isRat(l) && isNumV(r) && !isCpx(r)) { return false }
+            c = rcmp(l, r)
+        }
         if (op == "<") { return c < 0 }
         if (op == ">") { return c > 0 }
         if (op == "<=") { return c <= 0 }
@@ -17232,7 +17345,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binOps["<="] = function(l, r) { return relOp("<=", l, r) }
     binOps[">="] = function(l, r) { return relOp(">=", l, r) }
     binOps["-"]  = function(l, r) { return rbin("-", l, r) }
-    binOps["*"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return mkRStr(strRepeat(rsText(l), toF(r))) } return rbin("*", l, r) }
+    binOps["*"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { var tl = rsText(l); return mkRStr(strRepeat(tl, repeatCount(r, byteLen(tl), false))) } return rbin("*", l, r) }
     binOps["/"]  = function(l, r) { return rbin("/", l, r) }
     // String#% formats and Range#% is Range#step. Twins: js_rmod in
     // abnf/jsrtruby.go, rbNonNumBin in lib/ruby-rt.metajs.

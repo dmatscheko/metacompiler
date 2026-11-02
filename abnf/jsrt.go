@@ -6836,21 +6836,14 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 		}
 	case "*":
 		if ls, ok := l.(string); ok {
-			n := int(rubyToF(r))
-			if n < 0 {
-				rt.rubyRaiseErr("*", "ArgumentError", "negative argument")
-			}
-			return &jsRStr{s: strings.Repeat(ls, n)}
+			return &jsRStr{s: strings.Repeat(ls, rt.rubyRepeatCount(r, len(ls), false))}
 		}
 		if la, ok := l.(*jsArray); ok {
 			// Array#* is repetition with an Integer and JOIN with a String.
 			if sep, isStr := r.(string); isStr {
 				return rt.rubyArrJoin(la, sep)
 			}
-			times := int(rt.rubyImplicitInt("*", r, ""))
-			if times < 0 {
-				rt.rubyRaiseErr("*", "ArgumentError", "negative argument")
-			}
+			times := rt.rubyRepeatCount(r, len(la.elems), true)
 			out := &jsArray{}
 			for i := 0; i < times; i++ {
 				out.elems = append(out.elems, la.elems...)
@@ -6937,9 +6930,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			// the base conversion instead - see rubyIntStr for the same reason.
 			if math.Abs(x) > 9007199254740992 && x == math.Trunc(x) {
 				bf, _ := big.NewFloat(x).Int(nil)
-				return bf.Text(int(rubyToF(args[0]))), true
+				return bf.Text(rt.rubyToSRadix(args[0])), true
 			}
-			return strconv.FormatInt(int64(x), int(rubyToF(args[0]))), true
+			return strconv.FormatInt(int64(x), rt.rubyToSRadix(args[0])), true
 		}
 		// #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes.
 		if name == "inspect" {
@@ -7076,7 +7069,12 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 					nl.elems = append(nl.elems, jsFlo{f: d})
 				}
 			} else if rubyAnyBig(t, lim, by) {
-				nl = rt.rubyIntWalk(t, lim, by)
+				we := rt.rubyIntWalk(t, lim, by, desc)
+				if nblk == nil {
+					return rubyMkAseq(we, t, lim, by, false, desc), true
+				}
+				rt.rubyMethod(we, "each", []interface{}{rubyBlkWrap(nblk)})
+				return t, true
 			} else {
 				for v, lim, b := x, rubyToF(lim), rubyToF(by); (b > 0 && v <= lim) || (b < 0 && v >= lim); v += b {
 					nl.elems = append(nl.elems, v)
@@ -7107,16 +7105,14 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			}
 		case "upto":
 			if rubyAnyBig(t, argAt(npos, 0), nil) {
-				nl = rt.rubyIntWalk(t, argAt(npos, 0), float64(1))
-				break
+				return rt.rubyBigUpDown(t, name, npos, nblk), true
 			}
 			for i := x; i <= rubyToF(argAt(npos, 0)); i++ {
 				nl.elems = append(nl.elems, i)
 			}
 		default:
 			if rubyAnyBig(t, argAt(npos, 0), nil) {
-				nl = rt.rubyIntWalk(t, argAt(npos, 0), float64(-1))
-				break
+				return rt.rubyBigUpDown(t, name, npos, nblk), true
 			}
 			for i := x; i >= rubyToF(argAt(npos, 0)); i-- {
 				nl.elems = append(nl.elems, i)
@@ -7168,7 +7164,7 @@ func (rt *jsrt) rubyBigMethod(t *jsBigInt, name string, args []interface{}) (int
 	switch name {
 	case "to_s", "inspect":
 		if len(args) > 0 {
-			return t.v.Text(int(rubyToF(args[0]))), true
+			return t.v.Text(rt.rubyToSRadix(args[0])), true
 		}
 		return t.v.String(), true
 	// An Integer is already floored, ceilinged, truncated and rounded, at any
@@ -7708,6 +7704,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		if fcn < 0 {
 			rt.rubyRaiseErr("first", "ArgumentError", "negative array size (or size too big)")
 		}
+		rt.rubyAryCap("first", pos[0], fcn)
 		pos = []interface{}{float64(fcn)}
 	}
 	if strOpen && name == "each" && blk != nil {
@@ -8238,7 +8235,14 @@ func (rt *jsrt) rubyRel(op string, l, r interface{}) interface{} {
 			rt.rubyNoMethod(l, op)
 		}
 	}
-	c := rt.rubyCmp(l, r)
+	// Twin of the nil arm of relOp in ruby-interpreter.abnf.
+	c, ok := rt.rubySpaceship(l, r)
+	if !ok {
+		if _, lRat := l.(jsRat); !lRat && rubyIsReal(l) && rubyIsReal(r) {
+			return false
+		}
+		c = rt.rubyCmp(l, r)
+	}
 	switch op {
 	case "<":
 		return c < 0
@@ -11030,6 +11034,27 @@ func (rt *jsrt) rubyLongArg(frame string, v interface{}) int {
 	return int(n)
 }
 
+// rubyRepeatCount is the count of String#* and Array#*, unit the receiver's
+// length in bytes or elements. Twin of repeatCount in ruby-interpreter.abnf,
+// which states the rule.
+func (rt *jsrt) rubyRepeatCount(v interface{}, unit int, arr bool) int {
+	n := rt.rubyLongArg("*", v)
+	if n < 0 {
+		rt.rubyRaiseErr("*", "ArgumentError", "negative argument")
+	}
+	limit := math.Ldexp(1, 63)
+	if arr {
+		limit = math.Ldexp(1, 60)
+	}
+	if float64(unit)*float64(n) >= limit {
+		rt.rubyRaiseErr("*", "ArgumentError", "argument too big")
+	}
+	if unit == 0 {
+		return 0
+	}
+	return n
+}
+
 // rubyFormat is Kernel#format / String#% - the printf directives Ruby shares with C:
 // %[-][0][+][ ][#][width][.prec](d|i|u|f|s|p|c|x|X|o|b|B|e|E|g|G|%). The right
 // operand is the argument, or an array of them.
@@ -11705,24 +11730,26 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case "between?", "clamp":
 		// Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
 		// Float, Rational, Symbol and String all answer them off ONE pair of arms.
-		// rubySpaceship is the whole rule and it is big-aware. A user class that
+		// rubyCmp is the whole rule and it is big-aware. A user class that
 		// defines either method itself still wins: its own dispatch is below.
+		// Each <=> raises on nil, in MRI's order. Twin of cmpClamp and the
+		// between? arm in ruby-interpreter.abnf.
 		if !rubyUserObj(target) {
 			lo, hi := argAt(args, 0), argAt(args, 1)
-			cl, okLo := rt.rubySpaceship(target, lo)
-			ch, okHi := rt.rubySpaceship(target, hi)
-			if okLo && okHi {
-				if name == "between?" {
-					return cl >= 0 && ch <= 0
-				}
-				if cl < 0 {
-					return lo
-				}
-				if ch > 0 {
-					return hi
-				}
-				return target
+			if name == "between?" {
+				return rt.rubyCmp(target, lo) >= 0 && rt.rubyCmp(target, hi) <= 0
 			}
+			if rt.rubyCmp(lo, hi) > 0 {
+				rt.rubyRaiseErr("clamp", "ArgumentError", "min argument must be smaller than max argument")
+			}
+			c := rt.rubyCmp(target, lo)
+			if c < 0 {
+				return lo
+			}
+			if c > 0 && rt.rubyCmp(target, hi) > 0 {
+				return hi
+			}
+			return target
 		}
 	}
 	// NilClass's conversions. MRI answers "" / "nil" / [] / 0 / 0.0 for these, so
@@ -12769,7 +12796,24 @@ func (rt *jsrt) rubyArrCountArg(name string, v interface{}, enumFirst bool) int 
 		}
 		rt.rubyRaiseErr(name, "ArgumentError", msg)
 	}
+	if enumFirst && name == "first" {
+		rt.rubyAryCap(name, v, n)
+	}
 	return n
+}
+
+// rubyAryCap refuses an Enumerable#first count past ARY_MAX_SIZE. Twin of aryCap
+// in ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyAryCap(name string, v interface{}, n int) {
+	if n < 1<<60 {
+		return
+	}
+	if n == 1<<60 {
+		if c, ok := rubyBigCmp(v, float64(n)); ok && c < 0 {
+			return
+		}
+	}
+	rt.rubyRaiseErr(name, "ArgumentError", "array size too big")
 }
 
 func rubyArrSub(t *jsArray, from, length int) *jsArray {
@@ -12917,7 +12961,10 @@ func (rt *jsrt) rubyArrNew(args []interface{}) *jsArray {
 	}
 	n := 0
 	if len(pos) > 0 {
-		n = int(math.Trunc(rubyToF(pos[0])))
+		n = rt.rubyLongArg("initialize", pos[0])
+	}
+	if n < 0 {
+		rt.rubyRaiseErr("initialize", "ArgumentError", "negative array size")
 	}
 	for i := 0; i < n; i++ {
 		switch {
@@ -14016,7 +14063,10 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		cmp := rt.rubyArrCmpFn(blk)
 		wantMax := name == "max"
 		if len(pos) > 0 {
-			n := int(math.Trunc(rubyToF(pos[0])))
+			n := rt.rubyLongArg(name, pos[0])
+			if n < 0 {
+				rt.rubyRaiseErr(name, "ArgumentError", "negative size ("+strconv.Itoa(n)+")")
+			}
 			asc := &jsArray{elems: rubyArrSort(t.elems, cmp)}
 			if !wantMax {
 				return rubyArrSub(asc, 0, n)
@@ -14223,7 +14273,10 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 			return t.elems[0]
 		}
-		n := int(math.Trunc(rubyToF(pos[0])))
+		n := rt.rubyLongArg(name, pos[0])
+		if n < 0 {
+			rt.rubyRaiseErr(name, "ArgumentError", "negative sample number")
+		}
 		if n > len(t.elems) {
 			n = len(t.elems)
 		}
@@ -14778,7 +14831,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	// Array#fetch. Twin of arrayMethod in ruby-interpreter.abnf.
 	case "fetch":
 		n := len(t.elems)
-		fx := int(rt.toNumber(argAt(pos, 0)))
+		fx := rt.rubyLongArg(name, argAt(pos, 0))
 		fj := fx
 		if fx < 0 {
 			fj += n

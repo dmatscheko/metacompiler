@@ -697,6 +697,10 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		}
 		return rt.rubyBuiltinClass("Enumerator")
 	}
+	// Twin of the bigIntStep-walk arm of lazyMethod in ruby-interpreter.abnf.
+	if _, walk := t.props["bsz"]; walk && !isUndefOrNull(t.props["hi"]) {
+		return rt.rubyArrayMethod(&jsArray{elems: rt.rubyLazyFirst(t, -1)}, name, args)
+	}
 	rt.rubyNoMethod(t, name)
 	return nil
 }
@@ -871,14 +875,61 @@ func rubyAnyBig(a, b, c interface{}) bool {
 }
 
 // rubyIntWalk is bigIntStep of ruby-interpreter.abnf, which states the rule.
-func (rt *jsrt) rubyIntWalk(from, limit, by interface{}) *jsArray {
-	out, up := &jsArray{}, rubyToF(by) > 0
-	for v := from; ; v = rt.rubyBin("+", v, by) {
-		if c, _ := rt.rubySpaceship(v, limit); (up && c > 0) || (!up && c < 0) {
-			return out
+func (rt *jsrt) rubyIntWalk(from, limit, by interface{}, desc string) *jsObject {
+	if lf, isFlo := limit.(jsFlo); isFlo {
+		if math.IsNaN(lf.f) || math.IsInf(lf.f, 0) {
+			return rubyStepForever(from, by, false, desc)
 		}
-		out.elems = append(out.elems, v)
+		r := math.Ceil(lf.f)
+		if c, _ := rt.rubySpaceship(by, float64(0)); c > 0 {
+			r = math.Floor(lf.f)
+		}
+		return rt.rubyIntWalk(from, rt.rubyIntFromF(r), by, desc)
 	}
+	n := rt.rubyBin("+", rt.rubyBin("/", rt.rubyBin("-", limit, from), by), float64(1))
+	if c, _ := rt.rubySpaceship(n, float64(0)); c < 0 {
+		n = float64(0)
+	}
+	var hi interface{} = jsNull
+	if _, isBig := n.(*jsBigInt); !isBig {
+		hi = n
+	}
+	e := rubyMkLazy("range", &jsArray{}, 0, hi, true, false, desc)
+	f := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+		return rt.rubyBin("+", from, rt.rubyBin("*", argAt(a, 0), by))
+	}}
+	e.set("ops", &jsArray{elems: []interface{}{rubyLazyOpOf("map", f, 0)}})
+	e.set("bsz", n)
+	return e
+}
+
+// rubyBigUpDown is bigUpDown of ruby-interpreter.abnf.
+func (rt *jsrt) rubyBigUpDown(t interface{}, name string, pos []interface{}, blk interface{}) interface{} {
+	by := float64(1)
+	if name == "downto" {
+		by = -1
+	}
+	we := rt.rubyIntWalk(t, argAt(pos, 0), by, "#<Enumerator: "+rt.rubyInspect(t)+":"+name+rt.rubyInspectArgs(pos)+">")
+	if blk == nil {
+		return we
+	}
+	rt.rubyMethod(we, "each", []interface{}{rubyBlkWrap(blk)})
+	return t
+}
+
+// rubyIntWalkLast is bigIntStepLast of ruby-interpreter.abnf.
+func (rt *jsrt) rubyIntWalkLast(e *jsObject, k interface{}) *jsArray {
+	out, n := &jsArray{}, e.props["bsz"]
+	f := e.props["ops"].(*jsArray).elems[0].(*jsObject).props["f"]
+	i := rt.rubyBin("-", n, k)
+	if c, _ := rt.rubySpaceship(i, float64(0)); c < 0 {
+		i = float64(0)
+	}
+	for c, _ := rt.rubySpaceship(i, n); c < 0; c, _ = rt.rubySpaceship(i, n) {
+		out.elems = append(out.elems, rt.call(f, jsUndef, []interface{}{i}))
+		i = rt.rubyBin("+", i, float64(1))
+	}
+	return out
 }
 
 // rubyRangeStep is rangeStep of ruby-interpreter.abnf, which states the rule.
@@ -913,18 +964,18 @@ func (rt *jsrt) rubyRangeStep(t *jsObject, m string, args []interface{}) interfa
 	case strLo && isUndefOrNull(hi):
 		e = rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), rubyLazyOpOf("step", jsNull, int(math.Trunc(u))), false,
 			"#<Enumerator: "+rt.rubyInspect(t)+":"+m+rt.rubyInspectArgs(pos)+">")
+	case !flo && rubyAnyBig(lo, hi, by) && rubyIsIntV(lo) && rubyIsIntV(hi):
+		last := hi
+		if rt.truthy(t.props["excl"]) {
+			last = rt.rubyBin("-", hi, float64(1))
+		}
+		e = rt.rubyIntWalk(lo, last, by, desc)
 	default:
 		picked := &jsArray{}
 		if flo {
 			for _, d := range rubyFloatStep(rubyToF(lo), rubyToF(hi), u, rt.truthy(t.props["excl"])) {
 				picked.elems = append(picked.elems, jsFlo{f: d})
 			}
-		} else if rubyAnyBig(lo, hi, by) && rubyIsIntV(lo) && rubyIsIntV(hi) {
-			last := hi
-			if rt.truthy(t.props["excl"]) {
-				last = rt.rubyBin("-", hi, float64(1))
-			}
-			picked = rt.rubyIntWalk(lo, last, by)
 		} else {
 			src := rt.rubyRangeToArr(t)
 			for i := 0; i < len(src.elems); i += int(math.Trunc(u)) {
@@ -1027,10 +1078,15 @@ func (rt *jsrt) rubyAseqMethod(t *jsObject, name string, args []interface{}) int
 		return o != nil && rt.rubyEq(q.props["b"], o.props["b"]) && rt.rubyEq(q.props["e"], o.props["e"]) &&
 			rt.rubyEq(q.props["s"], o.props["s"]) && q.props["x"] == o.props["x"]
 	}
-	endless := t.props["__rlazy"] == true
+	bsz, walk := t.props["bsz"]
+	walk = walk && t.props["__rlazy"] == true
+	endless := t.props["__rlazy"] == true && !walk
 	items, _ := t.props["items"].(*jsArray)
 	switch name {
 	case "size":
+		if walk {
+			return bsz
+		}
 		if endless {
 			return jsFlo{f: math.Inf(1)}
 		}
@@ -1039,7 +1095,7 @@ func (rt *jsrt) rubyAseqMethod(t *jsObject, name string, args []interface{}) int
 		if blk == nil {
 			return t
 		}
-		if endless {
+		if endless || walk {
 			rt.rubyLazyMethod(t, "each", []interface{}{rubyBlkWrap(blk)})
 		} else {
 			for _, v := range items.elems {
@@ -1057,6 +1113,19 @@ func (rt *jsrt) rubyAseqMethod(t *jsObject, name string, args []interface{}) int
 	}
 	if endless {
 		rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
+	}
+	if walk {
+		if len(pos) == 0 {
+			if c, _ := rt.rubySpaceship(bsz, float64(0)); c == 0 {
+				return jsNull
+			}
+			return rt.rubyIntWalkLast(t, float64(1)).elems[0]
+		}
+		wn := math.Trunc(rubyToF(pos[0]))
+		if wn < 0 {
+			rt.rubyRaiseErr(name, "ArgumentError", "negative array size")
+		}
+		return rt.rubyIntWalkLast(t, wn)
 	}
 	n := len(items.elems)
 	if len(pos) == 0 {
@@ -2904,11 +2973,7 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 	case "==", "===", "eql?":
 		return rubyBinEq(t, argAt(pos, 0))
 	case "*":
-		n := int(rubyToF(argAt(pos, 0)))
-		if n < 0 {
-			rt.rubyRaiseErr("*", "ArgumentError", "negative argument")
-		}
-		return rubyEncStr(strings.Repeat(t.b, n), enc)
+		return rubyEncStr(strings.Repeat(t.b, rt.rubyRepeatCount(argAt(pos, 0), len(t.b), false)), enc)
 	case "unpack", "unpack1":
 		return rt.rubyUnpack(t.b, name, pos)
 	case "encode":

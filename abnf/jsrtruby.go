@@ -3054,6 +3054,9 @@ func (rt *jsrt) rubyEnumRun(t interface{}, name string, args []interface{}) inte
 			rt.rubyRaiseErr(name, "ArgumentError", "attempt to take negative size")
 		}
 		if len(pos) > 0 {
+			if name == "first" {
+				rt.rubyAryCap(name, pos[0], limit)
+			}
 			args = append([]interface{}{float64(limit)}, args[1:]...)
 		}
 	}
@@ -4269,6 +4272,16 @@ func rubyAllSymKeys(keys *jsArray) bool {
 		}
 	}
 	return true
+}
+
+// rubyToSRadix is the base of Integer#to_s. Twin of toSRadix in
+// ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyToSRadix(v interface{}) int {
+	b := math.Trunc(rt.rubyImplicitInt("to_s", v, ""))
+	if b < 2 || b > 36 {
+		rt.rubyRaiseErr("to_s", "ArgumentError", "invalid radix "+jsNumString(b))
+	}
+	return int(b)
 }
 
 // rubySliceSize is the size argument of each_slice / each_cons. Twin of
