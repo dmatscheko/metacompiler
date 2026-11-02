@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1128** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1129** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,20 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1126 ruby: Hash Array keys use eql? (not ==); endless Range blockless enumerators; Infinity #size of endless streams; method(:x).owner · P3 · RB · IN PROGRESS (RB worker, round 56) [V]
+### T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each), lazy no-block ArgumentError, lazy.take size, AS#last arity, Range#equal? · P3 · RB · OPEN [V]
 
-Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
-- The correctness item: `{[1] => 1}[[1.0]]` is nil in MRI. Array (and nested) keys compare with eql?, so 1 and 1.0 differ. All our engines return 1. Check `{1 => :a}[1.0]` (nil), `{[1, [2]] => :a}[[1, [2.0]]]` (nil) and `{1.0 => :a}[1]` (nil) too, plus Hash#key?, #delete, #fetch and Array#uniq / #- / #& / #|, which also use hash+eql?. Keep the fast path cost-neutral (bench --paired).
-- Endless Range without a block: `(1..).map.first(2)` is [1, 2], and `(1..).each_with_object([]).first(1)`, `.each_with_index.first(2)` and `.select.first(1)` all work in MRI. Ours raises RangeError "cannot convert endless range to an array". Also `1.step(Float::INFINITY,2).to_enum.first(2)` gives [1.0, 3.0]; ours raises NoMethodError.
-- `#size` of endless stream enumerators is Infinity: `[1,2].cycle.size`, `1.step.with_index.size`, `(1..).each_slice(2).size`, `1.step.map.size`. Ours gives 2 or 0.
-- `1.step(10,3).method(:begin).owner` is Enumerator::ArithmeticSequence, and `.public_methods(false)` returns a list; both raise NoMethodError here.
+Found while working T-1126. Each item lists MRI 2.6's answer (`/usr/bin/ruby`, LC_ALL=en_US.UTF-8) first, then ours. All three engines are affected unless noted.
+
+1. `find`, `find_index` and `take_while` with no block on stream enumerators (`[1,2].cycle`, `1.step`, `(1..).each`, Lazy). MRI returns an Enumerator whose `#size` is nil. Ours raise NoMethodError. On `[1].cycle(2)` ours report a size of 2 where MRI's is nil.
+2. `each_entry` with no block on cycle/step enumerators. MRI returns an Enumerator. Ours raise NoMethodError.
+3. A Lazy with no block for `map`, `select`, `reject`, `flat_map` and `take_while`. MRI raises ArgumentError `tried to call lazy map without a block`. Ours raise NoMethodError.
+4. `[1,2].cycle.send(:each)` with no block. MRI returns the Enumerator. Ours raise NoMethodError.
+5. `(1..).with_index` and `(1..).with_object` raise NoMethodError in MRI, because Range has no such methods. Ours try to build the whole array: RangeError on `1..`. On `1..Float::INFINITY`, and with a blockless `(1..Float::INFINITY).find`, the interpreter hangs and the Go twin stops at 1e7.
+6. `(1..).lazy.take(3).size` is 3 in MRI. Ours give nil.
+7. `1.step(10,3).method(:last).arity` is -1 in MRI. Ours give 0.
+8. `(1..2).equal?(1..2)` is false in MRI (identity). Ours give true.
+
+Verify with `tests/probe.sh ruby` (all four legs) and add new sections to tests/ruby-test-full.2.rb or .3.rb.
 
 # JS — JavaScript and TypeScript
 
@@ -1178,6 +1185,7 @@ T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local 
 T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/SingletonList); emptyArray class — DONE r36 (7a6b2a15, c4b42938): Unit is never null (casts, is, ?., ?:, !!, *NotNull, Pair holding Unit) in all engines, Any() as java.lang.Object, EmptyList/Singleton*/ArrayList result classes by size, explicit-type Array class; also fixed the interpreter's anonymous function swallowing the statement's ';'; master-probed vs kotlinc 2.2.21
 T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-step map/each_with_object, last → FloatDomainError — DONE r55 (fcfc144c): ArithmeticSequence respond_to?/own methods in both halves, Hash key via eql? parts, blockless map/with_object/each_with_object on endless streams, #last per MRI (FloatDomainError/ZeroDivisionError/RangeError); paired bench 0.00%; master-probed vs ruby 2.6
 T-1124 bash: test/[ -eq "integer expected"; compiled circular nameref loses -i; compiled `type` refuses unprintable bodies — merged f8f91736: test/[ integer-expected status 2 (digits fast path), compiled circular nameref keeps -i, lazy compiled type; local -i n; local -n n documented LIMIT; SECTION 129 in new bash-test-full.6.sh; 4-leg probe + stderr match bash 5.3; full matrix 605/605; bench -0.63%
+T-1126 ruby: Hash Array keys use eql? (not ==); endless Range blockless enumerators; Infinity #size of endless streams; method(:x).owner — merged 42ac0d48: eql?-based Hash keys/set ops (deep eql in all 3 engines, Float key index), endless-range blockless enumerators + to_enum streaming, Infinity/nil stream sizes (each_slice FloatDomainError per MRI), Method#owner + public_methods(false) via own-method rows; 4-leg probe matches ruby 2.6; matrix 605/605; bench -0.01%
 
 # Settled — do not re-open
 
