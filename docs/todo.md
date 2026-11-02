@@ -107,7 +107,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1160 kotlin: references to Java static members (Math::abs, System::currentTimeMillis) · P3 · KT · OPEN [V]
+### T-1160 kotlin: references to Java static members (Math::abs, System::currentTimeMillis) · P3 · KT · IN PROGRESS (KT worker, round 51) [V]
 Found while closing T-1158; oracle kotlinc 2.2.21. All engines.
 - `val m = Math::abs; println(m(-3))` prints `$$Lambda@1` in the interpreter and run; kotlinc prints 3.
 - `val g = System::currentTimeMillis; println(g() > 0L)` — interpreter false, compiled half aborts "member 'currentTimeMillis' of null"; kotlinc true. Same for `System::identityHashCode`.
