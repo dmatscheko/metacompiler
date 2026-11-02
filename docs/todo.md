@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1167 ruby: Float object identity (NaN/non-flonum), module reflection after include into builtins, NaN hash keys · P3 · RB · OPEN [V]
+### T-1167 ruby: Float object identity (NaN/non-flonum), module reflection after include into builtins, NaN hash keys · P3 · RB · IN PROGRESS (RB worker, round 67) [V]
 Carried over from T-1163 (closed partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
 - Float identity, all engines. MRI: `n = Float::NAN; n.equal?(n)` true, `Float::NAN.equal?(Float::NAN)` true, `[m].include?(m)` / `index` / `count` find the same NaN; but `1e300.equal?(1e300)` and `(-0.0).equal?(-0.0)` are false (non-flonum floats are distinct objects). Ours: interp `equal?` false for NaN; run/native `[m].include?(m)` false, `index` nil, `count` 0; all engines true for the non-flonum cases. Needs a pointer box for the Go twin's value-type `jsFlo` (abnf/jsrt.go, ~59 creation sites) plus flonum-range identity rules in all three engines — a shared-file structural change; schedule it in a round where jsrt.go is free and keep run and native in step.
 - Run vs native divergence: `m = 0.0/0.0; {m => 1}[m]` and `key?` give nil under `llvm.Run` but 1 natively (MRI 1).
