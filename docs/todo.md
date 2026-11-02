@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1111** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1112** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,12 +114,15 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1106 kotlin: Set.indices; read-only builder results not frozen against cast mutation; ListBuilder/MapBuilder javaClass · P3 · KT · IN PROGRESS (KT worker, round 31) [V]
+### T-1111 kotlin: MutableMap putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll value; shuffle(Random); view and iterator classes · P3 · KT · OPEN [V]
 
-Oracle: kotlinc 2.2.21. All three engines differ:
-- `println(setOf(4,5,6).indices)` prints `0..2`; ours prints `kotlin.Unit`. The property table already lists S for indices, so only the field read is missing.
-- Casting a read-only result to a mutable type and then mutating it throws UnsupportedOperationException. Examples: `(buildSet{..} as MutableSet<Int>).add(9)`, the same for buildList and buildMap results, `(setOf(1) as MutableSet<Int>).add(2)`, `(listOf(1) as MutableList<Int>).add(2)`. Ours mutates. Check each case against kotlinc first: listOf of several elements is an Arrays$ArrayList (set works, add throws), and emptyList is EmptyList.
-- `buildList{}.javaClass.name` is `kotlin.collections.builders.ListBuilder`, and for buildMap it is `MapBuilder`; ours prints java.util.ArrayList / LinkedHashMap. A list array cannot carry a `__jc` tag.
+Oracle: kotlinc 2.2.21. All three engines are wrong, and all of these predate r31:
+- `mutableMapOf(..).putIfAbsent`, `computeIfAbsent` and `merge` abort with "unknown Map method" ("unknown dict method" in llvm.Run). kotlinc gives 1 / null / 7 / 6 for the r31 worker's probe; re-derive it.
+- `m.putAll(mapOf())` returns the map instead of kotlin.Unit.
+- Two-argument `m.remove(k, v)` must return a Boolean (false when there is no match). Ours returns null; the interpreter returns 1 for `remove("a", 2)`.
+- `MutableList.shuffle(Random(seed))` and `List.shuffled(Random(seed))` fail with "unknown list method". Use the same Random algorithm as the existing Random(seed) support, so seeded output matches kotlinc.
+- Class names: `asReversed()` is kotlin.collections.ReversedListReadOnly (ReversedList for a mutable list); `buildList{..}.subList` is ListBuilder$BuilderSubList; `buildSet{}.iterator().javaClass.name` is MapBuilder$KeysItr (ours crashes with "property .name of null").
+- Writing through a view of a sealed builder map, such as `(bm.keys as MutableSet).remove(1)`, must throw UnsupportedOperationException (message null). Ours mutates the map.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1182,6 +1185,7 @@ T-1098 bash: subscript quote rule for run-time arithmetic text (variable values,
 T-1101 php: callable-typed parameters validated by shape only; static compound callables to non-static methods — DONE r48 (8b81d94b): callable/?callable params checked via zend_is_callable in callee frame with deprecations + TypeError, static compound non-static rejected; master-probed
 T-1102 php: uncaught "Undefined constant" Error reports the caller's line — DONE r48 (8b81d94b): Undefined constant raised at the constant's own line (getLine + uncaught); master-probed
 T-1103 php: htmlspecialchars double_encode / ENT_SUBSTITUTE / HTML5 names; array_key_exists float key via callable or named args — DONE r48 (8b81d94b): htmlspecialchars double_encode/ENT_SUBSTITUTE/IGNORE/DISALLOWED/invalid UTF-8, all 2125 HTML5 names, array_key_exists float-key deprecation via callable/named args; master-probed vs html.c
+T-1106 kotlin: Set.indices; read-only builder results not frozen against cast mutation; ListBuilder/MapBuilder javaClass — DONE r31 (ed41c693): Set.indices; read-only builder/singleton/Arrays$ArrayList/Empty* collections refuse writes through a cast per JVM class rules; ListBuilder/MapBuilder javaClass; master-probed vs kotlinc 2.2.21
 
 # Settled — do not re-open
 
