@@ -5671,7 +5671,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // eql?, like uniq and unlike include?: `[1, 2.0] - [2]` is [1, 2.0].
             var drop = false
             for (var j = 0; j < r.length; j++) {
-                if (classOf(l[i]) === classOf(r[j]) && rubyEq(l[i], r[j])) { drop = true; break }
+                if (valEql(l[i], r[j])) { drop = true; break }
             }
             if (!drop) { out.push(l[i]) }
         }
@@ -5974,6 +5974,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (blk == null && args.length == 0 && (name == "each" || name == "each_entry")) {
                 return lazyCopy(rangeLazy(t), null, false, "#<Enumerator: " + rinspect(t) + ":" + name + ">")
             }
+            // Without a block, map / select / reject / flat_map / each_with_index /
+            // each_with_object answer the stream's Enumerator for that method.
+            if (blk == null && (rbaPassOp(rbaLazyOp(name)) || name == "each_with_index" || (name == "each_with_object" && args.length > 0))) {
+                return lazyMethod(lazyCopy(rangeLazy(t), null, false, rinspect(t)), name, args, null)
+            }
             if (name == "size" && args.length == 0) { return strOpen ? null : mkFlo(Math.pow(2, 1024)) }
             if (strOpen && name == "first" && args.length > 0) { return lazyFirst(rangeLazy(t), Math.trunc(toF(args[0]))) }
             if (rbaSliceOp(name) != "" && args.length > 0 && Math.trunc(toF(args[0])) > 0) {
@@ -6013,7 +6018,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "exclude_end?") { return t.excl }
         if (name == "to_s") { return rangeText(t, false) }
         if (name == "inspect") { return rangeText(t, true) }
-        if (name == "==" || name == "eql?" || name == "equal?") {
+        if (name == "eql?") { return valEql(t, args[0]) }
+        if (name == "==" || name == "equal?") {
             return isRange(args[0]) && rangeEq(t, args[0])
         }
         // An endless (or beginless) range has no sequence, so only the two
@@ -8163,6 +8169,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isEnum(v)) {
             if (v.aseq !== undefined && name != null) { return aseqMethod(v, "size", [], null) }
             if (v.__rlazy === true && v.kind == "each") { return null }
+            if (name != null && v.__rlazy === true && rbaLazySize(v) != "") { return lazyEndlessSize(rbaLazySize(v)) }
             if (v.__rco === true && name != null) { return null }
             if (v.__rdefer === true) { enumForce(v) }
             return v.items.length
@@ -8782,7 +8789,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var out = function(a) { return rbRunYield(a) }
         if (t.__rcall === true) { return rcallRun(t, function() { return out(argsArray(arguments)) }) }
         if (t.__rlazy === true) {
-            rbaLazyFirst(t, -1, lazyCall, rtest, arrEql, lazyDrive, function(v, m) {
+            rbaLazyFirst(t, -1, lazyCall, rtest, valEql, lazyDrive, function(v, m) {
                 out(m ? v : [v])
                 return false
             })
@@ -9020,7 +9027,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "number" || isBig(v)) { return numBin("+", numBin("*", v, 2), 1) }
         var valued = typeof v == "string" || isRat(v) || isCpx(v)
         for (var i = 0; i < oidObjs.length; i++) {
-            if (identicalP(oidObjs[i], v) || (valued && arrEql(oidObjs[i], v))) { return 16 + 8 * i }
+            if (identicalP(oidObjs[i], v) || (valued && valEql(oidObjs[i], v))) { return 16 + 8 * i }
         }
         oidObjs.push(v)
         return 8 + 8 * oidObjs.length
@@ -9684,12 +9691,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (!isMethodVal(target)) { return target }
                 return markLambda(copyArity(function() { return target.apply(undefined, argsArray(arguments)) }, target))
             }
-            // Method#name: the Symbol `#<Method: Object#x>' ends in. #owner is NOT
-            // implemented, in any engine, and deliberately so - it has to answer the
-            // class OBJECT, and the two compiled halves reach a user class's object
-            // only through the emitted module, so one of the three would have had to
-            // answer a synthetic stand-in. An omission is not a divergence.
+            // Method#name: the Symbol `#<Method: Object#x>' ends in. #owner is
+            // answered for a builtin receiver's Method only (rbBuiltinOwner): a user
+            // class's object is reached by the two compiled halves only through the
+            // emitted module, so one of the three would have to answer a synthetic
+            // stand-in. An omission is not a divergence. Twins: the "name" arms of
+            // rubyMethod in abnf/jsrt.go and rbMethod in lib/ruby-rt.metajs.
             if (name == "name" && isMethodVal(target)) { return mkSym(methodNames[methodValIndex(target)]) }
+            if (name == "owner" && isMethodVal(target)) {
+                var mown = rbBuiltinOwner(methodOwners[methodValIndex(target)], methodNames[methodValIndex(target)])
+                if (mown != "") { return hostGlobals[mown] }
+            }
             // Proc#to_s / #inspect are the same string in MRI, and the same one the
             // interpolation "#{method(:x)}" renders.
             if (name == "to_s" || name == "inspect") { return rstr(target) }
@@ -9736,6 +9748,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "respond_to?" && !isUserObj(target) && !isClassObj(target)) {
             return rbResponds(classOf(target).__name, rstr(args[0])) || (args.length > 1 && rtest(args[1]) && respondsPrivate(rstr(args[0]))) ||
                 (builtinReopened && typeof lookupMethod(classOf(target), rstr(args[0])) == "function")
+        }
+        // Object#public_methods(false) of a builtin value: its class's own public
+        // methods. Twins: rubyMethod in abnf/jsrt.go, rbMethod in lib/ruby-rt.metajs.
+        if (name == "public_methods" && args.length > 0 && !rtest(args[0]) && !isUserObj(target) && !isClassObj(target) && typeof target != "function") {
+            return mcall(classOf(target), "public_instance_methods", [false], null)
         }
         // Object#method on a builtin value: a Method that re-dispatches by name, or
         // MRI's NameError when the value does not respond to it. Twins: the
@@ -10299,20 +10316,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // ----- Array helpers: the sort / min / max / flatten / join family -----
     // Ruby's eql?: == that does NOT convert across classes, so `1.eql?(1.0)` is false
-    // where `1 == 1.0` is true. Array#-, #uniq, #& and #| all compare with this;
-    // #include?, #index and #count(v) are ==. The compiler half spells it rbEql /
-    // rt.rubyEql.
-    function arrEql(a, b) {
-        if (isUserObj(a) && typeof lookupMethod(a.__class, "eql?") == "function") { return rtest(mcall(a, "eql?", [b], null)) }
-        return classOf(a) === classOf(b) && rubyEq(a, b)
-    }
-    // Array#eql? is eql? element by element, so [1].eql?([1.0]) is false. Twins:
-    // rubyEqlDeep in abnf/jsrtruby.go, rbEqlDeep in lib/ruby-rt.metajs.
+    // where `1 == 1.0` is true. Array, Hash and Range apply it to their parts, so
+    // [1].eql?([1.0]), {1 => 2}.eql?({1 => 2.0}) and (1..2).eql?(1.0..2.0) are all
+    // false. Hash keying, Array#-, #uniq, #& and #| compare with this; #include?,
+    // #index and #count(v) are ==. Twins: rubyEql in abnf/jsrt.go, rbEql in
+    // lib/ruby-rt.metajs.
     function valEql(a, b) {
-        if (!Array.isArray(a) || !Array.isArray(b)) { return arrEql(a, b) }
-        if (a.length != b.length) { return false }
-        for (var i = 0; i < a.length; i++) { if (!valEql(a[i], b[i])) { return false } }
-        return true
+        if (isUserObj(a) && typeof lookupMethod(a.__class, "eql?") == "function") { return rtest(mcall(a, "eql?", [b], null)) }
+        if (Array.isArray(a) && Array.isArray(b)) {
+            if (a.length != b.length) { return false }
+            for (var i = 0; i < a.length; i++) { if (!valEql(a[i], b[i])) { return false } }
+            return true
+        }
+        if (isDict(a) && isDict(b)) {
+            if (a.keys.length != b.keys.length) { return false }
+            for (var j = 0; j < a.keys.length; j++) {
+                var at = dictFind(b, a.keys[j])
+                if (at < 0 || !valEql(a.vals[j], b.vals[at])) { return false }
+            }
+            return true
+        }
+        if (isRange(a) && isRange(b)) { return a.excl === b.excl && valEql(a.lo, b.lo) && valEql(a.hi, b.hi) }
+        return classOf(a) === classOf(b) && rubyEq(a, b)
     }
     // A STABLE merge sort. MRI's Array#sort is not stable and its #sort_by is, so one
     // stable sort satisfies both contracts - and the extra guarantee is not something
@@ -10715,7 +10740,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Array#& and Array#|: both keep the LEFT-hand order and both dedupe, and both
     // compare with eql? (the hash-key comparison), not ==.
     function arrHas(a, v) {
-        for (var i = 0; i < a.length; i++) { if (arrEql(a[i], v)) { return true } }
+        for (var i = 0; i < a.length; i++) { if (valEql(a[i], v)) { return true } }
         return false
     }
     function arrAnd(l, r) {
@@ -10951,6 +10976,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (t.ops.length > 0 || t.ev === undefined) { return null }
         return t.ev
     }
+    // #size of an endless stream from rbaLazySize's answer. Twins: rubyLazySize's
+    // callers in abnf/jsrtrubystr.go, rbLazyEndlessSize in lib/ruby-rt.metajs.
+    function lazyEndlessSize(lsz) {
+        if (lsz == "slice") { floDomainGuard(Math.pow(2, 1024)) }
+        return lsz == "inf" ? mkFlo(Math.pow(2, 1024)) : null
+    }
     function lazyCopy(t, op, lazy, desc) {
         var c = mkLazy(t.kind, t.items, t.lo, t.hi, t.excl, lazy, desc)
         c.ops = t.ops.slice(0)
@@ -10960,8 +10991,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         c.en = t.en
         return c
     }
-    function lazyFirst(t, n) { return rbaLazyFirst(t, n, lazyCall, rtest, arrEql, lazyDrive, null) }
-    function lazyScan(t, hit) { return rbaLazyScan(t, lazyCall, rtest, arrEql, lazyDrive, hit) }
+    function lazyFirst(t, n) { return rbaLazyFirst(t, n, lazyCall, rtest, valEql, lazyDrive, null) }
+    function lazyScan(t, hit) { return rbaLazyScan(t, lazyCall, rtest, valEql, lazyDrive, hit) }
     // zip's i-th value of an argument, nil past its end: an Array is indexed and
     // any other is pulled as a Lazy, so an endless one still zips. Twins:
     // rubyLazyNth in abnf/jsrtrubystr.go, rbLazyNth in lib/ruby-rt.metajs.
@@ -11075,7 +11106,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             wmemo = args.length > 0 ? args[0] : null
             var wofs = wix && args.length > 0 ? Math.trunc(toF(args[0])) : 0
             var wn = [0]
-            rbaLazyFirst(t, -1, lazyCall, rtest, arrEql, lazyDrive, function(v, m) {
+            rbaLazyFirst(t, -1, lazyCall, rtest, valEql, lazyDrive, function(v, m) {
                 blockCall(blk, [v, wob ? wmemo : wn[0] + wofs])
                 wn[0] = wn[0] + 1
                 return false
@@ -11124,7 +11155,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // source's #each does - nil once an op is pending (lazyEachVal).
         if (name == "each" && blk != null) {
             if (t.kind == "each" && t.ops.length == 0) { return mcall(t.src, "each", [], blk) }
-            rbaLazyFirst(t, -1, lazyCall, rtest, arrEql, lazyDrive, function(v, m) {
+            rbaLazyFirst(t, -1, lazyCall, rtest, valEql, lazyDrive, function(v, m) {
                 lazyCall(blk, v, m)
                 return false
             })
@@ -11152,7 +11183,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return got[got.length - 1]
         }
         if (name == "rewind") { t.pos = 0; return t }
-        if (name == "size") { return t.kind == "arr" && t.ops.length == 0 ? t.items.length : null }
+        if (name == "size") {
+            var lsz = rbaLazySize(t)
+            if (lsz != "") { return lazyEndlessSize(lsz) }
+            return t.kind == "arr" && t.ops.length == 0 ? t.items.length : null
+        }
         if (name == "inspect" || name == "to_s") { return t.desc }
         if (name == "class") { return classOf(t) }
         noMethod(t, name)
@@ -11160,6 +11195,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function enumMethod(t, name, args, blk) {
         // freeze sets the flag #frozen? reads, without running a deferred method.
         if (name == "freeze") { t.__fz = true; return t }
+        // Enumerator#to_enum / #enum_for(:each): an Enumerator whose values are
+        // this one's #each, pulled one at a time so an endless one still answers
+        // first(n), and whose #size is nil as MRI's is. Twins: rubyEnumMethod in
+        // abnf/jsrt.go, rbEnumMethod in lib/ruby-rt.metajs.
+        if ((name == "to_enum" || name == "enum_for") && blk == null && (args.length == 0 || (args.length == 1 && isSym(args[0]) && args[0].s == "each"))) {
+            var lzt = t.__rlazy === true && t.lazy === true
+            var te = mkLazy("each", [], 0, null, false, lzt, (lzt ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + rinspect(t) + ":each>")
+            te.src = t
+            return te
+        }
         if (t.aseq !== undefined && aseqOwns(name)) { return aseqMethod(t, name, args, blk) }
         if (t.aseq !== undefined && t.aseq.ie !== undefined && rbaRerunsMethod(name)) { return enumMethod(t.aseq.ie, name, args, blk) }
         // An ArithmeticSequence's #first with no count is its begin, unconverted
@@ -11356,7 +11401,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 ukey = blk == null ? t[i] : blockCall(blk, [t[i]])
                 var seen = false
                 for (var uj = 0; uj < uk.length; uj++) {
-                    if (arrEql(uk[uj], ukey)) { seen = true; break }
+                    if (valEql(uk[uj], ukey)) { seen = true; break }
                 }
                 if (!seen) {
                     uq.push(t[i])
@@ -16731,6 +16776,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRStr(k)) { return "s" + k.__rs }
         // An ASCII-only box is the same key as the plain String of its text.
         if (isBin(k)) { return rbsAsciiOnly(k.__rbin) ? "s" + k.__rbin : "x" + binEnc(k) + ":" + k.__rbin }
+        // A Float is a box, keyed by its value apart from the Integers ("n"):
+        // 1.0.eql?(1) is false, and 0.0 and -0.0 render alike and are one key.
+        if (isFlo(k)) { return k.f !== k.f ? null : "f" + k.f }
         return null
     }
     // An ARRAY is a VALUE key in Ruby (Array#hash and Array#eql? are structural),
@@ -16749,11 +16797,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRStr(a) || isRStr(b)) { return rsText(a) === rsText(b) }
         // An object whose class defines eql? is keyed by it.
         if (isUserObj(b) && typeof lookupMethod(b.__class, "eql?") == "function") { return rtest(mcall(b, "eql?", [a], null)) }
-        if (Array.isArray(a) && Array.isArray(b)) { return rubyEq(a, b) }
-        if (isDict(a) && isDict(b)) { return rubyEq(a, b) }
-        // A Range is a VALUE key for the same reason an Array is: two range
-        // literals are two objects.
-        if (isRange(a) && isRange(b)) { return rangeEq(a, b) }
+        if (isFlo(a) && isFlo(b)) { return a.f == b.f }
+        // Two range literals are two objects, so a Range is a VALUE key like an
+        // Array, and all three key by eql?: {[1] => 5}[[1.0]] is nil.
+        if ((Array.isArray(a) && Array.isArray(b)) || (isDict(a) && isDict(b)) || (isRange(a) && isRange(b))) { return valEql(a, b) }
         // An ArithmeticSequence keys by eql? on what its #hash hashes, so
         // 1.step(10, 3) and (1..10).step(3) are one key and 1.0.step(10, 3) is
         // another. Twins: rbDictFind, rubyDictFind.

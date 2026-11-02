@@ -254,7 +254,7 @@ function rbOwnRows() {
         ["Hash", "<", "<=", "==", ">", ">=", "[]", "any?", "assoc", "clear", "default",
          "delete", "delete_if", "each", "each_key", "each_pair", "each_value", "empty?",
          "fetch", "filter", "filter!", "has_key?", "hash", "include?", "inspect", "invert",
-         "keep_if", "key", "key?", "keys", "length", "merge", "merge!", "reject",
+         "keep_if", "key", "key?", "keys", "length", "member?", "merge", "merge!", "reject",
          "reject!", "select", "select!", "size", "to_a", "to_h", "to_s", "transform_keys",
          "transform_values", "update", "values", "values_at"],
         ["Range", "==", "===", "begin", "cover?", "each", "end", "entries", "eql?",
@@ -288,6 +288,26 @@ function rbOwnRow(cls) {
         i = i + 1
     }
     return [cls]
+}
+// Method#owner of builtin class cls's method name: the nearest of cls and its
+// builtin superclasses whose own row lists it, else Enumerable for a class that
+// includes it and has no row between, else "" where the rows cannot tell (a
+// class or module without a row, such as Numeric or Kernel). Go twin:
+// rubyBuiltinOwner in abnf/jsrtruby.go.
+function rbBuiltinOwner(cls, name) {
+    var c = cls
+    while (c != "") {
+        var row = rbOwnRow(c)
+        var i = 1
+        while (i < row.length) {
+            if (row[i] == name) { return c }
+            i = i + 1
+        }
+        c = c == "Enumerator::ArithmeticSequence" ? "Enumerator" : ""
+    }
+    var enumerable = cls == "Array" || cls == "Hash" || cls == "Range" || cls == "Enumerator" || cls == "Enumerator::ArithmeticSequence"
+    if (enumerable && rbEnumName(name)) { return "Enumerable" }
+    return ""
 }
 var rbRespondSet = {}
 var rbRespondReady = false

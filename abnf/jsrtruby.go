@@ -135,9 +135,10 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 			// The #size of an Enumerator over a user #each (deferred or
 			// to_enum's), and a Lazy's over one, is nil, and an
-			// ArithmeticSequence's may be Infinity: rubyEnumMethod answers them.
+			// ArithmeticSequence's and an endless stream's may be Infinity:
+			// rubyEnumMethod answers them.
 			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rco"] != true &&
-				v.(*jsObject).props["kind"] != "each" && rubyAseqOf(v) == nil)
+				v.(*jsObject).props["kind"] != "each" && rubyAseqOf(v) == nil && rubyLazySize(v.(*jsObject)) == "")
 		}
 		if counted {
 			return pylen(a[:1])
@@ -771,7 +772,7 @@ func (rt *jsrt) rubyStructNew(argv []interface{}) interface{} {
 	})
 	put("eql?", func(self *jsObject, args []interface{}) interface{} {
 		o, ok := same(self, argAt(args, 0))
-		return ok && rt.rubyEqlDeep(vals(self), vals(o))
+		return ok && rt.rubyEql(vals(self), vals(o))
 	})
 	// The class name takes part, so two Struct classes' equal values hash apart.
 	put("hash", func(self *jsObject, args []interface{}) interface{} {
@@ -2394,7 +2395,7 @@ var rubyOwnNames = map[string][]string{
 	"Hash": {"<", "<=", "==", ">", ">=", "[]", "any?", "assoc", "clear", "default", "delete",
 		"delete_if", "each", "each_key", "each_pair", "each_value", "empty?", "fetch", "filter",
 		"filter!", "has_key?", "hash", "include?", "inspect", "invert", "keep_if", "key", "key?",
-		"keys", "length", "merge", "merge!", "reject", "reject!", "select", "select!", "size",
+		"keys", "length", "member?", "merge", "merge!", "reject", "reject!", "select", "select!", "size",
 		"to_a", "to_h", "to_s", "transform_keys", "transform_values", "update", "values",
 		"values_at"},
 	"Range": {"==", "===", "begin", "cover?", "each", "end", "entries", "eql?",
@@ -2426,6 +2427,44 @@ var rubyRespondSet = func() map[string]bool {
 	}
 	return out
 }()
+
+// rubyValueClassName is the name of v's class as #class answers it: an
+// Enumerator that is a Lazy or an ArithmeticSequence names that subclass.
+// Twin of rbValueClassName in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyValueClassName(v interface{}) string {
+	kind := rt.rubyClassNameRT(v)
+	if kind == "Enumerator" && rubyIsLazyEnum(v) {
+		return "Enumerator::Lazy"
+	}
+	if kind == "Enumerator" && rubyAseqOf(v) != nil {
+		return "Enumerator::ArithmeticSequence"
+	}
+	return kind
+}
+
+// rubyBuiltinOwner is Method#owner of builtin class cls's method name, or "".
+// Twin of rbBuiltinOwner in languages/lib/ruby-respond.js, which states the rule.
+func rubyBuiltinOwner(cls, name string) string {
+	for c := cls; c != ""; {
+		for _, n := range rubyOwnNames[c] {
+			if n == name {
+				return c
+			}
+		}
+		if c == "Enumerator::ArithmeticSequence" {
+			c = "Enumerator"
+		} else {
+			c = ""
+		}
+	}
+	switch cls {
+	case "Array", "Hash", "Range", "Enumerator", "Enumerator::ArithmeticSequence":
+		if rubyRespondSet["Enumerable#"+name] {
+			return "Enumerable"
+		}
+	}
+	return ""
+}
 
 // rubyResponds answers respond_to? for a value of builtin class cls.
 func rubyResponds(cls, name string) bool {
@@ -4148,25 +4187,6 @@ func (rt *jsrt) rubyHashOf(v interface{}) float64 {
 		return rt.rubyHashOf(&jsArray{elems: []interface{}{q.props["x"], q.props["b"], q.props["e"], q.props["s"]}})
 	}
 	return rubyStrHash("o" + rt.rubyInspect(rt.rubyObjectId(v)))
-}
-
-// rubyEqlDeep is #eql? on a builtin value. Twin of valEql in
-// languages/ruby-interpreter.abnf.
-func (rt *jsrt) rubyEqlDeep(a, b interface{}) bool {
-	la, aArr := a.(*jsArray)
-	lb, bArr := b.(*jsArray)
-	if !aArr || !bArr {
-		return rt.rubyEql(a, b)
-	}
-	if len(la.elems) != len(lb.elems) {
-		return false
-	}
-	for i := range la.elems {
-		if !rt.rubyEqlDeep(la.elems[i], lb.elems[i]) {
-			return false
-		}
-	}
-	return true
 }
 
 // rubyClassObj: a class or module object.

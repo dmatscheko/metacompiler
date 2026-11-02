@@ -3651,6 +3651,16 @@ function rbDictFind(keys, k) {
     if (typeof k != "object") { return 0 - 1 }
     // A String box is keyed by its text (rbDictSet stores the text).
     if (rtTag(k, "__rstr")) { return rbDictFind(keys, k["__s"]) }
+    // A Float is a box too, the same key as another Float of its value (0.0 and
+    // -0.0 included) and never an Integer's: 1.0.eql?(1) is false.
+    if (rbIsFlo(k)) {
+        var fk = 0
+        while (fk < keys.length) {
+            if (rbIsFlo(keys[fk]) && keys[fk]["f"] == k["f"]) { return fk }
+            fk = fk + 1
+        }
+        return 0 - 1
+    }
     if (rtTag(k, "__rbin")) {
         var bk = 0
         while (bk < keys.length) {
@@ -3677,7 +3687,7 @@ function rbDictFind(keys, k) {
         var q = 0
         while (q < keys.length) {
             var eq = rbAseqOf(keys[q])
-            if (eq !== null && rbEqlDeep([kq["x"], kq["b"], kq["e"], kq["s"]], [eq["x"], eq["b"], eq["e"], eq["s"]])) { return q }
+            if (eq !== null && rbEql([kq["x"], kq["b"], kq["e"], kq["s"]], [eq["x"], eq["b"], eq["e"], eq["s"]])) { return q }
             q = q + 1
         }
         return 0 - 1
@@ -3686,7 +3696,7 @@ function rbDictFind(keys, k) {
         var a = 0
         while (a < keys.length) {
             if (rbIsArr(keys[a]) || rbIsDict(keys[a]) || rbIsRange(keys[a])) {
-                if (rbEq(keys[a], k)) { return a }
+                if (rbEql(keys[a], k)) { return a }
             }
             a = a + 1
         }
@@ -3863,18 +3873,6 @@ function rbEq(l, r) {
     return rbPyEqual(l, r)
 }
 
-// #eql? on a builtin value. Twin of valEql in ruby-interpreter.abnf.
-function rbEqlDeep(a, b) {
-    if (!rbIsArr(a) || !rbIsArr(b)) { return rbEql(a, b) }
-    if (a.length != b.length) { return false }
-    var i = 0
-    while (i < a.length) {
-        if (!rbEqlDeep(a[i], b[i])) { return false }
-        i = i + 1
-    }
-    return true
-}
-
 // The first position at which an element is Ruby-== to v, or -1. Array#include?,
 // #index and #find_index are all defined on ==.
 function rbArrIndex(t, v) {
@@ -3887,14 +3885,53 @@ function rbArrIndex(t, v) {
 }
 
 // Ruby's eql?: == that does NOT convert across classes, so `1.eql?(1.0)` is
-// false where `1 == 1.0` is true. Array#uniq and Array#- compare with this.
+// false where `1 == 1.0` is true. Array, Hash and Range apply it to their parts,
+// so [1].eql?([1.0]) is false. Hash keying, Array#uniq and Array#- compare with
+// this. Twin of valEql in ruby-interpreter.abnf.
 function rbEql(a, b) {
     if (typeof a == "object" && rbUserObj(a)) {
         var em = rbFindMethod(a, "eql?")
         if (em !== undefined) { return rbTruthy(em.apply(undefined, [a, b])) }
     }
+    if (rbIsArr(a) && rbIsArr(b)) {
+        if (a.length != b.length) { return false }
+        var i = 0
+        while (i < a.length) {
+            if (!rbEql(a[i], b[i])) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    if (rbIsDict(a) && rbIsDict(b)) {
+        var ak = a["keys"]
+        var av = a["vals"]
+        var bk = b["keys"]
+        if (ak.length != bk.length) { return false }
+        var j = 0
+        while (j < ak.length) {
+            var at = rbDictFind(bk, ak[j])
+            if (at < 0) { return false }
+            if (!rbEql(av[j], b["vals"][at])) { return false }
+            j = j + 1
+        }
+        return true
+    }
+    if (rbIsRange(a) && rbIsRange(b)) {
+        if ((a["excl"] === true) != (b["excl"] === true)) { return false }
+        return rbEql(a["begin"], b["begin"]) && rbEql(a["end"], b["end"])
+    }
     if (rbClassName(a) != rbClassName(b)) { return false }
     return rbEq(a, b)
+}
+
+// The name of v's class as #class answers it: an Enumerator that is a Lazy or
+// an ArithmeticSequence names that subclass. Twin of rubyValueClassName in
+// abnf/jsrtruby.go.
+function rbValueClassName(v) {
+    var kind = rbClassName(v)
+    if (kind == "Enumerator" && v["lazy"] === true) { return "Enumerator::Lazy" }
+    if (kind == "Enumerator" && rbAseqOf(v) !== null) { return "Enumerator::ArithmeticSequence" }
+    return kind
 }
 
 // Object#<=> on a user object whose class defines no <=>: is it 0 (else nil)?
@@ -5040,6 +5077,9 @@ function rbRangeMethod(t, name, args) {
         if (blk === null && npos == 0 && (name == "each" || name == "each_entry")) {
             return rbLazyCopy(rbRangeLazy(t), null, false, "#<Enumerator: " + rbInspect(t) + ":" + name + ">")
         }
+        if (blk === null && (rbaPassOp(rbaLazyOp(name)) || name == "each_with_index" || (name == "each_with_object" && npos > 0))) {
+            return rbLazyMethod(rbLazyCopy(rbRangeLazy(t), null, false, rbInspect(t)), name, args)
+        }
         if (name == "size" && npos == 0) {
             if (strOpen) { return null }
             return rbMkFlo(Math.pow(2, 1024))
@@ -5093,7 +5133,8 @@ function rbRangeMethod(t, name, args) {
     if (name == "hash") { return rbHashOf(t) }
     if (name == "object_id") { return rbObjectId(t) }
     if (name == "dup" || name == "clone" || name == "freeze" || name == "itself") { return t }
-    if (name == "==" || name == "eql?" || name == "equal?") {
+    if (name == "eql?") { return rbEql(t, rbArgAt(args, 0)) }
+    if (name == "==" || name == "equal?") {
         var o = rbArgAt(args, 0)
         if (!rbIsRange(o)) { return false }
         return rbRangeEq(t, o)
@@ -7136,6 +7177,13 @@ function rbLazyOut(t, lz, name) {
     }
     return rbLazyFirst(lz, -1)
 }
+// #size of an endless stream from rbaLazySize's answer. Twin of
+// lazyEndlessSize in ruby-interpreter.abnf.
+function rbLazyEndlessSize(lsz) {
+    if (lsz == "slice") { rbFloDomain(Math.pow(2, 1024)) }
+    if (lsz == "inf") { return rbMkFlo(Math.pow(2, 1024)) }
+    return null
+}
 function rbLazyMethod(t, name, args) {
     var blk = rbBlockOf(args)
     var nPos = rbNPos(args)
@@ -7284,6 +7332,8 @@ function rbLazyMethod(t, name, args) {
         return t
     }
     if (name == "size") {
+        var lsz = rbaLazySize(t)
+        if (lsz != "") { return rbLazyEndlessSize(lsz) }
         if (t["kind"] == "arr" && t["ops"].length == 0) { return t["items"].length }
         return null
     }
@@ -7348,6 +7398,13 @@ function rbEnumMethod(t, name, args) {
     if (name == "freeze") {
         t["__fz"] = true
         return t
+    }
+    // Twin of the to_enum arm of enumMethod in ruby-interpreter.abnf.
+    if ((name == "to_enum" || name == "enum_for") && rbBlockOf(args) === null && (rbNPos(args) == 0 || (rbNPos(args) == 1 && args[0] === rbSym("each")))) {
+        var lzt = t["__rlazy"] === true && t["lazy"] === true
+        var te = rbMkLazy("each", [], 0, null, false, lzt, (lzt ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + rbInspect(t) + ":each>")
+        te["src"] = t
+        return te
     }
     if (t["aseq"] !== undefined && rbAseqOwns(name)) { return rbAseqMethod(t, name, args) }
     // Twin of the ArithmeticSequence arms of enumMethod in ruby-interpreter.abnf.
@@ -9204,9 +9261,7 @@ function rbMethod(target, name, args) {
     // instance_of? is identity with #class, never is_a?: `1.instance_of?(Numeric)'
     // and `[1].lazy.instance_of?(Enumerator)' are false.
     if (name == "class" || name == "instance_of?") {
-        var kind = rbClassName(target)
-        if (kind == "Enumerator" && target["lazy"] === true) { kind = "Enumerator::Lazy" }
-        if (kind == "Enumerator" && rbAseqOf(target) !== null) { kind = "Enumerator::ArithmeticSequence" }
+        var kind = rbValueClassName(target)
         if (kind != "") {
             if (name == "class") { return rbBuiltinClass(kind) }
             if (!rbUserObj(target)) { return rbArgAt(args, 0) === rbBuiltinClass(kind) }
@@ -9219,8 +9274,14 @@ function rbMethod(target, name, args) {
     // MRI's NameError when the value does not respond to it. Twin of the "method"
     // arm of rubyMethod in abnf/jsrt.go.
     if (name == "method" && !rbUserObj(target) && !rbIsFn(target) && !(rbIsObj(target) && target["__isclass"] === true)) {
-        var bkind = rbClassName(target)
+        var bkind = rbValueClassName(target)
         if (bkind != "") { return rbBuiltinMethodVal(target, bkind, rbStr(rbArgAt(args, 0))) }
+    }
+    // Object#public_methods(false) of a builtin value: its class's own public
+    // methods. Twin of the arm in rubyMethod of abnf/jsrt.go.
+    if (name == "public_methods" && rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0)) && !rbUserObj(target) && !rbIsFn(target)
+        && !(rbIsObj(target) && target["__isclass"] === true) && rbValueClassName(target) != "") {
+        return rbMethod(rbBuiltinClass(rbValueClassName(target)), "public_instance_methods", [false])
     }
     if (name == "nil?") { return rtIsNil(target) }
     // Kernel#itself / #tap, unless a user class defines its own.
@@ -9332,7 +9393,7 @@ function rbMethod(target, name, args) {
     if (name == "equal?") { return rbIdenticalP(target, rbArgAt(args, 0)) }
     if (name == "eql?" && rbFindMethod(target, name) === undefined) {
         if (rbRespondClass(target) == "" || rbIsFn(target)) { return rbIdenticalP(target, rbArgAt(args, 0)) }
-        return rbEqlDeep(target, rbArgAt(args, 0))
+        return rbEql(target, rbArgAt(args, 0))
     }
     if (name == "call" || name == "()" || name == "yield" || name == "[]" || name == "===") {
         if (rbIsFn(target)) { return target.apply(undefined, args) }
@@ -9364,14 +9425,12 @@ function rbMethod(target, name, args) {
         }
         if (rbIsFn(target)) { return target }
     }
-    // Method#name: the Symbol `#<Method: Object#x>' ends in. #owner is NOT
-    // implemented, deliberately - it has to answer the class OBJECT, and the two
-    // compiled halves reach a user class's object only through the emitted
-    // module, so one of the three engines would have to answer a synthetic
-    // stand-in. An omission is not a divergence.
-    if (name == "name") {
+    // Method#name: the Symbol `#<Method: Object#x>' ends in. Twin of the arm in
+    // mcall of ruby-interpreter.abnf, which says why #owner is a builtin's only.
+    if (name == "name" || name == "owner") {
         var mvr = rtPairGet(rbMethodFns, rbMethodRec, target)
-        if (mvr !== undefined) { return rbSym(mvr[1]) }
+        if (mvr !== undefined && name == "name") { return rbSym(mvr[1]) }
+        if (mvr !== undefined && rbBuiltinOwner(mvr[0], mvr[1]) != "") { return rbBuiltinClass(rbBuiltinOwner(mvr[0], mvr[1])) }
     }
     // NameError#name / #receiver: the hidden slots rbNameErr fills, nil for a
     // NameError the program raised itself.
@@ -9919,6 +9978,7 @@ function js_rlen(v, name) {
     if (rbIsEnum(v)) {
         if (name !== null && v["aseq"] !== undefined) { return rbAseqMethod(v, "size", []) }
         if (name !== null && v["__rlazy"] === true && v["kind"] == "each") { return null }
+        if (name !== null && v["__rlazy"] === true && rbaLazySize(v) != "") { return rbLazyEndlessSize(rbaLazySize(v)) }
         if (name !== null && v["__rco"] === true) { return null }
         if (v["__rdefer"] === true) { rbEnumForce(v) }
         return v["items"].length
@@ -10866,7 +10926,7 @@ function rbStructNew(argv) {
         return rbIsObj(o) && o["__class"] === self["__class"] && rbEq(vals(self), vals(o))
     })
     rbStructPut(cls, "eql?", function(self, o) {
-        return rbIsObj(o) && o["__class"] === self["__class"] && rbEqlDeep(vals(self), vals(o))
+        return rbIsObj(o) && o["__class"] === self["__class"] && rbEql(vals(self), vals(o))
     })
     // The class name takes part, so two Struct classes' equal values hash apart.
     rbStructPut(cls, "hash", function(self) {

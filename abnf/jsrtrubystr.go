@@ -632,6 +632,9 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		t.set("pos", float64(0))
 		return t
 	case "size":
+		if lsz := rubyLazySize(t); lsz != "" {
+			return rubyLazyEndlessSize(rt, lsz)
+		}
 		if t.props["kind"] == "arr" && len(t.props["ops"].(*jsArray).elems) == 0 {
 			return float64(len(t.props["items"].(*jsArray).elems))
 		}
@@ -668,6 +671,40 @@ func rubyLazyOp(name string) string {
 // through. Twin of rbaPassOp in languages/lib/ruby-arr.js.
 func rubyPassOp(op string) bool {
 	return op == "map" || op == "select" || op == "reject" || op == "flat_map"
+}
+
+// rubyLazySize is the #size of a stream whose source never ends: "inf", "nil",
+// "slice" (FloatDomainError) or "" for a source that ends. Twin of rbaLazySize
+// in lib/ruby-arr.js, which states the rule.
+func rubyLazySize(t *jsObject) string {
+	kind := t.props["kind"]
+	items, _ := t.props["items"].(*jsArray)
+	ops, isLazy := t.props["ops"].(*jsArray)
+	if !isLazy || !((kind == "range" && isUndefOrNull(t.props["hi"])) || (kind == "cycle" && items != nil && len(items.elems) > 0)) {
+		return ""
+	}
+	for _, op := range ops.elems {
+		switch op.(*jsObject).props["k"] {
+		case "slice":
+			return "slice"
+		case "map", "with_index", "with_object", "cons", "drop", "zip":
+		default:
+			return "nil"
+		}
+	}
+	return "inf"
+}
+
+// rubyLazyEndlessSize answers #size from rubyLazySize's verdict. Twin of
+// lazyEndlessSize in ruby-interpreter.abnf.
+func rubyLazyEndlessSize(rt *jsrt, lsz string) interface{} {
+	if lsz == "slice" {
+		rubyFloDomain(rt, math.Inf(1))
+	}
+	if lsz == "inf" {
+		return jsFlo{f: math.Inf(1)}
+	}
+	return jsNull
 }
 
 // rubyLazyBuffers: op k holds values back until a later one releases them. Twin

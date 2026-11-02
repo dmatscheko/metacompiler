@@ -222,6 +222,25 @@ function rbaPassOp(op) {
     return op == "map" || op == "select" || op == "reject" || op == "flat_map"
 }
 
+// The #size of a stream whose source never ends (an endless range, a cycle of a
+// non-empty Array): "inf" while every op keeps the count (map, with_index /
+// with_object, each_cons's size - n + 1, drop, zip), "nil" once an op makes it
+// unknown (a Lazy's select / reject / take_while / flat_map ...), "slice" when
+// an each_slice's (size + n - 1).div(n) divides Infinity, which raises
+// FloatDomainError in MRI 2.6. "" for a source that ends. Go twin:
+// rubyLazySize in abnf/jsrtrubystr.go.
+function rbaLazySize(lz) {
+    if (!((lz.kind == "range" && lz.hi === null) || (lz.kind == "cycle" && lz.items.length > 0))) { return "" }
+    var i = 0
+    while (i < lz.ops.length) {
+        var k = lz.ops[i].k
+        if (k == "slice") { return "slice" }
+        if (k != "map" && k != "with_index" && k != "with_object" && k != "cons" && k != "drop" && k != "zip") { return "nil" }
+        i = i + 1
+    }
+    return "inf"
+}
+
 // The Enumerable methods a Lazy answers EAGERLY, over the Array of all its
 // values: MRI's Lazy inherits them from Enumerable unchanged. The ones that can
 // stop early (find, include?, any?, ...) are answered by rbaLazyScan instead.

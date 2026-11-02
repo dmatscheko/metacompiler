@@ -7662,6 +7662,9 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		if blk == nil && len(pos) == 0 && (name == "each" || name == "each_entry") {
 			return rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, "#<Enumerator: "+rt.rubyInspect(t)+":"+name+">")
 		}
+		if blk == nil && (rubyPassOp(rubyLazyOp(name)) || name == "each_with_index" || (name == "each_with_object" && len(pos) > 0)) {
+			return rt.rubyLazyMethod(rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, rt.rubyInspect(t)), name, args)
+		}
 		if name == "size" && len(pos) == 0 {
 			if strOpen {
 				return jsNull
@@ -7719,7 +7722,9 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		return rt.rubyObjectId(t)
 	case "dup", "clone", "freeze", "itself":
 		return t
-	case "==", "eql?", "equal?":
+	case "eql?":
+		return rt.rubyEql(t, argAt(args, 0))
+	case "==", "equal?":
 		o, isRng := rubyIsRange(argAt(args, 0))
 		if !isRng {
 			return false
@@ -10335,7 +10340,7 @@ func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 	if kq := rubyAseqOf(k); kq != nil {
 		kc := &jsArray{elems: []interface{}{kq.props["x"], kq.props["b"], kq.props["e"], kq.props["s"]}}
 		for i, e := range keys.elems {
-			if eq := rubyAseqOf(e); eq != nil && rt.rubyEqlDeep(kc, &jsArray{elems: []interface{}{eq.props["x"], eq.props["b"], eq.props["e"], eq.props["s"]}}) {
+			if eq := rubyAseqOf(e); eq != nil && rt.rubyEql(kc, &jsArray{elems: []interface{}{eq.props["x"], eq.props["b"], eq.props["e"], eq.props["s"]}}) {
 				return i
 			}
 		}
@@ -10345,7 +10350,7 @@ func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 		return -1
 	}
 	for i, e := range keys.elems {
-		if rubyValueKey(e) && rt.rubyEq(e, k) {
+		if rubyValueKey(e) && rt.rubyEql(e, k) {
 			return i
 		}
 	}
@@ -10353,11 +10358,47 @@ func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 }
 
 // rubyEql is Ruby's eql?: == that does NOT convert across classes, so
-// `1.eql?(1.0)` is false where `1 == 1.0` is true. It is what Array#uniq
-// compares with (and what Hash keying is defined on).
+// `1.eql?(1.0)` is false where `1 == 1.0` is true. Array, Hash and Range apply
+// it to their parts, so [1].eql?([1.0]) is false. It is what Hash keying,
+// Array#uniq and Array#- compare with. Twin of valEql in
+// languages/ruby-interpreter.abnf.
 func (rt *jsrt) rubyEql(a, b interface{}) bool {
 	if m, own := rubyFindMethod(a, "eql?"); own && rubyUserObj(a) {
 		return rubyTruthy(rt.call(m, jsUndef, []interface{}{a, b}))
+	}
+	if la, isArr := a.(*jsArray); isArr {
+		if lb, ok := b.(*jsArray); ok {
+			if len(la.elems) != len(lb.elems) {
+				return false
+			}
+			for i := range la.elems {
+				if !rt.rubyEql(la.elems[i], lb.elems[i]) {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	if ak, av, isDict := dictParts(a); isDict {
+		if bk, bv, ok := dictParts(b); ok {
+			if len(ak.elems) != len(bk.elems) {
+				return false
+			}
+			for i := range ak.elems {
+				at := rt.rubyDictFind(bk, ak.elems[i])
+				if at < 0 || !rt.rubyEql(av.elems[i], bv.elems[at]) {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	if lo, isL := rubyIsRange(a); isL {
+		if ro, isR := rubyIsRange(b); isR {
+			le, _ := lo.props["excl"].(bool)
+			re, _ := ro.props["excl"].(bool)
+			return le == re && rt.rubyEql(lo.props["begin"], ro.props["begin"]) && rt.rubyEql(lo.props["end"], ro.props["end"])
+		}
 	}
 	return rubyClassName(a) == rubyClassName(b) && rt.rubyEq(a, b)
 }
@@ -11260,16 +11301,21 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	}
 	// Ruby's universal reflective methods, answered for every kind of value.
 	switch name {
+	// Object#public_methods(false) of a builtin value: its class's own public
+	// methods. Twins: mcall in ruby-interpreter.abnf, rbMethod in
+	// lib/ruby-rt.metajs.
+	case "public_methods":
+		if p, _ := rubyBlockArgs(args); len(p) > 0 && !rubyTruthy(p[0]) && !rubyUserObj(target) && !isCallable(target) {
+			if o, isObj := target.(*jsObject); !isObj || o.props["__isclass"] != true {
+				if kind := rt.rubyValueClassName(target); kind != "" {
+					return rt.rubyMethod(rt.rubyBuiltinClass(kind), "public_instance_methods", []interface{}{false})
+				}
+			}
+		}
 	// instance_of? is identity with #class, never is_a?: `1.instance_of?(Numeric)'
 	// and `[1].lazy.instance_of?(Enumerator)' are false.
 	case "class", "instance_of?":
-		if kind := rt.rubyClassNameRT(target); kind != "" {
-			if kind == "Enumerator" && rubyIsLazyEnum(target) {
-				kind = "Enumerator::Lazy"
-			}
-			if kind == "Enumerator" && rubyAseqOf(target) != nil {
-				kind = "Enumerator::ArithmeticSequence"
-			}
+		if kind := rt.rubyValueClassName(target); kind != "" {
 			if name == "class" {
 				return rt.rubyBuiltinClass(kind)
 			}
@@ -11287,7 +11333,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case "method":
 		o, isObj := target.(*jsObject)
 		isCls := isObj && o.props["__isclass"] == true
-		if kind := rt.rubyClassNameRT(target); kind != "" && !rubyUserObj(target) && !isCls && !isCallable(target) {
+		if kind := rt.rubyValueClassName(target); kind != "" && !rubyUserObj(target) && !isCls && !isCallable(target) {
 			nm := rt.rubyStr(argAt(args, 0))
 			if rt.rubyRespond(target, []interface{}{jsSym{s: nm}}) != true {
 				rt.rubyRaiseErr(name, "NameError", "undefined method `"+nm+"' for class `"+kind+"'")
@@ -11476,7 +11522,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			if rt.rubyRespondClass(target) == "" || isCallable(target) {
 				return rubyIdenticalP(target, argAt(args, 0))
 			}
-			return rt.rubyEqlDeep(target, argAt(args, 0))
+			return rt.rubyEql(target, argAt(args, 0))
 		}
 	case "call", "()", "yield", "[]", "===":
 		// A Proc / lambda / block: p.call(x), p.(x), p[x] and p.yield(x).
@@ -11529,16 +11575,19 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return target
 		}
 	case "name":
-		// Method#name: the Symbol `#<Method: Object#x>` ends in. #owner is NOT
-		// implemented in any engine and that is deliberate - it has to answer the
-		// class OBJECT, which the two compiled halves reach only through the
-		// emitted module, so one of the three would have to answer a synthetic
-		// stand-in. An omission is not a divergence.
+		// Method#name: the Symbol `#<Method: Object#x>` ends in. Twin of the arm in
+		// mcall of ruby-interpreter.abnf, which says why #owner is a builtin's only.
 		if mv, isMeth := rt.rubyMethodValOf(target); isMeth {
 			return jsSym{s: mv.name}
 		}
 		if v, ok := rt.rubyNameErrSlot(target, name, "__nmname"); ok {
 			return v
+		}
+	case "owner":
+		if mv, isMeth := rt.rubyMethodValOf(target); isMeth {
+			if own := rubyBuiltinOwner(mv.owner, mv.name); own != "" {
+				return rt.rubyBuiltinClass(own)
+			}
 		}
 	case "between?", "clamp":
 		// Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
@@ -13319,6 +13368,18 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	if name == "freeze" {
 		t.set("__fz", true)
 		return t
+	}
+	// Twin of the to_enum arm of enumMethod in ruby-interpreter.abnf.
+	if pos, blk := rubyBlockArgs(args); (name == "to_enum" || name == "enum_for") && blk == nil &&
+		(len(pos) == 0 || (len(pos) == 1 && pos[0] == interface{}(jsSym{s: "each"}))) {
+		lzt := t.props["__rlazy"] == true && t.props["lazy"] == true
+		d := "#<Enumerator: "
+		if lzt {
+			d = "#<Enumerator::Lazy: "
+		}
+		te := rubyMkLazy("each", &jsArray{}, 0, jsNull, false, lzt, d+rt.rubyInspect(t)+":each>")
+		te.set("src", t)
+		return te
 	}
 	if t.props["aseq"] != nil && rubyAseqOwns(name) {
 		return rt.rubyAseqMethod(t, name, args)

@@ -2479,6 +2479,83 @@ def s177
         v[0].step(v[1], v[2]).last == 10 && v[7].step(v[1], v[2]).last(2) == [7.0, 10.0])
 end
 
+# ===== SECTION 178: Hash keys and Array set operations compare by eql? =====
+# A Hash key matches by eql?, which never converts across classes: 1 and 1.0
+# are two keys, and an Array, Hash or Range key applies eql? to its parts, so
+# {[1] => 1}[[1.0]] is nil. A Float key is found by its value, 0.0 and -0.0
+# alike. Array#uniq / #- / #& / #| use the same rule, and Hash#eql? and
+# Range#eql? are the structural eql? itself. /usr/bin/ruby 2.6 settles each.
+def s178
+  v = [1, 1.0, 2, 2.0, 1.5, 0.0, -0.0, :a, :b]
+  h = {[v[0]] => v[7], v[0] => v[8], [v[0], [v[2]]] => v[7], v[1] => v[7]}
+  check("he178a", h[[v[1]]].nil? && h[[v[0]]] == v[7] && h[[v[0], [v[3]]]].nil? && h[[v[0], [v[2]]]] == v[7] &&
+        h[v[1]] == v[7] && h[v[0]] == v[8] && {v[1] => v[7]}[v[0]].nil? && {v[0] => v[7]}[v[1]].nil? &&
+        {v[4] => v[7]}[v[4]] == v[7] && {v[6] => v[7]}[v[5]] == v[7] && {[v[4]] => v[7]}[[v[4]]] == v[7])
+  check("he178b", !h.key?([v[1]]) && h.key?([v[0]]) && h.fetch([v[3]], v[8]) == v[8] && h.delete([v[1]]).nil? &&
+        h.size == 4 && {{v[0] => v[2]} => v[7]}[{v[0] => v[3]}].nil? && {(v[0]..v[2]) => v[7]}[v[1]..v[3]].nil? &&
+        {(v[0]..v[2]) => v[7]}[v[0]..v[2]] == v[7] && {v[1] => v[7]} == {v[1] => v[7]})
+  g = {}
+  g[v[0]] = 1
+  g[v[1]] = 2
+  g[[v[0]]] = 3
+  g[[v[1]]] = 4
+  check("he178c", g.size == 4 && g.values == [1, 2, 3, 4] && g.inspect == "{1=>1, 1.0=>2, [1]=>3, [1.0]=>4}")
+  check("he178d", [v[0], v[1], [v[0]], [v[1]], v[1]].uniq == [1, 1.0, [1], [1.0]] && [[v[0]], [v[1]]] - [[v[0]]] == [[1.0]] &&
+        ([[v[0]], [v[1]]] & [[v[1]]]) == [[1.0]] && ([[v[0]]] | [[v[1]]]) == [[1], [1.0]] &&
+        [{v[0] => v[2]}, {v[0] => v[3]}].uniq.size == 2 && [v[0]..v[2], v[1]..v[3]].uniq.size == 2 &&
+        [[v[0], [v[2]]], [v[0], [v[3]]]].uniq.size == 2)
+  check("he178e", !{v[0] => v[2]}.eql?({v[0] => v[3]}) && {v[0] => v[2]}.eql?({v[0] => v[2]}) &&
+        !(v[0]..v[2]).eql?(v[1]..v[3]) && (v[0]..v[2]).eql?(v[0]..v[2]) && (v[0]..v[2]) == (v[1]..v[3]) &&
+        ![v[0]].eql?([v[1]]) && [v[0]] == [v[1]])
+end
+
+# ===== SECTION 179: endless-stream Enumerators: blockless Range methods, Infinity #size, to_enum, Method#owner =====
+# An endless (or +Infinity) Integer range answers map / select / reject /
+# flat_map / each_with_index / each_with_object without a block with an
+# Enumerator that makes one value at a time. The #size of an Enumerator over a
+# stream that never ends (that range, a cycle, a step without an end) is
+# Infinity through map / with_index / with_object / each_cons, and
+# each_slice's (size + n - 1).div(n) raises FloatDomainError in MRI 2.6.
+# Enumerator#to_enum pulls the receiver's #each and has a nil #size. Method#owner
+# of a builtin's Method is the class or module defining it, and
+# public_methods(false) lists the class's own. /usr/bin/ruby 2.6 settles each.
+def s179err
+  yield
+rescue => e
+  "#{e.class} #{e.message}"
+end
+def s179
+  v = [1, 2, Float::INFINITY, nil, 10, 3, :m]
+  r = (v[0]..v[3])
+  check("es179a", r.map.first(2) == [1, 2] && r.each_with_object([]).first(1) == [[1, []]] &&
+        r.each_with_index.first(2) == [[1, 0], [2, 1]] && r.select.first(1) == [1] && r.reject.first(2) == [1, 2] &&
+        r.flat_map.first(2) == [1, 2] && r.map.with_index(1).first(2) == [[1, 1], [2, 2]] &&
+        r.map.inspect == "#<Enumerator: 1..:map>" && r.each_with_object(v[6]).inspect == "#<Enumerator: 1..:each_with_object(:m)>" &&
+        r.map.each { |x| break x * 7 } == 7 && r.select.each { |x| break x if x > 3 } == 4 && r.reject.next == 1 &&
+        (v[0]..v[2]).map.first(3) == [1, 2, 3] && (v[0]..v[2]).each_with_index.first(1) == [[1, 0]])
+  check("es179b", [v[0], v[1]].cycle.size == v[2] && v[0].step.with_index.size == v[2] && v[0].step.map.size == v[2] &&
+        r.map.size == v[2] && r.select.size == v[2] && r.each_with_index.size == v[2] && r.each.size == v[2] &&
+        r.each_cons(2).size == v[2] && [v[0]].cycle.map.with_index.size == v[2] && v[0].step(v[2], 2).with_object([]).size == v[2] &&
+        r.lazy.size == v[2] && r.lazy.each_with_index.size == v[2] && r.lazy.select { |x| x }.size.nil? &&
+        [].cycle.size == 0 && [v[0]].cycle(3).size == 3 && [v[0], v[1]].cycle.each_slice(2).first(1) == [[1, 2]] &&
+        s179err { r.each_slice(2).size } == "FloatDomainError Infinity" &&
+        s179err { v[0].step.each_slice(2).size } == "FloatDomainError Infinity")
+  a = v[0].step(v[2], 2)
+  check("es179c", a.to_enum.first(2) == [1.0, 3.0] && a.enum_for.first(3) == [1.0, 3.0, 5.0] && a.to_enum.size.nil? &&
+        a.to_enum.inspect == "#<Enumerator: (1.step(Infinity, 2)):each>" && v[0].step.to_enum.first(2) == [1, 2] &&
+        v[0].step(v[4], v[5]).to_enum.to_a == [1, 4, 7, 10] && v[0].step(v[4], v[5]).to_enum.size.nil? &&
+        [v[0], v[1]].cycle.to_enum.first(3) == [1, 2, 1] && r.lazy.to_enum.first(2) == [1, 2] &&
+        [v[0], v[1]].cycle.to_enum.inspect == "#<Enumerator: #<Enumerator: [1, 2]:cycle>:each>")
+  q = v[0].step(v[4], v[5])
+  check("es179d", q.method(:begin).owner == Enumerator::ArithmeticSequence && q.method(:first).owner == Enumerator::ArithmeticSequence &&
+        q.method(:with_index).owner == Enumerator && q.method(:map).owner == Enumerable && [v[0]].method(:map).owner == Array &&
+        [v[0]].method(:each_slice).owner == Enumerable && {v[0] => v[1]}.method(:member?).owner == Hash &&
+        {v[0] => v[1]}.method(:map).owner == Enumerable && v[0].method(:+).owner == Integer && "a".method(:upcase).owner == String &&
+        r.method(:each).owner == Range && q.method(:begin).inspect == "#<Method: Enumerator::ArithmeticSequence#begin>")
+  check("es179e", q.public_methods(false).sort == [:==, :===, :begin, :each, :end, :eql?, :exclude_end?, :first, :hash, :inspect, :last, :size, :step] &&
+        [v[0]].public_methods(false).sort == Array.instance_methods(false).sort && Hash.instance_methods(false).include?(:member?))
+end
+
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -2536,5 +2613,7 @@ s174() # SECTION-CALL 174
 s175() # SECTION-CALL 175
 s176() # SECTION-CALL 176
 s177() # SECTION-CALL 177
+s178() # SECTION-CALL 178
+s179() # SECTION-CALL 179
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
