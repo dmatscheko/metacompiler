@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1163** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1164** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,17 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-self ivars, NaN identity · P3 · RB · IN PROGRESS (RB worker, round 65) [V]
-Found while closing T-1153; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
-- `5[2.9]`, `5 << 2.9`, `5 >> 2.9` crash ("Float does not support '>>'"; run leg nil pointer); MRI truncates the count.
-- `5.digits(12.9)` — MRI [5]; interpreter and native give garbage floats, run crashes.
-- String#byteslice is missing (NoMethodError).
-- A bare `nil?` inside a method parses as `nil` followed by the `?;` char literal.
-- `count { break }` on an endless stream Enumerator hangs (rbaLazyEager runs "count" eagerly).
-- Compiled engines: an instance-variable read with nil as self crashes ("member ... of null"). Interpreter: `nil.instance_eval` is missing.
-- Interpreter and emitter: a user Comparable's clamp skips the min > max check.
-- Compiled engines: `n = Float::NAN; [n].include?(n)` is false; MRI true (identity first).
-- `upto` with a small receiver and a bound below 2**53 but large (e.g. 10**15) still builds an array instead of walking.
+### T-1163 ruby: include into Object, implicit-self builtins in reopened classes, breaking accumulator blocks on endless enums, instance_eval, NaN identity · P3 · RB · OPEN [V]
+Found while closing T-1157 (partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
+- Interpreter: `module M; end; class Object; include M; end; p 1` aborts ("Cannot read property 'length' of undefined" in includeInto: builtin class objects have no `__mixins`); compiled engines print 1 like MRI.
+- Compiled engines: a bare implicit-self builtin call inside a reopened builtin class fails — `class Integer; def e; [frozen?, even?]; end; end; p 4.e` raises "undefined method `even?' for 4:Integer"; MRI `[true, true]`.
+- All engines: inject/reduce, min/max/minmax with a block, and one? hang on an endless Enumerator even when the block breaks — MRI `e.inject { |a, x| break a if x > 4; a + x }` is 10, `e.max { break :mx }` is :mx.
+- All engines: Object#instance_eval / instance_exec are unimplemented (incl. `nil.instance_eval`).
+- Carried from T-1157: `n = Float::NAN; [n].include?(n)` is false in the compiled engines (MRI true, identity first) and `Float::NAN.equal?(Float::NAN)` is false in the interpreter. The Go twin's `jsFlo` is a value type with no identity; a fix needs a pointer box or a per-object stamp (~130 creation sites, mostly abnf/jsrt.go — coordinate as a shared-file change, keep run and native in step).
 
 # JS — JavaScript and TypeScript
 
@@ -1207,6 +1203,7 @@ T-1156 bash: run-time readonly through namerefs, element-nameref declarations, e
 T-1158 kotlin: per-scope local vararg function refs, System.identityHashCode — merged 3ae27e56: per-scope local vararg ::refs, System.identityHashCode, array hashCode identity in compiled halves; master four-leg probe matches kotlinc 2.2.21
 T-1160 kotlin: references to Java static members (Math::abs, System::currentTimeMillis) — merged 322c8260: references to Java static members (Math/System/Integer) call the static in all engines; master four-leg probe matches kotlinc 2.2.21
 T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` crash, hidden element locals — merged 33646300 (partial): run-time readonly refusals for read/declare/local/unset/printf -v/for/prefix, per-operand prefix declarations, w=k export w through a nameref; hidden NAME[SUB] locals and export w=7 carried to a follow-up; master probe matches bash 5.3
+T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-self ivars, NaN identity — merged d1f0a680 (partial): Float/Rational shift counts and bit index, digits radix, String#byteslice, bare nil?, stream-break count/sum/min_by..., nil-self ivars, Comparable#clamp check, walking upto; NaN identity carried to a follow-up; master four-leg probe matches ruby 2.6
 
 # Settled — do not re-open
 
