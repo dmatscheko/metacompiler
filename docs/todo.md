@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1170** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1171** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -134,11 +134,12 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local nameref (compiler), `export +x` · P3 · SH · IN PROGRESS (SH worker, round 52) [V]
-Carried over from T-1162 (closed partial); oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- Both engines: `declare -a w` (a hidden array local) through a nameref chain ending at NAME[SUB] is not emulated; the engines agree with each other but not with the oracle.
-- Compiler, pre-existing: a callee using a caller's local nameref is unsupported even for plain assignments (`f(){ local -n w=x; g; }; g(){ w=8; }; x=1; f; echo $x` — oracle 8, compiler 1), so a callee also cannot reach a hidden NAME[SUB] local that way. The compiler tracks namerefs statically; needs a run-time nameref check on the callee's by-name stores/reads where a caller could have made the name a nameref, kept cost-neutral (emit only when some function declares a local nameref of that name).
-- Both engines: `export +x NAME=V` is handled as an option where bash differs (pre-existing message mismatch).
+### T-1170 bash: parameter operators on arrays, missing element 0, set -u, circular array namerefs · P3 · SH · OPEN [V]
+Found while closing T-1166; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Interpreter: `${x:-d}`, `${x-e}`, `${x:+f}`, `${x+g}`, `${x?i}` treat an array name as unset (isSetVar ignores arrays at the param-op site, ~line 3229 of bash-interpreter.abnf). `x=(p q)` gives "d e"; oracle "p p f g". Same through namerefs (`${w:-dflt}` gives "dflt", oracle "xv").
+- Compiler: for an array with no element 0 (`y=([1]=a)`), `${y-e}` is empty and `${y+g}` gives "g"; oracle "e" and "" (rt_var returns empty when element 0 is missing).
+- Both engines: with `set -u`, reading `"$y"` for such an array should fail with "y: unbound variable", status 1.
+- Both engines: a circular local nameref given `declare -a w=x` / `local -A w=x` / `declare -ai w+=3` disagrees with the oracle (`declare -an w=()` there; bash prints uninitialised memory in its diagnostic — assert only the stable parts).
 
 # C — C subset
 
@@ -1212,6 +1213,7 @@ T-1162 bash: hidden NAME[SUB] locals through a nameref, `w=k export w=7`, hidePr
 T-1163 ruby: include into Object, implicit-self builtins in reopened classes, breaking accumulator blocks on endless enums, instance_eval, NaN identity — merged 066db318 (partial): include into Object, bare builtin calls in reopened builtin classes (+69 respond_to? names), breaking inject/reduce/min/max/one? on endless enums, instance_eval/instance_exec; Float identity carried to a follow-up; master four-leg probe matches ruby 2.6
 T-1165 kotlin: direct `java.lang.System.x()` calls in the compiler — merged e2c27fb4: java.lang.System.x() calls in the compiler, System.out (println/print/references) in both engines; master four-leg probe matches kotlinc 2.2.21
 T-1168 kotlin: System.err, `java` name shadowing in qualified java.lang rewrites — merged c274ffc6: System.err in all engines, a program binding named java (or own object System) hides java.lang.System in the compiler; master four-leg probe matches kotlinc 2.2.21 on stdout and stderr
+T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local nameref (compiler), `export +x` — merged d715bc7a: hidden NAME[SUB] array locals, compiler callee through caller's local nameref (emitted only for nameref names), declaration option-word errors; master probe matches bash 5.3
 
 # Settled — do not re-open
 
