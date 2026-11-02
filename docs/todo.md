@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1164** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1165** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,9 +103,10 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1161 kotlin: arity and Function-type checks of references to Java statics · P3 · KT · IN PROGRESS (KT worker, round 52) [V]
-Found while closing T-1160; oracle kotlinc 2.2.21. All engines.
-- `val m: (Int) -> Int = Math::abs; println(m is Function1<*, *>)` prints false; kotlinc true. The arity of a bound reference on a non-class value comes from `ktBuiltinArity(name)` (0 for abs). Overloaded statics (parseInt with 1/2/4 args) need the expected type, and Go host functions carry no arity — take the arity from the declared function type or the call-site parameter type where one exists; record the rest as a limit.
+### T-1164 kotlin: java.lang.Long::name in the compiler, function types from collection element types · P3 · KT · OPEN [V]
+Found while closing T-1161; oracle kotlinc 2.2.21.
+- Compiler (run and native): `val f = java.lang.Long::signum; println(f(-5L))` fails "js runtime error: method call 'signum' on a number"; kotlinc and the interpreter print -1. In `makeQualRef` a dotted base starting with `java` routes to `makeQualRef("Long", name)`, making an unbound kotlin Long reference instead of the java static. Pre-existing.
+- All engines: an expected function type that comes only from a collection's element type is not applied — `val fs: List<(Int) -> Int> = listOf(Math::abs); fs[0] is Function1<*, *>` prints false (kotlinc true). Push the declared element type into the builder's arguments (the element-adopt path handles only literal element types today).
 
 # GO — Go  (oracle: `go run`)
 
@@ -1204,6 +1205,7 @@ T-1158 kotlin: per-scope local vararg function refs, System.identityHashCode —
 T-1160 kotlin: references to Java static members (Math::abs, System::currentTimeMillis) — merged 322c8260: references to Java static members (Math/System/Integer) call the static in all engines; master four-leg probe matches kotlinc 2.2.21
 T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` crash, hidden element locals — merged 33646300 (partial): run-time readonly refusals for read/declare/local/unset/printf -v/for/prefix, per-operand prefix declarations, w=k export w through a nameref; hidden NAME[SUB] locals and export w=7 carried to a follow-up; master probe matches bash 5.3
 T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-self ivars, NaN identity — merged d1f0a680 (partial): Float/Rational shift counts and bit index, digits radix, String#byteslice, bare nil?, stream-break count/sum/min_by..., nil-self ivars, Comparable#clamp check, walking upto; NaN identity carried to a follow-up; master four-leg probe matches ruby 2.6
+T-1161 kotlin: arity and Function-type checks of references to Java statics — merged 817db5dc: FunctionN arity of references from declared function types and a measured java-static table; retyping lambdas keep arity; master four-leg probe matches kotlinc 2.2.21
 
 # Settled — do not re-open
 
