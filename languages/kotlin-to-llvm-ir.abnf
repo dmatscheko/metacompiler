@@ -1576,12 +1576,13 @@ DotAnonSfx  <~~ push({kind:"dotanon", t: notImplExpr("anonymous method", up.pos)
             = "." ( SkipBlock | "(" DiscardExpr ")" ) [ SkipParen ] ;
 
 // A trailing lambda is the call's LAST argument, so it is wrapped in the same
-// {at} record the other arguments use.
+// {at} record the other arguments use, marked `trail`: after a vararg that is not the
+// last parameter it binds the last parameter rather than a vararg element.
 // It may carry ANNOTATIONS, which is also Kotlin's OLD label syntax: `x2.filter @f
 // { return 2 }` is a LAMBDA_ARGUMENT whose child is an ANNOTATED_EXPRESSION wrapping the
 // lambda (psi/newLabels/oldSyntaxExpressions.txt). Annotation pushes nothing, so the
 // record still wraps exactly one lambda.
-TrailLambda <~~ push({at: pop()}) ~~>
+TrailLambda <~~ push({at: pop(), trail: true}) ~~>
             = { Annotation } Lambda ;
 // A call's argument list. Kotlin has three forms and they can be mixed:
 //   f(x)            positional
@@ -3715,8 +3716,7 @@ KwContract  = "contract" KwEnd ;
             tys.push(items[i].ty == undefined ? "" : items[i].ty)
             if (items[i].vararg) { varargAt = i }
         }
-        noteVararg(names, varargAt)
-        return {params: names, defs: defs, tys: tys, varargAt: varargAt}
+        return {params: names, defs: defs, tys: tys, varargAt: varargAt, vlate: noteVararg(names, varargAt)}
     }
     // Which parameter of a parameter LIST is the vararg. A vararg slot filled by NAME is
     // Kotlin's "only one named argument for a vararg parameter is allowed, and it must be
@@ -3728,15 +3728,24 @@ KwContract  = "contract" KwEnd ;
     // its argument whenever an unrelated function elsewhere in the file declared a
     // `vararg tags`. orderArgs holds the callee's name list and nothing else, which is
     // exactly what this key is.
+    //
+    // A vararg that is NOT the last parameter is recorded in lateVarargAt as well, and
+    // whether it is late is the result.
     var varargOfList = {}
+    var lateVarargAt = {}
+    var lateVarargN = 0
     function paramListKey(names) {
         var k = ""
         for (var i = 0; i < names.length; i++) { k = k + "\x01" + names[i] }
         return k
     }
     function noteVararg(names, at) {
-        if (at < 0) { return }
+        if (at < 0) { return false }
         varargOfList["$" + paramListKey(names)] = names[at]
+        if (at == names.length - 1) { return false }
+        lateVarargAt["$" + paramListKey(names)] = at
+        lateVarargN++
+        return true
     }
     // Place named arguments into the callee's positional slots. Unnamed arguments fill
     // from the left in order; a named one lands at its parameter's index; a slot no
@@ -3787,7 +3796,7 @@ KwContract  = "contract" KwEnd ;
         for (var j = 0; j < args.length; j++) {
             var r = args[j].at(b)
             b = r.b
-            vals.push({at: ktValThunk(r.v), aname: args[j].aname, spread: args[j].spread})
+            vals.push({at: ktValThunk(r.v), aname: args[j].aname, spread: args[j].spread, trail: args[j].trail})
         }
         if (recvV == null) { recvV = callExt(b, "js_ktrecvof", [curScopeV, emitStr(b, name), hTrue]) }
         var clsB = curF.NewBlock("")
@@ -3814,6 +3823,10 @@ KwContract  = "contract" KwEnd ;
         return true
     }
     function orderArgs(args, names) {
+        if (lateVarargN > 0 && names != undefined) {
+            var lva = lateVarargAt["$" + paramListKey(names)]
+            if (lva != undefined) { return orderLateVararg(args, names, lva) }
+        }
         var named = false
         for (var i = 0; i < args.length; i++) { if (args[i].aname != undefined) { named = true } }
         if (!named) { return args }
@@ -3845,6 +3858,44 @@ KwContract  = "contract" KwEnd ;
             last = src[q]
         }
         return inOrder ? filled : sourceOrdered(args, filled, src)
+    }
+    // A vararg parameter that is not the last one (`fun f(vararg xs: Int, tag: String)`)
+    // takes every positional argument, spread ones spliced in, or a single NAMED array;
+    // the parameters after it take only named arguments and the trailing lambda, which
+    // binds the LAST parameter. So the caller packs the vararg slot into one array and
+    // the callee binds it like any other slot (emitParamSig). Arguments are evaluated in
+    // source order, as sourceOrdered does. Twin of bindParams in kotlin-interpreter.abnf.
+    function orderLateVararg(args, names, va) {
+        var src = []
+        var elems = []
+        var pos = 0
+        for (var j = 0; j < args.length; j++) {
+            var slot = va
+            if (args[j].trail == true) { slot = names.length - 1 }
+            else if (args[j].aname != undefined) { slot = names.indexOf(args[j].aname) }
+            else if (pos < va) { slot = pos; pos++ }
+            if (slot == va) { elems.push(j) } else if (slot >= 0) { src[slot] = j }
+        }
+        var st = {vals: null}
+        var res = []
+        for (var q = 0; q < names.length; q++) {
+            var own = q == va ? lateVarargThunk(args, st, elems) : makeConst(undefined)
+            res.push({at: sourceSlotThunk(args, st, q == 0, q == va ? undefined : src[q], own)})
+        }
+        return res
+    }
+    // The packed vararg array: a named argument is the array itself, so it is spliced
+    // like a spread one.
+    function lateVarargThunk(args, st, elems) {
+        return function(b) {
+            var arrV = callExt(b, "js_arr_new", [])
+            for (var e = 0; e < elems.length; e++) {
+                var a = args[elems[e]]
+                if (a.spread == true || a.aname != undefined) { b = emitSpread(b, arrV, st.vals[elems[e]]); continue }
+                callExt(b, "js_arr_push", [arrV, st.vals[elems[e]]])
+            }
+            return {b: b, v: arrV}
+        }
     }
     // Kotlin evaluates arguments left to right AS WRITTEN, whatever slots they bind:
     // `f3(c = t(3), a = t(1))` runs t(3) first. The slot list's first thunk evaluates
@@ -3917,7 +3968,7 @@ KwContract  = "contract" KwEnd ;
     // cannot pass - so testing for it is a sound "argument absent" test.
     function emitParamSig(b, sig, argsV, off) {
         if (sig == undefined || sig == null) { return b }
-        if (sig.varargAt >= 0) {
+        if (sig.varargAt >= 0 && sig.vlate != true) {
             callExt(b, "js_scope_set", [curScopeV, emitStr(b, sig.params[sig.varargAt]),
                                         callExt(b, "js_pyrest", [argsV, handle(sig.varargAt + off)])])
         }
@@ -5636,7 +5687,7 @@ KwContract  = "contract" KwEnd ;
         while (n < args.length && args[n].aname == undefined && args[n].spread != true) { n++ }
         var tys = ktGenericArgTys(name, targs, n)
         if (tys == null) { return }
-        for (var i = 0; i < tys.length; i++) { args[i] = {at: ktAdoptThunk(args[i].at, tys[i])} }
+        for (var i = 0; i < tys.length; i++) { args[i] = {at: ktAdoptThunk(args[i].at, tys[i]), trail: args[i].trail} }
     }
     // Every name the program CALLS, so buildMain declares a builtin only for a program
     // that uses it (as ktVarSeen does for the names it reads).
@@ -5663,7 +5714,7 @@ KwContract  = "contract" KwEnd ;
                     var ar = args[ai].at(b)
                     b = ar.b
                     vals.push(ar.v)
-                    cargs.push({at: ktValThunk(ar.v), aname: args[ai].aname, spread: args[ai].spread})
+                    cargs.push({at: ktValThunk(ar.v), aname: args[ai].aname, spread: args[ai].spread, trail: args[ai].trail})
                 }
                 fitV = emitMemberFit(b, vals, lists)
             }
@@ -5779,7 +5830,7 @@ KwContract  = "contract" KwEnd ;
             }
             // A top-level function beats a nested class of its name outside that
             // class's owner, where Kotlin cannot see the class (ktMirrorNested).
-            if (classNames["$" + name] == 1 && !(topFunNames["$" + name] == true && !ktTopType(name) && ktLexType(name) == name)) {
+            if (ktClassKind(name) == 1 && !(topFunNames["$" + name] == true && !ktTopType(name) && ktLexType(name) == name)) {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
                 var objV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
@@ -6930,9 +6981,9 @@ KwContract  = "contract" KwEnd ;
                 params.push(reifiedKSlot(reified[r]))
                 defs.push(null)
             }
-            sig = {params: params, defs: defs, tys: sig.tys, varargAt: sig.varargAt}
+            sig = {params: params, defs: defs, tys: sig.tys, varargAt: sig.varargAt, vlate: sig.vlate}
         }
-        sig = {params: sig.params, defs: sig.defs, tys: sig.tys, varargAt: sig.varargAt, rty: rty}
+        sig = {params: sig.params, defs: sig.defs, tys: sig.tys, varargAt: sig.varargAt, vlate: sig.vlate, rty: rty}
         funParams["$" + items[0]] = params
         var body = items[bodyAt]
         // A non-local return somewhere inside marked this function's return-target entry;
@@ -7020,8 +7071,7 @@ KwContract  = "contract" KwEnd ;
             tys.push(cparams[i].ty == undefined ? "" : cparams[i].ty)
             if (cparams[i].vararg) { varargAt = i }
         }
-        noteVararg(names, varargAt)
-        return {params: names, defs: defs, tys: tys, varargAt: varargAt}
+        return {params: names, defs: defs, tys: tys, varargAt: varargAt, vlate: noteVararg(names, varargAt)}
     }
     // Property names declared by some class: an extension property never shadows them.
     function notePropName(name) { classPropNames["$" + name] = true }
@@ -7204,7 +7254,7 @@ KwContract  = "contract" KwEnd ;
             argVs.push(r.v)
         }
         var rn = resolvedTypeName(sup.name)
-        if (rn != null && classNames["$" + rn] == 1) {
+        if (rn != null && ktClassKind(rn) == 1) {
             var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rn)])
             var ctorV = callExt(b, "js_get", [supV, emitStr(b, "__ctor")])
             var argsV = callExt(b, "js_arr_new", [])
@@ -7320,7 +7370,7 @@ KwContract  = "contract" KwEnd ;
             ts.push(f.sig.tys[i])
         }
         var sig = {params: ps, defs: ds, tys: ts,
-                   varargAt: (f.sig.varargAt < 0 ? -1 : f.sig.varargAt + 2), rty: f.sig.rty}
+                   varargAt: (f.sig.varargAt < 0 ? -1 : f.sig.varargAt + 2), vlate: f.sig.vlate, rty: f.sig.rty}
         var saved = emitMemberExtOf
         emitMemberExtOf = emitClassTop()
         var idx = emitFunc(ps, f.body, false, false, sig)
@@ -7955,13 +8005,13 @@ KwContract  = "contract" KwEnd ;
     var declTick = 0
     var declMark = null
     var prevTick = 0
-    function noteDecl(name, supers, nested) {
+    function noteDecl(name, supers, nested, kind) {
         var ns = []
         for (var i = 0; i < supers.length; i++) { ns.push(supers[i].name) }
         declTick++
         declMark = {name: name, supers: ns}
         var rec = declRecs.length
-        declRecs.push({name: name, owner: 0 - 1, nested: nested, ctor: undefined, props: undefined, supers: ns, comp: false})
+        declRecs.push({name: name, owner: 0 - 1, nested: nested, ctor: undefined, props: undefined, supers: ns, comp: false, kind: kind})
         for (var j = 0; j < nested.length; j++) {
             if (nested[j].name != null && nested[j].rec != undefined) { declRecs[nested[j].rec].owner = rec }
         }
@@ -8082,6 +8132,17 @@ KwContract  = "contract" KwEnd ;
         if (q.indexOf(".") >= 0) { return q.split(".").join("$") }
         var sb = simpleBins["$" + name]
         return (sb != undefined && sb.length == 1) ? sb[0] : name
+    }
+    // What a simple type name written at the current emission point declares: 1 a
+    // class, 2 an object, 0 an interface, undefined nothing. classNames is keyed by the
+    // simple name, so `class A { class In }` and `class B { object In }` share an entry;
+    // the declaration the name resolves to here (ktBinKey) tells them apart.
+    function ktClassKind(name) {
+        var k = classNames["$" + name]
+        if (k == undefined) { return k }
+        var bin = ktBinKey(name)   // first: it may rebuild declRecOf
+        var r = declRecOf["$" + bin]
+        return r == undefined ? k : declRecs[r].kind
     }
     // The binary name of the class a qualified constructor call `Outer.Mid.In(...)`
     // names - path is [Outer, Mid], name In - or null when the path is not a chain
@@ -8552,7 +8613,7 @@ KwContract  = "contract" KwEnd ;
         return function(b) {
             var rv = b.NewCall(rtBareRef(), [curScopeV, emitStr(b, name), bareRefProp(name)])
             // A constructor reference takes the primary constructor's parameters.
-            if (classNames["$" + name] == 1) {
+            if (ktClassKind(name) == 1) {
                 ktDeclIndex()
                 var cps = ctorParamNames["$" + name]
                 rv = emitRefArity(b, rv, cps == undefined ? 0 : cps.length, undefined)
@@ -8719,7 +8780,7 @@ KwContract  = "contract" KwEnd ;
         var comp = parts.companion
         classNames["$" + name] = 1
         lastDeclaredClass = name
-        var drec = noteDecl(name, hdr.supers, parts.nested)
+        var drec = noteDecl(name, hdr.supers, parts.nested, 1)
         drec.ctor = ctorSig(hdr.cparams).params
         drec.comp = comp != null
         var own = {}
@@ -8849,7 +8910,7 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         classNames["$" + name] = 1
         lastDeclaredType = name
-        var drec = noteDecl(name, hdr.supers, parts.nested)
+        var drec = noteDecl(name, hdr.supers, parts.nested, 1)
         drec.ctor = ctorSig(hdr.cparams).params
         drec.comp = parts.companion != null
         var own = {}
@@ -9052,7 +9113,7 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         classNames["$" + name] = 2   // A singleton: named like a class, but never constructed.
         lastDeclaredType = name
-        noteDecl(name, hdr.supers, parts.nested)
+        noteDecl(name, hdr.supers, parts.nested, 2)
             // noteParams as well as the name, so orderArgs has the parameter list for
             // a NAMED argument to an object's method (`R.f(c = 9)`). The
             // declOpIfConvention call is the class emitter's, for the same reason: an
@@ -9092,7 +9153,7 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         interfaceNames["$" + name] = true
         lastDeclaredType = name
-        noteDecl(name, hdr.supers, parts.nested)
+        noteDecl(name, hdr.supers, parts.nested, 0)
         var sig = []
         // `from` is the interface that DECLARES the member, which is not always the one
         // a class names as its supertype (see the inheritance loop below): the copy in

@@ -8192,6 +8192,44 @@ fun s183() {
         Mc183::tag.invoke(Mc183()) == "m" && Mc183.Companion::tag.invoke() == "c" && listOf(Pc183(3)).map(Pc183::x) == listOf(3))
 }
 
+// ===== SECTION 184: a vararg before other parameters; nested types sharing a name =====
+// A vararg that is not the last parameter takes every positional argument (spread
+// ones spliced in) or one named array; the parameters after it take named arguments,
+// their defaults, and the trailing lambda, which binds the last parameter. A nested
+// class and a nested object of one simple name in different owners stay apart, and a
+// bound reference to a nested object's method has that method's arity.
+fun fv184(vararg xs: Int, tag: String) = xs.joinToString(",") + tag
+fun fd184(vararg xs: Int, tag: String = "D") = xs.joinToString(",") + tag
+fun fl184(vararg xs: Int, block: (Int) -> Int) = xs.map(block)
+fun fm184(a: Int, vararg xs: Int, b: Int = 7) = "" + a + xs.toList() + b
+var log184 = ""
+fun t184(x: Int): Int { log184 += x; return x }
+fun g184(vararg xs: Int, a: Int, b: Int = 100) = xs.sum() + a * 10 + b
+class M184(val k: Int) {
+    fun mv184(vararg xs: Int, f: (Int) -> Int) = xs.map { f(it) + k }
+    fun nv184(p: String, vararg xs: String, q: String = "Q") = p + xs.joinToString("") + q
+}
+class C184(vararg val xs: Int, val f: (Int) -> Int) { fun go() = xs.map(f) }
+class A184 { class In(val a: Int); fun mk() = In(2).a }
+class B184 { object In { fun f() = 1 } }
+class Out184 { object In { fun f(a: Int) = a * 2 } }
+class Q184 { fun f(a: Int, b: Int) = 1 }
+
+fun s184() {
+    check("var184a", fv184(1, 2, tag = "t") == "1,2t" && fv184(xs = intArrayOf(1, 2), tag = "t") == "1,2t" &&
+        fv184(*intArrayOf(1, 2), 3, tag = "t") == "1,2,3t" && fv184(tag = "q") == "q" &&
+        fd184(1, 2) == "1,2D" && fd184() == "D" && fd184(5, tag = "z") == "5z")
+    check("var184b", fl184(1, 2) { it * 10 } == listOf(10, 20) && fl184(3, block = { it + 1 }) == listOf(4) &&
+        fm184(1, 2, 3) == "1[2, 3]7" && fm184(1, 2, 3, b = 4) == "1[2, 3]4" && fm184(1) == "1[]7")
+    val o = M184(1)
+    check("var184c", o.mv184(1, 2) { it * 3 } == listOf(4, 7) && o.nv184("p", "a", "b") == "pabQ" && o.nv184("p", "a", q = "z") == "paz" &&
+        C184(4, 5) { it - 1 }.go() == listOf(3, 4) && g184(*intArrayOf(5, 6), 1, a = 2) == 132)
+    check("var184d", g184(t184(1), t184(2), b = t184(3), a = t184(4)) == 46 && log184 == "1234")
+    val oi = Out184.In
+    check("nest184e", A184().mk() == 2 && B184.In.f() == 1 && A184.In(5).a == 3 + 2 &&
+        (oi::f is Function1<*, *>) && !(oi::f is Function2<*, *, *>) && (oi::f)(4) == 8 && Q184().f(1, 2) == 1)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8373,6 +8411,7 @@ fun main() {
     s181() // SECTION-CALL 181
     s182() // SECTION-CALL 182
     s183() // SECTION-CALL 183
+    s184() // SECTION-CALL 184
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -697,7 +697,7 @@ ClassReal   <~~ ktNoteBody(up.start, up.pos); ktNoteClass(up.in, up.start, up.po
 // keyword - class Session private constructor(val id: Int). The keyword form is tried
 // first; without it the parameter list follows the class name directly.
 PrimaryCtor = { Annotation | Modifier } [ KwConstructor ] CtorParams ;
-ClassSkip   <~~ takeAll(); takeMods(); notImpl("class declaration", up.pos); push({nname: "", nval: null, inner: false}) ~~>
+ClassSkip   <~~ takeAll(); takeMods(); notImpl("class declaration", up.pos); push(kNestedRec("", null, false)) ~~>
             = KwClass KId [ SkipAngle ] [ { Annotation | Modifier } KwConstructor ] [ CtorParamsSkip ] [ ":" SuperList ] [ WhereClause ] [ SkipBlock ] ;
 // A tag-less primary-constructor parameter list for headers we only skip.
 CtorParamsSkip = "(" [ CParamSkip { "," CParamSkip } [ "," ] ] ")" ;
@@ -938,7 +938,7 @@ LocalTypeAlias <~~ push(function() {}) ~~>
 // therefore share one globalScope slot - the last one walked wins for anything that
 // resolves through globalScope, while the statement binding is per-frame and correct.
 // A local ENUM class is built for real too: EnumReal/EnumBare push the same
-// {nname, nval, inner} record ClassReal does.
+// kNestedRec record ClassReal does.
 LocalClass  <~~ push(makeLocalTypeStmt(pop())) ~~>
             = [ Modifiers ] ( EnumReal | EnumBare | ClassReal | InterfaceReal | ObjectReal ) ;
 // The shapes the real builders decline (an enum, or a body outside the member set):
@@ -1481,9 +1481,9 @@ RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
 // `emptyMap<K, V>()` and every other type-argument-carrying call are unaffected.
 MTypeArgs   <~~ push({mtargs: up.in}) ~~>
             = SkipAngle ;
-MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, lex: mc.lex, args: takeAll(), at: up.start}); retLblPop() ~~>
+MethodSfx   <~~ var mc = popMCall(); var mta = kSplitTrail(takeAll()); push({kind:"mcall", name: mc.name, targ: mc.targ, lex: mc.lex, args: mta.args, tr: mta.tr, at: up.start}); retLblPop() ~~>
             = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
-SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, lex: mcs.lex, args: takeAll(), safe: true, at: up.start}); retLblPop() ~~>
+SafeMethodSfx <~~ var mcs = popMCall(); var msta = kSplitTrail(takeAll()); push({kind:"mcall", name: mcs.name, targ: mcs.targ, lex: mcs.lex, args: msta.args, tr: msta.tr, safe: true, at: up.start}); retLblPop() ~~>
             = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
 FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
 // `receiver.{ ... }` and `receiver.(expr)` - the anonymous-method syntax of very early
@@ -1599,9 +1599,11 @@ IndexSfx    <~~ push({kind: "index", idx: kIndexArg(takeAll(), up.pos)}) ~~>
 // wrapping the lambda (psi/newLabels/oldSyntaxExpressions.txt); without them the `@f`
 // would end the call and the `{ ... }` become a second statement on the same line.
 MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { AnnLambda } | AnnLambda { AnnLambda } ;
-// Annotation pushes nothing, so this stays item-neutral: the parent still pops one
-// lambda per repetition.
-AnnLambda   = { Annotation } Lambda ;
+// Annotation pushes nothing, so the tag pops the lambda. It is marked {ktrail}: after a
+// vararg that is not the last parameter, a trailing lambda binds the LAST parameter
+// rather than a vararg element (kSplitTrail, kTrailArg).
+AnnLambda   <~~ push({ktrail: pop()}) ~~>
+            = { Annotation } Lambda ;
 
 // A call argument: a spread (*array, which splices the array into the positional
 // arguments of a vararg parameter), a NAMED argument (name = value, matched against
@@ -1848,7 +1850,9 @@ DNameKwVB   <~~ push(dName(takeAll(), false)) ~~>
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
 Call        <~~ push(makeCall(takeAll(), up.start, up.pos)); retLblPop() ~~>
-            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { Lambda } | Lambda { Lambda } ) ;
+            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { TrailLam } | TrailLam { TrailLam } ) ;
+TrailLam    <~~ push({ktrail: pop()}) ~~>
+            = Lambda ;
 // The explicit type arguments of a call - tag17<String>(x) - kept so that a reified
 // type parameter inside the callee resolves to the real type name.
 TypeArgs    <~~ push({targs: up.in}) ~~>
@@ -1914,9 +1918,9 @@ ParenSeed   = "(" Expression ")" ;
 InvokeLike  = InvokeSfx | TrailLamSfx | GenericSfx ;
 // SameLine, for the reason MArgs carries it: psi/DoubleColon.txt records a `(` that
 // OPENS a line as a new statement, not as the previous expression's argument list.
-InvokeSfx   <~~ push({kind:"invoke", args: takeAll()}) ~~>
+InvokeSfx   <~~ push({kind:"invoke", args: kSplitTrail(takeAll()).args}) ~~>
             = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { AnnLambda } ;
-TrailLamSfx <~~ push({kind:"invoke", args: takeAll()}) ~~>
+TrailLamSfx <~~ push({kind:"invoke", args: kSplitTrail(takeAll()).args}) ~~>
             = AnnLambda { AnnLambda } ;
 // A collection literal, [1, 2]. Kotlin allows it only as an annotation argument (the
 // spelling of an array constant); it is lowered to a list, which is how this subset
@@ -2221,7 +2225,7 @@ Interface   = InterfaceReal | InterfaceSkip ;
 InterfaceReal <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "interface", up.start, up.pos); buildInterface(takeAll()) ~~>
             = IfaceKw <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ CtorParamsSkip ] [ ":" SuperList ] [ WhereClause ] [ "{" { Member } "}" ] ;
-InterfaceSkip <~~ takeAll(); takeMods(); notImpl("interface", up.pos); push({nname: "", nval: null, inner: false}) ~~>
+InterfaceSkip <~~ takeAll(); takeMods(); notImpl("interface", up.pos); push(kNestedRec("", null, false)) ~~>
             = KwInterface KId [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ WhereClause ] [ SkipBlock ] ;
 // object Name [: Supertypes] { ... } is a real singleton: the member body is built
 // once (properties initialized, methods reachable through the name) and bound to the
@@ -2238,7 +2242,7 @@ ObjectReal  <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "object", up
 // PARSER builds (and its recovery corpus records without an error element) even though
 // the language forbids them on an object. At least one of the two must be present, so
 // an ordinary `object Foo` still reaches ObjectReal.
-ObjectExotic <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); push({nname: "", nval: null, inner: false}) ~~>
+ObjectExotic <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); push(kNestedRec("", null, false)) ~~>
             = KwObject KId ( SkipAngle [ { Annotation | Modifier } SkipParen ]
                            | { Annotation | Modifier } SkipParen )
               [ ":" SuperList ] [ WhereClause ] [ SkipBlock ] ;
@@ -2248,7 +2252,7 @@ ObjectExotic <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); p
 // corpus records `object Foo<T, R> private (x: Int) : Bar` with no error element in
 // it). Accepting the shape here is what lets such a file parse and be reported as not
 // implemented rather than failing at the first `<`.
-ObjectSkip  <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); push({nname: "", nval: null, inner: false}) ~~>
+ObjectSkip  <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); push(kNestedRec("", null, false)) ~~>
             = KwObject KId [ SkipAngle ] [ { Annotation | Modifier } SkipParen ] [ ":" SuperList ] [ WhereClause ] [ SkipBlock ] ;
 // enum class Dir(val dx: Int) { N(0), E(1); fun ... }: GENUINE. Each entry is a
 // singleton instance of the enum class, constructed in declaration order with its
@@ -2273,7 +2277,7 @@ EnumBare    <~~ ktNoteTypeName(up.in, "class", up.start, up.pos); buildEnum(take
 // after a `;`, the members. A plain SkipBlock here would accept every psi/EnumEntry*
 // corpus file (`enum class My { FIRST, fun foo() {} }`, `FIRST,,`, `FIRST: My(13)`), all of
 // which Kotlin rejects with "Expecting ';' after the last enum entry".
-EnumSkip    <~~ takeAll(); takeMods(); notImpl("enum class", up.pos); push({nname: "", nval: null, inner: false}) ~~>
+EnumSkip    <~~ takeAll(); takeMods(); notImpl("enum class", up.pos); push(kNestedRec("", null, false)) ~~>
             = KwEnum KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ EnumSkipBody ] ;
 // The member run after the `;` is the REAL member set, not a `{ SkipItem }` run. This
 // skip form exists for an ENTRY LIST the strict rules refused (an entry with a body,
@@ -9767,13 +9771,14 @@ NotMemberKw = :script(~~ "pure";
         // or a function may be declared after its use).
         var lazyAt = ktChainSites(suffixes)
         var lazyJc = ktNoteJavaClassRecvs(suffixes, raw)
-        var pending = lazyJc || lazyAt.length > 0
+        var pending = lazyJc || lazyAt.length > 0 || kAnyTrail(suffixes)
         var lead = ktLeadName(txt)
         var leadAt = ktAt
         return function() {
             if (pending) {
                 for (var li = 0; li < lazyAt.length; li++) { kAdoptChainSfx(lead, leadAt, suffixes, lazyAt[li]) }
                 if (lazyJc) { ktJvmPrimSfxs(suffixes) }
+                kTrailSfxs(suffixes)
                 pending = false
             }
             var cur = anytype // A member chain hops between types.
@@ -10557,6 +10562,9 @@ NotMemberKw = :script(~~ "pure";
                     va = Array.isArray(nv) ? nv : kIterable(nv)
                 }
                 declVar(p.pname, va)
+                // The parameters after a vararg take only named arguments (and the
+                // trailing lambda, which kTrailArg passed by name).
+                off = args.length
                 continue
             }
             var nm = pName(p)
@@ -10576,6 +10584,43 @@ NotMemberKw = :script(~~ "pure";
                 v = fnMetaSet(kRecvLambda(v), "", ktRecvFnArity(p.ty))
             }
             declVar(nm, v)
+        }
+    }
+    // The functions and classes whose vararg parameter is not the last one, each with
+    // its last parameter's name. Twin of lateVarargAt in kotlin-to-llvm-ir.abnf.
+    var kLateTail = {}
+    function kNoteLateVararg(name, params) {
+        for (var i = 0; i + 1 < params.length; i++) {
+            if (typeof params[i] != "string" && params[i].vararg) { kLateTail["$" + name] = pName(params[params.length - 1]) }
+        }
+    }
+    // A call's argument items with each trailing lambda's {ktrail} mark removed, and
+    // the index of the last one (-1: none).
+    function kSplitTrail(items) {
+        var args = []
+        var tr = 0 - 1
+        for (var i = 0; i < items.length; i++) {
+            var it = anytype
+            it = items[i]
+            if (typeof it != "function" && it != null && it.ktrail != undefined) { tr = args.length; args.push(it.ktrail) }
+            else { args.push(it) }
+        }
+        return {args: args, tr: tr}
+    }
+    // At a call of a name whose vararg is not its last parameter, the trailing lambda
+    // binds the last parameter, so it is passed by that name. Done when the call first
+    // runs, because the callee may be declared later in the file.
+    function kTrailArg(name, args, at) {
+        var tn = kLateTail["$" + name]
+        if (tn != undefined) { args[at] = {argname: tn, av: args[at]} }
+    }
+    function kAnyTrail(sfx) {
+        for (var i = 0; i < sfx.length; i++) { if (sfx[i].kind == "mcall" && sfx[i].tr >= 0) { return true } }
+        return false
+    }
+    function kTrailSfxs(sfx) {
+        for (var i = 0; i < sfx.length; i++) {
+            if (sfx[i].kind == "mcall" && sfx[i].tr >= 0) { kTrailArg(sfx[i].name, sfx[i].args, sfx[i].tr) }
         }
     }
     // Evaluate a call's argument items into {pos, named, nvals}: a plain thunk is
@@ -10622,6 +10667,7 @@ NotMemberKw = :script(~~ "pure";
             else if (it != undefined && it != null && it.params != undefined) { params = it.params }
             else if (it != undefined && it != null && it.rty != undefined) { rty = it.rty }
         }
+        kNoteLateVararg(name, params)
         return {name: name, params: params, body: body, rty: rty}
     }
     // The declared return type retypes the answer. It is applied at the frame runners
@@ -10692,7 +10738,7 @@ NotMemberKw = :script(~~ "pure";
     // running the statement is what puts the name in the current frame.
     function makeLocalTypeStmt(rec) {
         var nm = (rec == undefined || rec == null) ? "" : rec.nname
-        var val = (rec == undefined || rec == null) ? null : rec.nval
+        var val = (rec == undefined || rec == null) ? null : kNestedHeld[rec.nref]
         return function() { if (nm != "") { declVar(nm, val) } }
     }
     // A local function statement: bind a closure over the enclosing scope under the
@@ -11397,6 +11443,15 @@ NotMemberKw = :script(~~ "pure";
             } finally { scopes = saved }
         }
     }
+    // A declared type's {nname, nref, inner} record, which carries its value up to the
+    // owner as an INDEX into kNestedHeld: a value on the tag stack is copied under
+    // goja, and a copy loses what hangs off the original (a method closure's fnMeta
+    // arity, which `Out.In::f` reads), so the owner must be handed the original.
+    var kNestedHeld = []
+    function kNestedRec(name, v, inner) {
+        kNestedHeld.push(v)
+        return {nname: name, nref: kNestedHeld.length - 1, inner: inner}
+    }
     // Attach the nested declarations of a body: each one registered itself as a global
     // (that is what its own builder does), so they are MOVED into the outer
     // descriptor's statics under their own name.
@@ -11404,7 +11459,7 @@ NotMemberKw = :script(~~ "pure";
         for (var i = 0; i < nestedLists.length; i++) {
             var nm = nestedLists[i][0]
             if (nm == undefined) { continue }
-            cls.__statics[nm.nname] = nm.nval
+            cls.__statics[nm.nname] = kNestedHeld[nm.nref]
         }
     }
     // The companion object: a real singleton instance, reachable both under its own
@@ -11474,15 +11529,13 @@ NotMemberKw = :script(~~ "pure";
         }
         cls.__cparams = cparams
         kNoteCtorMembers(cparams)
+        kNoteLateVararg(name, cparams)
         cls.__ctor = makeCtor(cls, cparams, parentSpecs, parts.inits)
         cls.__secondary = parts.secondary
         // An `inner` class remembers WHICH class encloses it, so a BARE `Inner()`
         // written inside the outer's own member can capture the enclosing instance as
         // __outer, exactly as `outer.Inner()` does - otherwise `this@Outer` inside such
         // an instance would find no chain.
-        // Recorded HERE and not in attachNested: a descriptor that has travelled
-        // through the tag stack is a fresh copy on every read under goja (see
-        // docs/abnf-dialect-gotchas.md), so mutating nm.nval there does nothing.
         // curClassPop above removed this class's own name, so curClassTop is the
         // enclosing one.
         if (hasMod(mods, "inner")) {
@@ -11491,7 +11544,7 @@ NotMemberKw = :script(~~ "pure";
         }
         kBindType(name, cls)
         // An `inner` class keeps the enclosing instance; NestedType passes the pair up.
-        push({nname: name, nval: cls, inner: hasMod(mods, "inner")})
+        push(kNestedRec(name, cls, hasMod(mods, "inner")))
     }
     // Evaluate a member delegate and store it in the hidden backing field.
     function runDelegInit(self, dg) {
@@ -11715,7 +11768,7 @@ NotMemberKw = :script(~~ "pure";
         cls.__ctor = function() {}
         cls.__isiface = true
         kBindType(name, cls)
-        push({nname: name, nval: cls, inner: false})
+        push(kNestedRec(name, cls, false))
     }
 
     // ----- Objects (declarations, companions and object expressions) -----
@@ -11756,7 +11809,7 @@ NotMemberKw = :script(~~ "pure";
         var name = items[1]
         var obj = buildSingleton(name, items.slice(2), supersOf(items))
         kBindType(name, obj)
-        push({nname: name, nval: obj, inner: false})
+        push(kNestedRec(name, obj, false))
     }
 
     // ----- Enum classes -----
@@ -11821,7 +11874,7 @@ NotMemberKw = :script(~~ "pure";
         // Kotlin initializes the entries before the companion object, and a companion
         // property initializer that names an entry (`val def = A`) reads one.
         attachCompanion(cls, parts.companion)
-        push({nname: name, nval: cls, inner: false})
+        push(kNestedRec(name, cls, false))
     }
     function kEnumCompareTo(a, b) { return a.ordinal - b.ordinal }
     function enumEntryOf(items) {
@@ -14131,8 +14184,9 @@ NotMemberKw = :script(~~ "pure";
             targl = ktSplitTArgs(rawT.substring(1, rawT.length - 1))
             start = 2
         }
-        var args = items.slice(start)
-        var body = makeCallBody(name, targs, args, kLexAt(), targs == null ? at : undefined, to)
+        var sta = kSplitTrail(items.slice(start))
+        var args = sta.args
+        var body = makeCallBody(name, targs, args, kLexAt(), targs == null ? at : undefined, to, sta.tr)
         // A generic function or class called with explicit type arguments -
         // ident<Long>(5) - retypes the literals its parameter types fix, read when the
         // call first runs (the declaration may come later in the file).
@@ -14171,7 +14225,7 @@ NotMemberKw = :script(~~ "pure";
     }
     // A call written without type arguments has them inferred (inferAt..inferTo is
     // its source) when it first runs, because the callee may be declared later.
-    function makeCallBody(name, targs, args, lex, inferAt, inferTo) {
+    function makeCallBody(name, targs, args, lex, inferAt, inferTo, trailAt) {
         var nkey = "$" + name
         var argc = args.length
         for (var ai = 0; ai < args.length; ai++) {
@@ -14188,6 +14242,7 @@ NotMemberKw = :script(~~ "pure";
                 if (targs != null) { tinfo = kTypeArgInfo(targs, tpsW) }
                 inferPending = false
             }
+            if (trailAt >= 0) { kTrailArg(name, args, trailAt); trailAt = -1 }
             var spec = kevalArgs(args)
             // THE SYNTACTIC POSITION. `first` is a PROPERTY of IntProgression and a
             // member FUNCTION of List, so the NAME cannot decide which read an
