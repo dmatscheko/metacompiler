@@ -109,7 +109,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1149 kotlin: function reference to a vararg function called with an array, interpreter by-name static return type · P3 · KT · OPEN [V]
+### T-1149 kotlin: function reference to a vararg function called with an array, interpreter by-name static return type · P3 · KT · IN PROGRESS (KT worker, round 46) [V]
 
 Found while working T-1147. The oracle is kotlinc 2.2.21 (stdlib only).
 
