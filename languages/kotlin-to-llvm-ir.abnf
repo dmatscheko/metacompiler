@@ -2894,11 +2894,16 @@ KwContract  = "contract" KwEnd ;
             b.NewRet(callExt(b, "js_ktouter", [ps[0], ps[1]]))
         })
     }
-    // kt_bareref(env, name) is js_ktbareref: a bare `::name`.
+    // kt_bareref(env, name, prop) is js_ktbareref: a bare `::name`.
     function rtBareRef() {
-        return rtFunc("kt_bareref", 2, function(b, ps) {
-            b.NewRet(callExt(b, "js_ktbareref", [ps[0], ps[1]]))
+        return rtFunc("kt_bareref", 3, function(b, ps) {
+            b.NewRet(callExt(b, "js_ktbareref", [ps[0], ps[1], ps[2]]))
         })
+    }
+    // Whether `::name` names a top-level property no function shares, so that a
+    // lambda it holds still makes a property reference (js_ktbareref's prop).
+    function bareRefProp(name) {
+        return topValNames["$" + name] == true && funNames["$" + name] != true ? hTrue : hFalse
     }
     // kt_dthis(env) is js_ktdthis: the thisRef a delegated property is declared
     // against, the FIRST `this` up the chain.
@@ -4936,7 +4941,14 @@ KwContract  = "contract" KwEnd ;
                 if (start == 0) { names = [] }
             }
             var idx = emitFunc(names, lamBody, withRecv)
-            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+            var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
+            // A lambda with parameters records its arity, which names its
+            // kotlin.jvm.functions class (ktaElemLib); unset reads as 0. Twin of
+            // makeLambda in kotlin-interpreter.abnf.
+            if (start == 1 && params.length > 0) {
+                cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, params.length)])
+            }
+            return {b: b, v: cloV}
         }
     }
     // THE SCOPE FUNCTIONS' RECEIVER LAMBDAS. `x.apply { }`, `x.run { }`, `with(x) { }`,
@@ -5105,7 +5117,12 @@ KwContract  = "contract" KwEnd ;
         var body = items[1]
         return function(b) {
             var idx = emitFunc(sig.params, body, false, false, sig)
-            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+            var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
+            // Its arity, as makeLambda records a lambda's.
+            if (sig.params.length > 0) {
+                cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, sig.params.length)])
+            }
+            return {b: b, v: cloV}
         }
     }
 
@@ -8393,6 +8410,13 @@ KwContract  = "contract" KwEnd ;
             return notImplExpr("isInitialized on a property that is not lexically accessible here", pos)
         }
         return function(b) {
+            // A bare `::name` resolves as js_ktbareref does - a scope binding (a
+            // top-level property) before a member of the implicit receiver - and its
+            // reference answers isInitialized (js_ktfget).
+            if (base == null) {
+                var refV = b.NewCall(rtBareRef(), [curScopeV, emitStr(b, name), bareRefProp(name)])
+                return {b: b, v: callExt(b, "js_ktfget", [refV, emitStr(b, "isInitialized")])}
+            }
             var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
             return {b: b, v: callExt(b, "js_sne", [callExt(b, "js_get", [thisV, emitStr(b, name)]), hNull])}
         }
@@ -8404,7 +8428,7 @@ KwContract  = "contract" KwEnd ;
     // kCtorRefOf in kotlin-interpreter.abnf, so the two halves cannot drift apart.
     function makeBareRef(name) {
         return function(b) {
-            return {b: b, v: b.NewCall(rtBareRef(), [curScopeV, emitStr(b, name)])}
+            return {b: b, v: b.NewCall(rtBareRef(), [curScopeV, emitStr(b, name), bareRefProp(name)])}
         }
     }
     // `base::name` and `base::class`. Whether the base is a VALUE (a bound reference) or
@@ -8453,6 +8477,14 @@ KwContract  = "contract" KwEnd ;
                 var last = segs[segs.length - 1]
                 var isType = isTup || classNames["$" + last] != undefined || interfaceNames["$" + last] == true || ktTypeNameSet["$" + last] == true
                 return {b: b, v: callExt(b, isType ? "js_ktclasslit" : "js_ktvalclass", [baseV])}
+            }
+            // A property the named class declares wins over an extension function of
+            // the name, so the reference is to the property. Twin of kRefExtFn in
+            // kotlin-interpreter.abnf.
+            ktDeclIndex()
+            var ownP = classNames["$" + baseName] == 1 ? classOwnProps["$" + baseName] : undefined
+            if (ownP != undefined && ownP["$" + name] == true) {
+                return {b: b, v: callExt(b, "js_ktref", [baseV, emitStr(b, name), hUndef])}
             }
             return {b: b, v: emitRefValue(b, baseV, name)}
         }

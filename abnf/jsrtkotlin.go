@@ -2350,13 +2350,16 @@ func init() {
 		// becomes a constructor reference; a name the scope does not carry but the
 		// implicit receiver DOES becomes a bound property reference, which is what makes
 		// `::prop` inside a member a KProperty0. Anything else falls through to the
-		// ordinary name resolution. The twin is makeBareRef in kotlin-interpreter.abnf.
+		// ordinary name resolution. A truthy third argument says the name is a
+		// top-level property no function shares, so a lambda it holds still makes a
+		// property reference. The twin is makeBareRef in kotlin-interpreter.abnf.
 		m["js_ktbareref"] = func(a []uint64) uint64 {
 			sc := rt.scopeOf(a[0])
 			name := rt.toString(u(a[1]))
+			prop := rt.truthy(u(a[2]))
 			for s := sc; s != nil; s = s.parent {
 				if v, ok := s.get(name); ok {
-					if isCallable(v) {
+					if isCallable(v) && !prop {
 						ktFuncNames[v] = name
 					} else if o, isObj := v.(*jsObject); !isObj || o.props["__isclass"] != true {
 						return w(rt.ktMakeRef(&ktRefInfo{recv: ktVarHolder(s, name), name: name, bound: true}))
@@ -3251,6 +3254,17 @@ func init() {
 				}
 				if !info.bound {
 					rt.fail("member .%s of an unbound callable reference ::%s", name, info.name)
+				}
+				// A lateinit property is initialized once it is not null; the raw
+				// binding or field is read, since its getter throws until then.
+				if name == "isInitialized" {
+					var pv interface{}
+					if vs, isVar := ktVarScope(info.recv); isVar {
+						pv, _ = vs.get(info.name)
+					} else if ro, isObj := info.recv.(*jsObject); isObj {
+						pv = ro.props[info.name]
+					}
+					return w(!isUndefOrNull(pv))
 				}
 				return w(ktRefRead(info.recv, info.name))
 			}
@@ -4349,18 +4363,28 @@ func ktJvmClass(v interface{}) interface{} {
 			return ktArrJvmClass(t)
 		}
 		// An Array's class is its builder's element type's (js_ktarrclassed), else
-		// the one its elements share.
+		// the common supertype of its elements (ktaRefClass).
 		if p, isObj := t.props.(*jsObject); isObj && p.props["__jc"] != nil {
 			return p.props["__jc"]
 		}
-		var ecs []string
+		var gs [][][]string
+		var first *jsObject
 		for _, e := range t.elems {
-			if !isUndefOrNull(e) {
-				ec, _ := ktJvmClass(e).(string)
-				ecs = append(ecs, ec)
+			if e == jsNull {
+				continue
 			}
+			var g [][]string
+			if ec := ktaElemDesc(e); ec != nil {
+				if first == nil {
+					first = ec
+				}
+				ktaAddDesc(&g, ec, first, len(gs), 0)
+			} else if !ktaAddLib(&g, ktaElemLib(e)) {
+				g = nil
+			}
+			gs = append(gs, g)
 		}
-		return ktaRefClass(ecs)
+		return ktaRefClass(gs)
 	case jsGInt:
 		if t.u {
 			return "kotlin." + ktBoxTypeName(t)
@@ -11475,24 +11499,227 @@ func ktaKindOf(elem string) int {
 	return 0
 }
 
-// ktaRefClass is an Array<T>'s class, [L<T>; - T read off the elements' classes (a
-// static type argument is not kept): a java.lang class or a class the program
-// declares (a binary name in the default package: no dot, and not the <object>
-// of an anonymous one) every non-null element shares, else java.lang.Object.
-// Twin of ktaRefClass in kotlin-math.js.
-func ktaRefClass(classes []string) string {
-	c := ""
-	for _, e := range classes {
-		prog := e != "" && e[0] != '<' && !strings.Contains(e, ".")
-		if !(prog || strings.HasPrefix(e, "java.lang.")) || (c != "" && c != e) {
-			return "[Ljava.lang.Object;"
-		}
-		c = e
-	}
-	if c == "" {
+// ktaRefClass is an Array<T>'s class, [L<T>; with T read off the elements (a
+// static type argument is not kept), as the common supertype Kotlin infers for
+// arrayOf's arguments: the one type every element's class has among its
+// supertypes and that is a subtype of all the others; java.lang.Object when
+// there is none, or only an intersection (Int and String share Comparable and
+// Serializable). graphs holds one SUPERTYPE GRAPH per non-null element, entries
+// [class, its direct supertypes...] with the element's own class first; an empty
+// graph is an element whose class does not stand for its static type. Twin of
+// ktaRefClass in kotlin-math.js.
+func ktaRefClass(graphs [][][]string) string {
+	if len(graphs) == 0 || len(graphs[0]) == 0 {
 		return "[Ljava.lang.Object;"
 	}
-	return "[L" + c + ";"
+	g0 := graphs[0]
+	var common []string
+	for _, e := range g0 {
+		all := true
+		for _, g := range graphs[1:] {
+			if !ktaHas(g, e[0]) {
+				all = false
+			}
+		}
+		if all {
+			common = append(common, e[0])
+		}
+	}
+	for _, c := range common {
+		ups := map[string]bool{}
+		ktaUps(g0, c, ups)
+		least := true
+		for _, d := range common {
+			if !ups[d] {
+				least = false
+			}
+		}
+		if least {
+			if strings.HasPrefix(c, "[") {
+				return "[" + c
+			}
+			return "[L" + c + ";"
+		}
+	}
+	return "[Ljava.lang.Object;"
+}
+
+func ktaHas(g [][]string, n string) bool {
+	for _, e := range g {
+		if e[0] == n {
+			return true
+		}
+	}
+	return false
+}
+
+// ktaUps collects n and every supertype graph g reaches from it.
+func ktaUps(g [][]string, n string, out map[string]bool) {
+	if out[n] {
+		return
+	}
+	out[n] = true
+	for _, e := range g {
+		if e[0] == n {
+			for _, p := range e[1:] {
+				ktaUps(g, p, out)
+			}
+		}
+	}
+}
+
+// ktaLibSups is the direct supertypes of a library class, ok false for a class
+// whose static type an element's runtime class cannot stand for. Twin of
+// ktaLibSups in kotlin-math.js.
+func ktaLibSups(n string) ([]string, bool) {
+	switch n {
+	case "java.lang.Integer", "java.lang.Long", "java.lang.Short", "java.lang.Byte", "java.lang.Double", "java.lang.Float":
+		return []string{"java.lang.Number", "java.lang.Comparable"}, true
+	case "java.lang.Number", "java.lang.Throwable", "kotlin.Pair", "kotlin.Triple", "kotlin.text.Regex":
+		return []string{"java.io.Serializable"}, true
+	case "java.lang.Character", "java.lang.Boolean", "java.lang.Enum":
+		return []string{"java.lang.Comparable", "java.io.Serializable"}, true
+	case "java.lang.String", "java.lang.StringBuilder":
+		return []string{"java.lang.Comparable", "java.lang.CharSequence", "java.io.Serializable"}, true
+	case "kotlin.UInt", "kotlin.ULong", "kotlin.UShort", "kotlin.UByte":
+		return []string{"java.lang.Comparable"}, true
+	case "kotlin.reflect.KFunction":
+		return []string{"kotlin.Function"}, true
+	case "kotlin.Unit", "kotlin.Function", "java.io.Serializable", "kotlin.ranges.ClosedRange", "kotlin.ranges.OpenEndRange":
+		return nil, true
+	}
+	if len(n) > 29 && strings.HasPrefix(n, "kotlin.jvm.functions.Function") {
+		return []string{"kotlin.Function"}, true
+	}
+	for _, k := range []string{"Int", "Long", "Char"} {
+		switch n {
+		case "kotlin.ranges." + k + "Range":
+			return []string{"kotlin.ranges." + k + "Progression", "kotlin.ranges.ClosedRange", "kotlin.ranges.OpenEndRange"}, true
+		case "kotlin.ranges." + k + "Progression":
+			return []string{"java.lang.Iterable"}, true
+		}
+	}
+	// Every array is Cloneable and Serializable, and an array of references an
+	// Object[].
+	if len(n) > 1 && n[0] == '[' {
+		if n != "[Ljava.lang.Object;" && (n[1] == 'L' || n[1] == '[') {
+			return []string{"[Ljava.lang.Object;"}, true
+		}
+		return []string{"java.lang.Cloneable", "java.io.Serializable"}, true
+	}
+	return nil, len(n) > 10 && strings.HasPrefix(n, "java.lang.")
+}
+
+// ktaAddLib adds library class n and its supertypes to graph g; false when n is
+// not one ktaLibSups knows.
+func ktaAddLib(g *[][]string, n string) bool {
+	if ktaHas(*g, n) {
+		return true
+	}
+	s, ok := ktaLibSups(n)
+	if !ok {
+		return false
+	}
+	*g = append(*g, append([]string{n}, s...))
+	for _, p := range s {
+		ktaAddLib(g, p)
+	}
+	return true
+}
+
+// ktaElemDesc is the descriptor an Array element's supertype graph is read from:
+// its class, the enum class for an entry with a body (E.A is an E), nil for a
+// value with none. Twin of jxkElemDesc in kotlin-interpreter.abnf and
+// languages/lib/kotlin-rt.metajs.
+func ktaElemDesc(v interface{}) *jsObject {
+	o, isObj := v.(*jsObject)
+	if !isObj || o.props["__jc"] != nil || ktCollJvmClass(v) != "" {
+		return nil
+	}
+	c, _ := o.props["__class"].(*jsObject)
+	if c == nil {
+		return nil
+	}
+	if sup, _ := c.props["__super"].(*jsObject); sup != nil && c.props["__isenum"] == true && sup.props["__isenum"] == true {
+		return sup
+	}
+	return c
+}
+
+// ktaElemLib is the library class of an element with no descriptor: a reference
+// to a declared function is a KFunction, a lambda the FunctionN of the arity its
+// creation recorded (js_jsfnmeta), and any other reference unknown. Twin of
+// jxkElemLib in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktaElemLib(v interface{}) string {
+	if isCallable(v) {
+		if _, isRef := ktRefOf(v); isRef {
+			return ""
+		}
+		if _, named := ktFuncNames[v]; named {
+			return "kotlin.reflect.KFunction"
+		}
+		return "kotlin.jvm.functions.Function" + strconv.Itoa(jsvFnMeta(v).length)
+	}
+	s, _ := ktJvmClass(v).(string)
+	return s
+}
+
+func ktaDescName(c *jsObject) string {
+	if bn, _ := c.props["__bname"].(string); bn != "" {
+		return bn
+	}
+	n, _ := c.props["__name"].(string)
+	return n
+}
+
+// ktaAddDesc adds descriptor c and its supertypes (__super, __ifaces, the
+// emitter's Comparable / Serializable marks) to graph g for the k-th element.
+// Every anonymous class is named <object>, so only the first element's keeps
+// that name. Twin of jxkAddDesc in kotlin-interpreter.abnf and
+// languages/lib/kotlin-rt.metajs.
+func ktaAddDesc(g *[][]string, c *jsObject, first *jsObject, k int, depth int) {
+	n := ktaDescName(c)
+	if strings.HasPrefix(n, "<") && c != first {
+		n += strconv.Itoa(k)
+	}
+	if ktaHas(*g, n) || depth > 64 {
+		return
+	}
+	e := []string{n}
+	var ps []*jsObject
+	if sup, _ := c.props["__super"].(*jsObject); sup != nil && ktaDescName(sup) != "java.lang.Object" {
+		ps = append(ps, sup)
+	}
+	if ifs, ok := c.props["__ifaces"].(*jsArray); ok {
+		for _, x := range ifs.elems {
+			if ic, isObj := x.(*jsObject); isObj {
+				ps = append(ps, ic)
+			}
+		}
+	}
+	for _, p := range ps {
+		e = append(e, ktaDescName(p))
+	}
+	var libs []string
+	if c.props["__cmp"] == true {
+		libs = append(libs, "java.lang.Comparable")
+	}
+	if c.props["__Serializable"] == true {
+		libs = append(libs, "java.io.Serializable")
+	}
+	if c.props["__isenum"] == true {
+		libs = append(libs, "java.lang.Enum")
+	}
+	if ls, ok := ktaLibSups(n); ok {
+		libs = append(libs, ls...)
+	}
+	*g = append(*g, append(e, libs...))
+	for _, p := range ps {
+		ktaAddDesc(g, p, first, k, depth+1)
+	}
+	for _, l := range libs {
+		ktaAddLib(g, l)
+	}
 }
 
 // ktJvmListClass is the JVM class of a List: kotlin-stdlib's listOf answers
@@ -12438,10 +12665,13 @@ func ktJavaClass(jc string) *jsObject {
 		sn = ""
 	}
 	if strings.HasPrefix(jc, "[") {
-		if len(jc) == 2 {
+		switch {
+		case len(jc) == 2:
 			sn = ktJvmPrimNames[strings.IndexByte("IJDFCZBS", jc[1])]
-		} else {
-			sn = jc[cut+1 : len(jc)-1]
+		case jc[1] == 'L':
+			sn, _ = ktJavaClass(jc[2 : len(jc)-1]).props["kname"].(string)
+		default:
+			sn, _ = ktJavaClass(jc[1:]).props["kname"].(string)
 		}
 		sn += "[]"
 	}

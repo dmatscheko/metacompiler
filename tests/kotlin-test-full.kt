@@ -7867,6 +7867,74 @@ fun s177() {
         arrayOfNulls<A177>(1).javaClass.name == "[LA177;" && arrayOf(D177(), null).javaClass.name == "[LD177;")
 }
 
+// ===== SECTION 178: an Array's common element class, top-level lateinit and lambda properties as references =====
+// arrayOf's element type, and so its JVM class, is the common supertype of its
+// arguments: the one supertype every element has that is a subtype of all the
+// others (a superclass, an interface, java.lang.Comparable, Serializable, Enum,
+// Number, an Object[]), or Object when there is only an intersection. A lambda is
+// a kotlin.jvm.functions.FunctionN, a function reference a KFunction, an anonymous
+// object its own class. `::top.isInitialized` reads a top-level lateinit property,
+// `::f` of a top-level property holding a lambda is that property's KProperty0,
+// and an unbound reference to a name that is both a property of the class and an
+// extension function is the property.
+open class An178
+class Dg178 : An178()
+interface Sh178
+interface Nm178
+class S1178 : Sh178
+class S2178 : Sh178
+open class Ba178
+class M1178 : Ba178(), Sh178, Nm178
+class C1178 : Ba178(), Sh178, Nm178
+class K178 : Comparable<K178> { override fun compareTo(other: K178) = 0 }
+enum class E178 { A { override fun toString() = "a" }, B }
+enum class F178 { X }
+lateinit var late178: String
+lateinit var cb178: () -> Int
+val f178 = { x: Int -> x + 1 }
+fun two178(x: Int) = x * 2
+fun late178Set() = ::late178.isInitialized
+class Bx178(val name: String)
+fun Bx178.name(): String = "ext"
+
+fun s178() {
+    val o = "[Ljava.lang.Object;"
+    check("arr178a", arrayOf(Dg178(), An178()).javaClass.name == "[LAn178;" && arrayOf(S1178(), S2178()).javaClass.name == "[LSh178;" &&
+        arrayOf(M1178(), Ba178()).javaClass.name == "[LBa178;" && arrayOf(M1178(), C1178()).javaClass.name == o &&
+        arrayOf(E178.A, E178.B).javaClass.name == "[LE178;" && arrayOf(E178.A).javaClass.name == "[LE178;" &&
+        arrayOf(E178.B, F178.X).javaClass.name == "[Ljava.lang.Enum;" && arrayOf(K178(), "s").javaClass.name == "[Ljava.lang.Comparable;")
+    val i = 1
+    val l = 2L
+    check("arr178b", arrayOf(Unit).javaClass.name == "[Lkotlin.Unit;" && arrayOf(1 to 2).javaClass.name == "[Lkotlin.Pair;" &&
+        arrayOf(Pair(1, 2), Triple(1, 2, 3)).javaClass.name == "[Ljava.io.Serializable;" &&
+        arrayOf(1..2, 3 downTo 0).javaClass.name == "[Lkotlin.ranges.IntProgression;" && arrayOf(1..2, 'a'..'b').javaClass.name == o &&
+        arrayOf(RuntimeException(), IllegalStateException()).javaClass.name == "[Ljava.lang.RuntimeException;" &&
+        arrayOf(Error(), Exception()).javaClass.name == "[Ljava.lang.Throwable;" && arrayOf(i, l).javaClass.name == o &&
+        arrayOf(i, "s").javaClass.name == o && arrayOf(intArrayOf(1)).javaClass.name == "[[I" &&
+        arrayOf(arrayOf(1), arrayOf("a")).javaClass.name == "[[Ljava.lang.Object;" && arrayOf(intArrayOf(1), arrayOf(1)).javaClass.name == o &&
+        arrayOf(Regex("a")).javaClass.name == "[Lkotlin.text.Regex;" && arrayOf(1u).javaClass.name == "[Lkotlin.UInt;")
+    val an = object : Sh178 {}
+    check("arr178c", arrayOf({ 1 }).javaClass.name == "[Lkotlin.jvm.functions.Function0;" &&
+        arrayOf({ x: Int -> x }).javaClass.name == "[Lkotlin.jvm.functions.Function1;" &&
+        arrayOf({ x: Int, y: Int -> x + y }).javaClass.name == "[Lkotlin.jvm.functions.Function2;" &&
+        arrayOf(fun(x: Int) = x).javaClass.name == "[Lkotlin.jvm.functions.Function1;" &&
+        arrayOf(::two178).javaClass.name == "[Lkotlin.reflect.KFunction;" && arrayOf(an).javaClass.name == "[L" + an.javaClass.name + ";" &&
+        arrayOf(object : Sh178 {}, object : Sh178 {}).javaClass.name == "[LSh178;" && arrayOf(an, S1178()).javaClass.name == "[LSh178;")
+    check("arr178d", arrayOf(Dg178()).javaClass.simpleName == "Dg178[]" && arrayOf(arrayOf(1)).javaClass.simpleName == "Integer[][]" &&
+        arrayOf(intArrayOf(1)).javaClass.simpleName == "int[][]")
+    val before = ::late178.isInitialized
+    val beforeFn = late178Set()
+    val cbBefore = ::cb178.isInitialized
+    late178 = "x"
+    cb178 = { 3 }
+    check("lat178e", !before && !beforeFn && ::late178.isInitialized && late178Set() && !cbBefore && ::cb178.isInitialized && cb178() == 3)
+    val nr = " (Kotlin reflection is not available)"
+    check("ref178f", (::f178).toString() == "property f178" + nr && ::f178.name == "f178" && ::f178.get()(1) == 2 &&
+        (::f178)()(2) == 3 && (::two178).toString() == "function two178" + nr)
+    val r = Bx178::name
+    check("ref178g", r.toString() == "property name" + nr && r(Bx178("b")) == "b" && Bx178("c").name() == "ext")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8042,6 +8110,7 @@ fun main() {
     s175() // SECTION-CALL 175
     s176() // SECTION-CALL 176
     s177() // SECTION-CALL 177
+    s178() // SECTION-CALL 178
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

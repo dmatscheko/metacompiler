@@ -7026,6 +7026,57 @@ NotMemberKw = :script(~~ "pure";
         if (name == "countOneBits") { return {v: ones} }
         return {v: bits == "0" ? w : tz}
     }
+    // The descriptor an Array element's supertype graph (ktaRefClass) is read from:
+    // its class, the enum class for an entry with a body (E.A is an E), null for a
+    // value with none. Twin of ktaElemDesc in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function jxkElemDesc(v) {
+        if (v === null || v === undefined || typeof v != "object" || Array.isArray(v) || kCollJvmClass(v) != "") { return null }
+        var c = v.__class
+        if (c === undefined || c === null) { return null }
+        if (c.__isenum === true && c.__super != null && c.__super.__isenum === true) { return c.__super }
+        return c
+    }
+    // The library class of an element with no descriptor: a reference to a declared
+    // function is a KFunction, a lambda the FunctionN of its recorded arity.
+    function jxkElemLib(v) {
+        if (typeof v == "function") {
+            if (fnRefName(v) !== undefined) { return "kotlin.reflect.KFunction" }
+            return "kotlin.jvm.functions.Function" + fnMeta(v, "length")
+        }
+        return jxkClass(v)
+    }
+    function jxkDescName(c) { return (typeof c.__bname == "string" && c.__bname != "") ? c.__bname : c.__name }
+    // Adds descriptor c and its supertypes to graph g (ktaRefClass) for the k-th
+    // element. Every anonymous class is named <object>, so only the first element's
+    // keeps that name and another's never counts as common.
+    function jxkAddDesc(g, c, first, k, depth) {
+        var n = jxkDescName(c)
+        if (n.charAt(0) == "<" && c !== first) { n = n + k }
+        if (ktaHas(g, n) || depth > 64) { return }
+        var e = [n]
+        var ps = []
+        var rp = resolveParents(c)
+        for (var i = 0; i < rp.length; i++) {
+            if (jxkDescName(rp[i]) != "java.lang.Object") { ps.push(rp[i]); e.push(jxkDescName(rp[i])) }
+        }
+        var libs = []
+        var specs = c.__parentSpecs
+        if (specs != undefined) {
+            for (var si = 0; si < specs.length; si++) {
+                var sn = resolvedTypeName(specs[si].name)
+                if (sn == "Comparable") { libs.push("java.lang.Comparable") }
+                if (ktMarkerName(sn) == "Serializable") { libs.push("java.io.Serializable") }
+            }
+        }
+        if (c.__isenum === true) { libs.push("java.lang.Enum") }
+        var ls = ktaLibSups(n)
+        if (ls !== null) { for (var li = 0; li < ls.length; li++) { libs.push(ls[li]) } }
+        for (var lj = 0; lj < libs.length; lj++) { e.push(libs[lj]) }
+        g.push(e)
+        for (var pi = 0; pi < ps.length; pi++) { jxkAddDesc(g, ps[pi], first, k, depth + 1) }
+        for (var lk = 0; lk < libs.length; lk++) { ktaAddLib(g, libs[lk]) }
+    }
     function jxkClass(v) {
         if (v === undefined) { return "kotlin.Unit" }
         if (Array.isArray(v)) {
@@ -7033,12 +7084,22 @@ NotMemberKw = :script(~~ "pure";
             if (ak >= 5) { return ktaClasses[ak - 5] }
             if (ak != 1) { return kArrJvmClass(v) }
             // An Array's class is its builder's element type's (ktArrBuilderClass),
-            // else the one its elements share.
+            // else the common supertype of its elements (ktaRefClass).
             var ap = arrProps(v)
             if (ap !== undefined && ap.__jc !== undefined) { return ap.__jc }
-            var ecs = []
-            for (var i = 0; i < v.length; i++) { if (v[i] !== null && v[i] !== undefined) { ecs.push(jxkClass(v[i])) } }
-            return ktaRefClass(ecs)
+            var gs = []
+            var first = null
+            for (var i = 0; i < v.length; i++) {
+                if (v[i] === null) { continue }
+                var g = []
+                var ec = jxkElemDesc(v[i])
+                if (ec != null) {
+                    if (first == null) { first = ec }
+                    jxkAddDesc(g, ec, first, gs.length, 0)
+                } else if (!ktaAddLib(g, jxkElemLib(v[i]))) { g = [] }
+                gs.push(g)
+            }
+            return ktaRefClass(gs)
         }
         var cjc = kCollJvmClass(v)
         if (cjc != "") { return cjc }
@@ -9809,7 +9870,7 @@ NotMemberKw = :script(~~ "pure";
         var body = items.slice(start)
         return function() {
             var captured = scopes.slice(0)
-            return function() {
+            var lf = function() {
                 var args = arguments
                 // A lambda-with-receiver had its receiver parked by kRecvLambda right
                 // before the call; taking it here also clears it for the next lambda.
@@ -9895,6 +9956,10 @@ NotMemberKw = :script(~~ "pure";
                 scopes = saved
                 return last
             }
+            // A lambda with parameters records its arity, which names its
+            // kotlin.jvm.functions class (jxkElemLib); unset reads as 0. Twin of
+            // makeLambda in kotlin-to-llvm-ir.abnf.
+            return params == null ? lf : fnMetaSet(lf, "", params.length)
         }
     }
     // A { ... } block in value position (an if / when arm): run its statements in a fresh
@@ -11032,8 +11097,10 @@ NotMemberKw = :script(~~ "pure";
     function kInstallPTypes(cls, parts) {
         var t = {}
         var li = {}
+        var pn = {}
         for (var i = 0; i < parts.inits.length; i++) {
             var it = parts.inits[i]
+            if (it.prop != undefined) { pn["$" + it.prop] = true }
             if (it.prop != undefined && it.ty != undefined && it.ty != "") { t["$" + it.prop] = it.ty }
             // Which properties are `lateinit var`. A lateinit property cannot hold
             // null in Kotlin, so "the field is still null" IS "not initialized yet" -
@@ -11044,6 +11111,7 @@ NotMemberKw = :script(~~ "pure";
         }
         cls.__ptypes = t
         cls.__lateinit = li
+        cls.__pnames = pn  // The body's property names (kRefExtFn).
     }
     // Whether `name` is a lateinit property of this object's class chain.
     function kIsLateinit(o, name) {
@@ -12303,7 +12371,10 @@ NotMemberKw = :script(~~ "pure";
             for (var i = sc.length - 1; i >= 0; i--) {
                 if (ho.call(sc[i], name)) {
                     var raw = sc[i][name]
-                    if (typeof raw != "function" && !(raw !== null && typeof raw == "object" && raw.__isclass === true)) {
+                    // A top-level property holding a lambda is still a KProperty0: only
+                    // a declared function's binding is the function itself.
+                    var topVal = typeof raw == "function" && sc[i] === globalScope && fnRefNames.indexOf(name) < 0
+                    if (topVal || typeof raw != "function" && !(raw !== null && typeof raw == "object" && raw.__isclass === true)) {
                         return propRefOf(kVarHolder(sc[i], name), name)
                     }
                     return kCtorRefOf(vr())
@@ -12456,6 +12527,13 @@ NotMemberKw = :script(~~ "pure";
         if (r.kbound && r.obj !== null && typeof r.obj == "object") {
             if (hasOwn(r.obj, r.pname)) { return false }
             return extFor(r.pname, r.obj) != null
+        }
+        // A property the class itself declares wins. Twin of makeQualRef in
+        // kotlin-to-llvm-ir.abnf.
+        if (cls.__pnames != undefined && cls.__pnames["$" + r.pname] === true) { return false }
+        var cps = cls.__cparams
+        if (cps != undefined) {
+            for (var i = 0; i < cps.length; i++) { if (cps[i].prop && cps[i].pname == r.pname) { return false } }
         }
         return extFor(r.pname, {__class: cls}) != null
     }
@@ -12706,8 +12784,8 @@ NotMemberKw = :script(~~ "pure";
         var sn = jc.substring(cut + 1)
         if ((cut >= 0 && jc.charAt(cut) == "$" && kAllDigits(sn)) || jc == "<object>") { sn = "" }
         if (jc.charAt(0) == "[") {
-            sn = jc.length == 2 ? kJvmPrimNames["IJDFCZBS".indexOf(jc.charAt(1))] : jc.substring(cut + 1, jc.length - 1)
-            sn = sn + "[]"
+            var ej = jc.charAt(1) == "L" ? jc.substring(2, jc.length - 1) : jc.substring(1)
+            sn = (jc.length == 2 ? kJvmPrimNames["IJDFCZBS".indexOf(jc.charAt(1))] : kJavaClass(ej).kname) + "[]"
         }
         return {__kclass: true, kname: sn, jname: jc}
     }
@@ -12895,11 +12973,12 @@ NotMemberKw = :script(~~ "pure";
         }
         return function() {
             var captured = scopes.slice(0)
-            return function() {
+            // Its arity, as makeLambda records a lambda's.
+            return fnMetaSet(function() {
                 var base = captured.slice(0)
                 base.push({})
                 return runFrame(base, undefined, false, params, arguments, 0, body)
-            }
+            }, "", params.length)
         }
     }
     // A local extension function: registered when its declaration statement runs.

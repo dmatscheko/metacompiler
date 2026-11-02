@@ -825,24 +825,134 @@ function ktaResultKind(recv, name) {
     return 1
 }
 
-// An Array<T>'s class, [L<T>; - T read off the elements' classes (a static type
-// argument is not kept): a java.lang class or a class the program declares (a
-// binary name in the default package: no dot, and not the <object> of an
-// anonymous one) every non-null element shares, else java.lang.Object.
-function ktaRefClass(classes) {
-    var c = ""
+// An Array<T>'s class, [L<T>; with T read off the elements (a static type argument
+// is not kept), as the common supertype Kotlin infers for arrayOf's arguments:
+// the one type every element's class has among its supertypes and that is a
+// subtype of all the others; java.lang.Object when there is none, or only an
+// intersection (Int and String share Comparable and Serializable). graphs holds
+// one SUPERTYPE GRAPH per non-null element, entries [class, its direct
+// supertypes...] with the element's own class first and every supertype reached
+// listed; an empty graph is an element whose class does not stand for its static
+// type. Go twin: ktaRefClass in abnf/jsrtkotlin.go.
+function ktaRefClass(graphs) {
+    var obj = "[Ljava.lang.Object;"
+    if (graphs.length == 0 || graphs[0].length == 0) { return obj }
+    var g0 = graphs[0]
+    var common = []
     var i = 0
-    while (i < classes.length) {
-        var e = classes[i]
-        if (typeof e != "string") { return "[Ljava.lang.Object;" }
-        var prog = e.length > 0 && e.charAt(0) != "<" && e.indexOf(".") < 0
-        if (!prog && (e.length < 11 || e.substring(0, 10) != "java.lang.")) { return "[Ljava.lang.Object;" }
-        if (c != "" && c != e) { return "[Ljava.lang.Object;" }
-        c = e
+    while (i < g0.length) {
+        var n = g0[i][0]
+        var all = true
+        var k = 1
+        while (k < graphs.length) {
+            if (!ktaHas(graphs[k], n)) { all = false }
+            k = k + 1
+        }
+        if (all) { common.push(n) }
         i = i + 1
     }
-    if (c == "") { return "[Ljava.lang.Object;" }
-    return "[L" + c + ";"
+    i = 0
+    while (i < common.length) {
+        var ups = []
+        ktaUps(g0, common[i], ups)
+        var least = true
+        var j = 0
+        while (j < common.length) {
+            if (ups.indexOf(common[j]) < 0) { least = false }
+            j = j + 1
+        }
+        if (least) {
+            if (common[i].charAt(0) == "[") { return "[" + common[i] }
+            return "[L" + common[i] + ";"
+        }
+        i = i + 1
+    }
+    return obj
+}
+// Whether graph g has an entry for class n.
+function ktaHas(g, n) {
+    var i = 0
+    while (i < g.length) {
+        if (g[i][0] == n) { return true }
+        i = i + 1
+    }
+    return false
+}
+// Collects n and every supertype graph g reaches from it into out.
+function ktaUps(g, n, out) {
+    if (out.indexOf(n) >= 0) { return }
+    out.push(n)
+    var i = 0
+    while (i < g.length) {
+        if (g[i][0] == n) {
+            var j = 1
+            while (j < g[i].length) {
+                ktaUps(g, g[i][j], out)
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+// The direct supertypes of a library class (java.io.Serializable,
+// java.lang.Comparable and the rest are leaves here), null for a class whose
+// static type an element's runtime class cannot stand for - listOf(1) is a
+// Collections$SingletonList typed List, a sequence some private class.
+function ktaLibSups(n) {
+    if (typeof n != "string") { return null }
+    var nc = ["java.lang.Number", "java.lang.Comparable"]
+    var cs = ["java.lang.Comparable", "java.io.Serializable"]
+    var ser = ["java.io.Serializable"]
+    if (n == "java.lang.Integer" || n == "java.lang.Long" || n == "java.lang.Short" || n == "java.lang.Byte" ||
+        n == "java.lang.Double" || n == "java.lang.Float") { return nc }
+    if (n == "java.lang.Number" || n == "java.lang.Throwable" || n == "kotlin.Pair" || n == "kotlin.Triple" ||
+        n == "kotlin.text.Regex") { return ser }
+    if (n == "java.lang.Character" || n == "java.lang.Boolean" || n == "java.lang.Enum") { return cs }
+    if (n == "java.lang.String" || n == "java.lang.StringBuilder") {
+        return ["java.lang.Comparable", "java.lang.CharSequence", "java.io.Serializable"]
+    }
+    if (n == "kotlin.UInt" || n == "kotlin.ULong" || n == "kotlin.UShort" || n == "kotlin.UByte") { return ["java.lang.Comparable"] }
+    if (n == "kotlin.reflect.KFunction" || (n.length > 29 && n.substring(0, 29) == "kotlin.jvm.functions.Function")) {
+        return ["kotlin.Function"]
+    }
+    var rk = ["Int", "Long", "Char"]
+    var r = 0
+    while (r < rk.length) {
+        if (n == "kotlin.ranges." + rk[r] + "Range") {
+            return ["kotlin.ranges." + rk[r] + "Progression", "kotlin.ranges.ClosedRange", "kotlin.ranges.OpenEndRange"]
+        }
+        if (n == "kotlin.ranges." + rk[r] + "Progression") { return ["java.lang.Iterable"] }
+        r = r + 1
+    }
+    // Every array is Cloneable and Serializable, and an array of references an
+    // Object[].
+    if (n.length > 1 && n.charAt(0) == "[") {
+        if (n != "[Ljava.lang.Object;" && (n.charAt(1) == "L" || n.charAt(1) == "[")) { return ["[Ljava.lang.Object;"] }
+        return ["java.lang.Cloneable", "java.io.Serializable"]
+    }
+    if (n == "kotlin.Unit" || n == "kotlin.Function" || n == "java.io.Serializable" || n == "kotlin.ranges.ClosedRange" ||
+        n == "kotlin.ranges.OpenEndRange" || (n.length > 10 && n.substring(0, 10) == "java.lang.")) { return [] }
+    return null
+}
+// Adds library class n and its supertypes to graph g; false when n is not one
+// ktaLibSups knows.
+function ktaAddLib(g, n) {
+    if (ktaHas(g, n)) { return true }
+    var s = ktaLibSups(n)
+    if (s === null) { return false }
+    var e = [n]
+    var i = 0
+    while (i < s.length) {
+        e.push(s[i])
+        i = i + 1
+    }
+    g.push(e)
+    i = 0
+    while (i < s.length) {
+        ktaAddLib(g, s[i])
+        i = i + 1
+    }
+    return true
 }
 
 // The kind a member's fresh List of n elements takes when kotlin-stdlib answers it

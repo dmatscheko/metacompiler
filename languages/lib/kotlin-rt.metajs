@@ -4311,6 +4311,86 @@ function ktArrClassed(a, jc) {
     if (jc != "") { arrPropsSet(a, {__jc: jc}) }
     return a
 }
+// ktaElemDesc / ktaElemLib / ktaAddDesc (jsrtkotlin.go): an Array element's
+// supertype graph for ktaRefClass, read off its class descriptor (an enum
+// entry's enum class), else off its library class.
+function ktaElemDesc(v) {
+    if (!ktIsObj(v) || Array.isArray(v)) { return null }
+    if (v["__jc"] !== undefined || ktCollJvmClass(v) != "") { return null }
+    var c = v["__class"]
+    if (!ktIsObj(c)) { return null }
+    var sup = c["__super"]
+    if (c["__isenum"] === true && ktIsObj(sup)) {
+        if (sup["__isenum"] === true) { return sup }
+    }
+    return c
+}
+function ktaElemLib(v) {
+    if (k4Fn(v)) {
+        if (k4IsRef(ktRefOf(v))) { return "" }
+        if (rtPairGet(k4NameFns, k4NameStrs, v) !== undefined) { return "kotlin.reflect.KFunction" }
+        return "kotlin.jvm.functions.Function" + fnMeta(v, "length")
+    }
+    return jxkClass(v)
+}
+function ktaDescName(c) {
+    var bn = c["__bname"]
+    if (typeof bn == "string") { if (bn != "") { return bn } }
+    return c["__name"]
+}
+function ktaAddDesc(g, c, first, k, depth) {
+    var n = ktaDescName(c)
+    if (n.charAt(0) == "<" && c !== first) { n = n + k }
+    if (ktaHas(g, n) || depth > 64) { return undefined }
+    var e = [n]
+    var ps = []
+    var sup = c["__super"]
+    if (ktIsObj(sup)) {
+        if (ktaDescName(sup) != "java.lang.Object") { ps.push(sup) }
+    }
+    var ifs = c["__ifaces"]
+    if (Array.isArray(ifs)) {
+        var i = 0
+        while (i < ifs.length) {
+            if (ktIsObj(ifs[i])) { ps.push(ifs[i]) }
+            i = i + 1
+        }
+    }
+    var j = 0
+    while (j < ps.length) {
+        e.push(ktaDescName(ps[j]))
+        j = j + 1
+    }
+    var libs = []
+    if (c["__cmp"] === true) { libs.push("java.lang.Comparable") }
+    if (c["__Serializable"] === true) { libs.push("java.io.Serializable") }
+    if (c["__isenum"] === true) { libs.push("java.lang.Enum") }
+    var ls = ktaLibSups(n)
+    if (ls !== null) {
+        j = 0
+        while (j < ls.length) {
+            libs.push(ls[j])
+            j = j + 1
+        }
+    }
+    j = 0
+    while (j < libs.length) {
+        e.push(libs[j])
+        j = j + 1
+    }
+    g.push(e)
+    j = 0
+    while (j < ps.length) {
+        ktaAddDesc(g, ps[j], first, k, depth + 1)
+        j = j + 1
+    }
+    j = 0
+    while (j < libs.length) {
+        ktaAddLib(g, libs[j])
+        j = j + 1
+    }
+    return undefined
+}
 function jxkClass(v) {
     if (v === undefined) { return "kotlin.Unit" }
     if (k4IsCursor(v)) {
@@ -4321,18 +4401,29 @@ function jxkClass(v) {
         if (ak >= 5) { return ktaClasses[ak - 5] }
         if (ak != 1) { return ktArrJvmClass(v) }
         // An Array's class is its builder's element type's (js_ktarrclassed), else
-        // the one its elements share.
+        // the common supertype of its elements (ktaRefClass).
         var ap = arrProps(v)
         if (ap !== undefined) {
             if (ap["__jc"] !== undefined) { return ap["__jc"] }
         }
-        var ecs = []
+        var gs = []
+        var first = anytype
+        first = null
         var i = 0
         while (i < v.length) {
-            if (!rtIsNil(v[i])) { ecs.push(jxkClass(v[i])) }
+            if (v[i] !== null) {
+                var g = []
+                var ec = anytype
+                ec = ktaElemDesc(v[i])
+                if (ec !== null) {
+                    if (first === null) { first = ec }
+                    ktaAddDesc(g, ec, first, gs.length, 0)
+                } else if (!ktaAddLib(g, ktaElemLib(v[i]))) { g = [] }
+                gs.push(g)
+            }
             i = i + 1
         }
-        return ktaRefClass(ecs)
+        return ktaRefClass(gs)
     }
     var cjc = ktCollJvmClass(v)
     if (cjc != "") { return cjc }
@@ -7776,7 +7867,9 @@ function ktJavaClass(jc) {
     }
     if (jc == "<object>") { sn = "" }
     if (jc.charAt(0) == "[") {
-        if (jc.length == 2) { sn = ktJvmPrimName(jc.charAt(1)) } else { sn = jc.substring(cut + 1, jc.length - 1) }
+        if (jc.length == 2) { sn = ktJvmPrimName(jc.charAt(1)) }
+        else if (jc.charAt(1) == "L") { sn = ktJavaClass(jc.substring(2, jc.length - 1))["kname"] }
+        else { sn = ktJavaClass(jc.substring(1))["kname"] }
         sn = sn + "[]"
     }
     var o = ktClassLit(sn)
@@ -11697,6 +11790,12 @@ function js_ktfget(o, name) {
         if (info["bound"] !== true) {
             fail("member ." + name + " of an unbound callable reference ::" + info["name"])
         }
+        // Twin of the isInitialized arm of js_ktfget in abnf/jsrtkotlin.go.
+        if (name == "isInitialized") {
+            var rr = info["recv"]
+            if (k6IsVarHolder(rr)) { return !rtIsNil(scopeGet(rr["__ktvs"], info["name"])) }
+            return ktIsObj(rr) && !rtIsNil(rr[info["name"]])
+        }
         return k6RefGet(info["recv"], info["name"])
     }
     // ::topLevelFun is the closure itself, and KFunction.name is the name the
@@ -13207,11 +13306,12 @@ function ktTypeMarker(name) {
 // DOES becomes a BOUND property reference, which is what makes `::prop` inside a
 // member a KProperty0; anything else falls through to ordinary name resolution.
 // js_ktnameval is how the name is remembered so KFunction.name still answers.
-function js_ktbareref(env, name) {
+// A truthy prop says the name is a top-level property no function shares.
+function js_ktbareref(env, name, prop) {
     var v = anytype
     v = k6Find(env, name)
     if (!ktMiss(v)) {
-        if (!ktIsFn(v) && !(ktIsObj(v) && v["__isclass"] === true)) {
+        if ((prop && ktIsFn(v)) || (!ktIsFn(v) && !(ktIsObj(v) && v["__isclass"] === true))) {
             return ktMakeRef(k4bRefInfo(k6VarHolder(k6Owner(env, name), name), name, true, false, "", undefined))
         }
         return js_ktctorref(js_ktnameval(v, name))
