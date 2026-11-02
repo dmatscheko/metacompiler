@@ -3207,7 +3207,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (gp != "" && !refQuiet) { diagErr("warning: " + gp + ": maximum nameref depth (8) exceeded\n") }
                     // A readonly NAME abandons the line with status 2 (bash 5.3), as an
                     // expansion error does.
-                    if (tn != null && roRefusedV(tn)) { storeFail(); return "" }
+                    if (tn != null && roRefusedV(tn, "m")) { storeFail(); return "" }
                     if (tn != null) { d = storeAttr(tn, d, false) }
                     return d
                 }
@@ -4863,7 +4863,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The default is stored, and expands, under the array's attributes.
             // Read through a nameref that is an array, no element is set.
             if (refIsArr(name)) { refArrBad(); return "" }
-            if (blank && roRefused(name, "")) { storeFail(); return "" }
+            if (blank && roRefused(name, "", "m")) { storeFail(); return "" }
             if (blank) { var d = elemVal(name, null, (wordT != null) ? wordJoin(wordT()) : ""); if (!arithErr) { arrSet(name, sub, d) }; return d }
             return v
         }
@@ -5650,7 +5650,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arLhsSet(name, key, v) {
         if (arithErr) { return }
         // A readonly name is an arithmetic error: (( )) and let fail, $(( )) abandons the line.
-        if (roRefusedV(name)) { arithErr = true; return }
+        if (roRefusedV(name, (key == null) ? "cm" : "cc")) { arithErr = true; return }
         arSet(name, key, numToStr(v))
     }
     // An arithmetic store of s to NAME (NAME[key]). bash's bind_int_variable looks the name
@@ -6153,7 +6153,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arStore(nm, key, v) {
         if (arNoeval > 0 || arithErr) { return v }
         if (key == AR_NOSUB) { diagErr(arPfx + "`" + nm + "[]': not a valid identifier\n"); return v }
-        if (roRefusedV(nm)) { arBad = true; arithErr = true; return v }
+        if (roRefusedV(nm, (key == null) ? "cm" : "cc")) { arBad = true; arithErr = true; return v }
         arSet(nm, key, numToStr(v))
         return v
     }
@@ -6635,7 +6635,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     diagErr(as[k].lbl + "[" + as[k].isrc + "]: cannot assign list to array member\n")
                     abortSignal = {ret: 1, isExit: 1, soft: 1}
                 }
-                else if (roRefusedV(as[k].name)) { abortSignal = {ret: 1, isExit: 1, soft: 1} }
+                else if (roRefusedV(as[k].name, (as[k].lit != null) ? "c" : ((as[k].idxT != null) ? "cc" : "m"))) { abortSignal = {ret: 1, isExit: 1, soft: 1} }
                 else { runAssign(as[k], false, false) }
                 var ab = takeAbort()
                 if (ab != null) { return ab }
@@ -6650,8 +6650,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // Is NAME readonly? Then says so (`bash: [who]NAME: readonly variable`). Twin of roRefused
-    // in bash-to-llvm-ir.abnf.
-    function roRefused(name, who) {
+    // in bash-to-llvm-ir.abnf. look: the warnings the store's own lookups print through a
+    // circular nameref before its global refuses it, in order, c "circular name reference"
+    // and m "maximum nameref depth": a scalar store binds the name (m), an array literal
+    // looks it up once (c), an element twice (cc), an arithmetic store looks it up and
+    // binds it (cm).
+    function roRefused(name, who, look) {
         // A store through a nameref is refused by the variable it names, and names that;
         // through a circular one refGlobal resolves, by that global variable.
         if (anyRef && attrOn(refVars, name)) {
@@ -6663,7 +6667,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var gn = refGlobal(name)
                 if (gn != "") {
                     if (!globalEntry(gn).ar) { return false }
-                    if (!refQuiet) { diagErr("warning: " + name + ": maximum nameref depth (8) exceeded\n") }
+                    var lk
+                    for (lk = 0; lk < look.length && !refQuiet; lk++) {
+                        diagErr("warning: " + name + ((look.charAt(lk) == "c") ? ": circular name reference\n" : ": maximum nameref depth (8) exceeded\n"))
+                    }
                     diagErr(who + gn + ": readonly variable\n")
                     return true
                 }
@@ -6675,9 +6682,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // roRefused for a store of a value: a nameref with no value takes the value first, which
     // must name a variable before the nameref's readonly refuses it (refSelfBad, refRoBad).
-    function roRefusedV(name) {
+    function roRefusedV(name, look) {
         if (refVoid(name)) { return false }
-        return roRefused(name, "")
+        return roRefused(name, "", look)
     }
     // Is NAME a nameref with no value (unset or empty)? A store through it is one to the
     // nameref itself. Twin of rt_nref_void.
@@ -7104,7 +7111,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nm = asgs[k].aname
             if (asgs[k].bad != null) { diagErr("`" + asgs[k].bad + "': not a valid identifier\n"); continue }
             // A readonly name keeps its value, unexpanded; the command still runs.
-            if (roRefused(nm, "")) { continue }
+            if (roRefused(nm, "", "c")) { continue }
             var v = (asgs[k].val != null) ? wordJoin(asgs[k].val()) : ""
             if (asgs[k].op == "+=") { v = quietVal(nm) + v }
             if (!undo) { storeAttr(nm, v, false); continue }
@@ -7681,7 +7688,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var res = normBytes(pf.e)
         if (dest != null) {
-            if (roRefusedV(dest)) { return 1 }
+            if (roRefusedV(dest, "m")) { return 1 }
             var svp = arPfx
             arPfx = "printf: "
             storeAttr(dest, cutNul(res), true)
@@ -7790,7 +7797,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o.s != null && (skp == null || skp < 0)) { diagErr(who + ": " + o.s + ": invalid line count\n"); return 1 }
         if (o.c != null && (qn == null || qn <= 0)) { diagErr(who + ": " + o.c + ": invalid callback quantum\n"); return 1 }
         if (!isIdentText(nm)) { diagErr(who + ": `" + nm + "': not a valid identifier\n"); return 1 }
-        if (roRefused(nm, "")) { return 1 }
+        if (roRefused(nm, "", "c")) { return 1 }
         if (refIsArr(nm)) { diagErr(who + ": `': not a valid identifier\n"); return 1 }
         nm = refArrStore(nm)
         if (assocFact(nm, false)) { diagErr(who + ": " + nm + ": not an indexed array\n"); return 1 }
@@ -7904,10 +7911,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (badArr) { diagErr("read: `" + arrName + "': not a valid identifier\n") }
         var rec = readRec(o.raw, o.dlm, o.nch)
         if (badArr) { return 1 }
-        if (arrName != null && roRefused(arrName, "")) { return 1 }
+        if (arrName != null && roRefused(arrName, "", "c")) { return 1 }
         if (arrName != null && refIsArr(arrName)) { diagErr("read: `': not a valid identifier\n"); return 1 }
         if (arrName != null) { arrName = refArrStore(arrName) }
-        if (arrName == null && names.length == 0 && roRefused("REPLY", "")) { return 2 }
+        if (arrName == null && names.length == 0 && roRefused("REPLY", "", "m")) { return 2 }
         var st = rec.eof ? 1 : 0
         // -N splits nothing, as an empty IFS.
         var seps = o.whole ? "" : (isSetVar("IFS") ? vars["$IFS"] : " \t\n")
@@ -7928,7 +7935,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var k
         for (k = 0; k < names.length && !arithErr; k++) {
             if (!bashIsRef(names[k])) { diagErr("read: `" + names[k] + "': not a valid identifier\n"); st = 1; break }
-            if (roRefusedV(names[k])) { st = (k < names.length - 1) ? 2 : 1; break }
+            if (roRefusedV(names[k], "m")) { st = (k < names.length - 1) ? 2 : 1; break }
             storeAttr(names[k], vs[k], true)
             // A refused subscript, like a readonly name: 2 and the rest unset, 1 for the last.
             if (takeSubBad()) { st = (k < names.length - 1) ? 2 : 1; break }
@@ -9734,7 +9741,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k
             for (k = 0; k < vals.length; k++) {
                 // A readonly name ends the loop at its first pass, status 1.
-                if (roRefused(fname, "")) { setStatus(1); return 1 }
+                if (roRefused(fname, "", "m")) { setStatus(1); return 1 }
                 // A nameref control variable is made to refer to each word in turn, unless its
                 // chain is circular, when the word is stored (storeAttr, refGlobStore).
                 var fRef = anyRef && attrOn(refVars, fname) && refGlobal(fname) == ""

@@ -9423,6 +9423,13 @@ int rt_ar_nset(char *nm, char *k, char *v, int at)
         if (i >= 0) {
             nm = varnames[i];
             if (k == 0) k = "0";
+            /* That global's readonly (at & 8) refuses the store. */
+            if ((at & 8) != 0) {
+                rt_berr("", nm, "readonly variable");
+                arith_err = 1;
+                rt_nref_unglob();
+                return 0;
+            }
         } else {
             if (k == 0) return 0;
             rt_nref_unref(nm);

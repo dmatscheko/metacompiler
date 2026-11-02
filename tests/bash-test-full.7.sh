@@ -403,6 +403,32 @@ s151() {
   } 2>&1)
   check rfb5 "$(s151s "$e")" 's151g: readonly variable;n 1;s151g: readonly variable;m 1;o 5;'
 }
+# ===== SECTION 152: a store through a function's circular nameref to a readonly global =====
+# After `readonly w` of a function's nameref w that refers to itself, the global w is
+# readonly. A store through the nameref warns as its own lookups do before the global refuses
+# it: a scalar store binds the name ("maximum nameref depth"), an array literal looks it up
+# once and an element twice ("circular name reference"), an arithmetic store looks it up and
+# binds it. Every expected value is bash 5.3's.
+s152() {
+  local e
+  s152s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; case $l in "warning: w: circular name reference") l=c ;; "warning: w: maximum nameref depth (8) exceeded") l=m ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s152a() { local -n w=w; readonly w; echo "-"; w=q; echo no; }
+  s152b() { local -n w=w; readonly w; echo "-"; w=(q); echo no; }
+  s152c() { local -n w=w; readonly w; echo "-"; w[1]=q; echo no; }
+  s152d() { local -n w=w; readonly w; echo "-"; w+=(q); echo no; }
+  s152e() { local -n w=w; readonly w; echo "-"; w[1]+=q; echo no; }
+  e=$( (s152a) 2>&1; (s152b) 2>&1; (s152c) 2>&1; (s152d) 2>&1; (s152e) 2>&1)
+  check crr1 "$(s152s "$e")" 'local: warning: w: circular name reference;c;c;m;-;m;w: readonly variable;local: warning: w: circular name reference;c;c;m;-;c;w: readonly variable;local: warning: w: circular name reference;c;c;m;-;c;c;w: readonly variable;local: warning: w: circular name reference;c;c;m;-;c;w: readonly variable;local: warning: w: circular name reference;c;c;m;-;c;c;w: readonly variable;'
+  s152h() { local -n w=w; readonly w; echo "-"; (( w = 3 )); echo "x $?"; }
+  s152k() { local -n w=w; readonly w; echo "-"; (( w[1] = 3 )); echo "x $?"; }
+  s152m() { local -n w=w; readonly w; echo "-"; (( w++ )); echo "x $?"; }
+  s152n() { local -n w=w; readonly w; echo "-"; let w=3; echo "x $?"; }
+  e=$( (s152h) 2>&1; (s152k) 2>&1; (s152m) 2>&1; (s152n) 2>&1)
+  check crr2 "$(s152s "$e")" 'local: warning: w: circular name reference;c;c;m;-;c;m;w: readonly variable;x 1;local: warning: w: circular name reference;c;c;m;-;c;c;c;w: readonly variable;x 1;local: warning: w: circular name reference;c;c;m;-;c;c;m;w: readonly variable;x 1;local: warning: w: circular name reference;c;c;m;-;c;m;w: readonly variable;x 1;'
+  s152g() { local -n w=w; declare -gr w; echo "-"; w=(q); echo no; }
+  e=$( (s152g) 2>&1; echo "s $?")
+  check crr3 "$(s152s "$e")" 'local: warning: w: circular name reference;c;-;c;w: readonly variable;s 1;'
+}
 # ===== END SECTIONS =====
 
 s135  # SECTION-CALL 135
@@ -422,5 +448,6 @@ s148  # SECTION-CALL 148
 s149  # SECTION-CALL 149
 s150  # SECTION-CALL 150
 s151  # SECTION-CALL 151
+s152  # SECTION-CALL 152
 echo "full: $checks checks, $fails failures"
 exit $fails

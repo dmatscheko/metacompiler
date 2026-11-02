@@ -3557,7 +3557,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             st.NewCall(rtArNset, [nv, nullStr, st.NewCall(rtInt2str, v), refAttrs(st, nv, true)])
         }
         else if (k == null) { storeVar(st, name, st.NewCall(rtInt2str, v)) }
-        else if (rk.nm != null) { st.NewCall(rtArNset, [rk.nm, k, st.NewCall(rtInt2str, v), zero]) }
+        else if (rk.nm != null) {
+            // Through a nameref, the readonly of the variable it lands on (refAttrs).
+            var eat = attrOn(refVars, name) ? refAttrs(st, rk.nm, true) : zero
+            st.NewCall(rtArNset, [rk.nm, k, st.NewCall(rtInt2str, v), eat])
+        }
         else {
             // An element store makes a set scalar its element 0 (rt_arr_adopt).
             var adB = curF.NewBlock(""), isB = curF.NewBlock("")
@@ -4360,7 +4364,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     emitAbortCheck(rr.ro).NewBr(rr.ok)
                     b = rr.ok
                 }
-                b = refRoAbort(b, as[k].name)
+                b = refRoAbort(b, as[k].name, (as[k].lit != null) ? "c" : ((as[k].idxT != null) ? "cc" : "m"))
                 b = emitAssign(b, as[k], false, mk)
             }
             asgKept = kept
@@ -5746,20 +5750,31 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // An assignment statement through the nameref NAME to a readonly variable, which is
     // known when it runs (refAttrs), says so naming that variable and abandons the line.
-    // Twin of the nameref arm of roRefused in bash-interpreter.abnf.
-    function refRoAbort(b, name) {
+    // Through a circular chain that lands on the global variable the store's own lookups
+    // warn first, as look lists them (roRefused in bash-interpreter.abnf, its twin).
+    function refRoAbort(b, name, look) {
         if (!attrOn(refVars, name)) { return b }
         var anyRo = false
         var k
-        for (k = 0; k < varIdList.length; k++) { if (attrOn(roVars, varIdList[k])) { anyRo = true } }
+        for (k = 0; k < varIdList.length; k++) {
+            if (attrOn(roVars, varIdList[k]) || (globalAttrs(varIdList[k], true) & 8) != 0) { anyRo = true }
+        }
         if (!anyRo) { return b }
         var nv = gepStr(b, name)
         var ro = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(refAttrs(b, nv, true), llvm.constant.NewInt(i32, 8)), zero)
+        var circ = b.NewLoad(i32, gNrefGbase)
         // One with no value is refused by the store, once the value is known to name a
         // variable (rt_setvar_byname).
         ro = b.NewAnd(ro, b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtNrefVoid, nv), zero))
         var roB = curF.NewBlock(""), okB = curF.NewBlock("")
         b.NewCondBr(ro, roB, okB)
+        var cwB = curF.NewBlock(""), msgB = curF.NewBlock("")
+        roB.NewCondBr(roB.NewICmp(llvm.enum.IPredNE, circ, zero), cwB, msgB)
+        for (k = 0; k < look.length; k++) {
+            emitDiag(cwB, gepStr(cwB, "warning: " + name + ((look.charAt(k) == "c") ? ": circular name reference\n" : ": maximum nameref depth (8) exceeded\n")))
+        }
+        cwB.NewBr(msgB)
+        roB = msgB
         emitDiag(roB, roB.NewCall(rtStrcat, [roB.NewCall(rtNrefBase, nv), gepStr(roB, ": readonly variable\n")]))
         roB.NewStore(one, gArithErr)
         emitAbortCheck(roB).NewBr(okB)
