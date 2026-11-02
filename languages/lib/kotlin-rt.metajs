@@ -4433,6 +4433,9 @@ function jxkClass(v) {
     if (cjc != "") { return cjc }
     if (typeof v == "function") {
         if (!k4IsRef(ktRefOf(v)) && rtPairGet(k4NameFns, k4NameStrs, v) === undefined) { return KT_LAMBDA_CLASS }
+        // A reference is an instance of an anonymous class (AKt$main$r$1), whose
+        // stand-in is an object expression's.
+        return "<object>"
     }
     var n = k4bSimpleName(v)
     if (sintIs(v) && sintUns(v)) { return "kotlin." + n }
@@ -8167,11 +8170,20 @@ var ktStdJvm = {"$Pair": "kotlin.Pair", "$Triple": "kotlin.Triple",
     "$Set": "java.util.Set", "$MutableSet": "java.util.Set", "$Map": "java.util.Map",
     "$MutableMap": "java.util.Map", "$Collection": "java.util.Collection",
     "$MutableCollection": "java.util.Collection", "$Runnable": "java.lang.Runnable"}
+// js_ktrefarity(ref, n) (jsrtkotlin.go): a reference's arity, which k4FnTypeIs
+// reads - the n parameters of what it names, and an unbound one's receiver.
+function js_ktrefarity(ref, n) {
+    var info = ktRefOf(ref)
+    if (k4IsRef(info)) { fnMetaSet(ref, "", info["bound"] === true ? n : n + 1) }
+    return ref
+}
 // js_ktclasslit(base) is `base::class`.
 function js_ktclasslit(base) {
     if (ktIsObj(base)) {
         if (typeof base["__kttype"] == "string") {
             var tn = base["__kttype"]
+            // A java array class name is the emitter's `Array<Dog>::class`.
+            if (tn.charAt(0) == "[") { return ktArrKClass(tn) }
             if (ktIsBuiltinExc(tn)) { return ktClassOfDesc(ktExcHierarchy()[tn]) }
             var sj = ktStdJvm["$" + tn]
             if (sj !== undefined) { return ktJavaClass(sj) }
@@ -8185,12 +8197,12 @@ function js_ktclasslit(base) {
     if (jc != "") { return ktJavaClass(jc) }
     var c = ktClassOf(base)
     if (c !== undefined) { return ktClassOfDesc(c) }
-    // An array's KClass is IntArray / Array over its java class, a lambda's its
-    // hidden class.
+    // An array's KClass is IntArray / Array over its java class, a lambda's or a
+    // reference's its hidden class.
     var vjc = jxkClass(base)
     if (typeof vjc == "string") {
         if (vjc.charAt(0) == "[") { return ktArrKClass(vjc) }
-        if (vjc == KT_LAMBDA_CLASS) { return ktJavaClass(vjc) }
+        if (vjc == KT_LAMBDA_CLASS || vjc == "<object>") { return ktJavaClass(vjc) }
     }
     return ktClassLit(k4bSimpleName(base))
 }
@@ -8418,12 +8430,16 @@ function k4bMextWalk(start, mangled) {
 function js_ktrecvlam(f) {
     if (!ktIsFn(f)) { return f }
     return function () {
-        var a = rtCopyArr(arguments)
-        if (a.length == 0) { return ktWithRecv(null, f, []) }
-        // The receiver is passed on as the first ARGUMENT as well as bound as
-        // `this`: `fun scoped(block: FeatScope.() -> Int) = block(Scope(9))` with
-        // `scoped { s -> s.v }` reads it through the value parameter.
-        return ktWithRecv(a[0], f, a)
+        if (arguments.length == 0) { return ktWithRecv(null, f, []) }
+        // The first argument is the receiver, bound as `this`; the lambda's
+        // parameters take the rest.
+        var rest = []
+        var i = 1
+        while (i < arguments.length) {
+            rest.push(arguments[i])
+            i = i + 1
+        }
+        return ktWithRecv(arguments[0], f, rest)
     }
 }
 
@@ -11844,9 +11860,9 @@ function js_ktfget(o, name) {
     if (name == "CASE_INSENSITIVE_ORDER") {
         if (o === K4_STRING_FN) { return function (a, b) { return k2CmpText(a, b, true) } }
     }
-    // A callable reference: KCallable.name.
+    // A callable reference: KCallable.name. Its javaClass is read below.
     var info = ktRefOf(o)
-    if (k4IsRef(info)) {
+    if (k4IsRef(info) && name != "javaClass") {
         if (name == "name") { return info["name"] }
         if (info["bound"] !== true) {
             fail("member ." + name + " of an unbound callable reference ::" + info["name"])

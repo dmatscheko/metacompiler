@@ -3873,12 +3873,14 @@ KwContract  = "contract" KwEnd ;
                 // the closure with its first argument as `this`. The lambda the CALLER
                 // wrote is an ordinary one - the callee is the only place that knows
                 // the type - so the binding, not the literal, is what carries the
-                // receiver. js_ktrecvlam is the same rule ktWithRecv gives `with`.
+                // receiver. js_ktrecvlam is the same rule ktWithRecv gives `with`. The
+                // wrapper has the type's arity (ktRecvFnArity). Twin of the
+                // parameter binding in kotlin-interpreter.abnf.
                 if (sig.tys[t] != "" && isRecvFnType(sig.tys[t])) {
                     var rlV = emitStr(b, sig.params[t])
-                    callExt(b, "js_scope_set", [curScopeV, rlV,
-                                                callExt(b, "js_ktrecvlam",
-                                                        [callExt(b, "js_scope_get", [curScopeV, rlV])])])
+                    var rwV = callExt(b, "js_ktrecvlam", [callExt(b, "js_scope_get", [curScopeV, rlV])])
+                    rwV = callExt(b, "js_jsfnmeta", [rwV, emitStr(b, ""), emitNum(b, ktRecvFnArity(sig.tys[t]))])
+                    callExt(b, "js_scope_set", [curScopeV, rlV, rwV])
                 }
             }
         }
@@ -8460,7 +8462,14 @@ KwContract  = "contract" KwEnd ;
     // kCtorRefOf in kotlin-interpreter.abnf, so the two halves cannot drift apart.
     function makeBareRef(name) {
         return function(b) {
-            return {b: b, v: b.NewCall(rtBareRef(), [curScopeV, emitStr(b, name), bareRefProp(name)])}
+            var rv = b.NewCall(rtBareRef(), [curScopeV, emitStr(b, name), bareRefProp(name)])
+            // A constructor reference takes the primary constructor's parameters.
+            if (classNames["$" + name] == 1) {
+                ktDeclIndex()
+                var cps = ctorParamNames["$" + name]
+                rv = emitRefArity(b, rv, cps == undefined ? 0 : cps.length)
+            }
+            return {b: b, v: rv}
         }
     }
     // `base::name` and `base::class`. Whether the base is a VALUE (a bound reference) or
@@ -8474,6 +8483,13 @@ KwContract  = "contract" KwEnd ;
             return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, reifiedKSlot(baseName))])} }
         }
         return function(b) {
+            // `Array<Dog>::class` is the java array class its element type fixes
+            // ([LDog;), handed to js_ktclasslit as a type name. Twin of makePropRef
+            // in kotlin-interpreter.abnf.
+            var arrJc = name == "class" && baseName.substring(0, 6) == "Array<" ? ktDeclArrClass(baseName) : ""
+            if (arrJc != "") {
+                return {b: b, v: callExt(b, "js_ktclasslit", [callExt(b, "js_ktrefbase", [curScopeV, emitStr(b, arrJc), hTrue])])}
+            }
             // A builtin TYPE name is decided HERE, at emit time, because the base is
             // a literal: the extern's ktTypeNames arm runs before its scope walk, so
             // it cannot be lowered under the walk. Everything else goes through the
@@ -8516,10 +8532,16 @@ KwContract  = "contract" KwEnd ;
             ktDeclIndex()
             var ownP = classNames["$" + baseName] == 1 ? classOwnProps["$" + baseName] : undefined
             if (ownP != undefined && ownP["$" + name] == true) {
-                return {b: b, v: callExt(b, "js_ktref", [baseV, emitStr(b, name), hUndef])}
+                return {b: b, v: emitRefArity(b, callExt(b, "js_ktref", [baseV, emitStr(b, name), hUndef]), 0)}
             }
-            return {b: b, v: emitRefValue(b, baseV, name)}
+            return {b: b, v: emitRefArity(b, emitRefValue(b, baseV, name), ktRefParams(memberArity["$" + name]))}
         }
+    }
+    // js_ktrefarity(ref, n): a reference's arity, which decides `is FunctionN` - the
+    // n parameters of what it names, and an unbound one's receiver. Twin of
+    // kRefArity in kotlin-interpreter.abnf.
+    function emitRefArity(b, refV, n) {
+        return callExt(b, "js_ktrefarity", [refV, emitNum(b, n)])
     }
     // js_ktref(base, name, ext). The EXTENSIONS of the name are handed to the
     // reference, because the runtime has no extension table, so that `Box::tripled` and

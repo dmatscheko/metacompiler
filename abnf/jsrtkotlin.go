@@ -2403,10 +2403,29 @@ func init() {
 			return a[0]
 		}
 
+		// js_ktrefarity(ref, n) records a reference's arity, which ktFnTypeIs reads:
+		// the n parameters of what it names, and an unbound one's receiver. Twin of
+		// kRefArity in kotlin-interpreter.abnf and js_ktrefarity in
+		// languages/lib/kotlin-rt.metajs.
+		m["js_ktrefarity"] = func(a []uint64) uint64 {
+			if info, isRef := ktRefOf(u(a[0])); isRef {
+				n := int(rt.toNumber(u(a[1])))
+				if !info.bound {
+					n++
+				}
+				jsvFnMetaSet(u(a[0]), "", n)
+			}
+			return a[0]
+		}
+
 		// js_ktclasslit(base) is `base::class`.
 		m["js_ktclasslit"] = func(a []uint64) uint64 {
 			base := u(a[0])
 			if tn, isType := base.(ktTypeName); isType {
+				// A java array class name is the emitter's `Array<Dog>::class`.
+				if strings.HasPrefix(tn.name, "[") {
+					return w(ktArrKClass(tn.name))
+				}
 				// A builtin throwable's is the java class (ktClassOfDesc).
 				if ktIsBuiltinExc(tn.name) {
 					return w(ktClassOfDesc(ktExcHierarchy()[tn.name]))
@@ -2679,10 +2698,10 @@ func init() {
 				if len(args) == 0 {
 					return rt.ktWithRecv(jsNull, f)
 				}
-				// The receiver is passed on as the first ARGUMENT as well as bound as
-				// `this`: `fun scoped(block: FeatScope.() -> Int) = block(Scope(9))`
-				// with `scoped { s -> s.v }` reads it through the value parameter.
-				return rt.ktWithRecv(args[0], f, args...)
+				// The first argument is the receiver, bound as `this`; the lambda's
+				// parameters take the rest. Twin of kRecvLambda in
+				// kotlin-interpreter.abnf.
+				return rt.ktWithRecv(args[0], f, args[1:]...)
 			}))
 		}
 
@@ -3273,8 +3292,8 @@ func init() {
 				}))
 			}
 			// A callable reference: KCallable.name. The twin is the __propref arm of
-			// kGetField in kotlin-interpreter.abnf.
-			if info, isRef := ktRefOf(o); isRef {
+			// kGetField in kotlin-interpreter.abnf. Its javaClass is read below.
+			if info, isRef := ktRefOf(o); isRef && name != "javaClass" {
 				if name == "name" {
 					return rt.wrapStr(info.name)
 				}
@@ -4440,6 +4459,9 @@ func ktJvmClass(v interface{}) interface{} {
 				return ktLambdaClass
 			}
 		}
+		// A reference is an instance of an anonymous class (AKt$main$r$1), whose
+		// stand-in is an object expression's.
+		return "<object>"
 	}
 	return ktSimpleName(v)
 }
@@ -12685,12 +12707,12 @@ func ktClassOf(v interface{}) *jsObject {
 		}
 	}
 	// An array's KClass is IntArray / Array over its java class ([LDog;), a
-	// lambda's its hidden class.
+	// lambda's or a reference's its hidden class.
 	if jc, isStr := ktJvmClass(v).(string); isStr {
 		if strings.HasPrefix(jc, "[") {
 			return ktArrKClass(jc)
 		}
-		if jc == ktLambdaClass {
+		if jc == ktLambdaClass || jc == "<object>" {
 			return ktJavaClass(jc)
 		}
 	}

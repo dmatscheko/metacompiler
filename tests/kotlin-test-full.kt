@@ -8000,6 +8000,62 @@ fun s179() {
         arrayOf("a")::class.java.name == "[Ljava.lang.String;")
 }
 
+// ===== SECTION 180: Array<T>::class, a reference's class and arity, receiver-typed parameters, a parameter named it =====
+// A static `Array<T>::class` is the JVM array class its element type fixes
+// ([LDg180;, [[I), the class an array built of T has. A function reference is an
+// instance of an anonymous class (AKt$main$r$1, not reproducible), so only how its
+// name relates to toString and ::class is asserted. A reference is the FunctionN
+// of the parameters of what it names, plus the receiver of an unbound one; a
+// constructor reference takes the constructor's. A lambda passed to a parameter of
+// a receiver function type has that type's arity and takes its parameters after
+// the receiver, and an `it` read under a parameter named `it` is not the enclosing
+// lambda's implicit one.
+open class An180
+class Dg180 : An180()
+class Out180 { class In }
+class Cat180(val n: Int) {
+    var w = 3
+    fun bark() = "m"
+    fun eat(x: Int, y: Int) = x + y
+    fun self(): Any = this::bark
+}
+class Two180(a: Int, b: String)
+fun two180(): Int = 2
+val top180 = 5
+fun ar180(f: Any): String =
+    (if (f is Function0<*>) "0" else "") + (if (f is Function1<*, *>) "1" else "") +
+        (if (f is Function2<*, *, *>) "2" else "") + (if (f is Function3<*, *, *, *>) "3" else "")
+var seen180: Any? = null
+fun rc180(b: Int.() -> Int): Int { seen180 = b; return b(3) }
+fun rc180b(b: Int.(Int, String) -> Int): Int { seen180 = b; return 3.b(4, "x") }
+
+fun s180() {
+    val arr = arrayOf(Dg180())
+    check("arr180a", Array<Dg180>::class.java.name == "[LDg180;" && arr::class == Array<Dg180>::class &&
+        Array<An180>::class != Array<Dg180>::class && Array<Array<Dg180>>::class.java.name == "[[LDg180;" &&
+        Array<Out180.In>::class.java.name == "[LOut180\$In;" && Array<Int>::class.java.name == "[Ljava.lang.Integer;" &&
+        Array<IntArray>::class.java.name == "[[I" && Array<String>::class.java == arrayOf("a").javaClass &&
+        Array<Dg180>::class.simpleName == "Array")
+    val r = ::two180
+    val lam = { 1 }
+    check("ref180b", r.javaClass.name.isNotEmpty() && "${r.javaClass}" == "class " + r.javaClass.name &&
+        r.javaClass.simpleName == "" && r::class.java.name == r.javaClass.name && r.javaClass != lam.javaClass &&
+        Cat180::bark.javaClass.name.isNotEmpty() && Cat180::w.javaClass.simpleName == "")
+    val c = Cat180(1)
+    check("ref180c", listOf(ar180(Cat180::bark), ar180(Cat180::eat), ar180(c::bark), ar180(c::eat), ar180(Cat180::w),
+        ar180(c::w), ar180(Cat180::n), ar180(::top180), ar180(::Cat180), ar180(::Two180), ar180(c.self()), ar180(String::length)) ==
+        listOf("1", "3", "0", "2", "1", "0", "1", "0", "1", "2", "0", "1"))
+    val v1 = rc180 { this + 1 }
+    val s1 = seen180
+    val v2 = rc180b { a, s -> this * 10 + a + s.length }
+    check("rcv180d", v1 == 4 && ar180(s1!!) == "1" && v2 == 35 && ar180(seen180!!) == "3")
+    val a: Any = { { it: Int -> it } }
+    val b: Any = { listOf(3).map { it: Int -> "v$it" } }
+    val d: Any = { { it: Int -> it }(1) + 1 }
+    val e: Any = { x: Int -> { it: Int -> it + x } }
+    check("it180e", ar180(a) == "0" && ar180(b) == "0" && ar180(d) == "0" && ar180(e) == "1")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8177,6 +8233,7 @@ fun main() {
     s177() // SECTION-CALL 177
     s178() // SECTION-CALL 178
     s179() // SECTION-CALL 179
+    s180() // SECTION-CALL 180
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

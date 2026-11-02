@@ -660,10 +660,10 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("fn-nullable-type", runOpt({ n -> n + 1 }, 9) == 10 && runOpt(null, 9) == -1)
     check("fn-annotated-type", themed { 7 } == 7)
     check("fn-named-params-type", withNamed { r, c -> if (r) c else 0 } == 3)
-    check("fn-receiver-type", scoped { s -> s.v } == 9)
+    check("fn-receiver-type", scoped { v } == 9)
     check("suspend-fn-type", callSuspend { 42 } == 42)
     check("suspend-fn-type-arg", callSuspendArg { n -> n + 1 } == 21)
-    check("suspend-recv-fn-type", callSuspendRecv { r -> r + 1 } == 11)
+    check("suspend-recv-fn-type", callSuspendRecv { this + 1 } == 11)
 
     // ----- collection constructors: a set is its own shape, arrays collapse onto lists -----
     check("ctor-setof", setOf(1, 2, 3).size == 3 && setOf("a", "b").contains("b"))

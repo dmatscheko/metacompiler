@@ -101,6 +101,33 @@ function ktFnRetTy(ty) {
     if (e < 0 || t.substring(e + 1, e + 3) != "->") { return "" }
     return ktLitTy(t.substring(e + 3))
 }
+// The arity of a receiver function type `R.(A, B) -> T`, the kotlin.jvm.functions
+// class every value of it has: its parameters and the receiver.
+function ktRecvFnArity(t) {
+    var i = t.indexOf(".(")
+    var e = i < 0 ? -1 : ktMatchClose(t, i + 1, "(", ")")
+    if (e < 0) { return 1 }
+    var n = 1
+    var depth = 0
+    var any = false
+    for (var j = i + 2; j < e; j++) {
+        var c = t.charAt(j)
+        if (!ktIsWs(c)) { any = true }
+        if (c == "(" || c == "<") { depth++ }
+        else if (c == ")" || (c == ">" && t.charAt(j - 1) != "-")) { depth-- }
+        else if (c == "," && depth == 0) { n++ }
+    }
+    return any ? n + 1 : 1
+}
+// The parameter count of the member a `::` names, from the shapes of the program's
+// methods of its name (l, [min, max, names, ...] each): theirs when every one
+// agrees, else 0, which is also a property's and an unknown builtin's.
+function ktRefParams(l) {
+    if (l == undefined) { return 0 }
+    var n = l[0][2].length
+    for (var i = 1; i < l.length; i++) { if (l[i][2].length != n) { return 0 } }
+    return n
+}
 // Whether a collection type is a Map (its `in`, get and containsKey take a KEY).
 function ktIsMapTy(ty) {
     var t = (ty.length > 0 && ty.charAt(ty.length - 1) == "?") ? ty.substring(0, ty.length - 1) : ty
@@ -160,16 +187,21 @@ function ktDeclArrClass(dt) {
     if (t.substring(0, 6) != "Array<") { return "" }
     return ktArrBuilderClass("Array", t.substring(5))
 }
+var ktPrimArrJvm = {"$IntArray": "[I", "$LongArray": "[J", "$ShortArray": "[S", "$ByteArray": "[B",
+                    "$FloatArray": "[F", "$DoubleArray": "[D", "$CharArray": "[C", "$BooleanArray": "[Z"}
 // The JVM descriptor of an array element type: L<class>; for a type the program
 // declares (ktProgBin), Any, a builtin value type or a collection interface
-// (ktCastLang), [<descriptor> for an Array of one; "" for any other type (a type
-// parameter, a projection). Read once every type has been seen.
+// (ktCastLang), [<descriptor> for an Array or a primitive array (ktPrimArrJvm);
+// "" for any other type (a type parameter, a projection). Read once every type
+// has been seen.
 function ktArrElemJvm(t) {
     var s = (t.length > 0 && t.charAt(t.length - 1) == "?") ? t.substring(0, t.length - 1) : t
     if (s.substring(0, 6) == "Array<" && s.charAt(s.length - 1) == ">") {
         var inner = ktArrElemJvm(s.substring(6, s.length - 1))
         return inner == "" ? "" : "[" + inner
     }
+    var pj = ktPrimArrJvm["$" + s]
+    if (pj != undefined) { return pj }
     var lt = s.indexOf("<")
     var base = lt < 0 ? s : s.substring(0, lt)
     var pb = ktProgBin(base)
@@ -264,11 +296,20 @@ function ktNoteIt(at) { ktItWords.push(at) }
 // makes its arity 1 (Function1) rather than 0. A lambda without a parameter list
 // claims every unclaimed `it` inside it; a nested one was walked first and has
 // claimed its own, and one with a parameter list claims none, so an `it` it reads
-// belongs to the lambda around it.
+// belongs to the lambda around it - unless it names a parameter `it`, which every
+// `it` inside it reads instead.
 function ktLamClaimsIt(items, from, to) {
     for (var i = 0; i < items.length; i++) {
-        if (items[i] != undefined && items[i].lparams != undefined) { return false }
+        var lps = items[i] == undefined ? undefined : items[i].lparams
+        if (lps != undefined) {
+            if (lps.indexOf("it") >= 0) { ktLamTakeIt(from, to) }
+            return false
+        }
     }
+    return ktLamTakeIt(from, to)
+}
+// Removes the unclaimed `it` words in [from, to); whether there were any.
+function ktLamTakeIt(from, to) {
     var keep = []
     var hit = false
     for (var j = 0; j < ktItWords.length; j++) {

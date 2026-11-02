@@ -7109,7 +7109,10 @@ NotMemberKw = :script(~~ "pure";
         }
         var cjc = kCollJvmClass(v)
         if (cjc != "") { return cjc }
-        if (typeof v == "function" && fnRefName(v) === undefined) { return kLambdaClass }
+        // A reference is an instance of an anonymous class (AKt$main$r$1), whose
+        // stand-in is an object expression's. Twin of ktJvmClass in abnf/jsrtkotlin.go.
+        if (typeof v == "function") { return fnRefName(v) === undefined ? kLambdaClass : "<object>" }
+        if (kIsRef(v)) { return "<object>" }
         var n = kSimpleName(v)
         if (szIs(v) && v.u) { return "kotlin." + n }
         if (n == "Int") { return "java.lang.Integer" }
@@ -10566,8 +10569,11 @@ NotMemberKw = :script(~~ "pure";
             // A PARAMETER whose declared type is a lambda-WITH-RECEIVER (`body: T.() ->
             // Unit`) gets the same kRecvLambda wrapper a local `val` of that type gets,
             // so `t.body()` and `body(t)` both bind `this` to t inside the lambda - the
-            // shape of every DSL builder.
-            if (typeof p != "string" && isRecvFnTy(p.ty)) { v = kRecvLambda(v) }
+            // shape of every DSL builder. The wrapper has the type's arity
+            // (ktRecvFnArity). Twin of emitParamSig in kotlin-to-llvm-ir.abnf.
+            if (typeof p != "string" && isRecvFnTy(p.ty) && typeof v == "function") {
+                v = fnMetaSet(kRecvLambda(v), "", ktRecvFnArity(p.ty))
+            }
             declVar(nm, v)
         }
     }
@@ -12473,6 +12479,7 @@ NotMemberKw = :script(~~ "pure";
         if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true) {
             var cr = kRefMake(v, "<init>", true, null)
             cr.kctor = true
+            cr.kparams = v.__cparams == undefined ? 0 : v.__cparams.length
             return cr
         }
         return v
@@ -12508,8 +12515,15 @@ NotMemberKw = :script(~~ "pure";
         var tps = curTParams()
         var tpIdx = -1
         for (var ti = 0; ti < tps.length; ti++) { if (tps[ti] == baseName) { tpIdx = ti } }
+        // `Array<Dog>::class` is the java array class its element type fixes
+        // ([LDog;), read on the first run, once every type has been seen. Twin of
+        // makeQualRef in kotlin-to-llvm-ir.abnf.
+        var arrJc = anytype
+        arrJc = (name == "class" && baseName.substring(0, 6) == "Array<") ? null : ""
         return function() {
             if (tpIdx >= 0 && name == "class") { return kReifiedClass(typeKlsStack.length > 0 ? typeKlsStack[typeKlsStack.length - 1] : null, tpIdx) }
+            if (arrJc === null) { arrJc = ktDeclArrClass(baseName) }
+            if (arrJc != "") { return kArrKClass(arrJc) }
             var hv = hasVar(baseName)
             var base = anytype // A type name resolves to a descriptor, a value to anything.
             base = hv ? getVar(baseName) : null
@@ -12530,10 +12544,12 @@ NotMemberKw = :script(~~ "pure";
             if (!hv || isCls) {
                 var ur = kRefMake(null, name, false, baseName)
                 if (hv && base !== null && typeof base == "object" && base.__isclass === true) { ur.kcls = base }
+                ur.kparams = ur.kcls != undefined && kClsOwnProp(ur.kcls, name) ? 0 : ktRefParams(kMemberArity["$" + name])
                 return ur
             }
             var r = kRefMake(base, name, true, null)
             r.kthis = (baseName == "this" || baseName.substring(0, 5) == "this@")
+            r.kparams = ktRefParams(kMemberArity["$" + name])
             return r
         }
     }
@@ -12584,25 +12600,33 @@ NotMemberKw = :script(~~ "pure";
             if (hasOwn(r.obj, r.pname)) { return false }
             return extFor(r.pname, r.obj) != null
         }
-        // A property the class itself declares wins. Twin of makeQualRef in
-        // kotlin-to-llvm-ir.abnf.
-        if (cls.__pnames != undefined && cls.__pnames["$" + r.pname] === true) { return false }
-        var cps = cls.__cparams
-        if (cps != undefined) {
-            for (var i = 0; i < cps.length; i++) { if (cps[i].prop && cps[i].pname == r.pname) { return false } }
-        }
+        if (kClsOwnProp(cls, r.pname)) { return false }
         return extFor(r.pname, {__class: cls}) != null
     }
+    // Whether class descriptor cls itself declares property name, which wins over a
+    // method or extension of the name. Twin of classOwnProps in kotlin-to-llvm-ir.abnf.
+    function kClsOwnProp(cls, name) {
+        if (cls.__pnames != undefined && cls.__pnames["$" + name] === true) { return true }
+        var cps = cls.__cparams
+        if (cps != undefined) {
+            for (var i = 0; i < cps.length; i++) { if (cps[i].prop && cps[i].pname == name) { return true } }
+        }
+        return false
+    }
+    // A reference's arity, which decides `is FunctionN`: the parameters of what it
+    // names (kparams) and an unbound one's receiver. Twin of emitRefArity in
+    // kotlin-to-llvm-ir.abnf.
+    function kRefArity(r) { return (r.kparams == undefined ? 0 : r.kparams) + (r.kbound ? 0 : 1) }
     // The names Kotlin declares as TYPES rather than values. A `::` in front of one of
     // them is an UNBOUND reference (String::length, Int::class) even where the runtime
     // happens to carry a same-named builder in scope (as the compiled half does). The
     // twin is ktIsTypeName in abnf/jsrtkotlin.go; the two lists MUST stay in step.
     var kTypeNames = {}
     function kIsTypeName(n) { return hasOwn(kTypeNames, n) }
-    // `is` against a function type, for a function v: every function is a
-    // kotlin.Function, and the kotlin.jvm.functions.FunctionN of the arity its
-    // creation recorded (makeLambda); undefined when t is no function type. Twin of
-    // ktFnTypeIs in abnf/jsrtkotlin.go and k4FnTypeIs in kotlin-rt.metajs.
+    // `is` against a function type, for a function or reference v: every function is
+    // a kotlin.Function, and the kotlin.jvm.functions.FunctionN of the arity its
+    // creation recorded (makeLambda, kRefArity); undefined when t is no function
+    // type. Twin of ktFnTypeIs in abnf/jsrtkotlin.go and k4FnTypeIs in kotlin-rt.metajs.
     function kFnTypeIs(v, t) {
         var b = t
         if (b.indexOf("kotlin.jvm.functions.") == 0) { b = b.substring(21) }
@@ -12615,7 +12639,7 @@ NotMemberKw = :script(~~ "pure";
             if (d < 0 || d > 9) { return undefined }
             n = n * 10 + d
         }
-        return fnMeta(v, "length") == n
+        return (kIsRef(v) ? kRefArity(v) : fnMeta(v, "length")) == n
     }
     function kInstallTypeNames() {
         var ns = ["String", "CharSequence", "Int", "Long", "Short", "Byte", "UInt", "ULong",
@@ -12861,12 +12885,12 @@ NotMemberKw = :script(~~ "pure";
         if (jc != "") { return kJavaClass(jc) }
         if (v !== null && typeof v == "object" && v.__class != undefined && v.__class != null) { return kClassOfDesc(v.__class) }
         // An array's KClass is IntArray / Array over its java class ([LDog;), a
-        // lambda's its hidden class.
+        // lambda's or a reference's its hidden class.
         var vjc = anytype
         vjc = jxkClass(v)
         if (typeof vjc == "string") {
             if (vjc.charAt(0) == "[") { return kArrKClass(vjc) }
-            if (vjc == kLambdaClass) { return kJavaClass(vjc) }
+            if (vjc == kLambdaClass || vjc == "<object>") { return kJavaClass(vjc) }
         }
         return kKClass(kSimpleName(v))
     }
@@ -13210,7 +13234,7 @@ NotMemberKw = :script(~~ "pure";
         // ::topLevelFun is the function value itself, and KFunction.name is its name.
         if (typeof o == "function") {
             if (name == "name") { return fnRefName(o) }
-            if (name == "javaClass" && fnRefName(o) === undefined) { return kJavaClass(kLambdaClass) }
+            if (name == "javaClass") { return kJavaClass(jxkClass(o)) }
             return extPropGet(o, name)
         }
         if (kIsPkg(o)) { return kPkgMember(o, name) }
@@ -13734,7 +13758,7 @@ NotMemberKw = :script(~~ "pure";
         if (t == "Any" || t == "Object") { return true }
         // undefined is Unit, an object of no other type.
         if (v === undefined) { return t == "Unit" }
-        if (typeof v == "function") {
+        if (typeof v == "function" || kIsRef(v)) {
             var fi = kFnTypeIs(v, t)
             if (fi !== undefined) { return fi }
         }
