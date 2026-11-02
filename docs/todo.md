@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index, Float-range eager enumerator sizes, endless Range#size · P3 · RB · OPEN [V]
+### T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index, Float-range eager enumerator sizes, endless Range#size · P3 · RB · IN PROGRESS (RB worker, round 59) [V]
 
 Found while working T-1132. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected.
 
