@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1176** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1177** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,12 +128,11 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1175 bash: nameref refusals naming the target, readonly through a callee's nameref, array assignment to a circular assoc nameref · P3 · SH · IN PROGRESS (SH worker, round 55) [V]
-Found while closing T-1172; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- Interpreter only, stderr: when a nameref's target is a local of the same function, refusals name the target instead of the nameref — `f(){ local -A g=([k]=v); local -n w=g; declare -a w=x; }`: oracle and compiler "declare: w: cannot convert associative to indexed array", interp "g: ..."; same for `declare +a w` ("cannot destroy array variables") and `local -a w=(x)`.
-- Both engines: `f(){ local -r g1=1; local -n w=g1; declare w=2; }` — oracle "declare: w: readonly variable", ours names "g1".
-- Both engines, status: `f(){ local -r g4=1; f4b; }; f4b(){ local -n w=g4; declare w=2; echo $?; }; f` — oracle prints 0 with no error (the callee's `declare` makes a new local through the nameref); ours prints "declare: g4: readonly variable" and 1.
-- All legs (pre-existing on main, deterministic in bash over repeated runs): `h(){ local -n w=w; declare -A w=x; w=([k]=3); echo "s $?"; declare -p w; }; h` — oracle: the four circular warnings, `s 0`, `declare -An w=([0]="x" )`; ours print "`': not a valid identifier" and abandon the rest of the line.
+### T-1176 bash: computed `unset $v` (compiler), declaration builtins on a circular assoc nameref, `${e[0]:=v}` through a NAME[SUB] nameref · P3 · SH · OPEN [V]
+Found while closing T-1175; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Compiler only (run and native), `unset $v` computed from a word goes through `rt_unset_name`: `f(){ local x=1; v=x; unset $v; declare -p x; }` — oracle `declare -- x`, ours "x: not found"; with `local -n r=q; v=r; unset $v` the oracle keeps `declare -n r="q"`, ours prints `declare -- r="q"` (the nameref dropped).
+- Both engines (pre-existing on main), a circular nameref that is an associative array (`local -n w=w; declare -A w=x`): `export w=1`, `export w`, `readonly w=2`, `declare -g w=5` are no-ops with status 0 in the oracle; the interpreter reports "export: `1': not a valid identifier", status 1; the compiler turns `readonly w=2` into `declare -r w`. `readonly w` gives ": readonly variable" with status 0 in the oracle (deterministic over repeated runs).
+- All engines: `a=(p q); declare -n e=a[1]; echo "${e[0]:=v}"` — oracle "`a[1]': not a valid identifier" and the line is abandoned; ours store into a hidden variable named "" and print v (a later `${e[0]-u}` reads v).
 
 # C — C subset
 
@@ -1214,6 +1213,7 @@ T-1167 ruby: Float object identity (NaN/non-flonum), module reflection after inc
 T-1171 kotlin: range type constructors (IntRange, LongRange, CharRange) — merged 800486c5: IntRange/LongRange/CharRange/UIntRange/ULongRange constructors, *Progression.fromClosedRange with kotlin's step checks, kotlin.ranges/kotlin.Int qualified names in the compiler; master four-leg probe matches kotlinc 2.2.21
 T-1174 kotlin: javaClass of a range's Long bound — merged a1eba73b: range/progression first/last/step typed primitive, Long progression step is a Long; master four-leg probe matches kotlinc 2.2.21; no new defects
 T-1172 bash: -a declarations through namerefs to unset globals, second operand after a circular nameref became an array — merged 138aab5e: -a/-A declarations through namerefs to unset globals become call-local arrays (compiler), values given to an array nameref are checked as nameref names (both engines); master probe matches bash 5.3
+T-1175 bash: nameref refusals naming the target, readonly through a callee's nameref, array assignment to a circular assoc nameref — merged d924ee3e: make_local_variable rule for declarations through a function's nameref (refusals name the nameref; a callee may hide a caller's readonly local, not a readonly global), circular associative array namerefs drop stores and read unset; master probe matches bash 5.3
 
 # Settled — do not re-open
 
