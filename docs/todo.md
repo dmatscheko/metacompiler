@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1147** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1148** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -111,20 +111,20 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1144 kotlin: compiled named arguments evaluated in parameter order, not source order; qualified-object member references; same-named stdlib parameter order · P2 · KT · IN PROGRESS (KT worker, round 44) [V]
+### T-1147 kotlin: non-last vararg parameters, same-named nested class/object across owners (compiled), nested-object bound-ref arity (interp) · P2 · KT · OPEN [V]
 
-Found while working T-1142. The oracle is kotlinc 2.2.21 (stdlib only). Item 1 is a correctness bug that silently reorders side effects, hence P2.
+Found while working T-1144. The oracle is kotlinc 2.2.21 (stdlib only). Items 1 and 2 give wrong results or crashes on valid programs, hence P2.
 
-1. In compiled code (llvm.Run and native), named arguments are evaluated in parameter-slot order, not source order. Kotlin evaluates arguments left to right as written. Repro:
-   ```kotlin
-   val log = mutableListOf<String>()
-   fun t(s: String, v: Int): Int { log.add(s); return v }
-   fun f3(a: Int, b: Int, c: Int) = "$a$b$c"
-   fun main() { println(f3(c = t("c", 3), a = t("a", 1), b = t("b", 2)) + " " + log) }
-   ```
-   The oracle and the interpreter print `123 [c, a, b]`; run and native print `123 [a, b, c]`. The same happens on stdlib calls: `listOf(1,2,3).joinToString(postfix = t("p",1).toString(), separator = t("s",0).toString())` logs `[p, s]` in the oracle, but `[s, p]` compiled. The cause is that orderArgs emits the argument thunks in slot order. Evaluate them into temporaries in source order, then place them by slot. Check default arguments that refer to earlier parameters, and vararg/spread mixed with named arguments.
-2. A reference whose base is a qualified object value is treated as unbound. `class Cm { companion object { fun bite() = 0 } }`: `(Cm.Companion::bite as Any) is Function0<*>` and `(Cm::bite as Any) is Function0<*>` are true in the oracle, false in all engines. `enum class E { X; fun run(a: Int, b: Int, c: Int) = a + b + c }`: `(E.X::run as Any) is Function3<*,*,*,*>` is true in the oracle. Also `val f = E.X::run; f(1, 2, 3)` prints 6 in the oracle, but the interpreter aborts with "unknown Int method: run". The probable cause is that the companion is the class descriptor itself (`__isclass`), so js_ktref makes an unbound reference.
-3. Compiler only: a class method with the same name and the same parameter names as a stdlib member, but in a different order (`class Z { fun padStart(padChar: Char, length: Int) }`), makes `"x".padStart(length = 5, padChar = '*')` print `55555…x`. The oracle and the interpreter print `****x`. The fix needs a run-time choice of argument order when the receiver's class is not known statically. This only affects joinToString, windowed, chunked, padStart and padEnd.
+1. A vararg parameter that is not the last parameter is broken in all engines:
+   - `fun fv(vararg xs: Int, tag: String) = xs.joinToString(",") + tag`
+     - `fv(1, 2, tag = "t")`: the oracle gives `1,2t`; the interpreter `1,22`; run and native `1,tt`.
+     - `fv(xs = intArrayOf(1,2), tag = "t")`: the oracle gives `1,2t`; run gives `1,2,t2`.
+     - `fv(*intArrayOf(1,2), 3, tag = "t")`: the oracle gives `1,2,3t`.
+   - `fun fd(vararg xs: Int, tag: String = "D")`: `fd(1,2)` gives `1,2D` in the oracle and `1,22` in all engines.
+   - `fun fl(vararg xs: Int, block: (Int) -> Int)` with `fl(1,2) { it*10 }`: the oracle gives `[10, 20]`. The interpreter aborts with "Value is not an object"; the compiled legs print nothing.
+   - The cause is that the callee collects everything from the vararg index onward (js_pyrest / bindParams), so positional slots after the vararg take vararg elements. The fix needs the caller to pack a non-last vararg (only named arguments or a trailing lambda can follow it), and to mark the trailing lambda syntactically, in both grammars.
+2. Compiled only: a nested class and a nested object with the same simple name in different owners break the class's constructor calls. Repro: `class A { class In(val a: Int); fun mk() = In(2).a }` plus `class B { object In { fun f() = 1 } }`, then `A().mk()`. The oracle and the interpreter print 2; run and native abort with "call of a non function value: [object Object]". The cause is that classNames is keyed by simple name, and the object overwrites it. Key it by binary name (Owner$In).
+3. Interpreter only: a bound reference to a method of a nested object has arity 0 when the program's methods of that name have different arities. Repro: `class Out { object In { fun f(a: Int) = a*2 } }` plus `class Q9 { fun f(a: Int, b: Int) = 1 }`. Then `val o = Out.In; o::f is Function1` is true in the oracle and false in the interpreter. The closure found on In's descriptor carries no fnMeta length, although kMethodArity set it on the closure it built, so something replaces the method later.
 
 Verify with `tests/probe.sh kotlin` on all four legs.
 
@@ -1220,6 +1220,7 @@ T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list a
 T-1142 kotlin: per-class program-method arity, interpreter named args on builtins shadowed by a class method name — merged 013812e4: per-class reference arity for disputed method names (run-time from the receiver's class chain via recorded closure arity), stdlib named-argument order chosen by receiver (interp lookupMethod, compiler namesCover fallback); 4-leg probe matches kotlinc 2.2.21 except the pre-existing compiled named-arg evaluation order (filed P2); kotlin gates green; bench -0.02%
 T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer endless ranges — merged 081928f9 (partial by design: warn uplevel >= 2 inside a method raises NotImplementedError, carried to follow-up): Kernel#warn (IO#puts semantics, options errors, uplevel 0/1 with no per-call cost), warnings + warn through $stderr.write with TypeError on non-writable assignment, big-Integer endless ranges exact (each/for/first/step/lazy/next), endless #last RangeError; 4-leg probe matches ruby 2.6 stdout + stderr; matrix 605/605; bench -0.04%
 T-1143 bash: declaration error prefix rule, compiler run-time-circular and readonly nameref array decls, valueless local nameref subscript store, compiler step cost of comsub+extglob probes — merged 904aa2c2: this_command_name error prefix in both engines, compiler run-time readonly flags (readonly set after function definition), run-time-circular nameref array decls (rt_nref_loops), local -nr w=w; local w=(q) per oracle (ticket expectation was wrong), valueless local nameref subscript store, extglob strip literal-run filter (19-case probe >100M -> <10M steps); 4-leg probe (162 pattern removals + decl diagnostics) matches bash 5.3 stdout + stderr; bash gates green; bench +0.01%
+T-1144 kotlin: compiled named arguments evaluated in parameter order, not source order; qualified-object member references; same-named stdlib parameter order — merged f3844925: compiled named arguments evaluated in source order (slot-0 thunk evaluates in source order only when slots are out of order; positional calls unchanged), qualified object-value references bound (E.X::run, Cm::bite via js_ktbref/js_ktcref), stdlib/class same-name argument order chosen by receiver at run time; 4-leg probe incl. ++i ordering matches kotlinc 2.2.21; kotlin gates green; bench +0.05%
 
 # Settled — do not re-open
 
