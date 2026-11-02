@@ -1463,10 +1463,10 @@ NnSfx       <~~ push({kind: "nn"}) ~~>
 // reading at all and the parse died on the `::`. The value is not modelled - a class
 // literal has no runtime representation in this subset - so it is reported.
 // RefName PUSHES its text, so the tag drains it before pushing the suffix record.
-// A newline before the `::` of a receiver ends the statement instead (SameLine):
-// kotlinc reads `f()` / `q = s` then `::x.set(1)` on the next line as two statements.
+// A newline before the `::` of a receiver ends the statement outside `( )` / `[ ]`
+// (OpSameLine).
 RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
-            = SameLine "::" RefName ;
+            = OpSameLine "::" RefName ;
 // A call's EXPLICIT TYPE ARGUMENTS are the whole meaning of
 // `xs.filterIsInstance<String>()`, so the run is captured (as its raw text) and
 // popMCall lifts it off the item list beside the method name; every other method
@@ -2109,7 +2109,7 @@ CallableRef = IsInitRef | BareClassRef | BareRef | QualRef ;
 // QualRef, which would otherwise build an ordinary bound reference and read
 // .isInitialized off it - answering `false` where Kotlin refuses the program.
 IsInitRef   <~~ push(makeIsInit(takeAll(), up.pos)) ~~>
-            = [ QualRefBase [ "?" ] [ "?" ] SameLine ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
+            = [ QualRefBase [ "?" ] [ "?" ] OpSameLine ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
 // A RECEIVERLESS class literal, `::class` (psi/DoubleColon.kt line 40, clean tree). It
 // names the class of the implicit receiver, which this subset does not model, so it is
 // recognised and reported rather than guessed at. It must precede BareRef, whose KId
@@ -2130,10 +2130,10 @@ BareRef     = "::" KId <~~ push(makeBareRef(up.in)) ~~> ;
 // which this form drops anyway, so they are consumed and ignored.
 // This has to be matched at the Primary level, before Elvis gets to see the `?:` of
 // `a?::b` as its own operator.
-// A newline before the `::` of a receiver ends the statement instead (SameLine):
-// kotlinc reads `f()` / `q = s` then `::x.set(1)` on the next line as two statements.
+// A newline before the `::` of a receiver ends the statement outside `( )` / `[ ]`
+// (OpSameLine).
 QualRef     <~~ var n = pop(); push(makePropRef(pop(), n, up.pos)) ~~>
-            = QualRefBase [ "?" ] [ "?" ] SameLine "::" RefName ;
+            = QualRefBase [ "?" ] [ "?" ] OpSameLine "::" RefName ;
 RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
 QualRefBase <~~ push(stripWs(up.in)) ~~>
             = KId [ SkipAngle ] { "." KId [ SkipAngle ] } ;

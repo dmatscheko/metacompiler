@@ -1443,10 +1443,10 @@ CallMember  <~~ ktAt = up.start; push(kFoldPostfix(takeAll(), up.in, up.pos)) ~~
 // this. The value is not modelled - a class literal has no runtime representation in
 // this subset - so it is reported.
 // RefName PUSHES its text, so the tag drains it before pushing the suffix record.
-// A newline before the `::` of a receiver ends the statement instead (SameLine):
-// kotlinc reads `f()` / `q = s` then `::x.set(1)` on the next line as two statements.
+// A newline before the `::` of a receiver ends the statement outside `( )` / `[ ]`
+// (OpSameLine).
 RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
-            = SameLine "::" RefName ;
+            = OpSameLine "::" RefName ;
 NnSfx       <~~ push({kind: "nn"}) ~~>
             = "!!" ;
 RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
@@ -2078,7 +2078,7 @@ BareClassRef <~~ push(notImplExpr("receiverless class literal", up.pos)) ~~>
 // that the refusal happens HERE rather than falling through to QualRef, which would
 // build a perfectly good bound reference and read a member off it.
 IsInitRef   <~~ push(makeIsInit(takeAll(), up.pos)) ~~>
-            = [ QualRefBase [ "?" ] [ "?" ] SameLine ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
+            = [ QualRefBase [ "?" ] [ "?" ] OpSameLine ] "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
 BareRef     = "::" KId <~~ push(makeBareRef(up.in)) ~~> ;
 // A NULLABLE receiver is allowed in front of the `::` - `X?::x`, `X ?:: x`, `X? ?:: x`,
 // `X ??:: x`, `X ?? :: x`. All five are CALLABLE_REFERENCE_EXPRESSIONs in Kotlin's own
@@ -2087,8 +2087,8 @@ BareRef     = "::" KId <~~ push(makeBareRef(up.in)) ~~> ;
 // which this form drops anyway, so they are consumed and ignored.
 // This has to be matched at the Primary level, before Elvis gets to see the `?:` of
 // `a?::b` as its own operator.
-// A newline before the `::` of a receiver ends the statement instead (SameLine):
-// kotlinc reads `f()` / `q = s` then `::x.set(1)` on the next line as two statements.
+// A newline before the `::` of a receiver ends the statement outside `( )` / `[ ]`
+// (OpSameLine).
 QualRef     <~~ var qn = pop(); push(makeQualRef(pop(), qn)) ~~>
 // Each segment may carry TYPE ARGUMENTS - `a<b>?::c`, `a<b?,c?>?::d`, `a.b<c.d<e.f>>::g`
 // and `a<b,c>::class` are all clean CALLABLE_REFERENCE_EXPRESSIONs in psi/DoubleColon.txt -
@@ -2096,7 +2096,7 @@ QualRef     <~~ var qn = pop(); push(makeQualRef(pop(), qn)) ~~>
 // The base may also carry a LABEL - `super<a>@b::foo` (psi/DoubleColon.txt records it as
 // one CALLABLE_REFERENCE_EXPRESSION over a labelled super). The `::` that has to follow is
 // what keeps this apart from an ordinary `label@ statement`.
-            = QualRefBase [ "?" ] [ "?" ] SameLine "::" RefName ;
+            = QualRefBase [ "?" ] [ "?" ] OpSameLine "::" RefName ;
 QualRefBase <~~ push(stripWs(up.in)) ~~>
             = KId [ SkipAngle ] [ "@" KId ] { "." KId [ SkipAngle ] } ;
 
