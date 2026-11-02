@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1144** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1145** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -105,12 +105,20 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1142 kotlin: per-class program-method arity, interpreter named args on builtins shadowed by a class method name · P3 · KT · IN PROGRESS (KT worker, round 43) [V]
+### T-1144 kotlin: compiled named arguments evaluated in parameter order, not source order; qualified-object member references; same-named stdlib parameter order · P2 · KT · OPEN [V]
 
-Found while working T-1140. The oracle is kotlinc 2.2.21 (stdlib only).
+Found while working T-1142. The oracle is kotlinc 2.2.21 (stdlib only). Item 1 is a correctness bug that silently reorders side effects, hence P2.
 
-1. The program-method arity table is keyed by name across the whole program, not per class. Repro: `class Q { fun eat(x: Int) = x }; class P { fun eat(x: Int, y: Int) = x + y }`, then `(P::eat as Any) is Function3<*,*,*,*>` is true in the oracle. All three engines give false, because the two `eat` declarations disagree and so ktRefParams gives 0. Key the table by class (with inheritance), and fall back to the name when the class is not known statically.
-2. Interpreter only: a class method named like a String builtin breaks named arguments on the builtin. Repro: `class Q { fun padStart(a: Int, b: Int, c: Int) = a + b + c }`, then `"abcde".padStart(length = 7, padChar = '*')` prints `**abcde` in the oracle, llvm.Run and native, but `abcde` in the interpreter. Assertion win95o in tests/kotlin-test-full.kt turns red as soon as such a class is added to that file. Named-argument resolution should use the receiver's own method, not any program method with that name.
+1. In compiled code (llvm.Run and native), named arguments are evaluated in parameter-slot order, not source order. Kotlin evaluates arguments left to right as written. Repro:
+   ```kotlin
+   val log = mutableListOf<String>()
+   fun t(s: String, v: Int): Int { log.add(s); return v }
+   fun f3(a: Int, b: Int, c: Int) = "$a$b$c"
+   fun main() { println(f3(c = t("c", 3), a = t("a", 1), b = t("b", 2)) + " " + log) }
+   ```
+   The oracle and the interpreter print `123 [c, a, b]`; run and native print `123 [a, b, c]`. The same happens on stdlib calls: `listOf(1,2,3).joinToString(postfix = t("p",1).toString(), separator = t("s",0).toString())` logs `[p, s]` in the oracle, but `[s, p]` compiled. The cause is that orderArgs emits the argument thunks in slot order. Evaluate them into temporaries in source order, then place them by slot. Check default arguments that refer to earlier parameters, and vararg/spread mixed with named arguments.
+2. A reference whose base is a qualified object value is treated as unbound. `class Cm { companion object { fun bite() = 0 } }`: `(Cm.Companion::bite as Any) is Function0<*>` and `(Cm::bite as Any) is Function0<*>` are true in the oracle, false in all engines. `enum class E { X; fun run(a: Int, b: Int, c: Int) = a + b + c }`: `(E.X::run as Any) is Function3<*,*,*,*>` is true in the oracle. Also `val f = E.X::run; f(1, 2, 3)` prints 6 in the oracle, but the interpreter aborts with "unknown Int method: run". The probable cause is that the companion is the class descriptor itself (`__isclass`), so js_ktref makes an unbound reference.
+3. Compiler only: a class method with the same name and the same parameter names as a stdlib member, but in a different order (`class Z { fun padStart(padChar: Char, length: Int) }`), makes `"x".padStart(length = 5, padChar = '*')` print `55555…x`. The oracle and the interpreter print `****x`. The fix needs a run-time choice of argument order when the receiver's class is not known statically. This only affects joinToString, windowed, chunked, padStart and padEnd.
 
 Verify with `tests/probe.sh kotlin` on all four legs.
 
@@ -1200,6 +1208,7 @@ T-1138 kotlin: static Array<T>::class, KClass no-reflect suffix decision, functi
 T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-integer ranges, zero slice size, endless Float range slices — merged 8b79ec7b: Hash#index warning from the runtime arm at the running site (send/method/public_send; site fn registered once via js_rsitefn, no per-call extern), later-line call sites for warnings and backtraces in all engines, big-Integer ranges walk/count exactly, Range#length NoMethodError and Float-range count TypeError per MRI, each_slice/each_cons size checks with implicit conversion; 4-leg probe matches ruby 2.6 stdout + stderr; matrix 605/605; bench +0.02%
 T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) — merged 82430d9c: builtin method reference arity from one kotlinc-measured table in kotlin-decltypes.js (140 names x 30 receiver types; bound refs pass the spec to js_ktrefarity, unbound get it at compile time), expr::name records arity, inherited equals arity 1; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench 0.00%
 T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list assignment parse, quoted compound values, reads through circular array nameref, path-length-dependent frozen step cost — merged a35d7084: list-to-member declaration failures, nameref array conversions (-g target, removing nameref attribute, read -a/mapfile), prefix list assignments, quoted compound values (+ compiler keeps -i/-u/-l on runtime (...)), reads through circular array namerefs, readonly :=  status 2, linear ${v#*L}/${v%L*} for literal L (part 6 frozen steps 70M -> 27M); 4-leg probe matches bash 5.3 (stdout + stderr; \001 byte by design); bash gates green; bench 0.00%
+T-1142 kotlin: per-class program-method arity, interpreter named args on builtins shadowed by a class method name — merged 013812e4: per-class reference arity for disputed method names (run-time from the receiver's class chain via recorded closure arity), stdlib named-argument order chosen by receiver (interp lookupMethod, compiler namesCover fallback); 4-leg probe matches kotlinc 2.2.21 except the pre-existing compiled named-arg evaluation order (filed P2); kotlin gates green; bench -0.02%
 
 # Settled — do not re-open
 
