@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1155** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1156** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,12 +103,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1154 kotlin: `===` identity beyond arrays, array toString/contentHashCode, named spread, vararg element type · P3 · KT · IN PROGRESS (KT worker, round 48) [V]
-Found while closing T-1151; oracle kotlinc 2.2.21.
-- Both grammars lower `===` to `==`: `data class P(val x: Int); P(1) === P(1)`, lists and Pairs still compare structurally (kotlinc: false). Needs an identity extern; keep `m.keys === ks` (section 147) true. All engines.
-- `intArrayOf(1,2).toString()` prints `[1, 2]`; kotlinc prints `[I@<hash>` (assert as a relation). `contentHashCode()` is missing in all engines ("unknown list method"); kotlinc prints 994 for `intArrayOf(1,2)`.
-- Named spread `g(xs = *b)` does not parse in either grammar.
-- `fun fl(vararg xs: Long) = xs; fl(5L)[0].javaClass.name` gives java.lang.Long; kotlinc says `long` (the vararg's static type is noted as its element type). All engines, pre-existing.
+### T-1155 kotlin: Char/Boolean array element types, sum() result type, emptyList and ::f identity · P3 · KT · OPEN [V]
+Found while closing T-1154; oracle kotlinc 2.2.21.
+- `charArrayOf('x')[0].javaClass.name` gives `java.lang.Character` (kotlinc `char`); `booleanArrayOf(true)[0]` gives `java.lang.Boolean` (kotlinc `boolean`). All engines; adding them to `ktIndexTy` alone did not fix it.
+- `fun fs(vararg xs: Short) = xs; fs(1, 2).sum().javaClass.name` gives `java.lang.Integer` (kotlinc `int`): the static type of `.sum()` on a call result is unknown. All engines.
+- `emptyList<Int>() === emptyList<Int>()` gives false (kotlinc true: EmptyList is a singleton); `::f === ::f` gives true (kotlinc false: a new reference object each time). All engines.
+- Record as limits (value model): `===` on computed Strings and on boxed numbers compares by value; nested-array identity hashes are the stand-in 1, so `arrayOf(intArrayOf(1)).contentHashCode()` is equal for distinct arrays.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1204,6 +1204,7 @@ T-1149 kotlin: function reference to a vararg function called with an array, int
 T-1150 bash: compiler nameref attribute placement, circular-vs-depth message, compile-time readonly leaking out of subshells and dynamic calls — merged acfdc0f7: function readonly lifetime, circular-nameref readonly warnings, -i/-u/-l through computed namerefs; master four-leg probes match bash 5.3 except a pre-existing arithmetic-store case (filed)
 T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.size, Object instance methods + top-level define_method, uncaught-exception backtrace "from" lines — merged 45589482: Kernel#then, NUM2LONG count args, exact big times.size, program methods on Object; master probes match ruby 2.6 in run/native, interp gaps pre-existing (filed)
 T-1151 kotlin: array == / === compare contents instead of identity; vararg member references; local-fun ::name; inherited/inner static result types — merged 9bd4cb20: array ==/=== identity (tagged vararg arrays), vararg member refs, local ::name in interp, inherited result types; master four-leg probe matches kotlinc 2.2.21
+T-1154 kotlin: `===` identity beyond arrays, array toString/contentHashCode, named spread, vararg element type — merged 0c4c7b54: === identity, array toString/contentHashCode/contentDeep*, named spread, vararg array static types; master four-leg probe matches kotlinc 2.2.21
 
 # Settled — do not re-open
 
