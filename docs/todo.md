@@ -147,7 +147,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1131 bash: readonly/export on NAME[SUB], declare -g -x through circular nameref, scalar store to circular array nameref, compiled readonly-nameref assignment, test -nt/-ot/-ef · P3 · SH · OPEN [V]
+### T-1131 bash: readonly/export on NAME[SUB], declare -g -x through circular nameref, scalar store to circular array nameref, compiled readonly-nameref assignment, test -nt/-ot/-ef · P3 · SH · IN PROGRESS (SH worker, round 42) [V]
 
 Found while working T-1130. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
