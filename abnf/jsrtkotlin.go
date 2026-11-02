@@ -3645,7 +3645,14 @@ func init() {
 					if v, ok := rt.ktRangeEndEx(rg); ok {
 						return w(v)
 					}
+				// A Long or ULong progression's step is a Long.
 				case "step":
+					if ktRangeExact(rg) {
+						if rg.down {
+							return w(jsGInt{v: -rg.ls, w: 64})
+						}
+						return w(jsGInt{v: rg.ls, w: 64})
+					}
 					return w(ktRangeSigned(rg))
 				// `.size` on a progression is not Kotlin (IntRange is an Iterable,
 				// not a Collection), but the interpreter half answers the element

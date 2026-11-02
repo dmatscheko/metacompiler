@@ -11636,6 +11636,13 @@ function k4RangeDec(rg) {
     rg["to"] = rg["to"] - 1
     if (k4RangeExact(rg)) { rg["lt"] = k1Arith("-", rg["lt"], 1) }
 }
+// A Long or ULong progression's step: a Long that carries the direction. Twin of
+// kRangeStepL in kotlin-interpreter.abnf.
+function k4RangeStepL(rg) {
+    var st = ktNorm(k1Val(rg["ls"]), 64, 0)
+    if (rg["down"] === true) { return k1Arith("-", 0, st) }
+    return st
+}
 // ktRangeLastEl over a Long or ULong range's exact bounds (jsrtkotlin.go
 // ktRangeLastL).
 function k4RangeLastL(rg) {
@@ -12029,8 +12036,7 @@ function ktRangeHash(rg) {
     if (k4RangeExact(rg)) {
         first = rg["lf"]
         last = k4RangeLastL(rg)
-        step = ktNorm(k1Val(rg["ls"]), 64, 0)
-        if (rg["down"] === true) { step = k1Arith("-", 0, step) }
+        step = k4RangeStepL(rg)
     } else {
         first = k4RangeEl(rg, rg["from"])
         last = k4RangeEl(rg, ktRangeLastEl(rg))
@@ -12364,6 +12370,7 @@ function js_ktfget(o, name) {
             if (!ktMiss(ex)) { return ex }
         }
         if (name == "step") {
+            if (lg) { return k4RangeStepL(o) }
             if (o["down"] === true) { return -o["st"] }
             return o["st"]
         }

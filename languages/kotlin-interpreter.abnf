@@ -3531,6 +3531,8 @@ NotMemberKw = :script(~~ "pure";
         if (rg.down) { return kArith("+", rg.lt, kDiffModL(rg.lf, rg.lt, rg.ls)) }
         return kArith("-", rg.lt, kDiffModL(rg.lt, rg.lf, rg.ls))
     }
+    // A Long or ULong progression's step: a Long that carries the direction.
+    function kRangeStepL(rg) { return kAdoptLong(rg.down ? kArith("-", 0, rg.ls) : rg.ls) }
     function kDiffModL(a, b, st) {
         var ma = anytype
         var mb = anytype
@@ -3783,7 +3785,7 @@ NotMemberKw = :script(~~ "pure";
         if (kRangeExact(rg)) {
             first = rg.lf
             last = kRangeLastL(rg)
-            step = kAdoptLong(rg.down ? kArith("-", 0, rg.ls) : rg.ls)
+            step = kRangeStepL(rg)
         } else {
             first = rangeEl(rg, rg.from)
             last = rangeEl(rg, rangeLastEl(rg))
@@ -13739,7 +13741,7 @@ NotMemberKw = :script(~~ "pure";
                 ex = kRangeEndEx(o)
                 if (ex !== undefined) { return ex }
             }
-            if (name == "step") { return o.down ? -o.st : o.st }
+            if (name == "step") { return kRangeExact(o) ? kRangeStepL(o) : (o.down ? -o.st : o.st) }
             // `.size` on a progression is not Kotlin (IntRange is an Iterable, not a
             // Collection), but both halves answer the element count rather than
             // kotlin.Unit, so they agree on a spelling no valid program uses.

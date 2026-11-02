@@ -2004,6 +2004,14 @@ function ktPropTy(ty, name) {
         var mt = ktMemberTypeIn(base, name)
         return mt != "" ? mt : ktMemberTyOf(ktMemberLtys["$" + name], base)
     }
+    // A range's or a progression's first, last and step are declared primitive
+    // (a CharProgression's step is an Int); start and endInclusive come from the
+    // generic ClosedRange<T> and are not.
+    var re = ktElemOfTy(ty)
+    if (base == re + "Range" || base == re + "Progression") {
+        if (name == "first" || name == "last") { return re }
+        return name == "step" ? (re == "Long" ? "Long" : "Int") : ""
+    }
     var seq = ktOneArgColl["$" + base] != undefined || ktTwoArgColl["$" + base] != undefined ||
               ktPrimArrElem["$" + base] != undefined || base == "String" || base == "StringBuilder"
     if (!seq || base == "Pair" || base == "Iterable" || base == "Sequence") { return "" }

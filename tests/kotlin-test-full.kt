@@ -8654,6 +8654,33 @@ fun s195() {
         "Step must be greater than Long.MIN_VALUE to avoid overflow on negation.", "Step must be non-zero."))
 }
 
+// ===== SECTION 196: a range's members and their JVM types =====
+// A range's or a progression's first, last and step are declared primitive, so
+// javaClass of them is `long`, `int`, `char`; start and endInclusive come from the
+// generic ClosedRange<T> and are boxed. A LongProgression's (and a
+// ULongProgression's) step is a Long, a CharProgression's an Int
+// (kotlinc 2.2.21 on java 24).
+fun s196() {
+    val lr = 1L..4L
+    val ir = 1..4
+    val cr = 'a'..'d'
+    check("rjty196a", lr.last.javaClass.name == "long" && lr.first.javaClass.name == "long" &&
+        (1L..4L).last.javaClass.name == "long" && lr.step.javaClass.name == "long" && ir.first.javaClass.name == "int" &&
+        ir.last.javaClass.name == "int" && ir.step.javaClass.name == "int" && cr.first.javaClass.name == "char" &&
+        cr.last.javaClass.name == "char" && ('a'..'z' step 2).step.javaClass.name == "int")
+    check("rjty196b", (1L..10L step 3L).last.javaClass.name == "long" && (1L..10L step 3L).step.javaClass.name == "long" &&
+        (10 downTo 1).first.javaClass.name == "int" && (10L downTo 1L).step.javaClass.name == "long" &&
+        ('z' downTo 'a').first.javaClass.name == "char" && (1 until 4).last.javaClass.name == "int" &&
+        (1L until 4L).first.javaClass.name == "long")
+    check("rjty196c", lr.start.javaClass.name == "java.lang.Long" && lr.endInclusive.javaClass.name == "java.lang.Long" &&
+        cr.start.javaClass.name == "java.lang.Character" && ir.endInclusive.javaClass.name == "java.lang.Integer")
+    val s: Any = lr.step
+    val d: Any = (10L downTo 1L step 3L).step
+    val u: Any = (1uL..9uL step 2L).step
+    check("rstep196d", s is Long && s !is Int && d is Long && d == -3L && u is Long && u == 2L &&
+        (10L downTo 1L).step * 3000000000L == -3000000000L)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -8846,6 +8873,7 @@ fun main() {
     s193() // SECTION-CALL 193
     s194() // SECTION-CALL 194
     s195() // SECTION-CALL 195
+    s196() // SECTION-CALL 196
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
