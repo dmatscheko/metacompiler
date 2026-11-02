@@ -143,7 +143,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1150 bash: compiler nameref attribute placement, circular-vs-depth message, compile-time readonly leaking out of subshells and dynamic calls · P3 · SH · OPEN [V]
+### T-1150 bash: compiler nameref attribute placement, circular-vs-depth message, compile-time readonly leaking out of subshells and dynamic calls · P3 · SH · IN PROGRESS (SH worker, round 47) [V]
 
 Found while working T-1146. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
