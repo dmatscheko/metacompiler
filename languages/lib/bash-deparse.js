@@ -700,6 +700,22 @@ function dpPrintCmd(c, ind, inline) {
 // The diagnostic for the first option letter keyword kw does not take (bash 5.3: export
 // and readonly take -aAfnp, the others -aAfFgiIlnprtux), its usage line included, or "".
 // flags are the option words joined, their signs kept.
+// Does a declaration with these options change an attribute a readonly variable keeps?
+// bash 5.3 refuses -a/-A/-i/-l/-u/-n and +a/+A/+i/+l/+u on one ("NAME: readonly
+// variable", status 1, none of the line's attributes applied); -x, -g, -r and +n are
+// allowed, and so is everything `readonly` and `export` do.
+function bashDeclRoAttr(kw, flags, plus) {
+    if (kw == "export" || kw == "readonly" || flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0) { return false }
+    var i
+    for (i = 0; i < flags.length; i++) {
+        if ("aAilun".indexOf(flags.charAt(i)) >= 0) { return true }
+    }
+    for (i = 0; i < plus.length; i++) {
+        if ("aAilu".indexOf(plus.charAt(i)) >= 0) { return true }
+    }
+    return false
+}
+
 function bashDeclBadOpt(kw, flags) {
     var ok = (kw == "export" || kw == "readonly") ? "aAfnp" : "aAfFgiIlnprtux"
     var i

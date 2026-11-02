@@ -2713,6 +2713,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (!anyRef || noRef > 0 || !attrOn(refVars, pn)) { return plain() }
                 var rn = refTarget(pn)
                 if (rn == pn) { return plain() }
+                // A subscript applies to a variable named NAME[SUB] itself, which never
+                // exists (bash 5.3: declare -n e=a[1]; ${e[0]} is empty): "", never set.
+                // Through a circular chain bash warns a second time. Twin of rt_nref_elems.
+                if (hasIdx && rn.indexOf("[") > 0) { rn = "" }
+                else if (hasIdx && rn == "" && !refQuiet) { diagErr("warning: " + pn + ": circular name reference\n") }
                 var rk = "$" + rn
                 if (!hasOwn(byRef, rk)) {
                     var its = []
@@ -3247,6 +3252,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
         var isRef = kw != "export" && flags.indexOf("n") >= 0
+        var roAttr = bashDeclRoAttr(kw, flags, plus)
         // A readonly name the declaration would assign or make local is refused (status 1).
         var roFail = false
         // One name, which -g declares on its global binding even where a local hides it.
@@ -3281,6 +3287,42 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // inside one bash only warns, which is not modelled). Twin of the same check in
             // makeDecl in bash-to-llvm-ir.abnf.
             var nk = "$" + names[k]
+            // -a or -A of a nameref that refers to nothing makes it a plain array.
+            if (!isRef && bareArr && attrOn(refVars, names[k])) { refVars[nk] = false }
+            // -n, in bash 5.3's order. An array variable, an array value or -a/-A on a local
+            // is refused with "reference variable cannot be an array" (status 1), after a
+            // compound value is assigned and a local made an empty array. Then a set variable
+            // given no value must already name one (even an empty value is "invalid", not
+            // bashRefBad's "not a valid identifier"), and a readonly one is refused. A global
+            // declaration that passes with -a or -A drops the -n: those apply alone and a
+            // nameref attribute goes. Twin of the -n checks in declOne in bash-to-llvm-ir.abnf.
+            if (isRef) {
+                var lit = asgs[k] != null && asgs[k].lit != null
+                var loc = localizes()
+                var arrNow = isArr(names[k]) && !(loc && !localHere(names[k]))
+                if (arrNow || lit || (loc && bareArr)) {
+                    if (lit || (loc && bareArr)) {
+                        var sa = asgs[k]
+                        if (!lit) { asgs[k] = null }
+                        declOneN(k, lit ? v : null)
+                        asgs[k] = sa
+                    }
+                    diagErr(kw + ": " + names[k] + ": reference variable cannot be an array\n")
+                    roFail = true
+                    return
+                }
+                if (asgs[k] == null && !(loc && !localHere(names[k])) && varsHas[nk] == true && !bashIsRef(vars[nk])) {
+                    diagErr(kw + ": `" + vars[nk] + "': invalid variable name for name reference\n")
+                    roFail = true
+                    return
+                }
+                // declOneN refuses a readonly one (bashDeclRoAttr) and applies -a/-A alone.
+                if (bareArr || attrOn(roVars, names[k])) {
+                    if (!attrOn(roVars, names[k])) { refVars[nk] = false }
+                    declOneN(k, v)
+                    return
+                }
+            }
             // A value that names no variable is refused, and nothing is declared (bashRefBad).
             var refBad = (isRef && asgs[k] != null && asgs[k].lit == null && asgs[k].idxT == null) ? bashRefBad(kw, v) : ""
             if (refBad != "") { diagErr(refBad); roFail = true; return }
@@ -3312,7 +3354,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var fresh = localize && !localHere(names[k])
             var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
             var shown = (declOwn != "") ? declOwn : names[k]
-            if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0) && attrOn(roVars, names[k])) {
+            if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0 || roAttr) && attrOn(roVars, names[k])) {
                 diagErr(roWho + ((asgs[k] != null && roWho != "") ? shown : names[k]) + ": readonly variable\n")
                 roFail = true
                 return
@@ -4058,13 +4100,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return n
     }
-    // An assignment record retargeted through a nameref; null after a circular one.
+    // An assignment record retargeted through a nameref; null after a circular one, except
+    // that an element or array literal store lands on the nameref itself, marked circ for
+    // refCircDrop (bash 5.3). Twin of rt_nref_arr.
     function refAssign(a) {
-        if (!anyRef) { return a }
+        if (!anyRef || a.circ == true) { return a }
         var rn = refTarget(a.name)
+        if (rn == "" && (a.idxT != null || a.lit != null)) {
+            return {name: a.name, idxT: a.idxT, aqT: a.aqT, op: a.op, valT: a.valT, lit: a.lit, isrc: a.isrc, lbl: a.lbl, circ: true}
+        }
         if (rn == "") { arithErr = true; return null }
         if (rn == a.name) { return a }
+        // An element or literal store needs a variable, and NAME[SUB] names none.
+        if ((a.idxT != null || a.lit != null) && rn.indexOf("[") > 0) {
+            diagErr("`" + rn + "': not a valid identifier\n")
+            arithErr = true
+            return null
+        }
         return {name: rn, idxT: a.idxT, aqT: a.aqT, op: a.op, valT: a.valT, lit: a.lit, isrc: a.isrc, lbl: a.lbl}
+    }
+    // The circular nameref a store landed on stops being one and drops its value; an element
+    // store, its subscript good, warns a second time. Twin of rt_nref_circ.
+    function refCircDrop(a, warn) {
+        if (a.circ != true) { return }
+        if (warn && !refQuiet) { diagErr("warning: " + a.name + ": circular name reference\n") }
+        refVars["$" + a.name] = false
+        unsetVar(a.name)
     }
     // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
     // a call frame unwinding a `local` - so membership alone is not the answer.
@@ -6099,6 +6160,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a.lit != null) {
             var lv = evalArrayLit(a.lit, isAs)
             if (arithErr || abortSignal != null) { return }
+            refCircDrop(a, false)
             // A replacing literal drops a scalar of the name; an appending one keeps it as element 0.
             if (a.op != "+=") { unsetVar(a.name) } else if (!isAs) { arrAdopt(a.name) }
             applyArrayLit(a.name, lv, a.op == "+=", assoc, decl)
@@ -6139,7 +6201,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var svp = arPfx
         arPfx = ""
         var w = wordJoin((a.aqT != null && !isAs && !decl) ? a.aqT() : a.idxT())
+        // A circular nameref's own element is keyed without warning again (refCircDrop does).
+        var sq = refQuiet
+        if (a.circ == true) { refQuiet = true }
         var k = arrAkey(a.name, w, a.lbl + "[" + (decl ? w : a.isrc) + "]", isAs && !none, none || a.isrc == "@" || a.isrc == "*")
+        refQuiet = sq
         arPfx = svp
         return k
     }
@@ -6160,6 +6226,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var key = asgKey(a, isAs, decl)
             if (arithErr || abortSignal != null) { return }
+            refCircDrop(a, true)
             if (!isAs) { arrAdopt(a.name) }
             arrEnsure(a.name, assoc)
             elemSet(a.name, key, (a.op == "+=") ? arrGet(a.name, key) : null, v)

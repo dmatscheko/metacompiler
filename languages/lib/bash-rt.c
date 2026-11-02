@@ -4827,6 +4827,8 @@ int ar_rcap;
 int *ar_h;            /* record + 1, 0 = empty */
 int ar_hsz;           /* a power of two, or 0 before the first record */
 long arr_rows;        /* the rows of every record: 0 answers rt_arr_any at once */
+int nref_quiet;       /* >0: a circular nameref is not warned about (rt_nref_end) */
+char *nref_circ;      /* the circular nameref an element store waits to drop (rt_nref_circ) */
 
 void *realloc(void *p, unsigned long n);
 
@@ -5564,7 +5566,10 @@ char *rt_arr_akey(char *nm, char *sub, char *lbl, int whole) {
     if (whole != 0 || rt_isassoc(nm) != 0) rt_berr("", lbl, "bad array subscript");
     else {
         k = rt_arith(sub);
+        /* A circular nameref's own element is keyed without warning again. */
+        if (nref_circ != 0) nref_quiet = nref_quiet + 1;
         if (arith_err == 0) key = rt_arr_ikeyl(nm, k, lbl);
+        if (nref_circ != 0) nref_quiet = nref_quiet - 1;
     }
     if (key == &bad_key[0] && arith_err == 0) {
         arith_err = 1;
@@ -6192,7 +6197,6 @@ int rt_xmark(char *nm, int on) {
  * rt_nref_end cost nothing in a program without one. Twin of refVars in
  * bash-interpreter.abnf. */
 int nref_any;
-int nref_quiet;
 int rt_nmark(char *nm, int on) {
     int r;
     if (on != 0) {
@@ -6242,6 +6246,36 @@ int rt_decl_nref(char *kw, char *n, char *v, int mode)
     rt_xmark(n, 0);
     rt_nmark(n, 0);
     return 1;
+}
+
+/* `declare -n NAME` (keyword kw) meeting NAME: an array, even an empty one, is
+ * refused with bash's "reference variable cannot be an array"; so, when chk (no
+ * value given), is a set value that names no variable. 1, else 0. Twin of the -n
+ * checks in declOne in bash-interpreter.abnf. */
+int rt_nref_noarr(char *kw, char *nm, int chk)
+{
+    int r = rt_ar_find(nm);
+    int i;
+    if (r >= 0 && (ar_n[r] != 0 || (ar_mk[r] & 4099) != 0)) {
+        rt_berr(kw, nm, "reference variable cannot be an array");
+        return 1;
+    }
+    if (chk == 0) return 0;
+    i = rt_varslot(nm);
+    if (i < 0 || gvars[i] == &unset_marker[0] || rt_isasgref(gvars[i]) != 0) return 0;
+    rt_berr(kw, rt_strcat(rt_strcat("`", gvars[i]), "'"), "invalid variable name for name reference");
+    return 1;
+}
+
+/* -a or -A of the nameref nm whose value is unset or empty, which refers to
+ * nothing, makes it a plain array: the nameref mark goes. */
+int rt_nref_drop(char *nm)
+{
+    int i;
+    if (nref_any == 0 || (rt_arr_marks(nm) & 32) == 0) return 0;
+    i = rt_varslot(nm);
+    if (i >= 0 && gvars[i] != &unset_marker[0] && gvars[i][0] != 0) return 0;
+    return rt_nmark(nm, 0);
 }
 
 /* The variable a chain of namerefs from n ends at: n itself when it is no
@@ -8415,21 +8449,66 @@ char *rt_nref_base(char *n)
     return n;
 }
 
+/* The array a subscripted read through the nameref n reads: the end of its
+ * chain, or "" (never set) for an end NAME[SUB], which names no variable, and
+ * for a circular chain, which bash warns about twice. Twin of the nameref arm of
+ * mkParamExp in bash-interpreter.abnf. */
+char *rt_nref_elems(char *n)
+{
+    char *t = rt_nref_end(n);
+    if (t == 0) {
+        if (nref_quiet == 0) rt_berr("warning", n, "circular name reference");
+        return empty;
+    }
+    if (rt_indbr(t) > 0) return empty;
+    return t;
+}
+
+/* The nameref n made a plain unset variable. */
+int rt_nref_unref(char *n)
+{
+    int i = rt_varslot(n);
+    if (i >= 0) gvars[i] = &unset_marker[0];
+    return rt_nmark(n, 0);
+}
+
+/* The element store rt_nref_arr found circular, its subscript now good: bash's
+ * second warning, and the nameref goes. */
+int rt_nref_circ(void)
+{
+    char *n = nref_circ;
+    if (n == 0) return 0;
+    nref_circ = 0;
+    if (nref_quiet == 0) rt_berr("warning", n, "circular name reference");
+    return rt_nref_unref(n);
+}
+
 /* The array an array store through the nameref n lands on (the end of its
- * chain, less any [SUB]), made ready for it: a literal that replaces (lit 1)
- * empties its rows and drops its scalar, and any other store makes a set scalar
- * its element 0. A circular chain abandons the line. Twin of refAssign in
+ * chain), made ready for it: a literal that replaces (lit 1) empties its rows
+ * and drops its scalar, and any other store makes a set scalar its element 0.
+ * An end that is itself an element, NAME[SUB], is no variable name: bash's
+ * "not a valid identifier", and the line is abandoned (arith_err). Through a circular chain the store lands on n itself, which
+ * stops being a nameref and drops its value (bash 5.3); for an element (sub)
+ * that waits for rt_nref_circ, once its subscript is good. Twin of refAssign in
  * bash-interpreter.abnf. */
-char *rt_nref_arr(char *n, int lit)
+char *rt_nref_arr(char *n, int lit, int sub)
 {
     char *t = rt_nref_end(n);
     int i;
+    nref_circ = 0;
+    if (t == 0 && sub != 0) {
+        nref_circ = n;
+        return n;
+    }
     if (t == 0) {
+        rt_nref_unref(n);
+        t = n;
+    }
+    if (rt_indbr(t) > 0) {
+        rt_berr("", rt_strcat(rt_strcat("`", t), "'"), "not a valid identifier");
         arith_err = 1;
         return empty;
     }
-    i = rt_indbr(t);
-    if (i > 0) t = rt_substr(t, 0, i);
     i = rt_varslot_new(t);
     if (lit != 0) {
         rt_arr_empty(t, 4112);

@@ -877,6 +877,81 @@ $(s120m "$e")"
   e=$( (echo x"${s120a[$'x'[]-v}"y) 2>&1); r=$(s120m "$e")
   check sbq4 "$r" "bad substitution: no closing \`}' in x\"\${s120a[x[]-v}\"y"
 }
+# ===== SECTION 121: readonly attributes, and namerefs meeting arrays =====
+# A readonly variable refuses -a, -A, -i, -l, -u, -n and their + forms (none of the line's
+# attributes apply), and allows -x. -n meets an array: a global declaration of a non-array
+# with -a drops the -n; an array variable, an array value or -a on a local is refused
+# (the value still assigned, the local made an empty array). A set variable made a nameref
+# must already name one. An element or literal store through a circular nameref warns and
+# lands on the nameref itself, now a plain array; through a nameref to NAME[SUB] it is not
+# a valid identifier, and a subscripted read finds no variable. Every expected value is
+# bash 5.3's.
+s121m() { local l e; while IFS= read -r l; do e=${l#*line }; e=${e#*: }; printf '%s\n' "$e"; done <<< "$1"; }
+s121() {
+  local r e
+  r=$( (readonly s121z=1
+    declare -gi s121z; echo "i=$?"; declare -gu s121z; echo "u=$?"; declare -ga s121z; echo "a=$?"
+    declare -gA s121z; echo "A=$?"; declare -g +i s121z; echo "pi=$?"; declare -gix s121z; echo "ix=$?"
+    declare -gx s121z; echo "x=$?"; declare -p s121z) 2>/dev/null)
+  check sro1 "$r" 'i=1
+u=1
+a=1
+A=1
+pi=1
+ix=1
+x=0
+declare -rx s121z="1"'
+  e=$( (readonly s121y=1 s121u=abc; declare -gl s121y; declare -gn s121y; declare -gn s121u) 2>&1); r=$(s121m "$e")
+  check sro2 "$r" "declare: s121y: readonly variable
+declare: \`1': invalid variable name for name reference
+declare: s121u: readonly variable"
+  r=$( (declare -gan s121a; echo "1=$?"; declare -p s121a
+    s121b=v; declare -gan s121b; echo "2=$?"; declare -p s121b
+    s121c=(1); declare -gn s121c; echo "3=$?"; declare -p s121c
+    declare -gn s121d=(p q); echo "4=$?"; declare -p s121d
+    local -an s121e=y; echo "5=$?"; declare -p s121e
+    s121f=1; declare -gn s121f; echo "6=$?"; declare -p s121f
+    declare -gn s121g; declare -ga s121g; echo "7=$?"; declare -p s121g) 2>/dev/null)
+  check snr1 "$r" '1=0
+declare -a s121a
+2=0
+declare -a s121b=([0]="v")
+3=1
+declare -a s121c=([0]="1")
+4=1
+declare -a s121d=([0]="p" [1]="q")
+5=1
+declare -a s121e
+6=1
+declare -- s121f="1"
+7=0
+declare -a s121g'
+  e=$( (s121c=(1); declare -gn s121c; local -An s121h) 2>&1); r=$(s121m "$e")
+  check snr2 "$r" 'declare: s121c: reference variable cannot be an array
+local: s121h: reference variable cannot be an array'
+  r=$( (declare -gn s121p=s121q s121q=s121p; s121p[1]=4; echo "rc=$?"; declare -p s121p; s121p=5; declare -p s121p
+    declare -gn s121r=s121s s121s=s121r; s121r=(x y); echo "l=$?"; declare -p s121r s121s) 2>/dev/null)
+  check scr1 "$r" 'rc=0
+declare -a s121p=([1]="4")
+declare -a s121p=([0]="5" [1]="4")
+l=0
+declare -a s121r=([0]="x" [1]="y")
+declare -n s121s="s121r"'
+  e=$( (declare -gn s121p=s121q s121q=s121p; s121p[1]=4) 2>&1); r=$(s121m "$e")
+  check scr2 "$r" 'warning: s121p: circular name reference
+warning: s121p: circular name reference'
+  r=$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; echo "${s121w[0]}|$s121w|${s121w[@]}|${#s121w[@]}|${s121w[1]:-d}") 2>/dev/null)
+  check sne1 "$r" '|2||0|d'
+  e=$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w[0]=9; echo no) 2>&1)
+  e="$e
+$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w=(7 8); echo no) 2>&1)"
+  e="$e
+$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w+=(z); echo no) 2>&1)"
+  r=$(s121m "$e")
+  check sne2 "$r" "\`s121v[1]': not a valid identifier
+\`s121v[1]': not a valid identifier
+\`s121v[1]': not a valid identifier"
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -910,5 +985,6 @@ s117  # SECTION-CALL 117
 s118  # SECTION-CALL 118
 s119  # SECTION-CALL 119
 s120  # SECTION-CALL 120
+s121  # SECTION-CALL 121
 echo "full: $checks checks, $fails failures"
 exit $fails

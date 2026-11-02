@@ -1694,7 +1694,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `varnames`; the emitter only fills that table in main's entry block.
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1, 0, 0])
     var rtNrefBase = rtDecl("rt_nref_base", true, [1])
-    var rtNrefArr = rtDecl("rt_nref_arr", true, [1, 0])
+    var rtNrefElems = rtDecl("rt_nref_elems", true, [1])
+    var rtNrefArr = rtDecl("rt_nref_arr", true, [1, 0, 0])
+    var rtNrefCirc = rtDecl("rt_nref_circ", false, [])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
     // i32 rt_decl_word(i8* w, i32 d, i32 x, i32 at, i8* who): one computed operand of a
     // declaration, and i8* rt_decl_name(i8* w) the NAME it starts with (bash-rt.c).
@@ -1961,6 +1963,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrPlus = rtDecl("rt_arr_plus", false, [1, 1, 1, 0, 0])
     var rtNrefBad = rtDecl("rt_nref_bad", false, [1, 1])
     var rtDeclNref = rtDecl("rt_decl_nref", false, [1, 1, 1, 0])
+    var rtNrefNoArr = rtDecl("rt_nref_noarr", false, [1, 1, 0])
+    var rtNrefDrop = rtDecl("rt_nref_drop", false, [1])
     var rtNrefSelfBad = rtDecl("rt_nref_self_bad", false, [1, 1])
     var rtArrList = rtDecl("rt_arr_list", true, [1, 1, 0, 0])
     // The scalar-aware quartet, EXPANSION SITES ONLY - see languages/lib/bash-rt.c.
@@ -2320,7 +2324,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var pc = paramCore(items, null)
             if (!hasIdx || pfx) { return pc }
             // Through a nameref, NAME[SUB] is the element of the array it names, found when
-            // it runs (rt_nref_base), as an indirection's is.
+            // it runs (rt_nref_elems), as an indirection's is.
             var rcell = {tg: null, nm: null, sub: null}
             var ritems = []
             for (i = 0; i < items.length; i++) { ritems.push(items[i]) }
@@ -2330,7 +2334,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var pcName = name
             pc.fn = function(b) {
                 if (!attrOn(refVars, pcName)) { return pcFn(b) }
-                rcell.nm = b.NewCall(rtNrefBase, gepStr(b, pcName))
+                rcell.nm = b.NewCall(rtNrefElems, gepStr(b, pcName))
                 return rpc.fn(b)
             }
             return pc
@@ -3820,7 +3824,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // appending one keeps the scalar as element 0. Through a nameref, rt_nref_arr does
         // both to the array it names.
         if (attrOn(refVars, name)) {
-            nm = b.NewCall(rtNrefArr, [nm, append ? zero : one])
+            nm = b.NewCall(rtNrefArr, [nm, append ? zero : one, zero])
             b = emitAbortCheck(b)
             assoc = 2
         }
@@ -3966,9 +3970,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var soft = a.soft != undefined && !lit
             var pfx = soft ? b.NewLoad(i8ptr, gArPfx) : null
             if (soft) { b.NewStore(emptyPtr(b), gArPfx) }
-            // Through a nameref, the element is the named array's (rt_nref_arr).
+            // Through a nameref, the element is the named array's (rt_nref_arr), or a circular
+            // one's own once the subscript is good (rt_nref_circ).
             if (viaRef) {
-                nm = b.NewCall(rtNrefArr, [nm, zero])
+                nm = b.NewCall(rtNrefArr, [nm, zero, one])
                 b = emitAbortCheck(b)
             }
             var rk = lit ? subKeyOf(b, a.name, a.idxT, null) : asgKeyOf(b, a, assoc, viaRef ? nm : null)
@@ -3984,6 +3989,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = setB
             }
             b = emitAbortCheck(b)
+            if (viaRef) { b.NewCall(rtNrefCirc) }
             if (!viaRef) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
             var ebox = {b: b}
             emitElemSet(ebox, a.name, nm, rk.k, (a.op == "+=") ? b.NewCall(rtArrGet, [nm, rk.k]) : null, v, assoc, mk)
@@ -4275,6 +4281,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
         var isRef = kw != "export" && flags.indexOf("n") >= 0
+        var roAttr = bashDeclRoAttr(kw, flags, plus)
         // +a / +A, which an array of that kind refuses at run time (rt_arr_plus).
         var plusArr = plus.indexOf("a") >= 0 || plus.indexOf("A") >= 0
         var refuseP = null       // i32 slot: a name was refused at run time (nameref value, +a)
@@ -4389,6 +4396,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The nameref a declaration was retargeted from, which bash names when it refuses
         // to convert or destroy an array or, with a value, to change a readonly variable.
         var declOwn = ""
+        // Set while declOne runs again past the -n checks it has emitted.
+        var nrefDone = false
         var declOne = function(b, j, v) {
             var a = asgs[j]
             var refChk = isRef && a != null && a.lit == null && a.idxT == null
@@ -4413,6 +4422,53 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 declOwn = ""
                 names[j] = own
                 asgs[j] = a
+                return b
+            }
+            // -a or -A of a nameref that refers to nothing makes it a plain array (rt_nref_drop).
+            if (!isRef && bareArr && attrOn(refVars, names[j])) { b.NewCall(rtNrefDrop, gepStr(b, names[j])) }
+            // -n, in bash 5.3's order. An array value or -a/-A on a local is refused here, after
+            // the value is assigned and the local made an empty array; an array variable and
+            // a set value naming no variable at run time (rt_nref_noarr). A global declaration
+            // that passes with -a or -A drops the -n. Twin of the -n checks in declOne in
+            // bash-interpreter.abnf.
+            if (isRef && !nrefDone) {
+                var lit = a != null && a.lit != null
+                var loc = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
+                if (lit || (loc && bareArr)) {
+                    if (!lit) { asgs[j] = null }
+                    isRef = false
+                    b = declOneBody(b, j, lit ? v : null)
+                    isRef = true
+                    asgs[j] = a
+                    emitDiag(b, gepStr(b, kw + ": " + names[j] + ": reference variable cannot be an array\n"))
+                    roFail = true
+                    return b
+                }
+                if (!fresh) {
+                    var nrOk = curF.NewBlock(""), nrBad = curF.NewBlock(""), nrEnd = curF.NewBlock("")
+                    var nrRc = b.NewCall(rtNrefNoArr, [gepStr(b, kw), gepStr(b, names[j]), (a == null) ? one : zero])
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, nrRc, zero), nrBad, nrOk)
+                    nrBad.NewStore(one, refuseP)
+                    nrBad.NewBr(nrEnd)
+                    nrefDone = true
+                    if (bareArr && !attrOn(roVars, names[j])) {
+                        nrOk.NewCall(rtNmark, [gepStr(nrOk, names[j]), zero])
+                        refVars["$" + names[j]] = false
+                        isRef = false
+                        nrOk = declOne(nrOk, j, v)
+                        isRef = true
+                    } else { nrOk = declOne(nrOk, j, v) }
+                    nrefDone = false
+                    nrOk.NewBr(nrEnd)
+                    return nrEnd
+                }
+            }
+            // An attribute change on a readonly variable is refused before any array check.
+            // Twin of the readonly check in declOneN in bash-interpreter.abnf.
+            if (roAttr && attrOn(roVars, names[j])) {
+                var roW = (kw == "readonly" || kw == "export") ? "" : kw + ": "
+                emitDiag(b, gepStr(b, roW + ((a != null && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n"))
+                roFail = true
                 return b
             }
             var bad = null
