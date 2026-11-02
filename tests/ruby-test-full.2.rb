@@ -2556,6 +2556,72 @@ def s179
         [v[0]].public_methods(false).sort == Array.instance_methods(false).sort && Hash.instance_methods(false).include?(:member?))
 end
 
+# ===== SECTION 180: blockless find / take_while on streams, Lazy #size, builtin Method#arity, Range identity =====
+# find / detect / find_index / take_while / drop_while without a block answer an
+# Enumerator over the same values whose #size is nil and whose #each with a
+# block runs the method - on a cycle, a step, an endless range and an eager
+# Array alike; a Lazy's find is a Lazy, while its map / select / take_while ...
+# without a block raise ArgumentError. Enumerator#each without a block is the
+# receiver, each_entry streams, and Range has no with_index / with_object. A
+# Lazy's #size runs the source's count through its ops (take caps it). A builtin
+# Method's #arity is MRI's, and Range#dup / #equal? are about identity.
+# /usr/bin/ruby 2.6 settles each.
+def s180err
+  yield
+rescue => e
+  "#{e.class} #{e.message}"
+end
+def s180
+  v = [1, 2, nil, Float::INFINITY, 3, 10, 5]
+  c = [v[0], v[1]].cycle
+  r = (v[0]..v[2])
+  check("st180a", c.find.class == Enumerator && c.find.size.nil? && c.find_index.size.nil? && c.take_while.size.nil? &&
+        c.find.inspect == "#<Enumerator: #<Enumerator: [1, 2]:cycle>:find>" && c.find.each { |x| x > 1 } == 2 &&
+        c.detect.first(3) == [1, 2, 1] && c.find_index.each { |x| x > 1 } == 1 && c.take_while.each { |x| x < 2 } == [1] &&
+        [v[0], v[1]].cycle(2).find.size.nil? && [v[0], v[1]].cycle(2).drop_while.each { |x| x < 2 } == [2, 1, 2] &&
+        [v[0], v[1], v[4]].take_while.size.nil? && [v[0], v[1], v[4]].find.each { |x| x > 1 } == 2 &&
+        {a: v[0], b: v[1]}.find.each { |k, x| x > 1 } == [:b, 2] && (v[0]..v[4]).find_index.size.nil? &&
+        [v[0], v[1], v[4]].rindex.each { |x| x < 3 } == 1 && [v[0], v[1], v[4]].rindex.size.nil?)
+  s = v[0].step
+  check("st180b", s.find.size.nil? && s.find.inspect == "#<Enumerator: (1.step):find>" && s.find.each { |x| x > 2 } == 3 &&
+        s.take_while.each { |x| x < 3 } == [1, 2] && r.each.find.size.nil? && r.find.each { |x| x > 4 } == 5 &&
+        r.take_while.each { |x| x < 3 } == [1, 2] && (v[0]..v[3]).find.size.nil? && (v[0]..v[3]).find.each { |x| x > 2 } == 3 &&
+        r.lazy.find.class == Enumerator::Lazy && r.lazy.find_index.each { |x| x > 1 } == 1 &&
+        r.lazy.detect.inspect == "#<Enumerator::Lazy: #<Enumerator::Lazy: 1..>:detect>" && c.find.dup.size.nil?)
+  check("st180c", c.each_entry.class == Enumerator && c.each_entry.first(3) == [1, 2, 1] && s.each_entry.size == v[3] &&
+        r.lazy.each_entry.first(2) == [1, 2] && c.each.equal?(c) && c.send(:each).equal?(c) && r.lazy.each.class == Enumerator::Lazy &&
+        s.send(:each).first(2) == [1, 2] && c.each_entry.inspect == "#<Enumerator: #<Enumerator: [1, 2]:cycle>:each_entry>")
+  check("st180d", s180err { r.lazy.map } == "ArgumentError tried to call lazy map without a block" &&
+        s180err { [v[0]].lazy.collect } == "ArgumentError tried to call lazy map without a block" &&
+        s180err { [v[0]].lazy.filter } == "ArgumentError tried to call lazy select without a block" &&
+        s180err { [v[0]].lazy.reject } == "ArgumentError tried to call lazy reject without a block" &&
+        s180err { [v[0]].lazy.flat_map } == "ArgumentError tried to call lazy flat_map without a block" &&
+        s180err { [v[0]].lazy.take_while } == "ArgumentError tried to call lazy take_while without a block" &&
+        s180err { [v[0]].lazy.drop_while } == "ArgumentError tried to call lazy drop_while without a block" &&
+        s180err { [v[0]].lazy.chunk_while } == "ArgumentError tried to create Proc object without a block" &&
+        s180err { r.lazy.take(-v[0]) } == "ArgumentError attempt to take negative size" &&
+        [v[0]].lazy.zip.inspect == "#<Enumerator::Lazy: #<Enumerator::Lazy: [1]>:zip>")
+  check("st180e", s180err { r.with_index } == "NoMethodError undefined method `with_index' for 1..:Range" &&
+        s180err { r.with_object([]) } == "NoMethodError undefined method `with_object' for 1..:Range" &&
+        s180err { (v[0]..v[3]).with_index } == "NoMethodError undefined method `with_index' for 1..Infinity:Range" &&
+        s180err { (v[0]..v[4]).with_object([]) } == "NoMethodError undefined method `with_object' for 1..3:Range")
+  a = [v[0], v[1], v[4], v[6], v[5]]
+  check("st180f", r.lazy.take(v[4]).size == 3 && r.lazy.map { |x| x }.take(v[6]).size == 5 && r.lazy.take(v[6]).take(v[4]).size == 3 &&
+        r.lazy.select { |x| x }.take(v[4]).size.nil? && a.lazy.take(v[1]).size == 2 && a.lazy.take(0).size == 0 &&
+        a.lazy.drop(v[1]).size == 3 && a.lazy.each_slice(v[1]).size == 3 && a.lazy.each_cons(v[1]).size == 4 &&
+        a.lazy.map { |x| x }.size == 5 && a.lazy.uniq.size.nil? && (v[0]..v[5]).lazy.size == 10 && (v[0]...v[5]).lazy.take(v[6]).size == 5 &&
+        r.lazy.take(v[6]).each_slice(v[1]).size == 3 && v[0].step.lazy.take(v[4]).size == 3 && c.lazy.take(v[4]).size == 3 &&
+        a.each_slice(v[1]).lazy.take(1).size == 1 && s180err { r.lazy.each_slice(v[1]).size } == "FloatDomainError Infinity")
+  q = v[0].step(v[5], v[4])
+  check("st180g", q.method(:last).arity == -1 && q.method(:first).arity == -1 && q.method(:begin).arity == 0 &&
+        q.method(:==).arity == 1 && [v[0]].method(:push).arity == -1 && v[0].method(:+).arity == 1 && "a".method(:tr).arity == 2 &&
+        "a".method(:upcase).arity == -1 && [v[0]].method(:reverse_each).arity == 0 && {a: v[0]}.method(:fetch).arity == -1 &&
+        r.method(:cover?).arity == 1 && "abc".method(:tr).curry["a"]["x"] == "xbc" && q.method(:last).call(2) == [7, 10])
+  g = (v[0]..v[1])
+  check("st180h", !g.equal?(v[0]..v[1]) && g.equal?(g) && !g.equal?(g.dup) && !g.equal?(g.clone) && g.dup == g &&
+        g.dup.class == Range && g.clone.inspect == "1..2" && g.itself.equal?(g))
+end
+
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -2615,5 +2681,6 @@ s176() # SECTION-CALL 176
 s177() # SECTION-CALL 177
 s178() # SECTION-CALL 178
 s179() # SECTION-CALL 179
+s180() # SECTION-CALL 180
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

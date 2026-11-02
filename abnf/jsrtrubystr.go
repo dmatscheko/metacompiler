@@ -436,10 +436,38 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 	pos, blk := rubyBlockArgs(args)
 	desc := t.props["desc"].(string)
 	lazy := t.props["lazy"] == true
+	rm, _ := t.props["rm"].(string)
+	if name == "each_entry" && blk != nil {
+		name = "each"
+	}
 	if k := rubyLazyOp(name); k != "" && blk != nil {
 		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf(k, blk, 0), true, "#<Enumerator::Lazy: "+desc+":"+name+">"), name)
 	} else if blk == nil && !lazy && rubyPassOp(k) {
 		return rubyLazyCopy(t, nil, false, "#<Enumerator: "+desc+":"+name+">")
+	} else if blk == nil && lazy && k != "" && k != "uniq" {
+		if k == "chunk_while" || k == "slice_when" {
+			rt.rubyRaiseErr(name, "ArgumentError", "tried to create Proc object without a block")
+		}
+		rt.rubyRaiseErr(name, "ArgumentError", "tried to call lazy "+k+" without a block")
+	}
+	// A blockless find / take_while ... and each_entry; #each of the first runs
+	// its method rm. Twin of lazyMethod in ruby-interpreter.abnf.
+	if blk == nil && len(pos) == 0 && (rubyUnsizedOp(name) || name == "each_entry") {
+		rd := "#<Enumerator: "
+		if lazy {
+			rd = "#<Enumerator::Lazy: "
+		}
+		rc := rubyLazyCopy(t, nil, lazy, rd+desc+":"+name+">")
+		if name != "each_entry" {
+			rc.set("rm", name)
+		}
+		return rc
+	}
+	if name == "each" && rm != "" && blk != nil {
+		return rt.rubyLazyMethod(rubyLazyCopy(t, nil, lazy, desc), rm, args)
+	}
+	if name == "each" && blk == nil && len(pos) == 0 {
+		return t
 	}
 	// The Lazy-answering methods without a block, the streaming with_index /
 	// with_object, the early-stopping and the eager Enumerable ones, freeze, dup
@@ -475,7 +503,10 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			}
 			zd += rt.rubyInspect(pos[i])
 		}
-		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("zip", zf, 0), true, ld+"("+zd+")>"), name)
+		if len(pos) > 0 {
+			zd = "(" + zd + ")"
+		}
+		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("zip", zf, 0), true, ld+zd+">"), name)
 	case name == "drop":
 		dn := int(math.Trunc(rubyToF(argAt(pos, 0))))
 		if dn < 0 {
@@ -562,12 +593,16 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 	switch name {
 	case "dup", "clone":
 		cp := rubyLazyCopy(t, nil, lazy, desc)
+		cp.set("rm", rm)
 		if name == "clone" && t.props["__fz"] == true {
 			cp.set("__fz", true)
 		}
 		return cp
 	case "take":
 		tn := int(math.Trunc(rubyToF(argAt(pos, 0))))
+		if tn < 0 {
+			rt.rubyRaiseErr(name, "ArgumentError", "attempt to take negative size")
+		}
 		if lazy {
 			op := newJSObject()
 			op.set("k", "take")
@@ -632,13 +667,7 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		t.set("pos", float64(0))
 		return t
 	case "size":
-		if lsz := rubyLazySize(t); lsz != "" {
-			return rubyLazyEndlessSize(rt, lsz)
-		}
-		if t.props["kind"] == "arr" && len(t.props["ops"].(*jsArray).elems) == 0 {
-			return float64(len(t.props["items"].(*jsArray).elems))
-		}
-		return jsNull
+		return rubyLazySizeVal(rt, t)
 	case "inspect", "to_s":
 		return desc
 	case "class":
@@ -673,38 +702,80 @@ func rubyPassOp(op string) bool {
 	return op == "map" || op == "select" || op == "reject" || op == "flat_map"
 }
 
-// rubyLazySize is the #size of a stream whose source never ends: "inf", "nil",
-// "slice" (FloatDomainError) or "" for a source that ends. Twin of rbaLazySize
-// in lib/ruby-arr.js, which states the rule.
-func rubyLazySize(t *jsObject) string {
-	kind := t.props["kind"]
-	items, _ := t.props["items"].(*jsArray)
-	ops, isLazy := t.props["ops"].(*jsArray)
-	if !isLazy || !((kind == "range" && isUndefOrNull(t.props["hi"])) || (kind == "cycle" && items != nil && len(items.elems) > 0)) {
-		return ""
+// rubyLazyCount is the #size of a Lazy or stream Enumerator as a count: -1
+// unknown (nil), -2 FloatDomainError, +Inf endless. Twin of rbaLazyCount in
+// lib/ruby-arr.js, which states the rule.
+func rubyLazyCount(t *jsObject) float64 {
+	if rm, _ := t.props["rm"].(string); rm != "" {
+		return -1
 	}
-	for _, op := range ops.elems {
-		switch op.(*jsObject).props["k"] {
-		case "slice":
-			return "slice"
-		case "map", "with_index", "with_object", "cons", "drop", "zip":
-		default:
-			return "nil"
+	c := -1.0
+	items := t.props["items"].(*jsArray)
+	switch t.props["kind"] {
+	case "arr":
+		c = float64(len(items.elems))
+	case "cycle":
+		c = 0
+		if len(items.elems) > 0 {
+			c = math.Inf(1)
+		}
+	case "range":
+		if hi, ok := t.props["hi"].(float64); ok {
+			c = hi - t.props["lo"].(float64) + 1
+			if t.props["excl"] == true {
+				c--
+			}
+			c = math.Max(0, c)
+		} else {
+			c = math.Inf(1)
 		}
 	}
-	return "inf"
+	for _, o := range t.props["ops"].(*jsArray).elems {
+		if c < 0 {
+			break
+		}
+		op := o.(*jsObject)
+		n, _ := op.props["n"].(float64)
+		switch op.props["k"] {
+		case "take":
+			c = math.Min(c, n)
+		case "drop":
+			c = math.Max(0, c-n)
+		case "cons":
+			c = math.Max(0, c-n+1)
+		case "slice":
+			if math.IsInf(c, 1) {
+				return -2
+			}
+			c = math.Floor((c + n - 1) / n)
+		case "map", "with_index", "with_object", "zip":
+		default:
+			c = -1
+		}
+	}
+	return c
 }
 
-// rubyLazyEndlessSize answers #size from rubyLazySize's verdict. Twin of
-// lazyEndlessSize in ruby-interpreter.abnf.
-func rubyLazyEndlessSize(rt *jsrt, lsz string) interface{} {
-	if lsz == "slice" {
+// rubyLazySizeVal is a Lazy's or stream Enumerator's #size. Twin of lazySize in
+// ruby-interpreter.abnf.
+func rubyLazySizeVal(rt *jsrt, t *jsObject) interface{} {
+	c := rubyLazyCount(t)
+	if c == -2 {
 		rubyFloDomain(rt, math.Inf(1))
 	}
-	if lsz == "inf" {
-		return jsFlo{f: math.Inf(1)}
+	if c < 0 {
+		return jsNull
 	}
-	return jsNull
+	if math.IsInf(c, 1) {
+		return jsFlo{f: c}
+	}
+	return c
+}
+
+// rubyUnsizedOp: the methods whose blockless Enumerator has no size and whose
+// #each runs the method. Twin of rbaUnsizedOp in lib/ruby-arr.js.
+func rubyUnsizedOp(name string) bool {
+	return name == "find" || name == "detect" || name == "find_index" || name == "take_while" || name == "drop_while"
 }
 
 // rubyLazyBuffers: op k holds values back until a later one releases them. Twin

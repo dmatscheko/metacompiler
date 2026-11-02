@@ -309,6 +309,80 @@ function rbBuiltinOwner(cls, name) {
     if (enumerable && rbEnumName(name)) { return "Enumerable" }
     return ""
 }
+// Method#arity of a builtin method, MRI 2.6's as measured for every name the
+// respond_to? rows give a value class: row 0 is "Class arity", or "* arity" for
+// the arity a name has in every class whose own rows do not name it, and a name
+// in no row has arity 0. The Go twin's copy is rubyArityNames in
+// abnf/jsrtruby.go; abnf/ruby_respond_test.go keeps the two equal.
+function rbArityRows() {
+    return [
+        ["* -1", "[]", "ceil", "clone", "floor", "public_send", "rationalize", "round", "send",
+         "truncate", "respond_to?", "count", "sum", "all?", "any?", "chain", "cycle", "detect",
+         "entries", "find", "find_index", "first", "inject", "last", "max", "max_by", "min",
+         "min_by", "none?", "one?", "reduce", "reverse_each", "slice_after", "slice_before", "zip",
+         "with_index"],
+        ["* 1", "%", "&", "*", "**", "+", "-", "/", "<", "<=", "<=>", ">", ">=", "^", "coerce",
+         "div", "divmod", "eql?", "equal?", "fdiv", "instance_of?", "is_a?", "kind_of?", "quo",
+         "remainder", "|", "!=", "==", "===", "<<", "delete", "include?", "drop", "each_cons",
+         "each_slice", "each_with_object", "grep", "grep_v", "member?", "take", "with_object"],
+        ["Integer -1", "chr", "digits", "pow", "inspect", "to_s"],
+        ["Integer 1", "[]", "allbits?", "anybits?", "gcd", "gcdlcm", "lcm", "modulo", "nobits?"],
+        ["Float 1", "modulo"],
+        ["String -1", "capitalize", "center", "chomp", "chomp!", "concat", "delete", "delete!",
+         "downcase", "each_line", "encode", "end_with?", "index", "lines", "ljust", "prepend",
+         "rindex", "rjust", "scrub", "slice", "slice!", "split", "squeeze", "squeeze!",
+         "start_with?", "swapcase", "swapcase!", "to_i", "unicode_normalize",
+         "unicode_normalized?", "upcase", "upto"],
+        ["String 1", "casecmp", "casecmp?", "delete_prefix", "delete_prefix!", "delete_suffix",
+         "delete_suffix!", "force_encoding", "getbyte", "partition", "replace", "rpartition"],
+        ["String 2", "insert", "tr", "tr!", "tr_s", "tr_s!"],
+        ["Symbol -1", "capitalize", "downcase", "swapcase", "upcase"],
+        ["Array -1", "append", "concat", "each_with_index", "fetch", "fill", "flatten", "flatten!",
+         "index", "insert", "join", "permutation", "pop", "prepend", "product", "push", "rindex",
+         "rotate", "sample", "shift", "shuffle", "shuffle!", "slice", "unshift", "values_at"],
+        ["Array 0", "reverse_each"],
+        ["Array 1", "assoc", "combination", "delete_at"],
+        ["Hash -1", "default", "each_with_index", "fetch", "merge", "merge!", "update", "values_at"],
+        ["Hash 1", "[]", "assoc", "has_key?", "key", "key?"],
+        ["Range -1", "each_with_index", "step"],
+        ["Range 0", "entries"],
+        ["Range 1", "cover?"],
+        ["Proc -1", "call", "curry", "yield", "==="],
+        ["Proc 1", ">>"],
+        ["Method -1", "call", "curry", "==="],
+        ["Method 1", ">>"],
+        ["Regexp -1", "match", "match?"],
+        ["Regexp 1", "=~"],
+        ["MatchData 1", "begin", "end"],
+        ["Enumerator -1", "each", "to_a"],
+        ["Enumerator::ArithmeticSequence -1", "to_a"],
+        ["Enumerator::Lazy -1", "chunk_while", "each", "force", "slice_when", "to_a", "to_h"]
+    ]
+}
+// Method#arity of builtin class cls's method name. Go twin: rubyBuiltinArity in
+// abnf/jsrtruby.go.
+function rbBuiltinArity(cls, name) {
+    var rows = rbArityRows()
+    var star = 0
+    var i = 0
+    while (i < rows.length) {
+        var key = rows[i][0]
+        var sp = key.indexOf(" ")
+        var c = key.substring(0, sp)
+        var j = 1
+        while ((c == cls || c == "*") && j < rows[i].length) {
+            if (rows[i][j] == name) {
+                var a = key.charCodeAt(key.length - 1) - 48
+                if (key.charAt(sp + 1) == "-") { a = 0 - a }
+                if (c == cls) { return a }
+                star = a
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return star
+}
 var rbRespondSet = {}
 var rbRespondReady = false
 

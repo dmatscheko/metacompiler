@@ -32,6 +32,13 @@ func TestRubyOwnTablesAgree(t *testing.T) {
 	}
 }
 
+// TestRubyArityTablesAgree does the same for Method#arity of a builtin method
+// (rbArityRows / rubyArityNames).
+func TestRubyArityTablesAgree(t *testing.T) {
+	js := readJSRows(t, "rbArityRows")
+	compareRows(t, "Method#arity", js, rubyArityNames, "rubyArityNames")
+}
+
 // readJSRows parses the rows table function fn of ruby-respond.js.
 func readJSRows(t *testing.T, fn string) map[string][]string {
 	src := readRepoFile(t, "../languages/lib/ruby-respond.js")

@@ -222,23 +222,45 @@ function rbaPassOp(op) {
     return op == "map" || op == "select" || op == "reject" || op == "flat_map"
 }
 
-// The #size of a stream whose source never ends (an endless range, a cycle of a
-// non-empty Array): "inf" while every op keeps the count (map, with_index /
-// with_object, each_cons's size - n + 1, drop, zip), "nil" once an op makes it
-// unknown (a Lazy's select / reject / take_while / flat_map ...), "slice" when
-// an each_slice's (size + n - 1).div(n) divides Infinity, which raises
-// FloatDomainError in MRI 2.6. "" for a source that ends. Go twin:
-// rubyLazySize in abnf/jsrtrubystr.go.
-function rbaLazySize(lz) {
-    if (!((lz.kind == "range" && lz.hi === null) || (lz.kind == "cycle" && lz.items.length > 0))) { return "" }
+// The #size of a Lazy or stream Enumerator (lazy_receiver_size and each op's
+// size function): the source's count - an Array's length, a range's, inf for
+// an endless range or a cycle of a non-empty Array, unknown for a user #each -
+// carried through the ops. map, with_index / with_object and zip keep it,
+// take(n) caps it, drop(n) and each_cons(n) lower it, each_slice(n) is
+// (size + n - 1).div(n), and any other op (a Lazy's select, take_while,
+// flat_map, uniq ...) makes it unknown, as does the method rm of a blockless
+// find / take_while. -1 for unknown (nil), -2 for an each_slice dividing
+// Infinity, which raises FloatDomainError in MRI 2.6. Go twin: rubyLazyCount
+// in abnf/jsrtrubystr.go.
+function rbaLazyCount(lz, inf) {
+    if (lz.rm != "") { return 0 - 1 }
+    var c = 0 - 1
+    if (lz.kind == "arr") { c = lz.items.length }
+    if (lz.kind == "cycle") { c = lz.items.length > 0 ? inf : 0 }
+    if (lz.kind == "range") {
+        if (lz.hi === null) { c = inf } else { c = Math.max(0, lz.hi - lz.lo + (lz.excl ? 0 : 1)) }
+    }
     var i = 0
-    while (i < lz.ops.length) {
+    while (i < lz.ops.length && c >= 0) {
         var k = lz.ops[i].k
-        if (k == "slice") { return "slice" }
-        if (k != "map" && k != "with_index" && k != "with_object" && k != "cons" && k != "drop" && k != "zip") { return "nil" }
+        var n = lz.ops[i].n
+        if (k == "take") { c = Math.min(c, n) }
+        else if (k == "drop") { c = Math.max(0, c - n) }
+        else if (k == "cons") { c = Math.max(0, c - n + 1) }
+        else if (k == "slice") {
+            if (c == inf) { return 0 - 2 }
+            c = Math.floor((c + n - 1) / n)
+        } else if (k != "map" && k != "with_index" && k != "with_object" && k != "zip") { c = 0 - 1 }
         i = i + 1
     }
-    return "inf"
+    return c
+}
+
+// The Enumerable methods whose blockless Enumerator has no size and whose #each
+// with a block runs the method itself (RETURN_ENUMERATOR, not the sized form).
+// Go twin: rubyUnsizedOp in abnf/jsrtrubystr.go.
+function rbaUnsizedOp(name) {
+    return name == "find" || name == "detect" || name == "find_index" || name == "take_while" || name == "drop_while"
 }
 
 // The Enumerable methods a Lazy answers EAGERLY, over the Array of all its

@@ -7636,6 +7636,10 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	if name == "step" || name == "%" {
 		return rt.rubyRangeStep(t, name, args)
 	}
+	// Twin of the with_index arm of rangeMethod in ruby-interpreter.abnf.
+	if name == "with_index" || name == "with_object" {
+		rt.rubyNoMethod(t, name)
+	}
 	pos, blk := rubyBlockArgs(args)
 	endless := isUndefOrNull(t.props["begin"]) || isUndefOrNull(t.props["end"])
 	if name == "each_entry" && blk != nil {
@@ -7662,7 +7666,8 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		if blk == nil && len(pos) == 0 && (name == "each" || name == "each_entry") {
 			return rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, "#<Enumerator: "+rt.rubyInspect(t)+":"+name+">")
 		}
-		if blk == nil && (rubyPassOp(rubyLazyOp(name)) || name == "each_with_index" || (name == "each_with_object" && len(pos) > 0)) {
+		if blk == nil && (rubyPassOp(rubyLazyOp(name)) || name == "each_with_index" || (name == "each_with_object" && len(pos) > 0) ||
+			(rubyUnsizedOp(name) && len(pos) == 0)) {
 			return rt.rubyLazyMethod(rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, rt.rubyInspect(t)), name, args)
 		}
 		if name == "size" && len(pos) == 0 {
@@ -7720,11 +7725,15 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		return rt.rubyHashOf(t)
 	case "object_id":
 		return rt.rubyObjectId(t)
-	case "dup", "clone", "freeze", "itself":
+	case "freeze", "itself":
 		return t
+	case "dup", "clone":
+		return rubyOpenRange(t.props["begin"], t.props["end"], t.props["excl"] == true)
 	case "eql?":
 		return rt.rubyEql(t, argAt(args, 0))
-	case "==", "equal?":
+	case "equal?":
+		return rubyIdenticalP(t, argAt(args, 0))
+	case "==":
 		o, isRng := rubyIsRange(argAt(args, 0))
 		if !isRng {
 			return false
@@ -11339,10 +11348,19 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				rt.rubyRaiseErr(name, "NameError", "undefined method `"+nm+"' for class `"+kind+"'")
 			}
 			recv := target
-			return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + nm,
+			f := &hostFunc{name: "method:" + nm,
 				fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
 					return rt.rubyMethod(recv, "send", append([]interface{}{jsSym{s: nm}}, a...))
-				}}, kind, nm)
+				}}
+			if rt.rubyArities == nil {
+				rt.rubyArities = map[interface{}]rubyArity{}
+			}
+			if ar := rubyBuiltinArity(kind, nm); ar < 0 {
+				rt.rubyArities[f] = rubyArity{req: -ar - 1, star: true}
+			} else {
+				rt.rubyArities[f] = rubyArity{req: ar}
+			}
+			return rt.rubyMarkMethodVal(f, kind, nm)
 		}
 	case "nil?":
 		return isUndefOrNull(target)
@@ -13363,6 +13381,13 @@ func rubyIsEnum(v interface{}) bool {
 	return has && b == true
 }
 
+// rubyEnumUnsized: an Enumerator of a blockless find / take_while / index ...
+// Twin of enumUnsized in ruby-interpreter.abnf.
+func rubyEnumUnsized(t *jsObject) bool {
+	op, _ := t.props["op"].(string)
+	return rubyUnsizedOp(op) || op == "index" || op == "rindex"
+}
+
 func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) interface{} {
 	// Twin of the freeze arm of enumMethod in ruby-interpreter.abnf.
 	if name == "freeze" {
@@ -13457,6 +13482,9 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	case "to_a", "entries", "force":
 		return &jsArray{elems: append([]interface{}{}, items.elems...)}
 	case "size", "length", "count":
+		if name == "size" && rubyEnumUnsized(t) {
+			return jsNull
+		}
 		if len(pos) == 0 && blk == nil {
 			return float64(len(items.elems))
 		}
@@ -13480,9 +13508,8 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 		if blk == nil {
 			return t
 		}
-		// find_index stops at the first element the block accepts.
-		if op, _ := t.props["op"].(string); op == "find_index" || op == "index" {
-			return rt.rubyArrayMethod(items, "find_index", args)
+		if rubyEnumUnsized(t) {
+			return rt.rubyArrayMethod(items, t.props["op"].(string), args)
 		}
 		res := []interface{}{}
 		for _, e := range items.elems {
@@ -13654,8 +13681,15 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		return rubyIdxOrNil(rt.rubyArrIndex(t, argAt(pos, 0)))
 	case "rindex":
+		if blk == nil && len(pos) == 0 {
+			return rubyEnumAt(rubyMkEnumOp(&jsArray{elems: append([]interface{}{}, t.elems...)}, name), rt.rubyEnumSrc(t), name, pos)
+		}
 		for i := len(t.elems) - 1; i >= 0; i-- {
-			if rt.rubyEq(t.elems[i], argAt(pos, 0)) {
+			if blk != nil && len(pos) == 0 {
+				if rubyTruthy(rt.call(blk, jsUndef, []interface{}{t.elems[i]})) {
+					return float64(i)
+				}
+			} else if rt.rubyEq(t.elems[i], argAt(pos, 0)) {
 				return float64(i)
 			}
 		}

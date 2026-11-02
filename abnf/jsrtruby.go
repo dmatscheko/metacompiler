@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 )
@@ -134,11 +135,11 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 				isRng = !loStr || !isUndefOrNull(rng.props["end"])
 			}
 			// The #size of an Enumerator over a user #each (deferred or
-			// to_enum's), and a Lazy's over one, is nil, and an
-			// ArithmeticSequence's and an endless stream's may be Infinity:
-			// rubyEnumMethod answers them.
+			// to_enum's) or of a blockless find / take_while ... is nil, an
+			// ArithmeticSequence's may be Infinity, and a Lazy or stream
+			// Enumerator counts through its ops: rubyEnumMethod answers them.
 			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rco"] != true &&
-				v.(*jsObject).props["kind"] != "each" && rubyAseqOf(v) == nil && rubyLazySize(v.(*jsObject)) == "")
+				v.(*jsObject).props["__rlazy"] != true && rubyAseqOf(v) == nil && !rubyEnumUnsized(v.(*jsObject)))
 		}
 		if counted {
 			return pylen(a[:1])
@@ -2341,6 +2342,73 @@ var rubyRespondNames = map[string][]string{
 		"kind_of?", "method_defined?", "module_eval", "name", "nil?",
 		"private_instance_methods", "private_method_defined?", "public_instance_methods",
 		"public_method_defined?", "public_send", "send", "singleton_methods"},
+}
+
+// rubyArityNames is Method#arity of builtin methods: the Go twin's copy of
+// rbArityRows in languages/lib/ruby-respond.js, which states the rule;
+// abnf/ruby_respond_test.go keeps the two equal.
+var rubyArityNames = map[string][]string{
+	"* -1": {"[]", "ceil", "clone", "floor", "public_send", "rationalize", "round", "send",
+		"truncate", "respond_to?", "count", "sum", "all?", "any?", "chain", "cycle", "detect", "entries",
+		"find", "find_index", "first", "inject", "last", "max", "max_by", "min", "min_by", "none?",
+		"one?", "reduce", "reverse_each", "slice_after", "slice_before", "zip", "with_index"},
+	"* 1": {"%", "&", "*", "**", "+", "-", "/", "<", "<=", "<=>", ">", ">=", "^", "coerce", "div",
+		"divmod", "eql?", "equal?", "fdiv", "instance_of?", "is_a?", "kind_of?", "quo", "remainder", "|",
+		"!=", "==", "===", "<<", "delete", "include?", "drop", "each_cons", "each_slice",
+		"each_with_object", "grep", "grep_v", "member?", "take", "with_object"},
+	"Integer -1": {"chr", "digits", "pow", "inspect", "to_s"},
+	"Integer 1":  {"[]", "allbits?", "anybits?", "gcd", "gcdlcm", "lcm", "modulo", "nobits?"},
+	"Float 1":    {"modulo"},
+	"String -1": {"capitalize", "center", "chomp", "chomp!", "concat", "delete", "delete!",
+		"downcase", "each_line", "encode", "end_with?", "index", "lines", "ljust", "prepend", "rindex",
+		"rjust", "scrub", "slice", "slice!", "split", "squeeze", "squeeze!", "start_with?", "swapcase",
+		"swapcase!", "to_i", "unicode_normalize", "unicode_normalized?", "upcase", "upto"},
+	"String 1": {"casecmp", "casecmp?", "delete_prefix", "delete_prefix!", "delete_suffix",
+		"delete_suffix!", "force_encoding", "getbyte", "partition", "replace", "rpartition"},
+	"String 2":  {"insert", "tr", "tr!", "tr_s", "tr_s!"},
+	"Symbol -1": {"capitalize", "downcase", "swapcase", "upcase"},
+	"Array -1": {"append", "concat", "each_with_index", "fetch", "fill", "flatten", "flatten!",
+		"index", "insert", "join", "permutation", "pop", "prepend", "product", "push", "rindex",
+		"rotate", "sample", "shift", "shuffle", "shuffle!", "slice", "unshift", "values_at"},
+	"Array 0":                           {"reverse_each"},
+	"Array 1":                           {"assoc", "combination", "delete_at"},
+	"Hash -1":                           {"default", "each_with_index", "fetch", "merge", "merge!", "update", "values_at"},
+	"Hash 1":                            {"[]", "assoc", "has_key?", "key", "key?"},
+	"Range -1":                          {"each_with_index", "step"},
+	"Range 0":                           {"entries"},
+	"Range 1":                           {"cover?"},
+	"Proc -1":                           {"call", "curry", "yield", "==="},
+	"Proc 1":                            {">>"},
+	"Method -1":                         {"call", "curry", "==="},
+	"Method 1":                          {">>"},
+	"Regexp -1":                         {"match", "match?"},
+	"Regexp 1":                          {"=~"},
+	"MatchData 1":                       {"begin", "end"},
+	"Enumerator -1":                     {"each", "to_a"},
+	"Enumerator::ArithmeticSequence -1": {"to_a"},
+	"Enumerator::Lazy -1":               {"chunk_while", "each", "force", "slice_when", "to_a", "to_h"},
+}
+
+// rubyBuiltinArity is Method#arity of builtin class cls's method name. Twin of
+// rbBuiltinArity in languages/lib/ruby-respond.js.
+func rubyBuiltinArity(cls, name string) int {
+	star := 0
+	for key, names := range rubyArityNames {
+		c, a, _ := strings.Cut(key, " ")
+		if c != cls && c != "*" {
+			continue
+		}
+		for _, n := range names {
+			if n == name {
+				ar, _ := strconv.Atoi(a)
+				if c == cls {
+					return ar
+				}
+				star = ar
+			}
+		}
+	}
+	return star
 }
 
 // rubyOwnNames is Module#instance_methods(false) of a builtin class: the names of
