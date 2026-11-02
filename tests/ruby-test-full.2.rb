@@ -2389,6 +2389,48 @@ def s175
         s175err { a.dup } == "TypeError allocator undefined for Enumerator::ArithmeticSequence")
 end
 
+# ===== SECTION 176: endless-range to_a, streaming step / each_entry, Range#%, ArithmeticSequence #hash / Float values =====
+# An endless range has no Array: to_a, entries and a splat raise a rescuable
+# RangeError before any Float check. An endless String range's #step and a
+# blockless #each / #each_entry pull one value at a time. Range#% is Range#step.
+# An ArithmeticSequence hashes what its == compares. Without a block,
+# Integer#step toward a Float infinity yields Floats through #each, Integers
+# through with_index, and #first alone answers the begin itself.
+# /usr/bin/ruby 2.6 settles each.
+def s176
+  v = [1, nil, "a", 2.5, 10, 3, 2, Float::INFINITY, 4, "x"]
+  re = begin; (v[0]..v[1]).to_a; "none"; rescue RangeError => e; e.message; end
+  check("ar176a", re == "cannot convert endless range to an array" &&
+        s175err { (v[0]..v[1]).entries } == "RangeError cannot convert endless range to an array" &&
+        s175err { [*(v[2]..v[1])] } == "RangeError cannot convert endless range to an array" &&
+        s175err { (v[3]..v[1]).to_a } == "RangeError cannot convert endless range to an array" &&
+        s175err { [*(v[3]..v[1])] } == "RangeError cannot convert endless range to an array" &&
+        s175err { (v[3]..v[1]).each { } } == "TypeError can't iterate from Float")
+  r = []
+  (v[9]..v[1]).step(v[6]) { |s| r << s; break if r.size > 3 }
+  check("ar176b", (v[2]..v[1]).step(v[6]).first(2) == ["a", "c"] && r == ["x", "z", "ab", "ad"] &&
+        (v[2]..v[1]).step(v[6]).inspect == "#<Enumerator: \"a\"..:step(2)>" &&
+        (v[0]..v[1]).each_entry.first(2) == [1, 2] && (v[0]..v[1]).each_entry.inspect == "#<Enumerator: 1..:each_entry>" &&
+        (v[0]..v[7]).each.first(2) == [1, 2] && (v[2]..v[1]).each_entry.first(3) == ["a", "b", "c"])
+  pc = []
+  rr = (v[0]..v[4]).%(v[8]) { |x| pc << x }
+  check("ar176c", ((v[0]..v[4]) % v[5]).inspect == "((1..10).%(3))" && ((v[0]..v[4]) % v[5]).to_a == [1, 4, 7, 10] &&
+        ((v[0]..v[4]) % v[5]) == (v[0]..v[4]).step(v[5]) && pc == [1, 5, 9] && rr == (1..10) &&
+        ((v[2].."e") % v[6]).inspect == "#<Enumerator: \"a\"..\"e\":%(2)>" && ((v[2].."e") % v[6]).to_a == ["a", "c", "e"] &&
+        ((v[2]..v[1]) % v[6]).first(2) == ["a", "c"] && s175err { (v[0]..v[5]).%(0) { } } == "ArgumentError step can't be 0")
+  check("ar176d", v[0].step(v[4], v[5]).hash == v[0].step(v[4], v[5]).hash &&
+        v[0].step(v[4], v[5]).hash != v[0].step(v[4], v[8]).hash &&
+        (v[0]..v[4]).step(v[5]).hash == v[0].step(v[4], v[5]).hash && v[0].step(v[4], v[5]).hash.is_a?(Integer))
+  f = v[0].step(v[7], v[6])
+  fy = []
+  v[0].step(v[7], v[6]) { |x| fy << x; break if x > 2 }
+  check("ar176e", f.first(2) == [1.0, 3.0] && f.first(2)[0].is_a?(Float) && f.take(2) == [1.0, 3.0] &&
+        f.lazy.map { |x| x * 2 }.first(2) == [2.0, 6.0] && fy == [1, 3] && fy[0].is_a?(Integer) &&
+        f.each_slice(2).first(2) == [[1.0, 3.0], [5.0, 7.0]] && f.with_index.first(2) == [[1, 0], [3, 1]] &&
+        f.each_with_index.first(1)[0][0].is_a?(Integer) && f.first == 1 && f.first.is_a?(Integer) &&
+        f.next == 1.0 && v[0].step(v[4].to_f, v[5]).first.is_a?(Integer) && v[0].step(0, 1).first.nil?)
+end
+
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -2444,5 +2486,6 @@ s172() # SECTION-CALL 172
 s173() # SECTION-CALL 173
 s174() # SECTION-CALL 174
 s175() # SECTION-CALL 175
+s176() # SECTION-CALL 176
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

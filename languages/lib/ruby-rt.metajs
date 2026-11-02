@@ -4925,14 +4925,17 @@ function rbRangeText(r, insp) {
     return ls + dots + hs
 }
 
-// The element sequence. An ENDLESS range has none, and asking for one is an error
-// in MRI too - the message is ruby-interpreter.abnf's, so all three engines agree.
+// The element sequence. Twin of rangeToA in ruby-interpreter.abnf, which states
+// the rule.
 function rbRangeToArr(r) {
     rbRangeWalkable(r)
-    if (rtIsNil(r["end"]) || rtIsNil(r["begin"])) {
-        fail("cannot convert an endless range to an array")
-    }
+    if (rtIsNil(r["begin"])) { rbRaiseErr("each", "TypeError", "can't iterate from NilClass") }
+    rbRangeEndless(r)
     return rbRangeArr(r["begin"], r["end"], r["excl"] === true)
+}
+// Twin of rangeEndless in ruby-interpreter.abnf, which states the rule.
+function rbRangeEndless(r) {
+    if (rtIsNil(r["end"])) { rbRaiseErr("to_a", "RangeError", "cannot convert endless range to an array") }
 }
 // Twin of rubyRangeWalkable in abnf/jsrt.go, which states the rule.
 function rbRangeWalkable(r) {
@@ -5002,7 +5005,7 @@ function rbRangeEq(l, r) {
 // abnf/jsrt.go is the twin.
 function rbRangeMethod(t, name, args) {
     if (name == "lazy") { return rbRangeLazy(t) }
-    if (name == "step") { return rbRangeStep(t, args) }
+    if (name == "step" || name == "%") { return rbRangeStep(t, name, args) }
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
     var endless = rtIsNil(t["end"]) || rtIsNil(t["begin"])
@@ -5022,6 +5025,9 @@ function rbRangeMethod(t, name, args) {
             var sv = rbLazyMethod(rbLazyCopy(rbRangeLazy(t), null, false, "#<Enumerator: " + rbInspect(t) + ":each>"), name, args)
             if (name == "each") { return t }
             return sv
+        }
+        if (blk === null && npos == 0 && (name == "each" || name == "each_entry")) {
+            return rbLazyCopy(rbRangeLazy(t), null, false, "#<Enumerator: " + rbInspect(t) + ":" + name + ">")
         }
         if (name == "size" && npos == 0) {
             if (strOpen) { return null }
@@ -5081,7 +5087,10 @@ function rbRangeMethod(t, name, args) {
         if (!rbIsRange(o)) { return false }
         return rbRangeEq(t, o)
     }
-    if (name == "to_a" || name == "entries" || name == "to_ary") { return rbRangeToArr(t) }
+    if (name == "to_a" || name == "entries" || name == "to_ary") {
+        rbRangeEndless(t)
+        return rbRangeToArr(t)
+    }
     // An endless range has no sequence, so only the two questions that do not need
     // one can be answered; MRI agrees that (1..).min is 1 and (1..).max raises.
     if (endless) {
@@ -5123,7 +5132,7 @@ function rbRangeMethod(t, name, args) {
 }
 
 // Twin of rangeStep in ruby-interpreter.abnf, which states the rule.
-function rbRangeStep(t, args) {
+function rbRangeStep(t, m, args) {
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
     var by = anytype
@@ -5136,14 +5145,16 @@ function rbRangeStep(t, args) {
     hi = t["end"]
     var num = rbIsNum(lo) && (rtIsNil(hi) || rbIsNum(hi))
     var aseq = blk === null && num
-    if (!aseq && u < 0) { rbRaiseErr("step", "ArgumentError", "step can't be negative") }
-    if (!aseq && u == 0) { rbRaiseErr("step", "ArgumentError", "step can't be 0") }
+    if (!aseq && u < 0) { rbRaiseErr(m, "ArgumentError", "step can't be negative") }
+    if (!aseq && u == 0) { rbRaiseErr(m, "ArgumentError", "step can't be 0") }
     var flo = rbIsFlo(lo) || rbIsFlo(hi) || rbIsFlo(by)
-    var desc = "((" + rbInspect(t) + ").step" + rbInspectArgs(args, npos) + ")"
+    var desc = "((" + rbInspect(t) + ")." + m + rbInspectArgs(args, npos) + ")"
     var e = anytype
     if (u < 0) { e = rbMkEnum([]) }
     else if (num && (u == 0 || rtIsNil(hi) || rbRangeUnbounded(t))) { e = rbStepForever(rbToF(lo), u, flo, desc) }
-    else {
+    else if (typeof lo == "string" && rtIsNil(hi)) {
+        e = rbLazyCopy(rbRangeLazy(t), {k: "step", f: null, n: Math.trunc(u)}, false, "#<Enumerator: " + rbInspect(t) + ":" + m + rbInspectArgs(args, npos) + ">")
+    } else {
         var picked = []
         if (flo) {
             var fs = rbnFloatStep(rbToF(lo), rbToF(hi), u, t["excl"] === true)
@@ -5160,7 +5171,7 @@ function rbRangeStep(t, args) {
                 si = si + Math.trunc(u)
             }
         }
-        e = rbEnumAt(rbMkEnum(picked), t, "step", args)
+        e = rbEnumAt(rbMkEnum(picked), t, m, args)
     }
     if (blk !== null) {
         rbMethod(e, "each", [js_rblkwrap(blk)])
@@ -5205,7 +5216,7 @@ function rbAseqArgs(args, n) {
 function rbAseqOwns(name) {
     return name == "begin" || name == "end" || name == "step" || name == "exclude_end?" || name == "last"
         || name == "size" || name == "==" || name == "eql?" || name == "===" || name == "each"
-        || name == "dup" || name == "clone" || name == "class"
+        || name == "dup" || name == "clone" || name == "class" || name == "hash"
 }
 // Twin of aseqMethod in ruby-interpreter.abnf, which states the rule.
 function rbAseqMethod(t, name, args) {
@@ -5217,6 +5228,7 @@ function rbAseqMethod(t, name, args) {
     if (name == "step") { return q["s"] }
     if (name == "exclude_end?") { return q["x"] }
     if (name == "class") { return rbBuiltinClass("Enumerator::ArithmeticSequence") }
+    if (name == "hash") { return rbHashOf(t) }
     if (name == "dup" || name == "clone") { rbRaiseErr(name, "TypeError", "allocator undefined for Enumerator::ArithmeticSequence") }
     if (name == "==" || name == "eql?" || name == "===") {
         var o = rbAseqOf(rbArgAt(args, 0))
@@ -6135,7 +6147,12 @@ function rbNumMethod(t, name, args) {
         var desc = "(" + rbInspect(t) + ".step" + rbAseqArgs(args, rbNPos(args)) + ")"
         if (rtIsNil(lim) || rbToF(sby) == 0 || (rbIsFlo(lim) && rbToF(lim) - rbToF(lim) != 0 && (rbToF(lim) > 0) == (rbToF(sby) > 0))) {
             var se = rbStepForever(x, rbToF(sby), rbIsFlo(t) || rbIsFlo(sby), desc)
-            if (sblk === null) { return rbMkAseq(se, t, lim, sby, false, desc) }
+            if (sblk === null) {
+                if (!rbIsFlo(lim) || rbIsFlo(t) || rbIsFlo(sby)) { return rbMkAseq(se, t, lim, sby, false, desc) }
+                var fe = rbMkAseq(rbStepForever(x, rbToF(sby), true, desc), t, lim, sby, false, desc)
+                fe["aseq"]["ie"] = se
+                return fe
+            }
             rbLazyMethod(se, "each", [js_rblkwrap(sblk)])
             return t
         }
@@ -7315,6 +7332,14 @@ function rbEnumMethod(t, name, args) {
         return t
     }
     if (t["aseq"] !== undefined && rbAseqOwns(name)) { return rbAseqMethod(t, name, args) }
+    // Twin of the ArithmeticSequence arms of enumMethod in ruby-interpreter.abnf.
+    if (t["aseq"] !== undefined && t["aseq"]["ie"] !== undefined && rbaRerunsMethod(name)) { return rbEnumMethod(t["aseq"]["ie"], name, args) }
+    if (t["aseq"] !== undefined && name == "first" && args.length == 0) {
+        var a1 = anytype
+        a1 = rbEnumMethod(t, "first", [1])
+        if (a1.length == 0) { return null }
+        return t["aseq"]["b"]
+    }
     if (t["__rlazy"] === true) { return rbLazyMethod(t, name, args) }
     if (name == "dup" || name == "clone") { return rbEnumCopy(t, name == "clone") }
     if (t["__rco"] === true && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
@@ -9910,7 +9935,11 @@ function js_radd(l, r) { return rbBin("+", l, r) }
 function js_rsub(l, r) { return rbBin("-", l, r) }
 function js_rmul(l, r) { return rbBin("*", l, r) }
 function js_rdiv(l, r) { return rbBin("/", l, r) }
-function js_rmod(l, r) { return rbBin("%", l, r) }
+// Range#% is Range#step.
+function js_rmod(l, r) {
+    if (rbIsRange(l)) { return rbRangeStep(l, "%", [r]) }
+    return rbBin("%", l, r)
+}
 function js_rpow(l, r) { return rbBin("**", l, r) }
 
 // & | ^ are the NON-short-circuit boolean operators when the left side is true,
@@ -11165,6 +11194,10 @@ function rbHashOf(v) {
     if (rbIsCpx(v)) { return rbStrHash("c" + rbInspect(v)) }
     if (rbIsRange(v)) { return rbStrHash("g" + rbInspect(v)) }
     if (rbRxIsRegex(v)) { return rbStrHash("x" + rbInspect(v)) }
+    // Twin of the ArithmeticSequence arm of valHash in ruby-interpreter.abnf.
+    var q = anytype
+    q = rbAseqOf(v)
+    if (q !== null) { return rbHashOf([q["x"], q["b"], q["e"], q["s"]]) }
     return rbStrHash("o" + rbInspect(rbObjectId(v)))
 }
 

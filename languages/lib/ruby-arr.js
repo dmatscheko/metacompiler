@@ -9,6 +9,7 @@
 // a user Enumerable, src) - and the OPS {k, f, n}, applied to one value at a
 // time: map / select / reject / take_while / drop_while / flat_map / chunk_while
 // / slice_when (f the block), take / drop / with_index (n the count or offset),
+// step (every n-th value from the first, a String range's #step),
 // slice / cons (n the width), uniq (f the key block or null) and zip (f a list
 // of functions answering an argument's i-th value or nil).
 // rbaLazyFirst pulls the first n results (all of them when n < 0); call(f, v, m)
@@ -136,6 +137,10 @@ function rbaLazyRun(st, ops, v, m, from, call, test, eql) {
                 st.cnt[j] = st.cnt[j] + 1
                 return
             }
+        } else if (op.k == "step") {
+            var sk = st.cnt[j]
+            st.cnt[j] = sk + 1
+            if (sk % op.n != 0) { return }
         } else if (op.k == "uniq") {
             var key = anytype
             key = op.f === null ? cur : call(op.f, cur, multi)
@@ -232,6 +237,13 @@ function rbaLazyScan(lz, call, test, eql, drive, hit) {
         return false
     })
     return res
+}
+
+// The Enumerator methods that run the method the Enumerator was made from
+// again rather than its #each (enumerator.c). Go twin: rubyRerunsMethod in
+// abnf/jsrtrubystr.go.
+function rbaRerunsMethod(name) {
+    return name == "with_index" || name == "each_with_index" || name == "with_object" || name == "each_with_object"
 }
 
 // The op a blockless each_slice / each_cons is on an Enumerator that pulls one

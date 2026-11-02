@@ -152,7 +152,10 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		if s, ok := rubySV(u(a[0])).(string); ok {
 			return w(&jsRStr{s: rt.rubyFormat2(s, u(a[1]), "%")})
 		}
-
+		// Range#%, which is Range#step.
+		if r, isRng := rubyIsRange(u(a[0])); isRng {
+			return w(rt.rubyRangeStep(r, "%", []interface{}{u(a[1])}))
+		}
 		return baseMod(a)
 	}
 
@@ -4124,6 +4127,10 @@ func (rt *jsrt) rubyHashOf(v interface{}) float64 {
 	}
 	if rxIsRegexObj(v) {
 		return rubyStrHash("x" + rt.rubyInspect(v))
+	}
+	// Twin of the ArithmeticSequence arm of valHash in ruby-interpreter.abnf.
+	if q := rubyAseqOf(v); q != nil {
+		return rt.rubyHashOf(&jsArray{elems: []interface{}{q.props["x"], q.props["b"], q.props["e"], q.props["s"]}})
 	}
 	return rubyStrHash("o" + rt.rubyInspect(rt.rubyObjectId(v)))
 }

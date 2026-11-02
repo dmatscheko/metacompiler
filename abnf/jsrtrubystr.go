@@ -297,6 +297,11 @@ func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{},
 				st.cnt[j]++
 				return
 			}
+		case "step":
+			st.cnt[j]++
+			if (st.cnt[j]-1)%int(rubyToF(op.props["n"])) != 0 {
+				return
+			}
 		case "uniq":
 			key := v
 			if f != jsNull {
@@ -695,7 +700,7 @@ func rubyStepForever(beg, by float64, flo bool, desc string) *jsObject {
 }
 
 // rubyRangeStep is rangeStep of ruby-interpreter.abnf, which states the rule.
-func (rt *jsrt) rubyRangeStep(t *jsObject, args []interface{}) interface{} {
+func (rt *jsrt) rubyRangeStep(t *jsObject, m string, args []interface{}) interface{} {
 	pos, blk := rubyBlockArgs(args)
 	var by interface{} = float64(1)
 	if len(pos) > 0 {
@@ -706,22 +711,26 @@ func (rt *jsrt) rubyRangeStep(t *jsObject, args []interface{}) interface{} {
 	num := rubyIsNum(lo) && (isUndefOrNull(hi) || rubyIsNum(hi))
 	aseq := blk == nil && num
 	if !aseq && u < 0 {
-		rt.rubyRaiseErr("step", "ArgumentError", "step can't be negative")
+		rt.rubyRaiseErr(m, "ArgumentError", "step can't be negative")
 	}
 	if !aseq && u == 0 {
-		rt.rubyRaiseErr("step", "ArgumentError", "step can't be 0")
+		rt.rubyRaiseErr(m, "ArgumentError", "step can't be 0")
 	}
 	_, fb := lo.(jsFlo)
 	_, fe := hi.(jsFlo)
 	_, fs := by.(jsFlo)
 	flo := fb || fe || fs
-	desc := "((" + rt.rubyInspect(t) + ").step" + rt.rubyInspectArgs(pos) + ")"
+	_, strLo := lo.(string)
+	desc := "((" + rt.rubyInspect(t) + ")." + m + rt.rubyInspectArgs(pos) + ")"
 	var e *jsObject
 	switch {
 	case u < 0:
 		e = rubyMkEnum(&jsArray{})
 	case num && (u == 0 || isUndefOrNull(hi) || rubyRangeUnbounded(t)):
 		e = rubyStepForever(rubyToF(lo), u, flo, desc)
+	case strLo && isUndefOrNull(hi):
+		e = rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), rubyLazyOpOf("step", jsNull, int(math.Trunc(u))), false,
+			"#<Enumerator: "+rt.rubyInspect(t)+":"+m+rt.rubyInspectArgs(pos)+">")
 	default:
 		picked := &jsArray{}
 		if flo {
@@ -734,7 +743,7 @@ func (rt *jsrt) rubyRangeStep(t *jsObject, args []interface{}) interface{} {
 				picked.elems = append(picked.elems, src.elems[i])
 			}
 		}
-		e = rubyEnumAt(rubyMkEnum(picked), t, "step", pos)
+		e = rubyEnumAt(rubyMkEnum(picked), t, m, pos)
 	}
 	if blk != nil {
 		rt.rubyMethod(e, "each", []interface{}{rubyBlkWrap(blk)})
@@ -786,9 +795,18 @@ func (rt *jsrt) rubyAseqArgs(args []interface{}) string {
 	return "(" + strings.Join(parts, ", ") + ")"
 }
 
+// rubyRerunsMethod is rbaRerunsMethod of lib/ruby-arr.js, which states the rule.
+func rubyRerunsMethod(name string) bool {
+	switch name {
+	case "with_index", "each_with_index", "with_object", "each_with_object":
+		return true
+	}
+	return false
+}
+
 func rubyAseqOwns(name string) bool {
 	switch name {
-	case "begin", "end", "step", "exclude_end?", "last", "size", "==", "eql?", "===", "each", "dup", "clone", "class":
+	case "begin", "end", "step", "exclude_end?", "last", "size", "==", "eql?", "===", "each", "dup", "clone", "class", "hash":
 		return true
 	}
 	return false
@@ -809,6 +827,8 @@ func (rt *jsrt) rubyAseqMethod(t *jsObject, name string, args []interface{}) int
 		return q.props["x"]
 	case "class":
 		return rt.rubyBuiltinClass("Enumerator::ArithmeticSequence")
+	case "hash":
+		return rt.rubyHashOf(t)
 	case "dup", "clone":
 		rt.rubyRaiseErr(name, "TypeError", "allocator undefined for Enumerator::ArithmeticSequence")
 	case "==", "eql?", "===":

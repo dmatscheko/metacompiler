@@ -7059,7 +7059,12 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			if lf, isFlo := lim.(jsFlo); isUndefOrNull(lim) || rubyToF(by) == 0 || (isFlo && math.IsInf(lf.f, 1) == (rubyToF(by) > 0) && math.IsInf(lf.f, 0)) {
 				se := rubyStepForever(x, rubyToF(by), fb || ft, desc)
 				if nblk == nil {
-					return rubyMkAseq(se, t, lim, by, false, desc), true
+					if !isFlo || fb || ft {
+						return rubyMkAseq(se, t, lim, by, false, desc), true
+					}
+					fe := rubyMkAseq(rubyStepForever(x, rubyToF(by), true, desc), t, lim, by, false, desc)
+					fe.props["aseq"].(*jsObject).set("ie", se)
+					return fe, true
 				}
 				rt.rubyMethod(se, "each", []interface{}{rubyBlkWrap(nblk)})
 				return t, true
@@ -7515,16 +7520,24 @@ func (rt *jsrt) rubyRangeText(r *jsObject, insp bool) string {
 	return one(r.props["begin"]) + dots + one(r.props["end"])
 }
 
-// The element sequence. An ENDLESS range has none, and asking for one is an error
-// in MRI too; the message is ruby-interpreter.abnf's, so all three engines agree.
+// The element sequence. Twin of rangeToA in ruby-interpreter.abnf, which states
+// the rule.
 func (rt *jsrt) rubyRangeToArr(r *jsObject) *jsArray {
 	lo, hi := r.props["begin"], r.props["end"]
 	rt.rubyRangeWalkable(r)
-	if isUndefOrNull(lo) || isUndefOrNull(hi) {
-		rt.fail("cannot convert an endless range to an array")
+	if isUndefOrNull(lo) {
+		rt.rubyRaiseErr("each", "TypeError", "can't iterate from NilClass")
 	}
+	rt.rubyRangeEndless(r)
 	excl, _ := r.props["excl"].(bool)
 	return rt.rubyRangeArr(lo, hi, excl)
+}
+
+// Twin of rangeEndless in ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyRangeEndless(r *jsObject) {
+	if isUndefOrNull(r.props["end"]) {
+		rt.rubyRaiseErr("to_a", "RangeError", "cannot convert endless range to an array")
+	}
 }
 
 // A Float has no #succ, so a range beginning at one cannot be walked
@@ -7620,8 +7633,8 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	if name == "lazy" {
 		return rt.rubyRangeLazy(t)
 	}
-	if name == "step" {
-		return rt.rubyRangeStep(t, args)
+	if name == "step" || name == "%" {
+		return rt.rubyRangeStep(t, name, args)
 	}
 	pos, blk := rubyBlockArgs(args)
 	endless := isUndefOrNull(t.props["begin"]) || isUndefOrNull(t.props["end"])
@@ -7645,6 +7658,9 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 				return sv
 			}
 			return t
+		}
+		if blk == nil && len(pos) == 0 && (name == "each" || name == "each_entry") {
+			return rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, "#<Enumerator: "+rt.rubyInspect(t)+":"+name+">")
 		}
 		if name == "size" && len(pos) == 0 {
 			if strOpen {
@@ -7710,6 +7726,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		}
 		return rt.rubyRangeEq(t, o)
 	case "to_a", "entries", "to_ary":
+		rt.rubyRangeEndless(t)
 		return rt.rubyRangeToArr(t)
 	case "first":
 		if len(pos) == 0 {
@@ -13291,6 +13308,16 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	}
 	if t.props["aseq"] != nil && rubyAseqOwns(name) {
 		return rt.rubyAseqMethod(t, name, args)
+	}
+	// Twin of the ArithmeticSequence arms of enumMethod in ruby-interpreter.abnf.
+	if q := rubyAseqOf(t); q != nil && q.props["ie"] != nil && rubyRerunsMethod(name) {
+		return rt.rubyEnumMethod(q.props["ie"].(*jsObject), name, args)
+	}
+	if q := rubyAseqOf(t); q != nil && name == "first" && len(args) == 0 {
+		if a1, _ := rt.rubyEnumMethod(t, "first", []interface{}{float64(1)}).(*jsArray); a1 != nil && len(a1.elems) > 0 {
+			return q.props["b"]
+		}
+		return jsNull
 	}
 	if t.props["__rlazy"] == true {
 		return rt.rubyLazyMethod(t, name, args)
