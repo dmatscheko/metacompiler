@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1173** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1174** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1167 ruby: Float object identity (NaN/non-flonum), module reflection after include into builtins, NaN hash keys · P3 · RB · IN PROGRESS (RB worker, round 67) [V]
-Carried over from T-1163 (closed partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
-- Float identity, all engines. MRI: `n = Float::NAN; n.equal?(n)` true, `Float::NAN.equal?(Float::NAN)` true, `[m].include?(m)` / `index` / `count` find the same NaN; but `1e300.equal?(1e300)` and `(-0.0).equal?(-0.0)` are false (non-flonum floats are distinct objects). Ours: interp `equal?` false for NaN; run/native `[m].include?(m)` false, `index` nil, `count` 0; all engines true for the non-flonum cases. Needs a pointer box for the Go twin's value-type `jsFlo` (abnf/jsrt.go, ~59 creation sites) plus flonum-range identity rules in all three engines — a shared-file structural change; schedule it in a round where jsrt.go is free and keep run and native in step.
-- Run vs native divergence: `m = 0.0/0.0; {m => 1}[m]` and `key?` give nil under `llvm.Run` but 1 natively (MRI 1).
-- All engines: a module included into Object or a builtin class is missing from reflection — `class Object; include M; end`: MRI `Object.ancestors` = [Object, M, Kernel, BasicObject], `Integer.include?(M)` true, `5.is_a?(M)` true, `M === "s"` true; ours omit M / answer false. `class Integer; include M; end`: the interpreter lists M in ancestors, compiled engines don't; `5.is_a?(M)` false everywhere.
-- `Enumerator.new { |y| ... }` unsupported (`e.first(3)` raises "undefined method `each'"; MRI [1, 2, 3]). On an endless `(1..Float::INFINITY).each`: `each_slice(2) { break }` / `each_cons(2) { break }` raise NoMethodError and `zip([1]) { break :zp }` hangs (MRI :es, :ec, :zp).
-- Missing builtins (NoMethodError in all engines; pick the commonly used ones first): String `to_r to_c setbyte grapheme_clusters each_grapheme_cluster scrub! encode! unicode_normalize! undump`; Symbol `casecmp casecmp? encoding intern match match? slice`; Array `bsearch_index difference union rassoc repeated_combination repeated_permutation replace rotate! to_ary`; Hash `compact! flatten has_value? value? rassoc reverse_each slice slice_when to_hash`; nil `to_r to_c to_h rationalize`.
+### T-1173 ruby: String#to_r/to_c/setbyte/grapheme_clusters/undump, unicode_normalize, Class.new reflection · P3 · RB · OPEN [V]
+Carried over from T-1167 (closed partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
+- Still NoMethodError: String#to_r and #to_c (needs a rational/complex string parser: "1/3".to_r, " 2.5 ".to_r, "1+2i".to_c, junk suffixes), #setbyte (byte-level mutation of the text model), #grapheme_clusters / #each_grapheme_cluster (UAX#29 segmentation; mapping to chars is wrong for combining marks — at least the common extend/ZWJ/regional-indicator rules), #undump.
+- String#unicode_normalize (and the ! form) is the identity; MRI NFC-composes "é" into a 1-character "é" (also :nfd/:nfkc/:nfkd).
+- `Class.new` anonymous classes have no reflection: `Class.new.ancestors` and `.include?` raise NoMethodError.
+- Binary strings (`"\xff"`) with scrub!/encode! go through the binary path where the bang forms are not covered.
+- stderr only: NoMethodError messages lack MRI 2.6's "Did you mean?" suggestion — record as a limit unless cheap.
 
 # JS — JavaScript and TypeScript
 
@@ -1212,6 +1212,7 @@ T-1168 kotlin: System.err, `java` name shadowing in qualified java.lang rewrites
 T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local nameref (compiler), `export +x` — merged d715bc7a: hidden NAME[SUB] array locals, compiler callee through caller's local nameref (emitted only for nameref names), declaration option-word errors; master probe matches bash 5.3
 T-1169 kotlin (compiler): class property vs top-level object of the same name, `kotlin.io.println` — merged 00293308: a member property hides a same-named top-level class/enum/object in the compiler, fully-qualified kotlin.io.println/print and kotlin.text.Regex; master four-leg probe matches kotlinc 2.2.21
 T-1170 bash: parameter operators on arrays, missing element 0, set -u, circular array namerefs — merged 8a6948b8: parameter operators on array names (element 0) in the interpreter, missing element 0 in the compiler, set -u for such arrays and ${unset-w} under set -u, circular -a/-A local namerefs; master probe matches bash 5.3; hot rt_var path cost-neutral
+T-1167 ruby: Float object identity (NaN/non-flonum), module reflection after include into builtins, NaN hash keys — merged 5e0fe8d3 (partial): Float object identity with MRI's flonum rule (jsFlo pointer box in abnf/jsrt.go, full suite + native-full + ruby/python benches neutral), NaN hash keys, builtin mixin reflection, Enumerator.new, endless each_slice/each_cons/zip breaks, most missing builtins; String to_r/to_c/setbyte/grapheme/undump carried; master four-leg probe matches ruby 2.6
 
 # Settled — do not re-open
 
