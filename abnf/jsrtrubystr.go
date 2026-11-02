@@ -3339,6 +3339,30 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 			rt.call(blk, jsUndef, []interface{}{float64(t.b[i])})
 		}
 		return t
+	case "grapheme_clusters", "each_grapheme_cluster":
+		// Twin of the grapheme arm of binMethod in ruby-interpreter.abnf.
+		var gs []string
+		if enc == "UTF-8" {
+			gs = rubyGraphemes(t.b)
+		} else {
+			for i := 0; i < len(t.b); i++ {
+				gs = append(gs, t.b[i:i+1])
+			}
+		}
+		arr := &jsArray{}
+		for _, g := range gs {
+			arr.elems = append(arr.elems, rubyEncStr(g, enc))
+		}
+		if name == "grapheme_clusters" {
+			return arr
+		}
+		if blk == nil {
+			return rubyEnumAt(rubyMkEnum(arr), t, name, pos)
+		}
+		for _, g := range arr.elems {
+			rt.call(blk, jsUndef, []interface{}{g})
+		}
+		return t
 	case "inspect":
 		return rubyBoxInspect(t)
 	case "dump":

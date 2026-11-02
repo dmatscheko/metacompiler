@@ -1641,6 +1641,30 @@ def s195
         k.encode!("UTF-8").encoding == Encoding::UTF_8 && n.encode!("US-ASCII").encoding == Encoding::US_ASCII &&
         jm == "\"\\xFF\" from ASCII-8BIT to UTF-8" && j.bytes == [255, 113])
 end
+# ===== SECTION 196: String#grapheme_clusters / #each_grapheme_cluster =====
+# UAX #29's extended grapheme clusters as MRI 2.6 (Unicode 12.1) cuts them: CR
+# LF, Extend / ZWJ / SpacingMark after anything, Prepend before anything,
+# Hangul syllables, pictograph ZWJ pictograph, and Regional_Indicator pairs.
+# An invalid byte is a cluster of its own; another encoding than UTF-8 has one
+# per byte. Each string is built from code points, its clusters checked by
+# their sizes. /usr/bin/ruby 2.6 settles each.
+def s196
+  cs = [[0x61, 0x301, 0x62], [0x0D, 0x0A, 0x0A], [0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467],
+        [0x1F1EF, 0x1F1F5, 0x1F1FA, 0x1F1F8, 0x1F1EB], [0x1100, 0x1161, 0x11A8, 0xAC00, 0x11A8, 0xAC01, 0x11A8],
+        [0x600, 0x661, 0x915, 0x903, 0x41], [0x2764, 0xFE0F, 0x41, 0x200D, 0x1F600], [0x41, 0x0D, 0x301],
+        [0x1F600, 0x301, 0x200D, 0x2764], [0x1F1E6, 0x301, 0x1F1E7], [0x1160, 0x11A8, 0x1100, 0xAC00]]
+  sz = cs.map { |c| c.pack("U*").grapheme_clusters.map(&:size) }
+  check("gc196a", sz == [[2, 1], [2, 1], [5], [2, 2, 1], [3, 2, 2], [2, 2, 1], [2, 2, 1], [1, 1, 1], [4], [2, 1],
+        [2, 2]] && cs[0].pack("U*").grapheme_clusters == [[0x61, 0x301].pack("U*"), "b"])
+  b = ("a\xe3\x81" + [0x301].pack("U")).grapheme_clusters
+  check("gc196b", b.map(&:bytes) == [[97], [0xE3], [0x81], [0xCC, 0x81]] && !b[1].valid_encoding? &&
+        "\r\n".b.grapheme_clusters == ["\r", "\n"] && "\xff\xfe".b.grapheme_clusters.map(&:encoding).uniq == [Encoding::BINARY])
+  e = [0x65, 0x301, 0x66].pack("U*").each_grapheme_cluster
+  r = []
+  [0x65, 0x301, 0x66].pack("U*").each_grapheme_cluster { |g| r << g.size }
+  check("gc196c", e.class == Enumerator && e.size == 2 && e.to_a.map(&:size) == [2, 1] && r == [2, 1] &&
+        "".respond_to?(:grapheme_clusters) && "".respond_to?(:each_grapheme_cluster))
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1683,5 +1707,6 @@ s192() # SECTION-CALL 192
 s193() # SECTION-CALL 193
 s194() # SECTION-CALL 194
 s195() # SECTION-CALL 195
+s196() # SECTION-CALL 196
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

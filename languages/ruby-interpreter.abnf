@@ -4055,6 +4055,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var i = 0; i < b.length; i++) { blockCall(blk, [b.charCodeAt(i)]) }
             return t
         }
+        // A String in another encoding than UTF-8 has one cluster per byte.
+        if (name == "grapheme_clusters" || name == "each_grapheme_cluster") {
+            var gs = enc == "UTF-8" ? rbsGraphemeBytes(b) : rbsChars(b)
+            for (var g = 0; g < gs.length; g++) { gs[g] = encStr(gs[g], enc) }
+            if (name == "grapheme_clusters") { return gs }
+            if (blk == null) { return enumAt(mkEnum(gs), t, name, args) }
+            for (var gi = 0; gi < gs.length; gi++) { blockCall(blk, [gs[gi]]) }
+            return t
+        }
         if (name == "inspect") { return binInspect(t) }
         if (name == "dump") { return encStr(rbsDump(b, enc == "UTF-8"), enc) }
         if (name == "undump") { return strUndump(b, enc) }
@@ -4923,12 +4932,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             nargs.push(toF(args[i]))
         }
         if (nargs.length == 0) { nargs.push(0) }
-        // Without a block, each_byte / each_codepoint / each_line / upto answer an
-        // Enumerator over what they would yield.
-        if (name == "each_byte" || name == "each_codepoint" || name == "each_line" || name == "upto") {
+        // Without a block, each_byte / each_codepoint / each_grapheme_cluster /
+        // each_line / upto answer an Enumerator over what they would yield.
+        if (name == "each_byte" || name == "each_codepoint" || name == "each_grapheme_cluster" || name == "each_line"
+                || name == "upto") {
             var list = []
             if (name == "each_byte") { list = smUtf8Bytes(target) }
             if (name == "each_codepoint") { list = smCodePoints(target) }
+            if (name == "each_grapheme_cluster") { list = rbsGraphemes(target) }
             if (name == "each_line") { list = rbsLines(target, sargs.length > 0 ? sargs[0] : "\n") }
             if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, args.length > 1 && rtest(args[1])) }
             if (blk == null) { return {ok: true, v: enumAt(mkEnum(list), target, name, args)} }
@@ -10627,6 +10638,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "reverse") { return rbsReverse(target) }
             if (name == "strip") { return strStrip(target) }
             if (name == "chars") { return rbsChars(target) }
+            if (name == "grapheme_clusters") { return rbsGraphemes(target) }
             // String#[] / #slice: one index, a Range, or start+len.
             if (name == "[]" || name == "slice") {
                 if (args.length > 1) { return rsubseq(target, args[0], args[1]) }

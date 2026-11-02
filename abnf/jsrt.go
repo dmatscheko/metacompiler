@@ -12042,6 +12042,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				out.elems = append(out.elems, string(r))
 			}
 			return out
+		case "grapheme_clusters":
+			return rubySmStrArr(rubyGraphemes(o))
 		case "split":
 			return rt.rubySplitCall(o, args)
 		case "index", "rindex":
@@ -12101,7 +12103,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		// the string to see the removal (a held one is a box, see rubyStrMutate).
 		case "slice!":
 			return rt.rubyMethod(o, "slice", args)
-		case "each_byte", "each_codepoint", "each_line":
+		case "each_byte", "each_codepoint", "each_grapheme_cluster", "each_line":
 			var list []interface{}
 			if name == "each_byte" {
 				list = rubySmNumArr([]byte(o)).elems
@@ -12109,6 +12111,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				for _, r := range o {
 					list = append(list, float64(r))
 				}
+			} else if name == "each_grapheme_cluster" {
+				list = rubySmStrArr(rubyGraphemes(o)).elems
 			} else {
 				sep := "\n"
 				if len(spos) > 0 {

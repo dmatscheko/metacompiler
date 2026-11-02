@@ -382,6 +382,18 @@ function rbBinMethod(t, name, args) {
         while (i < b.length) { rbCall1(blk, b.charCodeAt(i)); i = i + 1 }
         return t
     }
+    // Twin of the grapheme arm of binMethod in ruby-interpreter.abnf.
+    if (name == "grapheme_clusters" || name == "each_grapheme_cluster") {
+        var gs = rbsChars(b)
+        if (enc == "UTF-8") { gs = rbsGraphemeBytes(b) }
+        var g = 0
+        while (g < gs.length) { gs[g] = rbEncStr(gs[g], enc); g = g + 1 }
+        if (name == "grapheme_clusters") { return gs }
+        if (blk === null) { return rbEnumAt(rbMkEnum(gs), t, name, args) }
+        g = 0
+        while (g < gs.length) { rbCall1(blk, gs[g]); g = g + 1 }
+        return t
+    }
     if (name == "inspect") { return rbBoxInspect(t) }
     if (name == "dump") { return rbEncStr(rbsDump(b, enc == "UTF-8"), enc) }
     if (name == "undump") { return rbStrUndump(b, enc) }
@@ -10108,6 +10120,7 @@ function rbMethod(target, name, args) {
         if (name == "reverse") { return rbsReverse(target) }
         if (name == "strip") { return rbStrStrip(target) }
         if (name == "chars") { return rbsChars(target) }
+        if (name == "grapheme_clusters") { return rbsGraphemes(target) }
         if (name == "split") {
             var spn = rbNPos(args)
             var spre = anytype
@@ -13008,11 +13021,13 @@ function rbStrExtra(target, name, args) {
     if (nargs.length == 0) { nargs.push(0) }
     // Without a block, each_byte / each_codepoint / each_line / upto answer an
     // Enumerator over what they would yield.
-    if (name == "each_byte" || name == "each_codepoint" || name == "each_line" || name == "upto") {
+    if (name == "each_byte" || name == "each_codepoint" || name == "each_grapheme_cluster" || name == "each_line"
+            || name == "upto") {
         var blk = rbBlockOf(args)
         var list = []
         if (name == "each_byte") { list = smUtf8Bytes(target) }
         if (name == "each_codepoint") { list = smCodePoints(target) }
+        if (name == "each_grapheme_cluster") { list = rbsGraphemes(target) }
         if (name == "each_line") { list = rbsLines(target, sargs.length > 0 ? sargs[0] : "\n") }
         if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, pos.length > 1 && rbTruthy(pos[1])) }
         if (blk === null) { return {ok: true, v: rbEnumAt(rbMkEnum(list), target, name, args)} }
