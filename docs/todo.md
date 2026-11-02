@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1160** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1161** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -107,11 +107,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1158 kotlin: per-scope local vararg function refs, System.identityHashCode · P3 · KT · IN PROGRESS (KT worker, round 50) [V]
-Found while closing T-1155; oracle kotlinc 2.2.21.
-- Compiled `llvm.Run` leg only: a reference to a local vararg function loses its array form when another function declares a same-named plain local function — the emitter tracks function names program-wide, not per scope. Repro: `fun a(){ fun loc(vararg xs:Int)=xs.size*10; println((::loc)(intArrayOf(4,5,6))) }` plus `fun b(){ fun loc(x:Int)=x; println(loc(1)) }`; kotlinc prints 30 then 1, run prints 10 (interp and native agree with kotlinc — also check why native and run differ here).
-- All engines: `System.identityHashCode(x)` fails with "unknown method 'identityHashCode'". Assert as relations (same object equal, distinct objects usually unequal).
-- Record as limit: each `::f` site is its own class in kotlinc, so `::f.javaClass == ::f.javaClass` is false there and true here (same stand-in as lambda classes).
+### T-1160 kotlin: references to Java static members (Math::abs, System::currentTimeMillis) · P3 · KT · OPEN [V]
+Found while closing T-1158; oracle kotlinc 2.2.21. All engines.
+- `val m = Math::abs; println(m(-3))` prints `$$Lambda@1` in the interpreter and run; kotlinc prints 3.
+- `val g = System::currentTimeMillis; println(g() > 0L)` — interpreter false, compiled half aborts "member 'currentTimeMillis' of null"; kotlinc true. Same for `System::identityHashCode`.
+- Likely causes: the compiler declares `System` only when it is seen as a variable (an `X::m` base does not count); the interpreter's `kBoundRef` takes a host member's arity from `ktBuiltinArity`, so calling the reference returns the function instead of calling it.
+- Record as limit: instances of one class share an identity-hash stand-in (System.identityHashCode of two P() is equal here).
 
 # GO — Go  (oracle: `go run`)
 
@@ -1206,6 +1207,7 @@ T-1152 bash: circular/computed nameref stores, readonly and attribute leftovers 
 T-1153 ruby: big-Integer ranges, NaN vs bignum, Object-method self, float counts — merged 3c7ad439: big-Integer upto/downto/step walks with exact sizes, NaN vs bignum relations, nil self in Object methods, Enumerable#first cap, C-long count args; master four-leg probe matches ruby 2.6
 T-1155 kotlin: Char/Boolean array element types, sum() result type, emptyList and ::f identity — merged 72874b1a: char/boolean array element types, sum() result types, empty-collection singletons, ::f reference identity; master four-leg probe matches kotlinc 2.2.21
 T-1156 bash: run-time readonly through namerefs, element-nameref declarations, eval refusals — merged 8558cf43: run-time readonly through computed namerefs for plain/arith/eval stores, prefix declarations through circular refs, element-nameref declare/export, local -n ''; eval refusal fixed after master send-back; master probes match bash 5.3
+T-1158 kotlin: per-scope local vararg function refs, System.identityHashCode — merged 3ae27e56: per-scope local vararg ::refs, System.identityHashCode, array hashCode identity in compiled halves; master four-leg probe matches kotlinc 2.2.21
 
 # Settled — do not re-open
 
