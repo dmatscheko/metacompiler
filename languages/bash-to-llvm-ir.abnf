@@ -5031,7 +5031,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 lpB = roBack(atBack(lpB, names[j], preAt), names[j], preRo)
                 lpB.NewBr(lpEnd)
                 refVars[lk] = true
-                // Through a chain that ends at NAME[SUB] it does nothing (rt_nref_elemend).
+                // Through a chain that ends at NAME[SUB] it does nothing (rt_nref_elemend), in
+                // both engines. bash 5.3 instead makes a local literally named NAME[SUB], which
+                // every later lookup through a nameref ending there finds in place of the
+                // element, with the declaration's attributes; that is not emulated.
                 var elB = curF.NewBlock("")
                 noB.NewCondBr(noB.NewICmp(llvm.enum.IPredNE, noB.NewCall(rtNrefElemend, gepStr(noB, names[j])), zero), lpEnd, elB)
                 noB = elB
