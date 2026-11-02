@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endless-range enumerators without a block; Range#%; ArithmeticSequence#hash · P3 · RB · OPEN [V]
+### T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endless-range enumerators without a block; Range#%; ArithmeticSequence#hash · P3 · RB · IN PROGRESS (RB worker, round 54) [V]
 
 Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
 - The most important item: converting an endless range to an array raises RangeError "cannot convert endless range to an array" in MRI, which `rescue` can catch. Ours is an uncatchable host failure worded "an endless range". Example: `begin; (1..).to_a; rescue RangeError => e; p e.message; end`.
