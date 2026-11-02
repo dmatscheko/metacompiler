@@ -26,7 +26,7 @@
 function rbRespondRows() {
     return [
         ["*", "!", "!=", "==", "===", "class", "hash", "inspect", "itself", "object_id",
-         "respond_to?", "tap", "to_s"],
+         "respond_to?", "tap", "then", "to_s", "yield_self"],
         ["private", "format", "lambda", "loop", "p", "print", "printf", "proc", "puts",
          "raise", "rand", "require", "sprintf"],
         ["Integer", "%", "&", "*", "**", "+", "+@", "-", "-@", "/", "<", "<<", "<=", "<=>", ">",

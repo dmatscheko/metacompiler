@@ -534,10 +534,7 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		}
 		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("zip", zf, 0), true, ld+zd+">"), name)
 	case name == "drop":
-		dn := int(math.Trunc(rubyToF(argAt(pos, 0))))
-		if dn < 0 {
-			rt.rubyRaiseErr(name, "ArgumentError", "attempt to drop negative size")
-		}
+		dn := rt.rubyArrCountArg(name, argAt(pos, 0), false)
 		return rt.rubyLazyOut(t, rubyLazyCopy(t, rubyLazyOpOf("drop", jsNull, dn), true, ld+"("+strconv.Itoa(dn)+")>"), name)
 	case wix && blk == nil:
 		wd := "#<Enumerator: " + desc + ":" + name
@@ -625,10 +622,7 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		}
 		return cp
 	case "take":
-		tn := int(math.Trunc(rubyToF(argAt(pos, 0))))
-		if tn < 0 {
-			rt.rubyRaiseErr(name, "ArgumentError", "attempt to take negative size")
-		}
+		tn := rt.rubyArrCountArg(name, argAt(pos, 0), true)
 		if lazy {
 			op := newJSObject()
 			op.set("k", "take")
@@ -639,7 +633,7 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		return &jsArray{elems: rt.rubyLazyFirst(t, tn)}
 	case "first":
 		if len(pos) > 0 {
-			return &jsArray{elems: rt.rubyLazyFirst(t, int(math.Trunc(rubyToF(pos[0]))))}
+			return &jsArray{elems: rt.rubyLazyFirst(t, rt.rubyArrCountArg(name, pos[0], true))}
 		}
 		if f1 := rt.rubyLazyFirst(t, 1); len(f1) > 0 {
 			return f1[0]
@@ -790,6 +784,9 @@ func rubyLazyCount(t *jsObject) float64 {
 // rubyLazySizeVal is a Lazy's or stream Enumerator's #size. Twin of lazySize in
 // ruby-interpreter.abnf.
 func rubyLazySizeVal(rt *jsrt, t *jsObject) interface{} {
+	if bsz, has := t.props["bsz"]; has {
+		return bsz
+	}
 	if rubyEnumNoSize(t) {
 		return jsNull
 	}

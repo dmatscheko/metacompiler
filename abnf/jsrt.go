@@ -7087,8 +7087,15 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			}
 		case "times":
 			// Twin of the times arm of bigMethod in ruby-interpreter.abnf.
+			if bt, _ := rubyBigOf(t); isBig && bt.Sign() < 0 {
+				if nblk == nil {
+					return rubyEnumAt(rubyMkEnum(nl), t, name, npos), true
+				}
+				return t, true
+			}
 			if isBig {
 				se := rubyStepForever(float64(0), float64(1), false, "#<Enumerator: "+rt.rubyInspect(t)+":times>")
+				se.set("bsz", t)
 				if nblk == nil {
 					return se, true
 				}
@@ -7691,13 +7698,17 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		rt.rubyRaiseErr("min", "RangeError", "cannot get the minimum of endless range with custom comparison method")
 	}
 	if blk == nil && len(pos) > 0 && (name == "min" || (name == "take" && (strOpen || rubyRangeUnbounded(t)))) {
-		if name == "take" && rubyToF(pos[0]) < 0 {
-			rt.rubyRaiseErr("take", "ArgumentError", "attempt to take negative size")
+		if name == "take" {
+			rt.rubyArrCountArg("take", pos[0], false)
 		}
 		name = "first"
 	}
-	if name == "first" && len(pos) > 0 && rubyToF(pos[0]) < 0 {
-		rt.rubyRaiseErr("first", "ArgumentError", "negative array size (or size too big)")
+	if name == "first" && len(pos) > 0 {
+		fcn := rt.rubyLongArg("first", pos[0])
+		if fcn < 0 {
+			rt.rubyRaiseErr("first", "ArgumentError", "negative array size (or size too big)")
+		}
+		pos = []interface{}{float64(fcn)}
 	}
 	if strOpen && name == "each" && blk != nil {
 		for {
@@ -10998,6 +11009,24 @@ func (rt *jsrt) rubyImplicitInt(frame string, v interface{}, alt string) float64
 	return 0
 }
 
+// rubyLongArg is a count taken as a C long. Twin of longArg in
+// ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyLongArg(frame string, v interface{}) int {
+	n := math.Trunc(rt.rubyImplicitInt(frame, v, ""))
+	bad := n != n || n > 1<<63 || n < -(1<<63)
+	if !bad && (n == 1<<63 || n == -(1<<63)) {
+		c, _ := rubyBigCmp(v, n)
+		bad = (n > 0 && c >= 0) || (n < 0 && c < 0)
+	}
+	if bad {
+		if _, isFlo := v.(jsFlo); isFlo {
+			rt.rubyRaiseErr(frame, "RangeError", "float "+rt.rubyFormat("%-.10g", v)+" out of range of integer")
+		}
+		rt.rubyRaiseErr(frame, "RangeError", "bignum too big to convert into `long'")
+	}
+	return int(n)
+}
+
 // rubyFormat is Kernel#format / String#% - the printf directives Ruby shares with C:
 // %[-][0][+][ ][#][width][.prec](d|i|u|f|s|p|c|x|X|o|b|B|e|E|g|G|%). The right
 // operand is the argument, or an array of them.
@@ -11422,6 +11451,15 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				rt.call(blk, jsUndef, []interface{}{target})
 			}
 			return target
+		}
+	// Kernel#then / #yield_self. Twin of the arm in ruby-interpreter.abnf.
+	case "then", "yield_self":
+		if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+			pos, blk := rubyBlockArgs(args)
+			if blk == nil {
+				return rubyEnumAt(rubyMkEnumOp(&jsArray{elems: []interface{}{target}}, "then"), target, name, pos)
+			}
+			return rt.call(blk, jsUndef, []interface{}{target})
 		}
 	// Object#hash / #object_id, unless a user class defines its own.
 	case "hash", "object_id":
@@ -12710,14 +12748,17 @@ func rubyArrNorm(t *jsArray, v interface{}) int {
 	return n
 }
 
-// rubyArrCountArg is the COUNT of first / last / pop / shift / take, which MRI
-// refuses below zero. Twin of arrCountArg in ruby-interpreter.abnf.
-func (rt *jsrt) rubyArrCountArg(name string, v interface{}) int {
-	n := int(math.Trunc(rubyToF(v)))
+// rubyArrCountArg is the COUNT of first / last / pop / shift / take / drop, which
+// MRI refuses below zero. Twin of arrCountArg in ruby-interpreter.abnf, which
+// states the rule.
+func (rt *jsrt) rubyArrCountArg(name string, v interface{}, enumFirst bool) int {
+	n := rt.rubyLongArg(name, v)
 	if n < 0 {
 		msg := "negative array size"
-		if name == "take" {
+		if name == "take" || enumFirst {
 			msg = "attempt to take negative size"
+		} else if name == "drop" {
+			msg = "attempt to drop negative size"
 		}
 		rt.rubyRaiseErr(name, "ArgumentError", msg)
 	}
@@ -13389,6 +13430,8 @@ func rubyEnumFinish(t *jsObject, items *jsArray, results []interface{}) interfac
 	// each_with_object's items are [element, memo] pairs, and it answers the memo.
 	case "each_with_object":
 		return t.props["margs"].(*jsArray).elems[0]
+	case "then":
+		return results[0]
 	case "select", "filter", "find_all", "reject":
 		out := &jsArray{}
 		for i := range items.elems {
@@ -13707,7 +13750,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	// ARRAY: `[1,2,3].first(2)` is [1, 2].
 	case "pop":
 		if len(pos) > 0 {
-			n := rt.rubyArrCountArg(name, pos[0])
+			n := rt.rubyArrCountArg(name, pos[0], false)
 			if n > len(t.elems) {
 				n = len(t.elems)
 			}
@@ -13724,7 +13767,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return v
 	case "first":
 		if len(pos) > 0 {
-			return rubyArrSub(t, 0, rt.rubyArrCountArg(name, pos[0]))
+			return rubyArrSub(t, 0, rt.rubyArrCountArg(name, pos[0], rt.rubyNmArr == t))
 		}
 		if len(t.elems) == 0 {
 			return jsNull
@@ -13732,7 +13775,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return t.elems[0]
 	case "last":
 		if len(pos) > 0 {
-			n := rt.rubyArrCountArg(name, pos[0])
+			n := rt.rubyArrCountArg(name, pos[0], false)
 			if n > len(t.elems) {
 				n = len(t.elems)
 			}
@@ -13745,7 +13788,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	// shift removes from the FRONT; unshift/prepend adds there, variadically.
 	case "shift":
 		if len(pos) > 0 {
-			n := rt.rubyArrCountArg(name, pos[0])
+			n := rt.rubyArrCountArg(name, pos[0], false)
 			if n > len(t.elems) {
 				n = len(t.elems)
 			}
@@ -14241,9 +14284,9 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		return t
 	case "take":
-		return rubyArrSub(t, 0, rt.rubyArrCountArg(name, argAt(pos, 0)))
+		return rubyArrSub(t, 0, rt.rubyArrCountArg(name, argAt(pos, 0), false))
 	case "drop":
-		n := int(math.Trunc(rubyToF(argAt(pos, 0))))
+		n := rt.rubyArrCountArg(name, argAt(pos, 0), false)
 		return rubyArrSub(t, n, len(t.elems)-n)
 	// Array#pack over C, c and U (rubyPack in jsrtrubystr.go).
 	case "pack":

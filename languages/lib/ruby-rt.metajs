@@ -2934,6 +2934,23 @@ function rbImplicitInt(frame, v, alt) {
     rbRaiseErr(frame, "TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
     return 0
 }
+// A count taken as a C long. Twin of longArg in ruby-interpreter.abnf, which
+// states the rule.
+function rbLongArg(frame, v) {
+    var n = Math.trunc(rbImplicitInt(frame, v, ""))
+    var lim = Math.pow(2, 63)
+    var bad = n !== n || n > lim || n < -lim
+    if (!bad && (n == lim || n == -lim)) {
+        var c = 0
+        if (rbIsBig(v)) { c = rtABigCmp(rbABigOperand(v), rtABigFromNum(n)) }
+        bad = n == lim ? c >= 0 : c < 0
+    }
+    if (bad) {
+        if (rbIsFlo(v)) { rbRaiseErr(frame, "RangeError", "float " + rbFormat("%-.10g", v, frame) + " out of range of integer") }
+        rbRaiseErr(frame, "RangeError", "bignum too big to convert into `long'")
+    }
+    return n
+}
 
 // The size argument of each_slice / each_cons, of the n positional ones in
 // args. Twin of sliceSize in ruby-interpreter.abnf, which states the rule.
@@ -5134,11 +5151,13 @@ function rbRangeMethod(t, name, args) {
         rbRaiseErr("min", "RangeError", "cannot get the minimum of endless range with custom comparison method")
     }
     if (blk === null && npos > 0 && (name == "min" || (name == "take" && (strOpen || rbRangeUnbounded(t))))) {
-        if (name == "take" && rbToF(args[0]) < 0) { rbRaiseErr("take", "ArgumentError", "attempt to take negative size") }
+        if (name == "take") { rbArrCountArg("take", args[0], false) }
         name = "first"
     }
-    if (name == "first" && npos > 0 && rbToF(args[0]) < 0) {
-        rbRaiseErr("first", "ArgumentError", "negative array size (or size too big)")
+    if (name == "first" && npos > 0) {
+        var fcn = rbLongArg("first", args[0])
+        if (fcn < 0) { rbRaiseErr("first", "ArgumentError", "negative array size (or size too big)") }
+        args = [fcn]
     }
     if (strOpen && name == "each" && blk !== null) {
         var sc = t["begin"]
@@ -6269,8 +6288,13 @@ function rbNumMethod(t, name, args) {
     if (name == "times") {
         var tblk = rbBlockOf(args)
         // Twin of the times arm of bigMethod in ruby-interpreter.abnf.
+        if (!isInt && rbNumCmp(t, 0) < 0) {
+            if (tblk === null) { return rbEnumAt(rbMkEnum([]), t, name, args) }
+            return t
+        }
         if (!isInt) {
             var te = rbStepForever(0, 1, false, "#<Enumerator: " + rbInspect(t) + ":times>")
+            te["bsz"] = t
             if (tblk === null) { return te }
             rbLazyMethod(te, "each", [js_rblkwrap(tblk)])
             return t
@@ -7091,6 +7115,7 @@ function rbEnumFinish(t, items, results) {
     }
     // each_with_object's items are [element, memo] pairs, and it answers the memo.
     if (op == "each_with_object") { return t["margs"][0] }
+    if (op == "then") { return results[0] }
     if (op == "select" || op == "filter" || op == "find_all" || op == "reject") {
         var keep = []
         var k = 0
@@ -7335,6 +7360,7 @@ function rbLazyOut(t, lz, name) {
 }
 // Twin of lazySize in ruby-interpreter.abnf.
 function rbLazySize(t) {
+    if (t["bsz"] !== undefined) { return t["bsz"] }
     if (rbEnumNoSize(t)) { return null }
     var inf = Math.pow(2, 1024)
     var c = rbaLazyCount(t, inf)
@@ -7391,8 +7417,7 @@ function rbLazyMethod(t, name, args) {
         return rbLazyOut(t, rbLazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + zd + ">"), name)
     }
     if (name == "drop") {
-        var dn = Math.trunc(rbToF(rbArgAt(args, 0)))
-        if (dn < 0) { rbRaiseErr(name, "ArgumentError", "attempt to drop negative size") }
+        var dn = rbArrCountArg(name, rbArgAt(args, 0), false)
         return rbLazyOut(t, rbLazyCopy(t, {k: "drop", f: null, n: dn}, true, ld + "(" + dn + ")>"), name)
     }
     var wix = name == "with_index" || name == "each_with_index"
@@ -7457,14 +7482,13 @@ function rbLazyMethod(t, name, args) {
         if (name == "clone" && t["__fz"] === true) { cp["__fz"] = true }
         return cp
     }
-    if (name == "take" && Math.trunc(rbToF(rbArgAt(args, 0))) < 0) { rbRaiseErr(name, "ArgumentError", "attempt to take negative size") }
     if (name == "take" && t["lazy"] === true) {
-        var tn = Math.trunc(rbToF(rbArgAt(args, 0)))
+        var tn = rbArrCountArg(name, rbArgAt(args, 0), true)
         return rbLazyCopy(t, {k: "take", f: null, n: tn}, true, "#<Enumerator::Lazy: " + desc + ":take(" + tn + ")>")
     }
-    if (name == "take") { return rbLazyFirst(t, Math.trunc(rbToF(rbArgAt(args, 0)))) }
+    if (name == "take") { return rbLazyFirst(t, rbArrCountArg(name, rbArgAt(args, 0), true)) }
     if (name == "first") {
-        if (nPos > 0) { return rbLazyFirst(t, Math.trunc(rbToF(rbArgAt(args, 0)))) }
+        if (nPos > 0) { return rbLazyFirst(t, rbArrCountArg(name, rbArgAt(args, 0), true)) }
         var f1 = rbLazyFirst(t, 1)
         if (f1.length > 0) { return f1[0] }
         return null
@@ -8052,7 +8076,7 @@ function rbArrayMethod(t, name, args) {
     // ARRAY: `[1,2,3].first(2)` is [1, 2].
     if (name == "pop") {
         if (nPos > 0) {
-            var pn = rbArrCountArg(name, args[0])
+            var pn = rbArrCountArg(name, args[0], false)
             if (pn > t.length) { pn = t.length }
             var ptail = rbArrSub(t, t.length - pn, pn)
             rbArrReplace(t, rbArrSub(t, 0, t.length - pn))
@@ -8062,13 +8086,13 @@ function rbArrayMethod(t, name, args) {
         return t.pop()
     }
     if (name == "first") {
-        if (nPos > 0) { return rbArrSub(t, 0, rbArrCountArg(name, args[0])) }
+        if (nPos > 0) { return rbArrSub(t, 0, rbArrCountArg(name, args[0], rbNmDeleg[0] === t)) }
         if (t.length == 0) { return null }
         return t[0]
     }
     if (name == "last") {
         if (nPos > 0) {
-            var ln = rbArrCountArg(name, args[0])
+            var ln = rbArrCountArg(name, args[0], false)
             if (ln > t.length) { ln = t.length }
             return rbArrSub(t, t.length - ln, ln)
         }
@@ -8078,7 +8102,7 @@ function rbArrayMethod(t, name, args) {
     // shift removes from the FRONT; unshift/prepend adds there, variadically.
     if (name == "shift") {
         if (nPos > 0) {
-            var sn = rbArrCountArg(name, args[0])
+            var sn = rbArrCountArg(name, args[0], false)
             if (sn > t.length) { sn = t.length }
             var shead = rbArrSub(t, 0, sn)
             rbArrReplace(t, rbArrSub(t, sn, t.length - sn))
@@ -8555,9 +8579,9 @@ function rbArrayMethod(t, name, args) {
         while (pm < res.length) { rbCall1(blk, res[pm]); pm = pm + 1 }
         return t
     }
-    if (name == "take") { return rbArrSub(t, 0, rbArrCountArg(name, rbPosAt(args, nPos, 0))) }
+    if (name == "take") { return rbArrSub(t, 0, rbArrCountArg(name, rbPosAt(args, nPos, 0), false)) }
     if (name == "drop") {
-        var dn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
+        var dn = rbArrCountArg(name, rbPosAt(args, nPos, 0), false)
         return rbArrSub(t, dn, t.length - dn)
     }
     // Array#pack over C, c and U (rbsPack in lib/ruby-str.js). Twin of the pack
@@ -9483,6 +9507,12 @@ function rbMethod(target, name, args) {
     if ((name == "itself" || name == "tap") && rbFindMethod(target, name) === undefined) {
         if (name == "tap") { rbCall1(rbBlockOf(args), target) }
         return target
+    }
+    // Kernel#then / #yield_self. Twin of the arm in ruby-interpreter.abnf.
+    if ((name == "then" || name == "yield_self") && rbFindMethod(target, name) === undefined) {
+        var thb = rbBlockOf(args)
+        if (thb === null) { return rbEnumAt(rbMkEnumOp([target], "then"), target, name, args) }
+        return rbCall1(thb, target)
     }
     // Object#hash / #object_id, unless a user class defines its own.
     if (name == "hash" && rbFindMethod(target, name) === undefined) { return rbHashOf(target) }
@@ -11852,7 +11882,7 @@ function rbEnumRun(t, name, args) {
     var cargs = args
     if (kind == 4) {
         limit = 0
-        if (pos.length > 0) { limit = Math.trunc(rbImplicitInt(name, pos[0], "")) } else if (name == "first") { limit = 1 }
+        if (pos.length > 0) { limit = rbLongArg(name, pos[0]) } else if (name == "first") { limit = 1 }
         if (limit < 0) { rbRaiseErr(name, "ArgumentError", "attempt to take negative size") }
         if (pos.length > 0) { cargs = [limit] }
     }
@@ -12567,10 +12597,14 @@ function js_rfn(scope, name) {
     rbNoMethod(fself, n)
     return null
 }
-// The COUNT of first / last / pop / shift / take - see rubyArrCountArg in abnf/jsrt.go.
-function rbArrCountArg(name, v) {
-    var n = Math.trunc(rbToF(v))
-    if (n < 0) { rbRaiseErr(name, "ArgumentError", name == "take" ? "attempt to take negative size" : "negative array size") }
+// The COUNT of first / last / pop / shift / take / drop - see rubyArrCountArg in
+// abnf/jsrt.go.
+function rbArrCountArg(name, v, enumFirst) {
+    var n = rbLongArg(name, v)
+    if (n < 0) {
+        if (name == "take" || enumFirst) { rbRaiseErr(name, "ArgumentError", "attempt to take negative size") }
+        rbRaiseErr(name, "ArgumentError", name == "drop" ? "attempt to drop negative size" : "negative array size")
+    }
     return n
 }
 // A receiver-less send(:name, ...) - see js_rselfsend in abnf/jsrtruby.go.

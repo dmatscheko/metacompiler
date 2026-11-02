@@ -2201,7 +2201,7 @@ func (rt *jsrt) rubyMainObj() *jsObject {
 // ruby_respond_test.go keeps the two equal.
 var rubyRespondNames = map[string][]string{
 	"*": {"!", "!=", "==", "===", "class", "hash", "inspect", "itself", "object_id",
-		"respond_to?", "tap", "to_s"},
+		"respond_to?", "tap", "then", "to_s", "yield_self"},
 	"private": {"format", "lambda", "loop", "p", "print", "printf", "proc", "puts", "raise",
 		"rand", "require", "sprintf"},
 	"Integer": {"%", "&", "*", "**", "+", "+@", "-", "-@", "/", "<", "<<", "<=", "<=>", ">", ">=",
@@ -3029,7 +3029,7 @@ func (rt *jsrt) rubyEnumRun(t interface{}, name string, args []interface{}) inte
 	if kind == 4 {
 		switch {
 		case len(pos) > 0:
-			limit = int(math.Trunc(rt.rubyImplicitInt(name, pos[0], "")))
+			limit = rt.rubyLongArg(name, pos[0])
 		case name == "first":
 			limit = 1
 		default:

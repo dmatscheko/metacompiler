@@ -5705,11 +5705,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out
     }
-    // The COUNT of first / last / pop / shift / take, which MRI refuses below zero.
-    // Twins: rubyArrCountArg in abnf/jsrt.go, rbArrCountArg in lib/ruby-rt.metajs.
-    function arrCountArg(name, v) {
-        var n = Math.trunc(toF(v))
-        if (n < 0) { raiseErr(name, "ArgumentError", name == "take" ? "attempt to take negative size" : "negative array size") }
+    // The COUNT of first / last / pop / shift / take / drop, which MRI refuses
+    // below zero. Enumerable#first, which a Hash or Enumerator delegating here
+    // runs, words it as take does. Twins: rubyArrCountArg in abnf/jsrt.go,
+    // rbArrCountArg in lib/ruby-rt.metajs.
+    function arrCountArg(name, v, enumFirst) {
+        var n = longArg(name, v)
+        if (n < 0) {
+            if (name == "take" || enumFirst) { raiseErr(name, "ArgumentError", "attempt to take negative size") }
+            raiseErr(name, "ArgumentError", name == "drop" ? "attempt to drop negative size" : "negative array size")
+        }
         return n
     }
     function arrRepeat(l, times) {
@@ -6061,11 +6066,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             raiseErr("min", "RangeError", "cannot get the minimum of endless range with custom comparison method")
         }
         if (blk == null && args.length > 0 && (name == "min" || (name == "take" && (strOpen || rangeUnbounded(t))))) {
-            if (name == "take" && toF(args[0]) < 0) { raiseErr("take", "ArgumentError", "attempt to take negative size") }
+            if (name == "take") { arrCountArg("take", args[0], false) }
             name = "first"
         }
-        if (name == "first" && args.length > 0 && toF(args[0]) < 0) {
-            raiseErr("first", "ArgumentError", "negative array size (or size too big)")
+        if (name == "first" && args.length > 0) {
+            var fcn = longArg("first", args[0])
+            if (fcn < 0) { raiseErr("first", "ArgumentError", "negative array size (or size too big)") }
+            args = [fcn]
         }
         if (strOpen && name == "each" && blk != null) {
             var sc = t.lo
@@ -7391,6 +7398,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         raiseErr(frame, "TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
         return 0
+    }
+    // A count taken as a C long (take, first, drop ... ): implicitInt truncated,
+    // and a value outside the long range is MRI's rb_out_of_long RangeError.
+    // A big Integer that rounds to the edge 2^63 is compared exactly. Twins:
+    // rubyLongArg in abnf/jsrt.go, rbLongArg in lib/ruby-rt.metajs.
+    function longArg(frame, v) {
+        var n = Math.trunc(implicitInt(frame, v, ""))
+        var lim = Math.pow(2, 63)
+        var bad = n !== n || n > lim || n < -lim
+        if (!bad && (n == lim || n == -lim)) {
+            var c = isBig(v) ? bigCmp(bigOf(v), bigOf(n)) : 0
+            bad = n == lim ? c >= 0 : c < 0
+        }
+        if (bad) {
+            if (isFlo(v)) { raiseErr(frame, "RangeError", "float " + rformat("%-.10g", v, frame) + " out of range of integer") }
+            raiseErr(frame, "RangeError", "bignum too big to convert into `long'")
+        }
+        return n
     }
     // each_slice / each_cons take one Integer size of at least 1, converted and
     // checked when the call is made (enum_each_slice), so a Float or endless
@@ -9130,7 +9155,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var limit = -1
         var cargs = args
         if (kind == 4) {
-            limit = args.length == 0 ? (name == "first" ? 1 : 0) : Math.trunc(implicitInt(name, args[0], ""))
+            limit = args.length == 0 ? (name == "first" ? 1 : 0) : longArg(name, args[0])
             if (limit < 0) { raiseErr(name, "ArgumentError", "attempt to take negative size") }
             if (args.length > 0) { cargs = [limit] }
         }
@@ -9393,9 +9418,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "pow" && args.length < 2) { return binAs(name, "**", t, args[0]) }
         if (name == "step") { return numStep(t, args, blk) }
         // No Array holds 2**53 values, so #times streams them; a break ends it.
+        // The stream is endless, so it carries its exact #size in bsz. A negative
+        // receiver yields nothing. Twins: the times arms of rubyNumMethod in
+        // abnf/jsrt.go and rbNumMethod in lib/ruby-rt.metajs.
         if (name == "times") {
+            if (numCmp(t, 0) < 0) { return blk == null ? enumAt(mkEnum([]), t, name, args) : t }
             var te = anytype
             te = stepForever(0, 1, false, "#<Enumerator: " + bigStr(t) + ":times>")
+            te.bsz = t
             if (blk == null) { return te }
             mcall(te, "each", [], blk)
             return t
@@ -10015,6 +10045,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return name == "hash" ? valHash(target) : objectId(target)
         }
         if (name == "tap") { blockCall(blk, [target]); return target }
+        // Kernel#then / #yield_self answer the block's value; without a block, an
+        // Enumerator over the receiver whose #each answers it. Twins: rubyMethod in
+        // abnf/jsrt.go, rbMethod in lib/ruby-rt.metajs.
+        if ((name == "then" || name == "yield_self") && !(isUserObj(target) && singRespond(target, name))) {
+            if (blk == null) { return enumAt(mkEnumOp([target], "then"), target, name, args) }
+            return blockCall(blk, [target])
+        }
         // Kernel#itself, unless a user class defines its own.
         if (name == "itself" && !(isUserObj(target) && singRespond(target, "itself"))) { return target }
         // Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
@@ -11151,6 +11188,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // each_with_object's items are [element, memo] pairs, and it answers the memo.
         if (op == "each_with_object") { return t.margs[0] }
+        if (op == "then") { return results[0] }
         if (op == "select" || op == "filter" || op == "find_all" || op == "reject") {
             var keep = []
             for (var k = 0; k < items.length; k++) {
@@ -11228,6 +11266,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A Lazy's or stream Enumerator's #size, from rbaLazyCount. Twins:
     // rubyLazySizeVal in abnf/jsrtrubystr.go, rbLazySize in lib/ruby-rt.metajs.
     function lazySize(t) {
+        if (t.bsz !== undefined) { return t.bsz }
         if (enumNoSize(t)) { return null }
         var inf = Math.pow(2, 1024)
         var c = rbaLazyCount(t, inf)
@@ -11362,8 +11401,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return lazyOut(t, lazyCopy(t, {k: "zip", f: zf, n: 0}, true, ld + (args.length > 0 ? "(" + zd + ")" : "") + ">"), name)
         }
         if (name == "drop") {
-            var dn = Math.trunc(toF(args[0]))
-            if (dn < 0) { raiseErr(name, "ArgumentError", "attempt to drop negative size") }
+            var dn = arrCountArg(name, args[0], false)
             return lazyOut(t, lazyCopy(t, {k: "drop", f: null, n: dn}, true, ld + "(" + dn + ")>"), name)
         }
         var wix = name == "with_index" || name == "each_with_index"
@@ -11420,14 +11458,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "clone" && t.__fz === true) { cp.__fz = true }
             return cp
         }
-        if (name == "take" && Math.trunc(toF(args[0])) < 0) { raiseErr(name, "ArgumentError", "attempt to take negative size") }
         if (name == "take" && t.lazy) {
-            var tn = Math.trunc(toF(args[0]))
+            var tn = arrCountArg(name, args[0], true)
             return lazyCopy(t, {k: "take", f: null, n: tn}, true, "#<Enumerator::Lazy: " + t.desc + ":take(" + tn + ")>")
         }
-        if (name == "take") { return lazyFirst(t, Math.trunc(toF(args[0]))) }
+        if (name == "take") { return lazyFirst(t, arrCountArg(name, args[0], true)) }
         if (name == "first") {
-            if (args.length > 0) { return lazyFirst(t, Math.trunc(toF(args[0]))) }
+            if (args.length > 0) { return lazyFirst(t, arrCountArg(name, args[0], true)) }
             var f1 = lazyFirst(t, 1)
             return f1.length > 0 ? f1[0] : null
         }
@@ -11620,7 +11657,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // ARRAY (`[1,2,3].first(2)` is [1, 2]).
         if (name == "pop") {
             if (args.length > 0) {
-                var pn = arrCountArg(name, args[0])
+                var pn = arrCountArg(name, args[0], false)
                 if (pn > t.length) { pn = t.length }
                 var ptail = arrSub(t, t.length - pn, pn)
                 arrReplace(t, arrSub(t, 0, t.length - pn))
@@ -11629,12 +11666,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return t.length == 0 ? null : t.pop()
         }
         if (name == "first") {
-            if (args.length > 0) { return arrSub(t, 0, arrCountArg(name, args[0])) }
+            if (args.length > 0) { return arrSub(t, 0, arrCountArg(name, args[0], nmDeleg.arr === t)) }
             return t.length == 0 ? null : t[0]
         }
         if (name == "last") {
             if (args.length > 0) {
-                var ln = arrCountArg(name, args[0])
+                var ln = arrCountArg(name, args[0], false)
                 if (ln > t.length) { ln = t.length }
                 return arrSub(t, t.length - ln, ln)
             }
@@ -11643,7 +11680,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // shift removes from the FRONT; unshift/prepend adds there, variadically.
         if (name == "shift") {
             if (args.length > 0) {
-                var sn = arrCountArg(name, args[0])
+                var sn = arrCountArg(name, args[0], false)
                 if (sn > t.length) { sn = t.length }
                 var shead = arrSub(t, 0, sn)
                 arrReplace(t, arrSub(t, sn, t.length - sn))
@@ -11994,9 +12031,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < res.length; i++) { blockCall(blk, [res[i]]) }
             return t
         }
-        if (name == "take") { return arrSub(t, 0, arrCountArg(name, args[0])) }
+        if (name == "take") { return arrSub(t, 0, arrCountArg(name, args[0], false)) }
         if (name == "drop") {
-            var dn = Math.trunc(toF(args[0]))
+            var dn = arrCountArg(name, args[0], false)
             return arrSub(t, dn, t.length - dn)
         }
         // Array#pack over C, c and U (rbsPack in lib/ruby-str.js); C or c first

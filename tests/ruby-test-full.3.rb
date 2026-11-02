@@ -1,4 +1,4 @@
-# Full-syntax test: Ruby - part 3, SECTIONs 97 to 124. tests/ruby-test-full.rb
+# Full-syntax test: Ruby - part 3, SECTIONs 97 to 125. tests/ruby-test-full.rb
 # leaves the -frozen interpreter leg too little of the IR interpreter's step
 # brake (-max-steps, 100M per call) for them; see that file for the
 # conventions.
@@ -1056,6 +1056,37 @@ def s124
   {5 => 6}.each { |k, v| o << k * v }
   check("nl124e", o == [1, 5, 4, 30])
 end
+# ===== SECTION 125: Kernel#then, count arguments, big #times =====
+# Kernel#then and its alias yield_self answer the block's value; without a block
+# they answer an Enumerator of size 1 whose #each answers the block's value. A
+# count argument (take, first, drop, last ...) converts as a C long: a Float
+# truncates, nil / a String / a Symbol is a TypeError, a value outside the long
+# range a RangeError, and a negative one each method's own ArgumentError.
+# Integer#times of a big Integer counts its #size exactly. /usr/bin/ruby 2.6
+# settles each.
+def s125
+  v = [1, "ab", nil, 2**70, "x", -1, 1.9, 1e30]
+  e = v[0].then
+  check("th125a", v[0].then { |x| x + 1 } == 2 && v[1].yield_self { |s| s + "c" } == "abc" &&
+    v[2].then { |x| x.inspect } == "nil" && v[0].respond_to?(:then) && v[1].respond_to?(:yield_self))
+  check("th125b", e.size == 1 && e.to_a == [1] && e.each { |x| x + 5 } == 6 && e.inspect == "#<Enumerator: 1:then>")
+  errs = []
+  [-> { (1..3).take(v[4]) }, -> { (1..).take(v[4]) }, -> { [1].first(v[2]) }, -> { [1].drop(:s) },
+   -> { [1].drop(v[5]) }, -> { {a: 1}.first(v[5]) }, -> { [1].take(v[3]) }, -> { [1].take(v[7]) }].each do |f|
+    begin
+      f.call
+    rescue TypeError, ArgumentError, RangeError => x
+      errs << x.class.name + ": " + x.message
+    end
+  end
+  check("ct125c", errs == ["TypeError: no implicit conversion of String into Integer",
+    "TypeError: no implicit conversion of String into Integer", "TypeError: no implicit conversion from nil to integer",
+    "TypeError: no implicit conversion of Symbol into Integer", "ArgumentError: attempt to drop negative size",
+    "ArgumentError: attempt to take negative size", "RangeError: bignum too big to convert into `long'",
+    "RangeError: float 1e+30 out of range of integer"])
+  check("ct125d", [1, 2, 3].take(v[6]) == [1] && (1..).first(v[6]) == [1] && [1, 2, 3].drop(v[6]) == [2, 3])
+  check("bt125e", v[3].times.size == 1180591620717411303424 && (-v[3]).times.size == 0 && v[3].times.first(2) == [0, 1])
+end
 
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
@@ -1085,5 +1116,6 @@ s121() # SECTION-CALL 121
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
+s125() # SECTION-CALL 125
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
