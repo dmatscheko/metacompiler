@@ -72,8 +72,26 @@ s129() {
   e=$(s129p() { echo "$(case a in a) echo x;; esac)"; }; s129q() { :; }; v=s129q; type $v; type -t s129p; command -V $v)
   check stl1 "$e" $'s129q is a function\ns129q () \n{ \n    :\n}\nfunction\ns129q is a function\ns129q () \n{ \n    :\n}'
 }
+
+# ===== SECTION 130: syntax errors of test and [ =====
+# test picks its rule by the number of arguments (up to four, and so does a parenthesised
+# group of up to four); a longer list is parsed as an expression. An argument left over is
+# "too many arguments" (or "syntax error: `-X' unexpected"), a lone word before another is
+# "unary operator expected", and the first error, an operand's "integer expected" included,
+# is the only one reported; the status is 2. Every expected value is bash 5.3's.
+s130() {
+  local e
+  s130m() { local m=${1#*: line }; printf '%s;' "${m#*: }"; }
+  e=$(s130m "$(test 1 -eq 1 x 2>&1; echo "|$?")"; s130m "$(test x -eq 2>&1; echo "|$?")"; s130m "$([ 1 -eq 1 x ] 2>&1; echo "|$?")")
+  check tse1 "$e" $'test: too many arguments\n|2;test: x: unary operator expected\n|2;[: too many arguments\n|2;'
+  e=$(s130m "$(test 1 -eq 1 -x 2>&1; echo "|$?")"; s130m "$(test '(' x y z 2>&1; echo "|$?")"; s130m "$(test x == y -a 2>&1; echo "|$?")"; s130m "$(test x -eq 1 y 2>&1; echo "|$?")"; s130m "$([ x 2>&1; echo "|$?")")
+  check tse2 "$e" $'test: syntax error: `-x\' unexpected\n|2;test: `)\' expected, found y\n|2;test: argument expected\n|2;test: x: integer expected\n|2;[: missing `]\'\n|2;'
+  e=$({ test -n -a -z; echo $?; test x -a '(' '' ')'; echo $?; test ! '(' ! '' ')'; echo $?; test -t -a -n x; echo $?; test -n x -a -q; echo $?; test -a / -a '(' -n x ')'; echo $?; } 2>&1)
+  check tse3 "$e" $'0\n0\n1\n1\n0\n0'
+}
 # ===== END SECTIONS =====
 
 s129  # SECTION-CALL 129
+s130  # SECTION-CALL 130
 echo "full: $checks checks, $fails failures"
 exit $fails

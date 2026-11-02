@@ -1896,6 +1896,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtStr2int = rtDecl("rt_str2int", 3, [1])
     // i64 rt_test_int(i8* s, i8* who): an integer operand of test / [, or test_err.
     var rtTestInt = rtDecl("rt_test_int", 3, [1, 1])
+    // i32 rt_test_syn(i8* who, i8* pre, i8* arg, i8* post) / rt_test_extra(i8* who, i8* arg):
+    // a syntax error of test / [, reported unless an operand already was; sets test_err.
+    var rtTestSyn = rtDecl("rt_test_syn", false, [1, 1, 1, 1])
+    var rtTestExtra = rtDecl("rt_test_extra", false, [1, 1])
     // i64 rt_arith(i8* expr): the arithmetic evaluator for an expression that only exists at
     // run time; rt_idiv / rt_ipow are / % and ** with bash's error cases. Any of them can
     // raise arith_err (see languages/lib/bash-rt.c).
@@ -5412,6 +5416,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (t == "-e" || t == "-f" || t == "-d" || t == "-s" || t == "-r" || t == "-w") { return true }
         if (t == "-x" || t == "-h" || t == "-L" || t == "-b" || t == "-c" || t == "-p") { return true }
         if (t == "-S" || t == "-t" || t == "-g" || t == "-u" || t == "-k" || t == "-O") { return true }
+        if (t == "-a" || t == "-G" || t == "-N" || t == "-o" || t == "-R") { return true }
         return false
     }
     function isTestBinary(t) {
@@ -5449,7 +5454,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // languages/bash-interpreter.abnf, including why a real stat() was declined.
         var two = llvm.constant.NewInt(i32, 2)
         if (op == "-d") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, two)) }
-        if (op == "-e" || op == "-r" || op == "-w") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, k, zero)) }
+        if (op == "-e" || op == "-a" || op == "-r" || op == "-w") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, k, zero)) }
         if (op == "-f") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, one)) }
         if (op == "-s") { return boolStatus(b, b.NewOr(b.NewICmp(llvm.enum.IPredEQ, k, one),
                                                       b.NewICmp(llvm.enum.IPredEQ, k, two))) }
@@ -5460,7 +5465,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A numeric operand of test: read at compile time when the word is a literal decimal
     // number that a double holds exactly, else rt_test_int's (tc.who names the command in
     // its diagnostic, tc.rt records that emitTest must look at test_err).
-    var tc = {who: "test", rt: false}
+    var tc = {who: "test", rt: false, stop: false, a: [], n: 0, i: 0}
     function testInt(b, w) {
         var t = w.c
         var i = (t != undefined && (t.charAt(0) == "-" || t.charAt(0) == "+")) ? 1 : 0
@@ -5492,62 +5497,136 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return one
     }
 
-    // The literal text of argument st.i, or a sentinel for "runtime value" / "past the end".
-    function tcAt(a, st) {
-        if (st.i >= a.length) { return "\x00end" }
-        if (a[st.i].c == undefined) { return "\x00val" }
-        return a[st.i].c
+    // bash's test.c, parsed at compile time over the argument words tc.a from tc.i: the rules
+    // and the order of evaluation are at tstTerm in bash-interpreter.abnf. A word whose text
+    // is known only at run time ("\x00val") is never an operator. Values are i32 statuses
+    // (0 is true). A syntax error is emitted as rt_test_syn and ends the emission (tc.stop).
+    function tcTok(k) {
+        if (k >= tc.n) { return "\x00end" }
+        if (tc.a[k].c == undefined) { return "\x00val" }
+        return tc.a[k].c
     }
-    function tcPrim(b, a, st) {
-        var t = tcAt(a, st)
-        if (t == "(") {
-            st.i = st.i + 1
-            var r = tcOr(b, a, st)
-            if (tcAt(a, st) == ")") { st.i = st.i + 1 }
-            return r
+    function tcOne(b, k) { return boolStatus(b, isNonEmptyStr(b, tc.a[k].v)) }
+    function tcSyn(b, pre, k, post) {
+        if (!tc.stop) {
+            tc.stop = true
+            tc.rt = true
+            b.NewCall(rtTestSyn, [gepStr(b, tc.who), gepStr(b, pre), (k < 0) ? gepStr(b, "") : tc.a[k].v, gepStr(b, post)])
         }
+        return one
+    }
+    function tcAdvance(b, chk) {
+        tc.i = tc.i + 1
+        if (chk && tc.i >= tc.n) { tcSyn(b, "argument expected", -1, "") }
+    }
+    function tcAndOr(t) { return t == "-a" || t == "-o" }
+    function tcBinary(b) {
+        var k = tc.i
+        tc.i = k + 3
+        return testBinaryIR(b, tc.a[k], tcTok(k + 1), tc.a[k + 2])
+    }
+    function tcUnary(b) {
+        var k = tc.i
+        if (tcTok(k) == "-t") {
+            if (tc.n >= 4 && tcAndOr(tcTok(k + 1))) { tc.i = k + 1; return one }
+            testInt(b, tc.a[k + 1])
+            tc.i = k + 2
+            return one
+        }
+        tc.i = k + 2
+        return testUnaryIR(b, tcTok(k), tc.a[k + 1], false)
+    }
+    function tcTwo(b) {
+        var k = tc.i
+        if (tcTok(k) == "!") { tc.i = k + 2; return b.NewXor(tcOne(b, k + 1), one) }
+        if (isTestUnary(tcTok(k))) { return tcUnary(b) }
+        return tcSyn(b, "", k, ": unary operator expected")
+    }
+    function tcThree(b) {
+        var k = tc.i
+        var w = tcTok(k + 1)
+        if (isTestBinary(w)) { return tcBinary(b) }
+        if (tcAndOr(w)) {
+            tc.i = k + 3
+            var l = tcOne(b, k), r = tcOne(b, k + 2)
+            return (w == "-a") ? b.NewOr(l, r) : b.NewAnd(l, r)
+        }
+        if (tcTok(k) == "!") { tcAdvance(b, true); return b.NewXor(tcTwo(b), one) }
+        if (tcTok(k) == "(" && tcTok(k + 2) == ")") { tc.i = k + 3; return tcOne(b, k + 1) }
+        return tcSyn(b, "", k + 1, ": binary operator expected")
+    }
+    function tcPosix(b, nargs) {
+        var k = tc.i
+        if (nargs == 1) { tc.i = k + 1; return tcOne(b, 0) }
+        if (nargs == 2) { return tcTwo(b) }
+        if (nargs == 3) { return tcThree(b) }
+        if (nargs == 4 && tcTok(k) == "!") { tcAdvance(b, true); return b.NewXor(tcThree(b), one) }
+        if (nargs == 4 && tcTok(k) == "(" && tcTok(k + 3) == ")") {
+            tcAdvance(b, true)
+            var v = tcTwo(b)
+            tcAdvance(b, false)
+            return v
+        }
+        return tcExpr(b)
+    }
+    function tcExpr(b) { return (tc.i >= tc.n) ? tcSyn(b, "argument expected", -1, "") : tcOr(b) }
+    function tcOr(b) {
+        var v = tcAnd(b)
+        if (tcTok(tc.i) == "-o") { tc.i = tc.i + 1; return b.NewAnd(v, tcOr(b)) }
+        return v
+    }
+    function tcAnd(b) {
+        var v = tcTerm(b)
+        if (tcTok(tc.i) == "-a") { tc.i = tc.i + 1; return b.NewOr(v, tcAnd(b)) }
+        return v
+    }
+    function tcTerm(b) {
+        if (tc.stop) { return one }
+        if (tc.i >= tc.n) { return tcSyn(b, "argument expected", -1, "") }
+        var t = tcTok(tc.i)
         if (t == "!") {
-            st.i = st.i + 1
-            return b.NewXor(tcPrim(b, a, st), one)
+            var neg = false
+            while (tcTok(tc.i) == "!") { tcAdvance(b, true); neg = !neg }
+            var r = tcTerm(b)
+            return neg ? b.NewXor(r, one) : r
         }
-        if (isTestUnary(t) && st.i + 1 < a.length && !isTestBinary(tcNext(a, st))) {
-            var opnd = a[st.i + 1]
-            st.i = st.i + 2
-            return testUnaryIR(b, t, opnd, false)
+        if (t == "(") {
+            tcAdvance(b, true)
+            if (tc.stop) { return one }
+            var nargs = 1, depth = 1
+            while (tc.i + nargs < tc.n) {
+                var u = tcTok(tc.i + nargs)
+                if (u == ")") { depth = depth - 1 } else if (u == "(") { depth = depth + 1 }
+                if (depth == 0) { break }
+                nargs = nargs + 1
+            }
+            var v = (tc.i + nargs < tc.n && nargs <= 4) ? tcPosix(b, nargs) : tcExpr(b)
+            if (tc.i >= tc.n) { tcSyn(b, "`)' expected", -1, "") }
+            else if (tcTok(tc.i) != ")") { tcSyn(b, "`)' expected, found ", tc.i, "") }
+            tc.i = tc.i + 1
+            return v
         }
-        var lhs = a[st.i]
-        st.i = st.i + 1
-        if (st.i + 1 < a.length && isTestBinary(tcAt(a, st))) {
-            var op = tcAt(a, st)
-            var rhs = a[st.i + 1]
-            st.i = st.i + 2
-            return testBinaryIR(b, lhs, op, rhs)
-        }
-        return boolStatus(b, isNonEmptyStr(b, lhs.v))
-    }
-    function tcNext(a, st) {
-        if (st.i + 1 >= a.length) { return "\x00end" }
-        if (a[st.i + 1].c == undefined) { return "\x00val" }
-        return a[st.i + 1].c
-    }
-    function tcAnd(b, a, st) {
-        var v = tcPrim(b, a, st)
-        while (tcAt(a, st) == "-a") { st.i = st.i + 1; v = b.NewOr(v, tcPrim(b, a, st)) }
-        return v
-    }
-    function tcOr(b, a, st) {
-        var v = tcAnd(b, a, st)
-        while (tcAt(a, st) == "-o") { st.i = st.i + 1; v = b.NewAnd(v, tcAnd(b, a, st)) }
-        return v
+        if (tc.i + 3 <= tc.n && isTestBinary(tcTok(tc.i + 1))) { return tcBinary(b) }
+        if (tc.i + 2 <= tc.n && isTestUnary(t)) { return tcUnary(b) }
+        tc.i = tc.i + 1
+        return tcOne(b, tc.i - 1)
     }
 
     function emitTest(b, cmd, args) {
         var a = args
+        tc.who = cmd
+        var bbox = {b: b}
         if (cmd == "[") {
-            if (a.length == 0 || a[a.length - 1].c != "]") { fail("[ used without the closing ]") }
+            if (a.length == 0 || a[a.length - 1].c != "]") {
+                if (a.length > 0 && a[a.length - 1].c == undefined) { fail("[ whose last word is computed") }
+                evalArgs(bbox, a)
+                b = emitAbortCheck(bbox.b)
+                emitDiag(b, gepStr(b, "[: missing `]'\n"))
+                storeStatusI(b, 2)
+                return b
+            }
             a = a.slice(0, a.length - 1)
         }
-        var bbox = {b: b}
         var vals = evalArgs(bbox, a)
         b = bbox.b
         if (vals.length == 0) { storeStatusI(b, 1); return b }
@@ -5555,11 +5634,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             storeStatus(b, boolStatus(b, isNonEmptyStr(b, vals[0].v)))
             return b
         }
-        var st = {i: 0}
-        tc.who = cmd
+        tc.a = vals
+        tc.n = vals.length
+        tc.i = 0
         tc.rt = false
-        var res = tcOr(b, vals, st)
-        // An operand that is no integer makes the status 2, whatever the rest answered.
+        tc.stop = false
+        var res = tcPosix(b, vals.length)
+        if (tc.i < tc.n && !tc.stop) {
+            tc.rt = true
+            b.NewCall(rtTestExtra, [gepStr(b, tc.who), vals[tc.i].v])
+        }
+        // An operand that is no integer, or a syntax error, makes the status 2.
         if (tc.rt) {
             res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gTestErr), zero), llvm.constant.NewInt(i32, 2), res)
             b.NewStore(zero, gTestErr)

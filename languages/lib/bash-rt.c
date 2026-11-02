@@ -1186,6 +1186,32 @@ long rt_test_slow(char *s, char *who)
     return sign * v;
 }
 
+/* A syntax error of test / [: "WHO: PRE ARG POST", unless an operand already
+ * failed. Twin of tstSyn in bash-interpreter.abnf. */
+int rt_test_syn(char *who, char *pre, char *arg, char *post)
+{
+    int saved = sink_out;
+    if (test_err == 0) {
+        sink_out = sink_err;
+        rt_diag_pfx();
+        rt_prints(who);
+        rt_prints(": ");
+        rt_prints(pre);
+        rt_prints(arg);
+        rt_prints(post);
+        rt_prints("\n");
+        sink_out = saved;
+    }
+    test_err = 1;
+    return 0;
+}
+/* ARG is left over after the expression: an operator-like one is "unexpected". */
+int rt_test_extra(char *who, char *arg)
+{
+    if (arg[0] == 45) return rt_test_syn(who, "syntax error: `", arg, "' unexpected");
+    return rt_test_syn(who, "too many arguments", "", "");
+}
+
 /* ${v:off:len} with a negative len that ends before off: bash's "substring
  * expression < 0", which abandons the command like an arithmetic error. */
 int rt_suberr(int bad, int len)

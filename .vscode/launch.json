@@ -535,15 +535,15 @@
             "name": "Bash to LLVM IR -qq, a compile error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",
-            "expectError": "bash-to-llvm-ir error: [ used without the closing",
-            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "[ a = b", "-qq"]
+            "expectError": "bash-to-llvm-ir error: unsupported binary test operator (must be a literal): -nt",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "[ a -nt b ]", "-qq"]
         },
         {
             "name": "Bash interpreter -qq, an interpreter error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",
-            "expectError": "bash interpreter error: [ used without the closing",
-            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "[ a = b", "-qq"]
+            "expectError": "bash interpreter error: unknown binary test operator: -nt",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "[ a -nt b ]", "-qq"]
         },
         {
             "name": "TinyC to LLVM IR -qq, a compile error still shows SHOULD FAIL",

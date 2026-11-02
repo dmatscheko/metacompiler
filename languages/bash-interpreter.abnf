@@ -7755,6 +7755,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (t == "-e" || t == "-f" || t == "-d" || t == "-s" || t == "-r" || t == "-w") { return true }
         if (t == "-x" || t == "-h" || t == "-L" || t == "-b" || t == "-c" || t == "-p") { return true }
         if (t == "-S" || t == "-t" || t == "-g" || t == "-u" || t == "-k" || t == "-O") { return true }
+        if (t == "-a" || t == "-G" || t == "-N" || t == "-o" || t == "-R") { return true }
         return false
     }
     function isTestBinary(t) {
@@ -7791,10 +7792,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // See fsKind for the model and for why stat() was declined. -s is "exists and has a
         // nonzero size", which a directory has and a character device does not; -x is
         // "searchable/executable", which is true of the model's directories and unknowable
-        // for anything else; -b, -p, -S, -h, -L, -g, -u, -k, -O and -t are all false,
-        // because the model has no block device, no fifo, no socket and no symlink.
+        // for anything else; -b, -p, -S, -h, -L, -g, -u, -k, -O, -G, -N and -t are all false,
+        // because the model has no block device, no fifo, no socket, no symlink, no owner and
+        // no access time. LIMIT: -o OPTION and -R NAME answer false too.
         if (op == "-d") { return (fsKind(s) == 2) ? 0 : 1 }
-        if (op == "-e" || op == "-r" || op == "-w") { return (fsKind(s) != 0) ? 0 : 1 }
+        if (op == "-e" || op == "-a" || op == "-r" || op == "-w") { return (fsKind(s) != 0) ? 0 : 1 }
         if (op == "-f") { return (fsKind(s) == 1) ? 0 : 1 }
         if (op == "-s") { return (fsKind(s) == 1 || fsKind(s) == 2) ? 0 : 1 }
         if (op == "-x") { return (fsKind(s) == 2) ? 0 : 1 }
@@ -7806,7 +7808,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // white space, one optional sign, decimal digits that fit an intmax_t, white space.
     // Anything else is "integer expected", reported once, and tst.err makes the test
     // command's status 2. Twin of rt_test_int in bash-rt.c.
-    var tst = {who: "test", err: false}
+    var tst = {who: "test", err: false, stop: false, a: [], n: 0, i: 0}
     function isCSpace(c) { return c == 32 || (c >= 9 && c <= 13) }
     function testInt(s) {
         var i = 0, j = s.length
@@ -7836,57 +7838,139 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return 2
     }
 
-    // A recursive descent over the ARGUMENT LIST: or := and { -o and }, and := not { -a not },
-    // not := "!" not | prim, prim := "(" or ")" | UNOP word | word [ BINOP word ] | word.
-    function tstAt(a, st) { return (st.i < a.length) ? a[st.i] : "\x00end" }
-    function tstPrim(a, st) {
-        var t = tstAt(a, st)
+    // bash's test.c over the ARGUMENT LIST tst.a, at position tst.i. posixtest picks a rule by
+    // the number of arguments (0 to 4, and so does a parenthesised group of at most four);
+    // beyond that, expr := and [ -o expr ], and := term [ -a and ], term := { "!" } ( "(" ... ")"
+    // | WORD BINOP WORD | UNOP WORD | WORD ). A syntax error is reported unless an operand
+    // already was, and stops the evaluation (tst.stop); either makes the status 2. Values are
+    // booleans. Twin of the tc* functions in bash-to-llvm-ir.abnf.
+    function tstAt(k) { return (k < tst.n) ? tst.a[k] : "\x00end" }
+    function tstSyn(msg) {
+        if (!tst.stop && !tst.err) { diagErr(tst.who + ": " + msg + "\n") }
+        tst.err = true
+        tst.stop = true
+        return false
+    }
+    function tstAdvance(chk) {
+        tst.i = tst.i + 1
+        if (chk && tst.i >= tst.n) { tstSyn("argument expected") }
+    }
+    function tstAndOr(t) { return t == "-a" || t == "-o" }
+    function tstBinary() {
+        var k = tst.i
+        tst.i = k + 3
+        return testBinary(tst.a[k], tst.a[k + 1], tst.a[k + 2]) == 0
+    }
+    // -t takes its operand only when that is an integer, or is no -a / -o among five or more
+    // arguments (where it means -t 1); the model has no terminal.
+    function tstUnary() {
+        var k = tst.i
+        if (tst.a[k] == "-t") {
+            if (tst.n >= 4 && tstAndOr(tst.a[k + 1])) { tst.i = k + 1; return false }
+            testInt(tst.a[k + 1])
+            tst.i = k + 2
+            return false
+        }
+        tst.i = k + 2
+        return testUnary(tst.a[k], tst.a[k + 1], false) == 0
+    }
+    function tstTwo() {
+        var k = tst.i
+        if (tst.a[k] == "!") { tst.i = k + 2; return tst.a[k + 1] == "" }
+        if (isTestUnary(tst.a[k])) { return tstUnary() }
+        return tstSyn(tst.a[k] + ": unary operator expected")
+    }
+    function tstThree() {
+        var k = tst.i
+        var w = tst.a[k + 1]
+        if (isTestBinary(w)) { return tstBinary() }
+        if (tstAndOr(w)) {
+            tst.i = k + 3
+            return (w == "-a") ? (tst.a[k] != "" && tst.a[k + 2] != "") : (tst.a[k] != "" || tst.a[k + 2] != "")
+        }
+        if (tst.a[k] == "!") { tstAdvance(true); return !tstTwo() }
+        if (tst.a[k] == "(" && tst.a[k + 2] == ")") { tst.i = k + 3; return w != "" }
+        return tstSyn(w + ": binary operator expected")
+    }
+    // One argument reads the FIRST argument of the command, also inside parentheses (bash).
+    function tstPosix(nargs) {
+        var k = tst.i
+        if (nargs == 1) { tst.i = k + 1; return tst.a[0] != "" }
+        if (nargs == 2) { return tstTwo() }
+        if (nargs == 3) { return tstThree() }
+        if (nargs == 4 && tst.a[k] == "!") { tstAdvance(true); return !tstThree() }
+        if (nargs == 4 && tst.a[k] == "(" && tst.a[k + 3] == ")") {
+            tstAdvance(true)
+            var v = tstTwo()
+            tstAdvance(false)
+            return v
+        }
+        return tstExpr()
+    }
+    function tstExpr() { return (tst.i >= tst.n) ? tstSyn("argument expected") : tstOr() }
+    function tstOr() {
+        var v = tstAnd()
+        if (tstAt(tst.i) == "-o") { tst.i = tst.i + 1; var v2 = tstOr(); return v || v2 }
+        return v
+    }
+    function tstAnd() {
+        var v = tstTerm()
+        if (tstAt(tst.i) == "-a") { tst.i = tst.i + 1; var v2 = tstAnd(); return v && v2 }
+        return v
+    }
+    function tstTerm() {
+        if (tst.stop) { return false }
+        if (tst.i >= tst.n) { return tstSyn("argument expected") }
+        var t = tst.a[tst.i]
+        if (t == "!") {
+            var neg = false
+            while (tstAt(tst.i) == "!") { tstAdvance(true); neg = !neg }
+            var r = tstTerm()
+            return neg ? !r : r
+        }
         if (t == "(") {
-            st.i = st.i + 1
-            var r = tstOr(a, st)
-            if (tstAt(a, st) == ")") { st.i = st.i + 1 }
-            return r
+            tstAdvance(true)
+            if (tst.stop) { return false }
+            // The group a matching ")" closes, counted from the argument after the first.
+            var nargs = 1, depth = 1
+            while (tst.i + nargs < tst.n) {
+                var u = tst.a[tst.i + nargs]
+                if (u == ")") { depth = depth - 1 } else if (u == "(") { depth = depth + 1 }
+                if (depth == 0) { break }
+                nargs = nargs + 1
+            }
+            var v = (tst.i + nargs < tst.n && nargs <= 4) ? tstPosix(nargs) : tstExpr()
+            if (tst.i >= tst.n) { tstSyn("`)' expected") }
+            else if (tst.a[tst.i] != ")") { tstSyn("`)' expected, found " + tst.a[tst.i]) }
+            tst.i = tst.i + 1
+            return v
         }
-        if (t == "!") { st.i = st.i + 1; var r2 = tstPrim(a, st); return (r2 == 0) ? 1 : 0 }
-        if (isTestUnary(t) && st.i + 1 < a.length && !isTestBinary(a[st.i + 1])) {
-            var opnd = a[st.i + 1]
-            st.i = st.i + 2
-            return testUnary(t, opnd, false)
-        }
-        st.i = st.i + 1
-        if (st.i + 1 < a.length + 0 && isTestBinary(tstAt(a, st))) {
-            var op = tstAt(a, st)
-            var rhs = a[st.i + 1]
-            st.i = st.i + 2
-            return testBinary(t, op, rhs)
-        }
-        return (t != "") ? 0 : 1
-    }
-    function tstAnd(a, st) {
-        var v = tstPrim(a, st)
-        while (tstAt(a, st) == "-a") { st.i = st.i + 1; var r = tstPrim(a, st); if (r != 0) { v = 1 } }
-        return v
-    }
-    function tstOr(a, st) {
-        var v = tstAnd(a, st)
-        while (tstAt(a, st) == "-o") { st.i = st.i + 1; var r = tstAnd(a, st); if (r == 0) { v = 0 } }
-        return v
+        if (tst.i + 3 <= tst.n && isTestBinary(tst.a[tst.i + 1])) { return tstBinary() }
+        if (tst.i + 2 <= tst.n && isTestUnary(t)) { return tstUnary() }
+        tst.i = tst.i + 1
+        return t != ""
     }
 
     // The test builtin: [ ... ] (drops the closing ]) or `test ...`.
     function testBuiltin(cmd, argsIn) {
         var a = argsIn
+        tst.who = cmd
         if (cmd == "[") {
-            if (a.length == 0 || a[a.length - 1] != "]") { fail("[ used without the closing ]") }
+            if (a.length == 0 || a[a.length - 1] != "]") { diagErr("[: missing `]'\n"); return 2 }
             a = a.slice(0, a.length - 1)
         }
         if (a.length == 0) { return 1 }
-        if (a.length == 1) { return (a[0] != "") ? 0 : 1 }
-        var st = {i: 0}
-        tst.who = cmd
+        tst.a = a
+        tst.n = a.length
+        tst.i = 0
         tst.err = false
-        var r = tstOr(a, st)
-        return tst.err ? 2 : r
+        tst.stop = false
+        var v = tstPosix(a.length)
+        if (tst.i < tst.n) {
+            if (tst.a[tst.i].charAt(0) == "-") { tstSyn("syntax error: `" + tst.a[tst.i] + "' unexpected") }
+            else { tstSyn("too many arguments") }
+        }
+        return tst.err ? 2 : (v ? 0 : 1)
     }
 
     // Dispatch a command by its (already expanded) name. Returns an int status, or {ret: n}
