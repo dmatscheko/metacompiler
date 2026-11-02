@@ -1116,6 +1116,64 @@ $0: line $l: warning: l: circular name reference
 0
 declare -n l=\"l\""
 }
+# ===== SECTION 127: errors of an arithmetic text's expansions; function attributes =====
+# An error raised while an arithmetic text's expansions are expanded is the word's: it
+# carries no "((: " prefix and abandons the line, where an error of the evaluation only
+# fails (( )). A bad substitution there names the arithmetic text: what (( )) or $(( ))
+# enclose, a for (( )) part from its first token, an offset from the ":" on. Through a
+# circular nameref @a and @A warn three times, four with a subscript, and a chain that
+# closes on a local reads, stores and unsets the global variable of that name. A byte that
+# starts no well-formed UTF-8 sequence is a character of its own to a pattern and to case mapping.
+# declare -ft gives a function the trace attribute, which declare -F and -pf show. Every
+# expected value is bash 5.3's.
+s127() {
+  local e f l w nl=$'\n' x=abc s=hello b='bad substitution'
+  e=$( ( (( $((1/0)) )); echo no) 2>&1); w="$0: line $LINENO: 1/0: division by 0 (error token is \"0\")"
+  f=$( (if (( 1 + $((2/0)) )); then echo t; else echo e; fi; echo no) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 2/0: division by 0 (error token is \"0\")"
+  f=$( (for (( i=$((3/0)); i<1; i++ )); do :; done; echo no) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 3/0: division by 0 (error token is \"0\")"
+  f=$( (echo ${s:1+$((4/0))}; echo no) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 4/0: division by 0 (error token is \"0\")"
+  f=$( ( (( 1/0 + $x )); echo "st=$?") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: ((: 1/0 + abc : division by 0 (error token is \"0 + abc \")${nl}st=1"
+  check sxe1 "$e" "$w"
+  e=$( ( (( 1+${#x-a}  )); echo no) 2>&1); w="$0: line $LINENO:  1+\${#x-a}  : $b"
+  f=$( (echo "a $((${#x-a}+1)) b") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: \${#x-a}+1: $b"
+  f=$( (echo $[ ${#x-a} ]) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO:  \${#x-a} : $b"
+  f=$( (for ((  i=${#x-a} ; i<1; i++ )); do :; done) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: i=\${#x-a} : $b"
+  f=$( (echo ${s:  ${#x-a}  }) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO:   \${#x-a}  : $b"
+  f=$( (echo "${s:1: 1+${#x-a}}") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO:  1+\${#x-a}: $b"
+  f=$( ( (( $'\t'${#x-a} )) ) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO:  '"$'\t'"'\${#x-a} : $b"
+  f=$( ([[ 1 -eq "${#x-a}" ]]) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: \${#x-a}: $b"
+  check sxe2 "$e" "$w"
+  local c=': warning: q: circular name reference'
+  e=$( (declare -n q=r r=q; echo "[${q@a}]") 2>&1); l=$LINENO
+  w="$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl[]"
+  f=$( (declare -n q=r r=q; echo "[${q[@]@A}]") 2>&1); e="$e$nl$f"; l=$LINENO
+  w="$w$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl[]"
+  f=$( (s127n() { local -n n; n=n; echo "[$?]"; }; s127n) 2>&1); e="$e$nl$f"; w="$w$nl[0]"
+  check sxe3 "$e" "$w"
+  s127r() { local -n s127v=s127v; echo "${#s127v[@]} $s127v"; s127v=X; s127v+=Z; printf -v s127v %s "$s127v"P; echo "$s127v"
+    for s127v in F1 F2; do :; done; unset s127v; echo "[${s127v-u}]"; }
+  s127v=G; e=$(s127r 2>/dev/null; echo "$s127v"); f=$(s127r 2>&1 >/dev/null); w=${f//[!$nl]/}; f=${f//maximum nameref depth/@}; f=${f//[!@]/}
+  check snl1 "$e ${#w} ${#f}" $'1 G\nXZP\n[u]\nF2 12 5'
+  local v=$'a\x80b' v2=$'ab\x80' v3=$'\xc3b' v4=$'\xc0\xafa'
+  check sxb1 "${v#?}|${v##??}|${v%?}|${v//?/-}|${v2%??}|${v2#??}|${v3^^}|${v4^^}|${v2^^}" $'\x80b|b|a\x80|---|a|\x80|\xc3B|\xc0\xafA|AB\x80'
+  e=$(s127f() { :; }; s127g() { :; }
+    declare -ft s127f s127g nosuch; echo "st=$?"; declare -f +t s127g; declare -pF s127f s127g
+    f=$(declare -f s127f); echo "${f##*$nl}"; f=$(declare -pf s127f); echo "${f##*$nl}"
+    typeset -tF s127g; echo "st=$?"
+    unset -f s127f; s127f() { :; }; declare -pF s127f s127g; declare -pF nosuch 2>/dev/null; echo "st=$?"
+    (declare +t -f s127g); declare -F s127g; declare -pF s127g)
+  check sft1 "$e" 'st=1
+declare -ft s127f
+declare -f s127g
+}
+declare -ft s127f
+st=0
+declare -f s127f
+declare -ft s127g
+st=1
+s127g
+declare -ft s127g'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -1155,5 +1213,6 @@ s123  # SECTION-CALL 123
 s124  # SECTION-CALL 124
 s125  # SECTION-CALL 125
 s126  # SECTION-CALL 126
+s127  # SECTION-CALL 127
 echo "full: $checks checks, $fails failures"
 exit $fails

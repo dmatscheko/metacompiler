@@ -323,6 +323,11 @@ char *rt_nref_base(char *n);
 int rt_arr_marks(char *nm);
 int rt_indbr(char *v);
 char *rt_nref_end(char *n);
+int rt_nref_glob(char *n);
+int rt_nref_close(char *n);
+int rt_nref_gstore(char *n);
+int rt_nref_fstore(char *n, char *v);
+int rt_nref_unglob(void);
 int rt_unset_name(char *n);
 char *rt_subx(char *s);
 char *rt_subxa(char *nm, char *s);
@@ -2293,11 +2298,18 @@ int rt_glob_x(char *p, char *s)
 }
 
 /* 1 when byte offset k of s is a CHARACTER boundary: a pattern operator never
- * cuts a UTF-8 sequence (bash 5.3: v=hé; ${v%?} is h, not h\xC3). */
+ * cuts a UTF-8 sequence (bash 5.3: v=hé; ${v%?} is h, not h\xC3). A
+ * continuation byte is inside a character only when a well-formed sequence
+ * starting at most three bytes back spans it (rt_cpw); a stray one is a
+ * character of its own. */
 int rt_isbound(char *s, int k)
 {
+    int j;
     if (k <= 0 || s[k] == 0) return 1;
-    return ((int)(unsigned char)s[k] & 192) != 128;
+    if (((int)(unsigned char)s[k] & 192) != 128) return 1;
+    j = k - 1;
+    while (j > 0 && j > k - 3 && ((int)(unsigned char)s[j] & 192) == 128) j = j - 1;
+    return j + rt_cpw(s + j) <= k;
 }
 
 /* int rt_patlen(char *p): the number of CHARACTERS every match of p spans, or
@@ -2756,13 +2768,15 @@ char *rt_case(char *s, int mode, char *pat) {
     while (i < len) {
         int c0 = (int)(unsigned char)s[i];
         int touch = all || (first != 0);
-        int w = 1;
+        /* A byte that starts no well-formed sequence (rt_cpw) is a character of
+         * its own, and no case maps it. */
+        int w = rt_cpw(s + i);
         int t = 0;
         long cp = c0;
-        if (c0 >= 240) { w = 4; cp = c0 & 7; }
-        else if (c0 >= 224) { w = 3; cp = c0 & 15; }
-        else if (c0 >= 192) { w = 2; cp = c0 & 31; }
-        if (i + w > len) { w = len - i; touch = 0; }
+        if (w == 4) { cp = c0 & 7; }
+        else if (w == 3) { cp = c0 & 15; }
+        else if (w == 2) { cp = c0 & 31; }
+        else if (c0 >= 128) { touch = 0; }
         /* THE PATTERN OPERAND. ${v^^[bn]} converts only the characters the glob
          * matches (bash 5.3: banana -> BaNaNa). The pattern is matched against
          * ONE character at a time, so the subject is the current
@@ -2777,7 +2791,7 @@ char *rt_case(char *s, int mode, char *pat) {
         }
         one[w] = 0;
         if (touch != 0 && nopat == 0) { touch = rt_glob(pat, one) != 0; }
-        if (touch != 0 && (c0 < 128 || c0 >= 192)) { cp = case_map(cp, up); }
+        if (touch != 0) { cp = case_map(cp, up); }
         else { cp = -1; }
         if (cp < 0) {
             t = 0;
@@ -5006,6 +5020,7 @@ int *ar_h;            /* record + 1, 0 = empty */
 int ar_hsz;           /* a power of two, or 0 before the first record */
 long arr_rows;        /* the rows of every record: 0 answers rt_arr_any at once */
 int nref_quiet;       /* >0: a circular nameref is not warned about (rt_nref_end) */
+int nref_glob;        /* 1 + the slot rt_nref_glob put the global binding in effect for, else 0 */
 char *nref_circ;      /* the circular nameref an element store waits to drop (rt_nref_circ) */
 
 void *realloc(void *p, unsigned long n);
@@ -6389,6 +6404,16 @@ int rt_nmark(char *nm, int on) {
     return 0;
 }
 
+/* A for loop's nameref control variable n stores the word v through a chain
+ * that closes on a local as any scalar store does (rt_nref_gstore): 1 when it
+ * did, 0 when the store is n's own. */
+int rt_nref_fstore(char *n, char *v)
+{
+    if (rt_nref_close(n) < 0) return 0;
+    rt_setvar_byname(n, v, 0, 0);
+    return 1;
+}
+
 /* A store that lands on the nameref n itself (its value unset or empty) must name
  * a variable, NAME or NAME[SUB]: otherwise bash's "not a valid identifier" (under
  * the storing builtin's ar_pfx), arith_err and sub_bad, and 1. Twin of refSelfBad
@@ -6510,11 +6535,21 @@ char *rt_nref_name(char *n, int own)
 }
 
 /* `unset NAME` of the nameref n acts on the variable its chain ends at, which
- * ro (8, picked by the emitter as for rt_setvar_byname) says is readonly. */
+ * ro (8, picked by the emitter as for rt_setvar_byname) says is readonly. A
+ * circular chain bash looks up a second time (another warning), and the unset
+ * acts on n itself, its nameref mark going first; a local of the running call
+ * (ro 16) stays declared. Twin of the unset arm of runCommand in
+ * bash-interpreter.abnf. */
 int rt_unset_ref(char *n, int ro)
 {
     char *e = rt_nref_end(n);
-    if (e == 0) return 1;
+    if (e == 0) {
+        rt_nref_end(n);
+        rt_arr_clear(n);
+        rt_unset_name(n);
+        if ((ro & 16) != 0) rt_arr_smark(n);
+        return 0;
+    }
     if ((ro & 8) != 0) {
         rt_berr("unset", e, "cannot unset: readonly variable");
         return 1;
@@ -8492,7 +8527,14 @@ char *rt_getvar_byname(char *n)
     int allDigits;
     int len;
     if (nref_any != 0) {
-        n = rt_nref_end(n);
+        sel = rt_nref_end(n);
+        i = sel == 0 ? rt_nref_glob(n) : -1;
+        if (i >= 0) {
+            sel = rt_var(varnames[i], gvars[i]);
+            rt_nref_unglob();
+            return sel;
+        }
+        n = sel;
         if (n == 0) return &unset_marker[0];
     }
     len = rt_strlen(n);
@@ -8562,6 +8604,11 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
     int ro = at & 8;
     char *old;
     at = at & 7;
+    if (nref_any != 0 && rt_nref_gstore(n) != 0) {
+        i = rt_setvar_byname(n, v, app, at | bi | ro);
+        rt_nref_unglob();
+        return i;
+    }
     if (nref_any != 0) {
         n = rt_nref_end(n);
         if (n == 0) {
@@ -8640,17 +8687,77 @@ char *rt_nref_base(char *n)
 /* The array a subscripted read through the nameref n reads: the end of its
  * chain, or "" (never set) for an end NAME[SUB], which names no variable, and
  * for a circular chain, which bash warns about twice for an element or the
- * elements and once (once 1) for their count or keys. Twin of the nameref arm of
- * mkParamExp in bash-interpreter.abnf. */
+ * elements and once (once 1) for their count or keys. A circular chain that
+ * rt_nref_glob resolves reads the global variable, put in effect until the
+ * caller's rt_nref_unglob. Twin of the nameref arm of mkParamExp in
+ * bash-interpreter.abnf. */
 char *rt_nref_elems(char *n, int once)
 {
     char *t = rt_nref_end(n);
+    int i;
     if (t == 0) {
         if (nref_quiet == 0 && once == 0) rt_berr("warning", n, "circular name reference");
+        i = rt_nref_glob(n);
+        if (i >= 0) return varnames[i];
         return empty;
     }
     if (rt_indbr(t) > 0) return empty;
     return t;
+}
+
+/* Inside a function a circular chain from n that closes on a local - n itself
+ * or a nameref naming itself - resolves to the global variable of that name,
+ * read as no nameref (bash 5.3: l=G; f() { local -n l=l; echo $l; }; f prints
+ * G). Puts that global binding in effect (rt_glob_swap, which finds no saved
+ * binding outside a function) and answers its slot, which rt_nref_unglob
+ * swaps back; -1 when no local closes the chain. Twin of refGlobal and
+ * onRefGlobal in bash-interpreter.abnf. */
+int rt_nref_glob(char *n)
+{
+    int i = rt_nref_close(n);
+    if (i < 0 || rt_glob_swap(i) == 0) return -1;
+    nref_glob = i + 1;
+    return i;
+}
+
+/* The slot of the name a circular chain from n closes on, or -1. */
+int rt_nref_close(char *n)
+{
+    char *cur = n;
+    char *nx;
+    int g = 0;
+    int i;
+    while (g < 9 && (rt_arr_marks(cur) & 32) != 0) {
+        i = rt_varslot(cur);
+        if (i < 0) return -1;
+        nx = gvars[i];
+        if (nx == &unset_marker[0] || nx[0] == 0) return -1;
+        if (rt_streq(nx, n) != 0 || rt_streq(nx, cur) != 0) return rt_varslot(nx);
+        cur = nx;
+        g = g + 1;
+    }
+    return -1;
+}
+
+/* A scalar store to n through such a chain lands on the global variable n,
+ * with bash's warning (bind_global_variable): answers 1 with that binding in
+ * effect until rt_nref_unglob. Twin of refGlobStore in bash-interpreter.abnf. */
+int rt_nref_gstore(char *n)
+{
+    int i;
+    if (nref_glob != 0 || rt_nref_close(n) < 0) return 0;
+    i = rt_varslot(n);
+    if (i < 0 || rt_glob_swap(i) == 0) return 0;
+    nref_glob = i + 1;
+    if (nref_quiet == 0) rt_berr("warning", n, "maximum nameref depth (8) exceeded");
+    return 1;
+}
+
+int rt_nref_unglob(void)
+{
+    if (nref_glob > 0) rt_glob_swap(nref_glob - 1);
+    nref_glob = 0;
+    return 0;
 }
 
 /* The nameref n made a plain unset variable. */
