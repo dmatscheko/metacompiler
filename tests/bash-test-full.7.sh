@@ -194,6 +194,65 @@ s141() {
   e=$(declare -gn s141g; mapfile s141g <<< 'x' 2>&1; declare -p s141g)
   check nsd5 "$(s141s "$e")" 'warning: s141g: removing nameref attribute;declare -a s141g=([0]=$'"'"'x\n'"'"');'
 }
+# ===== SECTION 142: the command name before a declaration's expansion errors =====
+# An array literal that a declaration refuses while its words expand (an indexed array made
+# associative, a readonly name given the -a or -A option) is reported first with bash's
+# current command name: the function just called, "[[" or "((" after one of those, nothing
+# after a simple command. Then declare reports it again. Without such an option a readonly
+# literal abandons the line with no declare report. Every expected value is bash 5.3's.
+s142() {
+  local e
+  s142s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$(s142ib=(1); s142f() { declare -gA s142ib=(x); }; s142f 2>&1; echo "s $?")
+  check tcn1 "$(s142s "$e")" 's142f: s142ib: cannot convert indexed to associative array;declare: s142ib: cannot convert indexed to associative array;s 1;'
+  e=$(s142ic=(1); s142g() { true; declare -gA s142ic=(x); }; s142g 2>&1; echo "s $?")
+  check tcn2 "$(s142s "$e")" 's142ic: cannot convert indexed to associative array;declare: s142ic: cannot convert indexed to associative array;s 1;'
+  e=$(s142id=(1); s142h() { echo "$(declare -gA s142id=(x))"; }; s142h 2>&1)
+  check tcn3 "$(s142s "$e")" 's142h: s142id: cannot convert indexed to associative array;declare: s142id: cannot convert indexed to associative array;'
+  e=$(s142ie=(1); s142j() { [[ -n x ]]; declare -gA s142ie=(x); }; s142j 2>&1)
+  check tcn4 "$(s142s "$e")" '[[: s142ie: cannot convert indexed to associative array;declare: s142ie: cannot convert indexed to associative array;'
+  e=$(s142k() { declare -a s142c=(1); echo "k $?"; }; readonly s142c=1; s142k 2>&1; echo "s $?")
+  check tcn5 "$(s142s "$e")" 's142k: s142c: readonly variable;declare: s142c: readonly variable;k 1;s 0;'
+  e=$(s142m() { declare -g s142d=(1); echo "m $?"; }; readonly s142d=1; s142m 2>&1; echo "s $?")
+  check tcn6 "$(s142s "$e")" 's142d: readonly variable;'
+}
+# ===== SECTION 143: declarations of a function's nameref that loops only at run time =====
+# A local nameref whose value makes it refer to itself is circular only once it runs. An
+# array literal declaration then makes it an array that keeps the nameref attribute; one that
+# is also readonly abandons the line after the warnings. NAME[SUB]=VALUE of a nameref with
+# no value makes it an empty array and refuses VALUE as a name. Every expected value is
+# bash 5.3's.
+s143() {
+  local e
+  s143s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s143f() { local -n w=$1; local w=(q); declare -p w; }
+  e=$(s143f w 2>/dev/null)
+  check rcn1 "$e" 'declare -an w=([0]="q")'
+  s143g() { local -nr w=w; local w=(q); echo "g $?"; }
+  e=$(s143g 2>&1; echo "s $?")
+  check rcn2 "$(s143s "$e")" 'local: warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;'
+  s143h() { local -n q7; declare q7[1]=5; echo "h $?"; declare -p q7; }
+  e=$(s143h 2>&1)
+  check rcn3 "$(s143s "$e")" 'declare: `5'"'"': invalid variable name for name reference;h 1;declare -an q7;'
+}
+# ===== SECTION 144: an extglob prefix removal of every line of a subshell's errors =====
+# ${l##*: line +([0-9]): } drops the file and line prefix of each error line that a
+# subshell's command substitution caught, many times over. Every expected value is bash 5.3's.
+s144() {
+  local e o
+  shopt -s extglob
+  s144s() { local l; while IFS= read -r l; do printf '%s;' "${l##*: line +([0-9]): }"; done <<< "$1"; }
+  for o in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    e=$( ( s144a=(1); declare -gA s144a=(x); readonly s144r=1; s144r=2; echo "c $o" ) 2>&1 )
+    e=$(s144s "$e")
+  done
+  check egs1 "$e" 's144a: cannot convert indexed to associative array;declare: s144a: cannot convert indexed to associative array;s144r: readonly variable;'
+  check egs2 "$(s144s 'x: line 3: y: line 45: z')" 'z;'
+  local l='/a/b.sh: line 12: x: y: line 3: z'
+  check egs3 "${l%: line +([0-9]): *}|${l%%: line +([0-9]): *}|${l%%line @(1|3)*}|${l##*@(x|y)\: }" '/a/b.sh: line 12: x: y|/a/b.sh|/a/b.sh: |line 3: z'
+  check egs4 "${l#?(/)a}|${l##*[0-9]: }" '/b.sh: line 12: x: y: line 3: z|z'
+  shopt -u extglob
+}
 # ===== END SECTIONS =====
 
 s135  # SECTION-CALL 135
@@ -203,5 +262,8 @@ s138  # SECTION-CALL 138
 s139  # SECTION-CALL 139
 s140  # SECTION-CALL 140
 s141  # SECTION-CALL 141
+s142  # SECTION-CALL 142
+s143  # SECTION-CALL 143
+s144  # SECTION-CALL 144
 echo "full: $checks checks, $fails failures"
 exit $fails

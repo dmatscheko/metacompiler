@@ -111,7 +111,7 @@ ElseClause  <~~ push(mkElse(pop())) ~~>
 // case WORD in [(] PAT [| PAT]... ) LIST ;; ... esac
 // Subject and patterns are NsWords (not field-split); NotCaseTerm keeps a clause body's
 // separator run off the ";;". Twin of CaseStmt in bash-interpreter.abnf; see there.
-CaseStmt    <~~ push(atLine(makeCase(takeAll()), srcLine(up.start))) ~~>
+CaseStmt    <~~ push(atLine(makeCase(takeAll()), srcLine(up.start), tcKeep)) ~~>
             = KwCase NsWord KwIn CaseSepOpt { CaseClause } KwEsac ;
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = CaseOpen CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
@@ -141,7 +141,7 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
 // for (( init; cond; step )); do LIST; done
 // Each part is arithmetic text that, like (( )), is expanded FIRST when it holds an
 // expansion (e='1 + 2'; `i < $e * 2` is i < 5), and may be empty: an empty condition is 1.
-CForStmt    <~~ push(atLine(makeCFor(takeAll()), srcLine(up.start))) ~~>
+CForStmt    <~~ push(atLine(makeCFor(takeAll()), srcLine(up.start), tcKeep)) ~~>
             = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep LoopBody ;
 CfPart      = CfDyn | CfSt | CfRaw | CfZero ;
 CfCond      = CfDyn | CfSt | CfRaw | CfOne ;
@@ -156,7 +156,7 @@ CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
 CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
-ForStmt     <~~ push(atLine(makeFor(takeAll()), srcLine(up.start))) ~~>
+ForStmt     <~~ push(atLine(makeFor(takeAll()), srcLine(up.start), tcKeep)) ~~>
             = KwFor ForName [ ForIn ] Sep LoopBody ;
 // A for loop's body is do LIST done or, as bash also takes it, { LIST; }.
 LoopBody    = ( KwDo CompoundList KwDone ) | ( "{" BraceKwEnd CompoundList "}" ) ;
@@ -219,7 +219,7 @@ FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileS
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
 // Redirections may stand before and among the assignments (`>/dev/null x=5 cmd`).
-PrefixCommand <~~ push(atLine(makePrefixCmd(takeAll()), lnPop())) ~~>
+PrefixCommand <~~ push(atLine(makePrefixCmd(takeAll()), lnPop(), tcAfter)) ~~>
             = { RedirItem } AsgPrefix1 { AsgPrefix | RedirItem } NotIoRedir NotReserved CWord { CmdSuffix } ;
 AsgPrefix1  <~~ lnPush(up.pos) ~~> = AsgPrefix ;
 // A subscripted one (`a[1]=Q cmd`) parses too: bash refuses it when it runs (mkPrefixAsg).
@@ -232,7 +232,7 @@ AsgPList    <~~ push(mkPrefixList(takeAll())) ~~> = "(" :whitespace(WsNL) { NsWo
 AsgPOp      <~~ push({pop: up.in}) ~~> = "+=" | AsgEq ;
 AsgEq       = "=" ;
 // NAME=VALUE... before a declaration builtin (makePrefixDecl has the rules).
-PrefixDecl  <~~ push(atLine(makePrefixDecl(takeAll()), lnPop())) ~~>
+PrefixDecl  <~~ push(atLine(makePrefixDecl(takeAll()), lnPop(), tcAfter)) ~~>
             = AsgPrefix1 { AsgPrefix } DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
@@ -245,20 +245,20 @@ BraceGroup  <~~ push(eeExempt(makeGroupR(takeAll()))) ~~> = "{" BraceKwEnd Compo
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is. Twin of ArithCmd in bash-interpreter.abnf.
 ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
-ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(atLine(makeArithCmd(pop()), srcLine(up.pos))) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
-ArithCmdDyn <~~ arSqClaim(up.start + 2, up.pos - 2); badClaim(up.start + 2, up.pos - 2, true); push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(atLine(makeArithCmd(pop()), srcLine(up.pos), tcArith)) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+ArithCmdDyn <~~ arSqClaim(up.start + 2, up.pos - 2); badClaim(up.start + 2, up.pos - 2, true); push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos), tcArith)) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
-ArithCmdRaw <~~ arSqClaim(up.start + 2, up.pos - 2); badClaim(up.start + 2, up.pos - 2, true); push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
+ArithCmdRaw <~~ arSqClaim(up.start + 2, up.pos - 2); badClaim(up.start + 2, up.pos - 2, true); push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos), tcArith)) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
-CondCmd     <~~ push(atLine(makeCondCmd(pop()), srcLine(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr Linebreak "]]" ;
+CondCmd     <~~ push(atLine(makeCondCmd(pop()), srcLine(up.pos), tcCond)) ~~> = "[[" :whitespace(Whitespace) CondOr Linebreak "]]" ;
 
 RedirList   = RedirItem { RedirItem } ;
 RedirItem   = HereDoc | Redir ;
 
 // let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
 // Redirections may stand among the arguments (`let x=1 2>/dev/null`).
-LetCmd      <~~ push(atLine(makeLetCmd(takeAll()), srcLine(up.start))) ~~> = KwLet LetItem { LetItem } ;
+LetCmd      <~~ push(atLine(makeLetCmd(takeAll()), srcLine(up.start), tcAfter)) ~~> = KwLet LetItem { LetItem } ;
 KwLet       = "let" KwEnd ;
 LetItem     = RedirItem | NotIoRedir LetArg ;
 // Each argument is a WORD: expanded, field-split where it is unquoted, and every field is
@@ -280,7 +280,7 @@ LetRaw      <~~ push({letws: takeAll()}) ~~> = CWord ;
 // variable slot, and `local` needs it to record the save entry for the current call frame.
 // It carries its own [ RedirList ] because it is not a SimpleCommand
 // (`declare -p missing 2>/dev/null`).
-DeclCommand <~~ push(atLine(makeDeclR(takeAll()), srcLine(up.start))) ~~>
+DeclCommand <~~ push(atLine(makeDeclR(takeAll()), srcLine(up.start), tcAfter)) ~~>
             = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
 DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
@@ -345,13 +345,13 @@ AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
 // command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
-SimpleCommand <~~ push(atLine(makeSimpleCommand(takeAll(), null), lnPop())) ~~>
+SimpleCommand <~~ push(atLine(makeSimpleCommand(takeAll(), null), lnPop(), tcAfter)) ~~>
             = NotReserved FirstWord { CmdSuffix } ;
 FirstWord   <~~ lnPush(up.pos) ~~> = CWord ;
 CmdSuffix   = HereDoc | Redir | CWord ;
 // Redirections before the command word, or with no command at all (then `:`). Twin of
 // RedirCommand in bash-interpreter.abnf; see there.
-RedirCommand <~~ push(atLine(makeSimpleCommand(redirCmdItems(takeAll()), null), lnPop())) ~~>
+RedirCommand <~~ push(atLine(makeSimpleCommand(redirCmdItems(takeAll()), null), lnPop(), tcAfter)) ~~>
             = RedirFirst { RedirItem } [ NotReserved CWord { CmdSuffix } ] ;
 RedirFirst  <~~ lnPush(up.pos) ~~> = RedirItem ;
 
@@ -1706,6 +1706,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtNrefUnglob = rtDecl("rt_nref_unglob", false, [])
     var rtNrefArr = rtDecl("rt_nref_arr", true, [1, 0, 0])
     var rtNrefCirc = rtDecl("rt_nref_circ", false, [])
+    var rtNrefLoops = rtDecl("rt_nref_loops", false, [1])
     var rtNrefArname = rtDecl("rt_nref_arname", true, [1])
     var rtArNget = rtDecl("rt_ar_nget", true, [1, 1])
     var rtArNset = rtDecl("rt_ar_nset", false, [1, 1, 1, 0])
@@ -3632,12 +3633,35 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // bash-interpreter.abnf.
     var emitLine = 1
     var lnCtx = null
-    function atLine(emit, n) {
+    // tc: what the command does to tcSlot - undefined clears it first (an assignment), a code
+    // sets it first, tcKeep leaves it, and tcAfter clears it last (any other simple command,
+    // whose words and a declaration's checks still see it).
+    function atLine(emit, n, tc) {
         return function(b) {
             emitLine = lnCtx == null ? n : bashCsLine(lnCtx.tab, lnCtx.base, n)
             storeVarRaw(b, "LINENO", gepStr(b, emitLine))
-            return emit(b)
+            if (tc == undefined) { b.NewStore(zero, tcSlot) }
+            else if (tc >= 0) { b.NewStore(llvm.constant.NewInt(i32, tc), tcSlot) }
+            var e = emit(b)
+            if (tc == tcAfter) { e.NewStore(zero, tcSlot) }
+            return e
         }
+    }
+    // bash's this_command_name, which a declaration's literal checks run during expansion
+    // print first: the called function's name until its first simple command completes
+    // (tcFn), "[[" or "((" after those, "eval" inside an eval string, else nothing (0). It
+    // lives in an i32 slot of each function (tcSlot); a subshell restores it (saveOpts).
+    // Twin of thisCmd in bash-interpreter.abnf.
+    var tcSlot = null
+    var tcFn = 1, tcCond = 2, tcArith = 3, tcEval = 4, tcKeep = -1, tcAfter = -2
+    // The prefix tcSlot names, "" or "NAME" (an i8*), for rt_berr.
+    function tcWho(b) {
+        var tc = b.NewLoad(i32, tcSlot)
+        var w = emptyPtr(b)
+        if (curFrame != null) { w = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, tc, llvm.constant.NewInt(i32, tcFn)), loadVar(b, "FUNCNAME"), w) }
+        w = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, tc, llvm.constant.NewInt(i32, tcCond)), gepStr(b, "[["), w)
+        w = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, tc, llvm.constant.NewInt(i32, tcArith)), gepStr(b, "(("), w)
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, tc, llvm.constant.NewInt(i32, tcEval)), gepStr(b, "eval"), w)
     }
     // A simple command's line is the line its first word ends on. Twin of lnStack in
     // bash-interpreter.abnf; see there.
@@ -4384,6 +4408,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // export and readonly print with -p only when no name is given. Twin of makeDecl in
         // bash-interpreter.abnf.
         if ((kw == "export" || kw == "readonly") && order.length > 0) { flags = flags.split("p").join("") }
+        if (kw == "readonly" || flags.indexOf("r") >= 0) {
+            for (i = 0; i < names.length; i++) { if (!hasOwn(roAnywhere, "$" + names[i])) { roAnywhere["$" + names[i]] = true; roNames.push(names[i]) } }
+        }
         // An option the builtin does not take fails it with status 2 before anything is done.
         // Twin of declBadOpt in bash-interpreter.abnf.
         if (opts != "") {
@@ -4592,6 +4619,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var selfDone = false
         // Set while declOne runs again past the NAME[SUB] nameref check it has emitted.
         var subDropDone = false
+        // Set while declOne runs again past the void nameref NAME[SUB]=VALUE test it has emitted.
+        var voidSubDone = false
+        // Set while declOne runs again past the run-time circular nameref test it has emitted.
+        var circDone = false
+        // Set while declOne runs again past the run-time readonly test it has emitted.
+        var roRtDone = false
         // export and readonly of a function's circular local nameref, its chain known here,
         // act on the global variable of the name, after bash's warnings. Twin of
         // declCircGlob in bash-interpreter.abnf, which has the cases.
@@ -4634,6 +4667,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rv = (a.valT.f == true) ? wordJoin(r.b, r.v) : r.v
             if (a.valT.c == undefined && a.valT.done != true) { return {b: emitAbortCheck(r.b), v: rv} }
             return {b: r.b, v: rv}
+        }
+        // The literal of name j, readonly here, is refused while the words expand (bash 5.3):
+        // when bashDeclLitChk or a function's local has it declared first, reported after
+        // tcSlot's name and then by the builtin (status 1), except at top level and for export
+        // and readonly, which abandon the line; otherwise bare, abandoning the line. Twin of
+        // the literal arm of the readonly check in declOneN in bash-interpreter.abnf.
+        var roLitRefuse = function(b, j, localize) {
+            var early = bashDeclLitChk(flags) || (localize && curFrame != null)
+            b.NewCall(rtBerr, [early ? tcWho(b) : emptyPtr(b), gepStr(b, names[j]), gepStr(b, "readonly variable")])
+            roFail = true
+            if (early && curFrame != null && kw != "export" && kw != "readonly") {
+                emitDiag(b, gepStr(b, kw + ": " + names[j] + ": readonly variable\n"))
+                return b
+            }
+            b.NewStore(one, gArithErr)
+            return emitAbortCheck(b)
         }
         var declOne = function(b, j, v) {
             // -n of an operand written NAME[SUB] is refused first; -n with -i fails, silently.
@@ -4703,59 +4752,121 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var circOk = a == null || a.idxT == null
             var cf
             for (cf = 0; cf < flags.length; cf++) { if ("-irxulctaA".indexOf(flags.charAt(cf)) < 0) { circOk = false } }
+            // The value and attributes of a declaration without -n of a nameref whose chain
+            // is circular go to the nameref itself.
+            var circArm = function(b, v) {
+                var lit0 = a != null && a.lit != null
+                var cEnd = null
+                // A written value that names no variable is refused before any attribute.
+                var cw = (a == null || lit0 || v != null) ? null : ((a.valT == null) ? "" : a.valT.c)
+                if (cw != null && cw != undefined && !bashIsRef(cw)) {
+                    b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), gepStr(b, cw), one])
+                    roFail = true
+                    return b
+                }
+                if (a != null && !lit0) {
+                    var cr = declValue(b, a, v)
+                    b = cr.b
+                    v = cr.v
+                    var cbad = b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), v, one])
+                    var cBadB = curF.NewBlock(""), cOkB = curF.NewBlock("")
+                    cEnd = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, cbad, zero), cBadB, cOkB)
+                    cBadB.NewStore(one, refuseP)
+                    cBadB.NewBr(cEnd)
+                    b = cOkB
+                } else {
+                    b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero])
+                    // A readonly one refuses the literal: checked while the words expand
+                    // (bashDeclLitChk), reported after tcSlot's name and then by the
+                    // builtin; otherwise the line is abandoned, silently. Twin of roLit in
+                    // declOne in bash-interpreter.abnf.
+                    var roLit = lit0 && attrOn(roVars, names[j])
+                    if (roLit && bashDeclLitChk(flags)) { b.NewCall(rtBerr, [tcWho(b), gepStr(b, names[j]), gepStr(b, "readonly variable")]) }
+                    if (lit0 && !isArray) { b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero]) }
+                    if (roLit) {
+                        roFail = true
+                        if (bashDeclLitChk(flags)) { emitDiag(b, gepStr(b, kw + ": " + names[j] + ": readonly variable\n")); return b }
+                        b.NewStore(one, gArithErr)
+                        return emitAbortCheck(b)
+                    }
+                }
+                if (integer && a != null && !lit0) { asgs[j] = null; roFail = true }
+                if (lit0 && a.op == "+=") {
+                    var isA0 = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, names[j])), zero)
+                    storeVarRaw(b, names[j], b.NewSelect(isA0, loadVar(b, names[j]), unsetPtr(b)))
+                }
+                // The store lands on the nameref itself; its target is unknown after it,
+                // except that a literal leaves the chain circular for the next declaration.
+                var circRef = refVars["$" + names[j]]
+                refVars["$" + names[j]] = false
+                b = declOneBody(b, j, (asgs[j] == null) ? null : v)
+                // Assigning the literal cleared the binding's marks; the nameref stays.
+                if (lit0) { b.NewCall(rtNmark, [gepStr(b, names[j]), one]) }
+                refVars["$" + names[j]] = lit0 ? circRef : true
+                asgs[j] = a
+                if (cEnd == null) { return b }
+                b.NewBr(cEnd)
+                return cEnd
+            }
             if (!nrefDone && localHereJ && plus.indexOf("n") < 0 && (isRef ? plainV : circOk) && refLoops(names[j])) {
                 if (isRef || (a == null && flags == "")) {
                     b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero])
                     if (!isRef) { return b }
-                } else {
-                    var lit0 = a != null && a.lit != null
-                    var cEnd = null
-                    // A written value that names no variable is refused before any attribute.
-                    var cw = (a == null || lit0 || v != null) ? null : ((a.valT == null) ? "" : a.valT.c)
-                    if (cw != null && cw != undefined && !bashIsRef(cw)) {
-                        b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), gepStr(b, cw), one])
-                        roFail = true
-                        return b
-                    }
-                    if (a != null && !lit0) {
-                        var cr = declValue(b, a, v)
-                        b = cr.b
-                        v = cr.v
-                        var cbad = b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), v, one])
-                        var cBadB = curF.NewBlock(""), cOkB = curF.NewBlock("")
-                        cEnd = curF.NewBlock("")
-                        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, cbad, zero), cBadB, cOkB)
-                        cBadB.NewStore(one, refuseP)
-                        cBadB.NewBr(cEnd)
-                        b = cOkB
-                    } else {
-                        b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero])
-                        if (lit0 && !isArray) { b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero]) }
-                    }
-                    if (integer && a != null && !lit0) { asgs[j] = null; roFail = true }
-                    if (lit0 && a.op == "+=") {
-                        var isA0 = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, names[j])), zero)
-                        storeVarRaw(b, names[j], b.NewSelect(isA0, loadVar(b, names[j]), unsetPtr(b)))
-                    }
-                    // The store lands on the nameref itself; its target is unknown after it,
-                    // except that a literal leaves the chain circular for the next declaration.
-                    var circRef = refVars["$" + names[j]]
-                    refVars["$" + names[j]] = false
-                    b = declOneBody(b, j, (asgs[j] == null) ? null : v)
-                    // Assigning the literal cleared the binding's marks; the nameref stays.
-                    if (lit0) { b.NewCall(rtNmark, [gepStr(b, names[j]), one]) }
-                    refVars["$" + names[j]] = lit0 ? circRef : true
-                    asgs[j] = a
-                    if (cEnd == null) { return b }
-                    b.NewBr(cEnd)
-                    return cEnd
+                } else { return circArm(b, v) }
+            }
+            // A chain known only when it runs (a computed target) is tested then (rt_nref_loops).
+            if (!nrefDone && !circDone && !isRef && localHereJ && plus.indexOf("n") < 0 && circOk && attrOn(refVars, names[j]) === true) {
+                var lpB = curF.NewBlock(""), noB = curF.NewBlock(""), lpEnd = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefLoops, gepStr(b, names[j])), zero), lpB, noB)
+                if (a == null && flags == "") { lpB.NewCall(rtDeclCirc, [gepStr(lpB, kw), gepStr(lpB, names[j]), emptyPtr(lpB), zero]) }
+                else {
+                    // A refusal there is this path's alone.
+                    var svFail = roFail
+                    roFail = false
+                    lpB = circArm(lpB, v)
+                    if (roFail) { lpB.NewStore(one, refuseP) }
+                    roFail = svFail
                 }
+                lpB.NewBr(lpEnd)
+                refVars["$" + names[j]] = true
+                circDone = true
+                noB = declOne(noB, j, v)
+                circDone = false
+                noB.NewBr(lpEnd)
+                refVars["$" + names[j]] = true
+                return lpEnd
             }
             var refChk = isRef && a != null && a.lit == null && a.idxT == null
             if (refChk && v == null && (a.valT == null || a.valT.c != undefined)) {
                 var msg = bashRefBad(kw, (a.valT != null) ? a.valT.c : "")
                 if (msg != "") { emitDiag(b, gepStr(b, msg)); roFail = true; return b }
                 refChk = false
+            }
+            // NAME[SUB]=VALUE of a function's own nameref with no value (rt_nref_void) makes it
+            // an empty array and then refuses VALUE as the name it would refer to, status 1:
+            // one that is no name is "invalid variable name for name reference"; for a name
+            // bash prints uninitialised memory, which is not emulated. Twin of the same check
+            // in declOne in bash-interpreter.abnf.
+            var awv = asgsWritten[j]
+            if (!voidSubDone && !isRef && plus == "" && flags.split("-").join("").split("a").join("") == "" && awv != null && awv.idxT != null && awv.isrc != ""
+                && awv.lit == null && localHereJ && attrOn(refVars, names[j])) {
+                var vdB = curF.NewBlock(""), vnB = curF.NewBlock(""), veB = curF.NewBlock("")
+                var vr = declValue(b, a, v)
+                b = vr.b
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefVoid, gepStr(b, names[j])), zero), vdB, vnB)
+                storeVarRaw(vdB, names[j], unsetPtr(vdB))
+                vdB.NewCall(rtArrDmark, gepStr(vdB, names[j]))
+                var vbB = curF.NewBlock("")
+                vdB.NewStore(one, refuseP)
+                vdB.NewCondBr(vdB.NewICmp(llvm.enum.IPredEQ, vdB.NewCall(rtIsAsgRef, vr.v), zero), vbB, veB)
+                emitDiag(vbB, vbB.NewCall(rtStrcat, [vbB.NewCall(rtStrcat, [gepStr(vbB, kw + ": `"), vr.v]), gepStr(vbB, "': invalid variable name for name reference\n")]))
+                vbB.NewBr(veB)
+                voidSubDone = true
+                vnB = declOne(vnB, j, vr.v)
+                voidSubDone = false
+                vnB.NewBr(veB)
+                return veB
             }
             // NAME[SUB] of a nameref, outside a function's locals, makes NAME itself the array
             // when rt_nref_subdrop drops the nameref: with a value under no option but -a or -g,
@@ -4837,11 +4948,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // An attribute change on a readonly variable is refused before any array check.
             // Twin of the readonly check in declOneN in bash-interpreter.abnf.
+            // A global made readonly by code emitted after this is known only when it runs
+            // (roFlag): the declaration is emitted both ways. A function's declaration of a
+            // name it has no local of meets the global too, since bash makes no local of a
+            // readonly one.
+            var actsGlobal = global || curFrame == null || kw == "export" || kw == "readonly" || !localHereJ
+            if (!roRtDone && actsGlobal && (roAttr || a != null || plus.indexOf("r") >= 0 || (curFrame != null && !global && !localHereJ && kw != "export" && kw != "readonly" && !bashDeclQuery(flags))) && !attrOn(roVars, names[j]) && hasOwn(roAnywhere, "$" + names[j])) {
+                var roB = curF.NewBlock(""), rnB = curF.NewBlock(""), reB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, roFlag(names[j])), zero), roB, rnB)
+                // The self reference warning above is emitted already, once for both paths.
+                var svAt = attrSnap(names[j]), svRf = roFail, svSelf = selfDone
+                roRtDone = true
+                selfDone = true
+                roVars["$" + names[j]] = true
+                roFail = false
+                roB = declOne(roB, j, v)
+                if (roFail) { roB.NewStore(one, refuseP) }
+                attrBack(svAt)
+                roFail = svRf
+                rnB = declOne(rnB, j, v)
+                roRtDone = false
+                selfDone = svSelf
+                roB.NewBr(reB)
+                rnB.NewBr(reB)
+                return reB
+            }
             if (roAttr && attrOn(roVars, names[j])) {
                 var roW = (kw == "readonly" || kw == "export") ? "" : kw + ": "
+                if (a != null && a.lit != null && !listPre) { return roLitRefuse(b, j, !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))) }
                 if (listPre) {
-                    var fnR = (global && curFrame != null) ? loadVar(b, "FUNCNAME") : emptyPtr(b)
-                    b.NewCall(rtBerr, [fnR, gepStr(b, names[j]), gepStr(b, "readonly variable")])
+                    b.NewCall(rtBerr, [tcWho(b), gepStr(b, names[j]), gepStr(b, "readonly variable")])
                 } else { emitDiag(b, gepStr(b, roW + ((a != null && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n")) }
                 roFail = true
                 return b
@@ -4852,8 +4988,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (plusArr && !fresh) { bad = b.NewCall(rtArrPlus, [gepStr(b, kw), gepStr(b, names[j]), shown, (plus.indexOf("a") >= 0) ? one : zero, (plus.indexOf("A") >= 0) ? one : zero]) }
             else if (bareArr && !fresh && (a == null || a.lit == null) && !listPre) { bad = b.NewCall(rtArrConv, [gepStr(b, kw), gepStr(b, names[j]), shown, assoc ? one : zero]) }
             else if (bareArr && !fresh) {
-                var fnP = (global && curFrame != null) ? loadVar(b, "FUNCNAME") : emptyPtr(b)
-                bad = b.NewCall(rtArrConvLit, [gepStr(b, (lateOnly || listPre) ? "" : kw), gepStr(b, names[j]), shown, assoc ? one : zero, fnP, (curFrame != null) ? one : zero])
+                bad = b.NewCall(rtArrConvLit, [gepStr(b, (lateOnly || listPre) ? "" : kw), gepStr(b, names[j]), shown, assoc ? one : zero, tcWho(b), (curFrame != null) ? one : zero])
             }
             if (bad == null) { return declOneBody(b, j, v) }
             var okB = curF.NewBlock(""), badB = curF.NewBlock(""), endB = curF.NewBlock("")
@@ -4873,7 +5008,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
             var fresh = localize && curFrame != null && !locOwn("$" + names[j])
             var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
-            if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0) && attrOn(roVars, names[j])) {
+            if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0 || roAttr) && attrOn(roVars, names[j])) {
+                if (asgs[j] != null && asgs[j].lit != null && !listPre) { return roLitRefuse(b, j, localize) }
                 emitDiag(b, gepStr(b, roWho + ((asgs[j] != null && roWho != "" && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n"))
                 // export still exports it (bash 5.3: readonly z=1; export z=2 leaves -rx).
                 if (kw == "export" && xCode > 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), one]) }
@@ -4931,6 +5067,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The value of a declaration with -n is the reference's own: the name it refers to.
             if (isRef) { refVars["$" + names[j]] = false }
             if (setRo) { roVars["$" + names[j]] = true }
+            // readonly of a name the function has a local of makes that local readonly, not the global.
+            if (setRo && !localize && (global || !locOwn("$" + names[j]))) { b.NewStore(one, roFlag(names[j])) }
             // A name with an attribute has a slot, where refAttrs looks for it.
             if (integer || cl != "" || setRo) { getVarId(names[j]) }
             // A value that names no variable, for a nameref itself, fails the declaration
@@ -5248,9 +5386,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var j
             var vals = []
-            var anyRefName = false
-            for (j = 0; j < names.length; j++) { if (attrOn(refVars, names[j])) { anyRefName = true } }
-            refuseP = (isRef || plusArr || bareArr || anyRefName || late != null || anyQuoted()) && !query ? slotOf(i32) : null
+            // A nameref, or a name made readonly only by code emitted later, may be refused at run time.
+            var rtRefuse = false
+            for (j = 0; j < names.length; j++) {
+                if (attrOn(refVars, names[j]) || (hasOwn(roAnywhere, "$" + names[j]) && !attrOn(roVars, names[j]))) { rtRefuse = true }
+            }
+            refuseP = (isRef || plusArr || bareArr || rtRefuse || late != null || anyQuoted()) && !query ? slotOf(i32) : null
             if (refuseP != null) { b.NewStore(zero, refuseP) }
             for (j = 0; j < names.length && !query; j++) {
                 var a = asgs[j]
@@ -5350,6 +5491,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var loVars = {}       // `declare -l`; a `declare -c` name is in both (caseLetter)
     var trVars = {}       // `declare -t`: shown by `declare -p` and ${v@a}, otherwise inert
     var roVars = {}       // `readonly` / -r: an assignment, `local` or `unset` fails (roRefused)
+    // The names a declaration anywhere in the program makes readonly. A declaration acting
+    // on the global variable of one, emitted before that is known here, asks its run-time
+    // flag (an i32 global), which a global readonly declaration of the name sets and a
+    // subshell restores (saveOpts). roNames lists the same names in order.
+    var roAnywhere = {}
+    var roNames = []
+    var roFlags = {}
+    function roFlag(name) {
+        if (!hasOwn(roFlags, "$" + name)) { roFlags["$" + name] = m.NewGlobalDef("ro_" + roNames.indexOf(name), zero) }
+        return roFlags["$" + name]
+    }
     // `declare -n` / `local -n`: a NAMEREF, lexical like the others. A read (varString), an
     // assignment (storeVar, emitAssign) and an unset of the name act on the variable its value
     // names, through rt_getvar_byname / rt_setvar_byname; declare -p, ${!REF} (the name),
@@ -5483,6 +5635,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 0; i < subIds.length; i++) { if (subIds[i] == curFrame.locs[key]) { return true } }
         return false
+    }
+    // The lexical state of one name - its attributes and whether it is a local of the
+    // function being compiled - to put back after emitting a path that may never run.
+    function attrSnap(name) {
+        var k = "$" + name
+        var ms = [intVars, upVars, loVars, trVars, roVars, refVars]
+        var sv = []
+        var i
+        for (i = 0; i < ms.length; i++) { sv.push({m: ms[i], has: hasOwn(ms[i], k), v: ms[i][k]}) }
+        var fr = curFrame
+        return {k: k, sv: sv, fr: fr, loc: fr != null && hasOwn(fr.locs, k), lv: fr != null ? fr.locs[k] : null, undo: attrUndo.length}
+    }
+    function attrBack(sn) {
+        var i
+        while (attrUndo.length > sn.undo) { attrUndo.pop() }
+        for (i = 0; i < sn.sv.length; i++) {
+            var e = sn.sv[i]
+            e.m[sn.k] = e.has ? e.v : false
+        }
+        // -1 is no subshell's id, so locOwn finds no local.
+        if (sn.fr != null && (sn.loc || hasOwn(sn.fr.locs, sn.k))) { sn.fr.locs[sn.k] = sn.loc ? sn.lv : -1 }
     }
     function attrUnwind(base) {
         while (attrUndo.length > base) {
@@ -7001,7 +7174,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (n = 3; n <= 9; n++) {
             if (usedFd[n]) { var fs = slotOf(i32); b.NewStore(b.NewLoad(i32, fdGlobal(n)), fs); fds.push({g: fdGlobal(n), s: fs}) }
         }
-        return {e: se, u: su, pf: sp, x: sx, so: so, sr: sr, sb: sb, si: si, fds: fds}
+        var tc = slotOf(i32)
+        b.NewStore(b.NewLoad(i32, tcSlot), tc)
+        var ros = []
+        for (n = 0; n < roNames.length; n++) { var rs = slotOf(i32); b.NewStore(b.NewLoad(i32, roFlag(roNames[n])), rs); ros.push({g: roFlag(roNames[n]), s: rs}) }
+        return {e: se, u: su, pf: sp, x: sx, so: so, sr: sr, sb: sb, si: si, fds: fds, tc: tc, ros: ros}
     }
     // The streams an `exec` may have redirected come back too; the standard input only when
     // the subshell REPLACED it, since what it read of an inherited input is consumed for the
@@ -7013,8 +7190,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(b.NewLoad(i32, sv.x), gOptExtglob)
         b.NewStore(b.NewLoad(i32, sv.so), gSinkOut)
         b.NewStore(b.NewLoad(i32, sv.sr), gSinkErr)
+        b.NewStore(b.NewLoad(i32, sv.tc), tcSlot)
         var k
         for (k = 0; k < sv.fds.length; k++) { b.NewStore(b.NewLoad(i32, sv.fds[k].s), sv.fds[k].g) }
+        for (k = 0; k < sv.ros.length; k++) { b.NewStore(b.NewLoad(i32, sv.ros[k].s), sv.ros[k].g) }
         var ib = b.NewLoad(i8ptr, sv.sb)
         var moved = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i8ptr, gStdin), ib)
         b.NewStore(b.NewSelect(moved, b.NewLoad(i32, sv.si), b.NewLoad(i32, gStdinPos)), gStdinPos)
@@ -7650,7 +7829,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 if (allConst) {
                     if (esrc == "") { storeStatusI(b, 0); return b }
-                    return compileSnippet(esrc, 0, true)(b)
+                    b.NewStore(llvm.constant.NewInt(i32, tcEval), tcSlot)
+                    var eb = compileSnippet(esrc, 0, true)(b)
+                    eb.NewStore(zero, tcSlot)
+                    return eb
                 }
                 // A COMPUTED eval cannot be compiled in general. The one shape a compiler can
                 // still honour is a string of assignments, `eval "NAME=VALUE"`, which becomes a
@@ -8675,6 +8857,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bad = curF.NewBlock("")
             var mk = heapMark(b)
             b.NewCondBr(takeArithErr(b), bad, head)
+            head.NewStore(llvm.constant.NewInt(i32, tcArith), tcSlot)
             var rc = condT(head)
             var go = curF.NewBlock("")
             rc.b.NewCondBr(takeArithErr(rc.b), bad, go)
@@ -8764,6 +8947,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 fset.NewBr(body2)
             }
             else { body2 = emitStoreAttr(body, fname, body.NewCall(rtFAt, [list, i])) }
+            body2.NewStore(zero, tcSlot)
             loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})
             var bb = bodyT(body2)
             loopStack.pop()
@@ -8799,7 +8983,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var f = defFunc(fname, kdef)
             // bash's loops do not reach into a called function: the body starts with none.
             var savedF = curF, savedEntry = curEntry, savedExit = curExit, savedFrame = curFrame, savedLoops = loopStack
-            var savedExitRd = curExitRd, savedRedirs = redirStack, savedRetSub = retInSub, savedTouch = fnTouch
+            var savedExitRd = curExitRd, savedRedirs = redirStack, savedRetSub = retInSub, savedTouch = fnTouch, savedTc = tcSlot
             fnTouch = null
             loopStack = []
             retInSub = false
@@ -8814,6 +8998,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // return (rt_fn_enter).
             var dslot = entry.NewAlloca(i32)
             entry.NewStore(entry.NewCall(rtFnEnter, llvm.constant.NewInt(i32, getVarId("FUNCNAME"))), dslot)
+            tcSlot = entry.NewAlloca(i32)
+            entry.NewStore(llvm.constant.NewInt(i32, tcFn), tcSlot)
             // Every attribute the body declares is function-local, exactly like the value.
             var undoBase = attrUndo.length
             curFrame = {depth: dslot, locs: {}, undo: undoBase}
@@ -8823,7 +9009,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             emitFnRet(endb, endb.NewLoad(i32, gStatus))
             attrUnwind(undoBase)
             curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops; fnTouch = savedTouch
-            curExitRd = savedExitRd; redirStack = savedRedirs; retInSub = savedRetSub
+            curExitRd = savedExitRd; redirStack = savedRedirs; retInSub = savedRetSub; tcSlot = savedTc
             return b
         }
     }
@@ -8840,6 +9026,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         curEntry = entry
         var body = main.NewBlock("body")
         curExit = main.NewBlock("exit")
+        tcSlot = entry.NewAlloca(i32)
+        entry.NewStore(zero, tcSlot)
         // An explicit `exit N` still runs the EXIT trap on its way out.
         var mainExit = curExit
         curFrame = null

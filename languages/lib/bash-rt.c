@@ -328,6 +328,7 @@ int ar_rmw(char *nm, char *key);
 int rt_arr_marks(char *nm);
 int rt_indbr(char *v);
 char *rt_nref_end(char *n);
+int rt_nref_loops(char *n);
 int rt_nref_glob(char *n);
 int rt_nref_close(char *n);
 int rt_nref_gstore(char *n);
@@ -2864,18 +2865,39 @@ int rt_sfxstar(char *q, char *s, int len, int shortest)
     return i;
 }
 
+/* 1 when byte c of a pattern may be anything but itself: an operator, a class
+ * bracket, an extglob group or its prefix, or a quoting backslash. */
+int rt_patop(int c)
+{
+    return c == 42 || c == 63 || c == 91 || c == 93 || c == 40 || c == 41 || c == 124
+        || c == 64 || c == 43 || c == 33 || c == 92;
+}
+
 /* rt_strip: ${v#p} / ${v##p} / ${v%p} / ${v%%p}; mode 0 = #, 1 = ##, 2 = %, 3 = %%.
  * A pattern with a "*" and no extglob group strips a prefix found by
  * rt_pfxwalk, and a suffix by rt_sfxstar when it starts with the "*". Otherwise
  * a trial length t walks 0..len; k is t for the ascending modes (# and %%) and
  * len - t for the descending ones (## and %), so the first hit is the shortest
- * or the longest match as required. */
+ * or the longest match as required. A run of plain bytes that ends p (for a
+ * prefix) or starts it (for a suffix) must end or start every candidate it
+ * matches, so a candidate without it skips the match. Twin of stripPat in
+ * bash-interpreter.abnf. */
 char *rt_strip(char *s, char *p, int mode) {
     int len = rt_strlen(s);
     int isPre = (mode == 0) || (mode == 1);
     int asc = (mode == 0) || (mode == 3);
     int pl = rt_patlen(p);
     int t = 0;
+    int plen = rt_strlen(p);
+    int ra = 0;
+    int rn = 0;
+    if (isPre) {
+        ra = plen;
+        while (ra > 0 && rt_patop((int)(unsigned char)p[ra - 1]) == 0) ra = ra - 1;
+        rn = plen - ra;
+    } else {
+        while (rn < plen && rt_patop((int)(unsigned char)p[rn]) == 0) rn = rn + 1;
+    }
     if (pl < 0 && rt_hasegrp(p) == 0 && (isPre || p[0] == 42)) {
         int kw = isPre ? rt_pfxwalk(p, s, len, mode == 0) : rt_sfxstar(p + 1, s, len, mode == 2);
         if (kw < 0) return s;
@@ -2885,6 +2907,15 @@ char *rt_strip(char *s, char *p, int mode) {
         int k = asc ? t : len - t;
         int clen = isPre ? k : len - k;
         int fits = pl < 0 || (clen >= pl && clen <= 4 * pl);
+        if (fits && rn > 0) {
+            int at = isPre ? k - rn : k;
+            int q = 0;
+            if (clen < rn) fits = 0;
+            while (fits && q < rn) {
+                if (s[at + q] != p[ra + q]) fits = 0;
+                q = q + 1;
+            }
+        }
         if (fits && rt_isbound(s, k) != 0 && (isPre ? rt_globat(p, s, 0, clen) : rt_globsfx(p, s + k)) != 0) {
             return isPre ? rt_substr(s, k, -1) : rt_substr(s, 0, k);
         }
@@ -6042,8 +6073,8 @@ int rt_arr_conv(char *kw, char *nm, char *sh, int as)
     return 1;
 }
 
-/* The same for NAME=(...): "NAME: cannot convert ..." (FN, a -g declaration's
- * function, first), which abandons the line at top level (arith_err); in a
+/* The same for NAME=(...): "NAME: cannot convert ..." (FN, bash's
+ * this_command_name, first), which abandons the line at top level (arith_err); in a
  * function (infn) the builtin reports it again, unless kw is "" (the kind came
  * from an option word after an operand alone), and fails. Twin of the literal
  * check in declOneN in bash-interpreter.abnf. */
@@ -6940,6 +6971,16 @@ char *rt_nref_end(char *n)
         g = g + 1;
     }
     return n;
+}
+
+/* Is the chain of namerefs from n circular? Quietly: 1, else 0. */
+int rt_nref_loops(char *n)
+{
+    char *e;
+    nref_quiet = nref_quiet + 1;
+    e = rt_nref_end(n);
+    nref_quiet = nref_quiet - 1;
+    return e == 0 ? 1 : 0;
 }
 
 /* ${!REF} of the nameref n: the name its chain ends at, or n's own value when

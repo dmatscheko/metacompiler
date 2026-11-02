@@ -1453,6 +1453,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Calls running, which a subshell keeps (it starts with no frames of its own): `local`
     // outside every function is an error.
     var fnDepth = 0
+    // bash's this_command_name, which a declaration's literal checks run during expansion
+    // print first: the called function's name until its first simple command completes,
+    // "[[" or "((" after those, "eval" inside an eval string, else nothing. A subshell
+    // restores it. Twin of tcSlot in bash-to-llvm-ir.abnf.
+    var thisCmd = ""
+    function tcWho() { return (thisCmd == "") ? "" : thisCmd + ": " }
 
     // Output capture for $( ) / ` ` : while the stack is non-empty every byte a command
     // would print is appended to its top entry instead of reaching stdout.
@@ -2031,10 +2037,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (longest) { return "" }
             return isPrefix ? v.slice(lit.length) : v.slice(0, n - lit.length)
         }
+        // A run of plain characters that ends pat (for a prefix) or starts it (for a suffix)
+        // must end or start every candidate it matches, so a candidate without it skips the
+        // glob match. Twin of the same filter in rt_strip in languages/lib/bash-rt.c.
+        var ops = "*?[]()|@+!\\"
+        var ra = isPrefix ? pat.length : 0
+        var rb = ra
+        if (isPrefix) { while (ra > 0 && ops.indexOf(pat.charAt(ra - 1)) < 0) { ra = ra - 1 } }
+        else { while (rb < pat.length && ops.indexOf(pat.charAt(rb)) < 0) { rb = rb + 1 } }
+        var run = pat.slice(ra, rb)
         var down = (longest == isPrefix)
         var k = down ? n : 0
         while (true) {
-            if (globMatch(pat, isPrefix ? v.slice(0, k) : v.slice(k))) { return isPrefix ? v.slice(k) : v.slice(0, k) }
+            var cand = isPrefix ? v.slice(0, k) : v.slice(k)
+            var hasRun = run == "" || (cand.length >= run.length && (isPrefix ? cand.slice(cand.length - run.length) : cand.slice(0, run.length)) == run)
+            if (hasRun && globMatch(pat, cand)) { return isPrefix ? v.slice(k) : v.slice(0, k) }
             if (down) { if (k == 0) { return v }; k = k - chWBack(v, k) }
             else { if (k == n) { return v }; k = k + chW(v, k) }
         }
@@ -3262,9 +3279,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // literal is assigned right then, in order (`declare -ai k=(1 x+) 2>/dev/null` still reports
     // x+, and `declare -a c=(7) d=${c[0]}` sees 7); the builtin then declares the names and
     // stores the other values, already expanded (`a=0; declare a=1 b=$a` makes b 0), under the
-    // redirections (`declare -i n=1+ 2>/dev/null` is silent). Twin of makeDecl in
+    // redirections (`declare -i n=1+ 2>/dev/null` is silent). keepTc: a part of a longer
+    // declaration (makeDeclR), which clears thisCmd itself. Twin of makeDecl in
     // bash-to-llvm-ir.abnf.
-    function makeDecl(items, redirs, ln) {
+    function makeDecl(items, redirs, ln, keepTc) {
         var kw = items[0].dkw
         var flags = ""
         var plus = ""
@@ -3448,7 +3466,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         if (asgs[k] == null && flags == "") { return }
                         var lit0 = asgs[k] != null && asgs[k].lit != null
                         if (asgs[k] != null && !lit0 && !bashIsRef(v)) { diagErr(kw + ": `" + v + "': invalid variable name for name reference\n"); roFail = true; return }
+                        // A readonly one refuses the literal (bash 5.3): checked while the words
+                        // expand (bashDeclLitChk), the report after thisCmd comes first, then
+                        // the builtin's; otherwise the line is abandoned, silently.
+                        var roLit = lit0 && attrOn(roVars, names[k])
+                        var litChk = bashDeclLitChk(flags)
+                        if (roLit && litChk) { diagErr(tcWho() + names[k] + ": readonly variable\n") }
                         if (lit0 && !isArray && !refQuiet) { diagErr("warning: " + names[k] + ": circular name reference\n"); diagErr("warning: " + names[k] + ": circular name reference\n") }
+                        if (roLit && !litChk) { abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
+                        if (roLit) { diagErr(kw + ": " + names[k] + ": readonly variable\n"); roFail = true; return }
                         var sa0 = asgs[k]
                         if (integer && sa0 != null && !lit0) { asgs[k] = null; roFail = true }
                         if (lit0 && sa0.op == "+=" && !isArr(names[k])) {
@@ -3461,6 +3487,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         return
                     }
                 }
+            }
+            // NAME[SUB]=VALUE of a function's own nameref with no value makes it an empty
+            // array and then refuses VALUE as the name it would refer to (bash 5.3, status 1):
+            // one that is no name is "invalid variable name for name reference"; for a name
+            // bash prints uninitialised memory, which is not emulated. Twin of voidSub in
+            // declOne in bash-to-llvm-ir.abnf.
+            if (!isRef && plus == "" && flags.split("-").join("").split("a").join("") == "" && aw != null && aw.idxT != null && aw.isrc != "" && aw.lit == null
+                && localizes() && localHere(names[k]) && refVoid(names[k])) {
+                arrEnsure(names[k], false)
+                arrs[arrKey(names[k])].decl = true
+                if (!bashIsRef(v)) { diagErr(kw + ": `" + v + "': invalid variable name for name reference\n") }
+                roFail = true
+                return
             }
             // NAME[SUB] of a nameref, outside a function's locals, makes NAME itself the array
             // (bash 5.3): with a value under no option but -a or -g, warning that the nameref
@@ -3571,9 +3610,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // attributes (bash 5.3: f() { local a=5; local a; echo $a; } prints 5).
             var fresh = localize && !localHere(names[k])
             var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
-            if (listPre) { roWho = (global && fnDepth > 0) ? getVarVal("FUNCNAME") + ": " : "" }
+            if (listPre) { roWho = tcWho() }
             var shown = (declOwn != "") ? declOwn : names[k]
             if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0 || roAttr) && attrOn(roVars, names[k])) {
+                // A literal is checked while the words expand (bash 5.3): under an option that
+                // changes an attribute, or for a function's local, by a declaration reporting
+                // after thisCmd, which abandons the line at top level and for export and
+                // readonly; otherwise by an assignment, which reports it bare and abandons the
+                // line. Twin of the same check in declOneBody in bash-to-llvm-ir.abnf.
+                if (asgs[k] != null && asgs[k].lit != null && !listPre) {
+                    var early = bashDeclLitChk(flags) || (localize && fnDepth > 0)
+                    diagErr((early ? tcWho() : "") + names[k] + ": readonly variable\n")
+                    if (!early || fnDepth == 0 || kw == "export" || kw == "readonly") { abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
+                }
                 diagErr(roWho + ((asgs[k] != null && roWho != "") ? shown : names[k]) + ": readonly variable\n")
                 // export still exports it (bash 5.3: readonly z=1; export z=2 leaves -rx).
                 if (kw == "export" && flags.indexOf("n") < 0) { exVars["$" + names[k]] = true }
@@ -3593,13 +3642,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return
             }
             // So is it with a literal, which runs with the words (bash 5.3): "NAME: cannot
-            // convert ..." abandons the line at top level; in a function, where a -g one names
-            // the function first, the builtin reports it again and fails. Twin of
-            // rt_arr_convlit.
+            // convert ..." (after thisCmd) abandons the line at top level; in a function the
+            // builtin reports it again and fails. Twin of rt_arr_convlit.
             if (bareArr && !fresh && isArr(names[k]) && arrs[arrKey(names[k])].assoc != assoc) {
                 var cmsg = shown + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n"
-                if (fnDepth == 0) { diagErr(cmsg); abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
-                diagErr((global ? getVarVal("FUNCNAME") + ": " : "") + cmsg)
+                diagErr(tcWho() + cmsg)
+                if (fnDepth == 0) { abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
                 if (!lateOnly && !listPre) { diagErr(kw + ": " + cmsg) }
                 roFail = true
                 return
@@ -3787,6 +3835,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = anytype
             r = run()
             valStack.pop()
+            if (keepTc != true) { thisCmd = "" }
             return r
         }
     }
@@ -3853,6 +3902,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var run = mkRedirected([function() { diagErr(msg); return 2 }].concat(redirs))
         return function() {
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            thisCmd = ""
             var st = anytype
             st = run()
             if (typeof st == "object") { return st }
@@ -3879,7 +3929,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pres = []
         var lates = []
         var xr = core[0].dkw == "export" || core[0].dkw == "readonly"
-        for (i = 0; i < les.length; i++) { pres.push(makeDecl(les[i].pre, [], ln)); lates.push(makeDecl(les[i].late, [], ln)) }
+        for (i = 0; i < les.length; i++) { pres.push(makeDecl(les[i].pre, [], ln, true)); lates.push(makeDecl(les[i].late, [], ln, true)) }
         return function() {
             var j
             var st = anytype
@@ -3896,6 +3946,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 st = lates[j]()
                 if (typeof st == "object") { return st }
             }
+            thisCmd = ""
             return st
         }
     }
@@ -6498,6 +6549,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return function() {
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            thisCmd = ""
             cmdSubRan = false
             var k
             for (k = 0; k < as.length; k++) {
@@ -6853,6 +6905,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // which is why the split happens here rather than inside runCommand.
             var cf = wordFields(cmdT())
             var rest = expandWords(argTs)
+            thisCmd = ""
             var k
             var ab = takeAbort()
             if (ab != null) { return ab }
@@ -8466,7 +8519,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (src == "") { setStatus(0); return 0 }
             var et = compileSnippet(src, 0, true)
             var er = anytype
+            thisCmd = "eval"
             er = et()
+            thisCmd = ""
             if (typeof er == "object") { return er }
             setStatus(er)
             return er
@@ -8680,8 +8735,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         localFrames[localFrames.length - 1][localFrames[localFrames.length - 1].length - 1].sys = true
         setVarVal("FUNCNAME", name)
         fnDepth = fnDepth + 1
+        thisCmd = name
         var r = anytype
         r = body()
+        thisCmd = ""
         fnDepth = fnDepth - 1
         lnCtx = svLn
         if (own) { popLocalFrame() }
@@ -8941,7 +8998,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         subLevels = subLevels + 1
         return {fl: funcLog.length, vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
                 e: optErrExit, u: optNounset, pf: optPipefail, eg: optExtglob, tr: exitTrap, ts: exitTrapSrc,
-                so: sinkOut, se: sinkErr, fd: fdTab, inb: stdinBuf, inp: stdinPos}
+                so: sinkOut, se: sinkErr, fd: fdTab, inb: stdinBuf, inp: stdinPos, tc: thisCmd}
     }
     function restoreShellState(st) {
         while (funcLog.length > st.fl) {
@@ -8966,6 +9023,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         optExtglob = st.eg
         exitTrap = st.tr
         exitTrapSrc = st.ts
+        thisCmd = st.tc
     }
     // ( LIST ) : variables and positional parameters are restored afterwards, and both a
     // `return` and an `exit` inside end only the subshell. No EXIT trap is inherited. It starts outside every loop,
@@ -9016,6 +9074,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var exprT = arIn("((: ", exprT0)
         return function() {
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            thisCmd = "(("
             var st = !arIsZero(exprT()) ? 0 : 1
             if (takeArithErr()) { st = 1 }
             var sab = subErrAbort()
@@ -9050,6 +9109,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 lists.push(fs)
                 total = total + fs.length
             }
+            thisCmd = ""
             var ab = takeAbort()
             if (ab != null) { return ab }
             if (nstatic == 0 && total == 0) { arFailAt("let", "expression expected", "") }
@@ -9082,6 +9142,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeCondCmd(t, ln) {
         return function() {
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            thisCmd = "[["
             condErr = 0
             var v = t()
             var st = (condErr != 0) ? condErr : (v ? 0 : 1)
@@ -9510,6 +9571,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (takeArithErr()) { return cforErr() }
             var go = true
             while (go) {
+                thisCmd = "(("
                 var cv = condT()
                 if (takeArithErr()) { return cforErr() }
                 if (arIsZero(cv)) { go = false; continue }
@@ -9605,6 +9667,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (fRef) { noRef = noRef - 1 }
                 // A word that names no variable ends the loop, status 1.
                 if (fRef && takeSubBad()) { setStatus(1); return 1 }
+                thisCmd = ""
                 r = bodyT()
                 if (typeof r == "object") {
                     var sg = loopSignal(r)

@@ -759,12 +759,27 @@ function dpPrintCmd(c, ind, inline) {
     return ""
 }
 
+// Does bash 5.3 check a declaration's NAME=(...) operand by declaring it while the words
+// expand (an option that changes the value's kind or case)?
+function bashDeclLitChk(flags) {
+    var i
+    for (i = 0; i < flags.length; i++) {
+        if ("aAiluc".indexOf(flags.charAt(i)) >= 0) { return true }
+    }
+    return false
+}
+
+// A declaration with -p, -f or -F only reports: it declares and changes nothing.
+function bashDeclQuery(flags) {
+    return flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0
+}
+
 // Does a declaration with these options change an attribute a readonly variable keeps?
 // bash 5.3 refuses -a/-A/-i/-l/-u/-c/-n and +a/+A/+i/+l/+u/+c on one ("NAME: readonly
 // variable", status 1, none of the line's attributes applied); -x, -g, -r, -t, +t and +n
 // are allowed, and so is everything `readonly` and `export` do.
 function bashDeclRoAttr(kw, flags, plus) {
-    if (kw == "export" || kw == "readonly" || flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0) { return false }
+    if (kw == "export" || kw == "readonly" || bashDeclQuery(flags)) { return false }
     var i
     for (i = 0; i < flags.length; i++) {
         if ("aAilucn".indexOf(flags.charAt(i)) >= 0) { return true }
