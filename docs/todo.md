@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1142** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1143** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -105,11 +105,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) · P3 · KT · IN PROGRESS (KT worker, round 42) [V]
+### T-1142 kotlin: per-class program-method arity, interpreter named args on builtins shadowed by a class method name · P3 · KT · OPEN [V]
 
-Found while working T-1138. The oracle is kotlinc 2.2.21 (stdlib only).
+Found while working T-1140. The oracle is kotlinc 2.2.21 (stdlib only).
 
-A bound reference to a builtin method with parameters (`"ab"::plus`, `5::plus`, `listOf(1)::contains`) answers `is Function0` in all engines; the oracle says Function1. An unbound builtin method reference with parameters (`Int::plus`, `String::substring`) is short by its parameter count, where the oracle gives Function2, and so on. Program methods are already right, through ktRefParams and js_ktrefarity. The missing piece is a builtin-method arity table for the Kotlin receivers we implement: String, Int/Long/Double, List/MutableList, Map, Set, and so on. Build it by measuring against kotlinc (one probe per receiver type listing `is FunctionN` for each method name), the way the Ruby rbArityRows table was measured, and keep the Go twin and the JS copy equal with a Go test. Overloads: for a reference whose expected type is not given, kotlinc rejects ambiguous overloads, so only unambiguous names matter.
+1. The program-method arity table is keyed by name across the whole program, not per class. Repro: `class Q { fun eat(x: Int) = x }; class P { fun eat(x: Int, y: Int) = x + y }`, then `(P::eat as Any) is Function3<*,*,*,*>` is true in the oracle. All three engines give false, because the two `eat` declarations disagree and so ktRefParams gives 0. Key the table by class (with inheritance), and fall back to the name when the class is not known statically.
+2. Interpreter only: a class method named like a String builtin breaks named arguments on the builtin. Repro: `class Q { fun padStart(a: Int, b: Int, c: Int) = a + b + c }`, then `"abcde".padStart(length = 7, padChar = '*')` prints `**abcde` in the oracle, llvm.Run and native, but `abcde` in the interpreter. Assertion win95o in tests/kotlin-test-full.kt turns red as soon as such a class is added to that file. Named-argument resolution should use the receiver's own method, not any program method with that name.
 
 Verify with `tests/probe.sh kotlin` on all four legs.
 
@@ -1200,6 +1201,7 @@ T-1136 kotlin: uninitialized top-level lateinit read, lambda `is FunctionN`, lam
 T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, other stores to circular array nameref, valueless readonly nameref stores, nested brackets in computed decl operands — merged c92fc735: NAME[SUB]=(list) abandons the line (declares array under declare/local/export/readonly), export/readonly through circular local nameref act on the global with bash's warnings, stores to circular array nameref leave it alone, value-before-readonly check for valueless readonly namerefs, nested-bracket subscripts in declaration operands; full-syntax ratchet split into 7 parts (part 5 was pushed over the brake); 4-leg probe + stderr match bash 5.3; matrix 605/605; bench -0.04%
 T-1138 kotlin: static Array<T>::class, KClass no-reflect suffix decision, function-reference javaClass and member-ref arity, receiver-lambda arity — merged d520bee5: static Array<T>::class (incl. nested/primitive element arrays), function-reference javaClass stand-in, reference arity for program methods/props/constructors (js_ktrefarity), receiver-param lambda arity, explicit it-parameter scoping; also fixed compiled js_ktrecvlam passing the receiver twice (two invalid-Kotlin feature tests corrected); 4-leg probe matches kotlinc 2.2.21; kotlin gates green; bench +0.04%
 T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-integer ranges, zero slice size, endless Float range slices — merged 8b79ec7b: Hash#index warning from the runtime arm at the running site (send/method/public_send; site fn registered once via js_rsitefn, no per-call extern), later-line call sites for warnings and backtraces in all engines, big-Integer ranges walk/count exactly, Range#length NoMethodError and Float-range count TypeError per MRI, each_slice/each_cons size checks with implicit conversion; 4-leg probe matches ruby 2.6 stdout + stderr; matrix 605/605; bench +0.02%
+T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) — merged 82430d9c: builtin method reference arity from one kotlinc-measured table in kotlin-decltypes.js (140 names x 30 receiver types; bound refs pass the spec to js_ktrefarity, unbound get it at compile time), expr::name records arity, inherited equals arity 1; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench 0.00%
 
 # Settled — do not re-open
 
