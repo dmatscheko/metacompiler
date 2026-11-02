@@ -320,6 +320,10 @@ int rt_varslot(char *n);
 int rt_varslot_new(char *n);
 int rt_setvar_byname(char *n, char *v, int app, int at);
 char *rt_nref_base(char *n);
+char *rt_nref_arname(char *n);
+char *rt_ar_nget(char *nm, char *k);
+int rt_ar_nset(char *nm, char *k, char *v, int at);
+int ar_rmw(char *nm, char *key);
 int rt_arr_marks(char *nm);
 int rt_indbr(char *v);
 char *rt_nref_end(char *n);
@@ -1350,12 +1354,10 @@ char *ar_name(void)
 {
     int s = ar_p;
     char *nm;
-    char *t;
     while (ar_idch(ar_at(0), ar_p == s ? 1 : 0) != 0) ar_p = ar_p + 1;
     nm = rt_substr(ar_s, s, ar_p - s);
     if (ar_at(0) != 91 || (rt_arr_marks(nm) & 32) == 0) return nm;
-    t = rt_nref_base(nm);
-    return t[0] == 0 ? nm : t;
+    return rt_nref_arname(nm);
 }
 
 /* An indexed array's subscript met by the arithmetic evaluator is an expression
@@ -1482,7 +1484,7 @@ long ar_value(char *nm, char *key)
         rt_berr("", rt_strcat(nm, "[]"), "bad array subscript");
         return 0;
     }
-    if (key != 0) v = rt_sc_get(nm, key);
+    if (key != 0) v = rt_ar_nget(nm, key);
     else if (rt_arr_any(nm) != 0) v = rt_arr_get(nm, "0");
     else v = rt_getvar_byname(nm);
     if (v[0] == 0) return 0;
@@ -1497,9 +1499,7 @@ long ar_store(char *nm, char *key, long v)
         rt_berr("", rt_strcat(rt_strcat(rt_strcat(ar_pfx(), "`"), nm), "[]'"), "not a valid identifier");
         return v;
     }
-    if (key != 0) rt_arr_iset(nm, key, rt_int2str(v));
-    else if (rt_arr_any(nm) != 0) rt_arr_iset(nm, "0", rt_int2str(v));
-    else rt_setvar_byname(nm, rt_int2str(v), 0, 0);
+    rt_ar_nset(nm, key, rt_int2str(v), 0);
     return v;
 }
 
@@ -1549,6 +1549,7 @@ long ar_primary(void)
         v = ar_value(nm, key);
         ar_ws();
         if ((ar_at(0) == 43 && ar_at(1) == 43) || (ar_at(0) == 45 && ar_at(1) == 45)) {
+            ar_rmw(nm, key);
             ar_store(nm, key, ar_at(0) == 43 ? v + 1 : v - 1);
             ar_p = ar_p + 2;
         }
@@ -1574,6 +1575,7 @@ long ar_unary(void)
             long v;
             if (ar_bad != 0) return 0;
             v = ar_value(nm, key);
+            ar_rmw(nm, key);
             return ar_store(nm, key, c == 43 ? v + 1 : v - 1);
         }
         ar_p = save;
@@ -1792,7 +1794,11 @@ long ar_assign(void)
         v = ar_assign();
         if (ar_bad != 0) return 0;
         if ((op == 47 || op == 37) && v == 0 && ar_noeval == 0) return ar_errtok("division by 0", ar_latok(ar_p));
-        if (op != 61) v = ar_apply(op, ar_value(nm, key), v);
+        if (op != 61) {
+            long ov = ar_value(nm, key);
+            ar_rmw(nm, key);
+            v = ar_apply(op, ov, v);
+        }
         if (ar_bad != 0) return 0;
         return ar_store(nm, key, v);
     }
@@ -2752,6 +2758,8 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
 
 /* rt_case: ${v^} / ${v^^} / ${v,} / ${v,,}; mode 0 = ^, 1 = ^^, 2 = ",", 3 = ",,".
  * Mode 4 is `declare -c`: the first character upper, every other one lower.
+ * Modes 5 and 6 are ${v~} and ${v~~}, which toggle the case of an ASCII letter
+ * and leave any other character. Twin of caseMap in bash-interpreter.abnf.
  *
  * It walks CODEPOINTS, not bytes, and maps each one as towupper / towlower do: the
  * Unicode SIMPLE mapping (case-simple.h), one character for one, so "ß" stays and
@@ -2761,7 +2769,7 @@ char *rt_case(char *s, int mode, char *pat) {
     int len = rt_strlen(s);
     char *dst = rt_bump(len + len + 1);
     int up = mode < 2 || mode == 4;
-    int all = mode != 0 && mode != 2;
+    int all = mode != 0 && mode != 2 && mode != 5;
     int i = 0;
     int o = 0;
     int first = 1;
@@ -2793,7 +2801,11 @@ char *rt_case(char *s, int mode, char *pat) {
         }
         one[w] = 0;
         if (touch != 0 && nopat == 0) { touch = rt_glob(pat, one) != 0; }
-        if (touch != 0) { cp = case_map(cp, up); }
+        if (touch != 0 && mode >= 5) {
+            if (cp >= 65 && cp <= 90) cp = cp + 32;
+            else if (cp >= 97 && cp <= 122) cp = cp - 32;
+            else cp = -1;
+        } else if (touch != 0) { cp = case_map(cp, up); }
         else { cp = -1; }
         if (cp < 0) {
             t = 0;
@@ -5025,6 +5037,7 @@ int nref_quiet;       /* >0: a circular nameref is not warned about (rt_nref_end
 char *nref_cstart;    /* the name the last circular chain rt_nref_end met started at */
 int nref_glob;        /* 1 + the slot rt_nref_glob put the global binding in effect for, else 0 */
 char *nref_circ;      /* the circular nameref an element store waits to drop (rt_nref_circ) */
+int nref_ckeep;       /* 1: nref_circ names the global rt_nref_glob put in effect, kept */
 
 void *realloc(void *p, unsigned long n);
 
@@ -8782,13 +8795,14 @@ int rt_nref_unref(char *n)
 }
 
 /* The element store rt_nref_arr found circular, its subscript now good: bash's
- * second warning, and the nameref goes. */
+ * second warning, and the nameref goes - unless the store is the global's. */
 int rt_nref_circ(void)
 {
     char *n = nref_circ;
     if (n == 0) return 0;
     nref_circ = 0;
     if (nref_quiet == 0) rt_berr("warning", n, "circular name reference");
+    if (nref_ckeep != 0) return 0;
     return rt_nref_unref(n);
 }
 
@@ -8796,22 +8810,27 @@ int rt_nref_circ(void)
  * chain), made ready for it: a literal that replaces (lit 1) empties its rows
  * and drops its scalar, and any other store makes a set scalar its element 0.
  * An end that is itself an element, NAME[SUB], is no variable name: bash's
- * "not a valid identifier", and the line is abandoned (arith_err). Through a circular chain the store lands on n itself, which
- * stops being a nameref and drops its value (bash 5.3); for an element (sub)
- * that waits for rt_nref_circ, once its subscript is good. Twin of refAssign in
+ * "not a valid identifier", and the line is abandoned (arith_err). Through a
+ * circular chain the store lands on the global variable rt_nref_glob puts in
+ * effect, until the caller's rt_nref_unglob, or else on n itself, which stops
+ * being a nameref and drops its value (bash 5.3); for an element (sub) that
+ * waits for rt_nref_circ, once its subscript is good. Twin of refAssign in
  * bash-interpreter.abnf. */
 char *rt_nref_arr(char *n, int lit, int sub)
 {
     char *t = rt_nref_end(n);
     int i;
     nref_circ = 0;
-    if (t == 0 && sub != 0) {
-        nref_circ = n;
-        return n;
-    }
+    nref_ckeep = 0;
     if (t == 0) {
-        rt_nref_unref(n);
-        t = n;
+        i = rt_nref_glob(n);
+        nref_ckeep = i >= 0 ? 1 : 0;
+        t = i >= 0 ? varnames[i] : n;
+        if (sub != 0) {
+            nref_circ = t;
+            return t;
+        }
+        if (i < 0) rt_nref_unref(n);
     }
     if (rt_indbr(t) > 0) {
         rt_berr("", rt_strcat(rt_strcat("`", t), "'"), "not a valid identifier");
@@ -8824,6 +8843,87 @@ char *rt_nref_arr(char *n, int lit, int sub)
         if (i >= 0) gvars[i] = &unset_marker[0];
     } else if (i >= 0) rt_arr_adopt(t, i);
     return t;
+}
+
+/* The array NAME[SUB] names in arithmetic: through the nameref n, the array its
+ * chain ends at, or n itself for a circular chain, which bash's lookup warns
+ * about - twice while `let` runs, its arguments not being pre-expanded
+ * (valid_array_reference looks the name up again). Twin of arElemName in
+ * bash-interpreter.abnf. */
+char *rt_nref_arname(char *n)
+{
+    char *t = rt_nref_end(n);
+    int i;
+    if (t == 0) {
+        if (ar_pfx_s != 0 && rt_streq(ar_pfx_s, "let: ") != 0) rt_nref_end(n);
+        return n;
+    }
+    i = rt_indbr(t);
+    if (i > 0) return rt_substr(t, 0, i);
+    return t;
+}
+
+/* The store of an element an operator just read (++, op=) looks a circular
+ * nameref up once more than a plain assignment's. Twin of arRmwRef in
+ * bash-interpreter.abnf. */
+int ar_rmw(char *nm, char *key)
+{
+    if (key != 0 && nref_any != 0 && (rt_arr_marks(nm) & 32) != 0) rt_nref_end(nm);
+    return 0;
+}
+
+/* An element of nm in arithmetic. Through a circular nameref rt_nref_arname
+ * kept, the read looks the name up again (another warning) and reads the
+ * global variable rt_nref_glob finds, else nothing. Twin of arElem in
+ * bash-interpreter.abnf. */
+char *rt_ar_nget(char *nm, char *k)
+{
+    char *v;
+    int i;
+    if (nref_any == 0 || (rt_arr_marks(nm) & 32) == 0 || rt_nref_end(nm) != 0) return rt_sc_get(nm, k);
+    i = rt_nref_glob(nm);
+    if (i < 0) return empty;
+    v = rt_sc_get(varnames[i], k);
+    rt_nref_unglob();
+    return v;
+}
+
+/* An arithmetic store of v to nm (nm[k]; k 0 for none), at the attributes of
+ * rt_setvar_byname. bash's bind_int_variable looks the name up before it
+ * stores, so a circular nameref chain warns once more than an assignment does,
+ * and the store lands on the global variable rt_nref_glob finds - element 0
+ * of an array, warned as an element store - or, outside a function, nowhere
+ * for a scalar and on the nameref itself, which stops being one, for an
+ * element. An element store makes a set scalar its element 0. Twin of arSet
+ * in bash-interpreter.abnf. */
+int rt_ar_nset(char *nm, char *k, char *v, int at)
+{
+    int i = -1;
+    int r;
+    if (nref_any != 0 && (rt_arr_marks(nm) & 32) != 0 && rt_nref_end(nm) == 0) {
+        i = rt_nref_glob(nm);
+        if (k == 0 && i >= 0 && rt_arr_any(varnames[i]) == 0) {
+            rt_nref_unglob();
+            return rt_setvar_byname(nm, v, 0, at);
+        }
+        if (nref_quiet == 0) rt_berr("warning", nm, "circular name reference");
+        if (i >= 0) {
+            nm = varnames[i];
+            if (k == 0) k = "0";
+        } else {
+            if (k == 0) return 0;
+            rt_nref_unref(nm);
+        }
+    }
+    if (k == 0) {
+        if (rt_arr_any(nm) != 0) return rt_arr_iset(nm, "0", v);
+        return rt_setvar_byname(nm, v, 0, at);
+    }
+    r = rt_varslot(nm);
+    if (r >= 0) rt_arr_adopt(nm, r);
+    r = rt_arr_iset(nm, k, v);
+    if (i >= 0) rt_nref_unglob();
+    return r;
 }
 
 /* A name an indirection may land on: a NAME, NAME[SUB], a positional parameter

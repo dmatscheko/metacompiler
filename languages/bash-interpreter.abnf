@@ -658,7 +658,7 @@ PeGlobSeg   = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | BraceBare ;
 
 // ${v^} ${v^^} ${v,} ${v,,} : case conversion of the first / of every character.
 PeCaseForm  = PeTarget PeCaseOp [ PeGlobArg ] ;
-PeCaseOp    <~~ push({pe: up.in}) ~~> = "^^" | "^" | ",," | "," ;
+PeCaseOp    <~~ push({pe: up.in}) ~~> = "^^" | "^" | ",," | "," | "\x7e\x7e" | "\x7e" ;
 
 // ${v/pat/rep} first match, ${v//pat/rep} every match, ${v/#pat/rep} anchored at the
 // start, ${v/%pat/rep} anchored at the end. The replacement may be omitted (delete).
@@ -2100,10 +2100,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // matched against ONE character at a time, so only the characters it matches are
     // converted: ${s^^[bn]} on banana is BaNaNa. "" is the absent case and means every
     // character - globMatch("", "a") is false, so it is tested for, not delegated.
+    // ${v~} toggles the case of an ASCII letter (the doubled operator of every one) and
+    // leaves any other character. Twin of rt_case.
     function caseMap(v, mode, pat) {
         var out = ""
         var up = (mode == "^" || mode == "^^")
-        var all = (mode == "^^" || mode == ",,")
+        var tog = (mode == "~" || mode == "\x7e\x7e")
+        var all = (mode == "^^" || mode == ",," || mode == "\x7e\x7e")
         var nopat = (pat == "")
         var i = 0
         var first = true
@@ -2112,7 +2115,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             i = i + ch.length
             // towupper / towlower per character: the SIMPLE mapping, as for @U / @L.
             var touch = (all || first) && (nopat || globMatch(pat, ch))
-            if (touch) { ch = unicodeCase(ch, up ? 1 : 0) }
+            if (touch && tog) {
+                var cc = ch.charCodeAt(0)
+                if (ch.length == 1 && cc >= 65 && cc <= 90) { ch = String.fromCharCode(cc + 32) }
+                else if (ch.length == 1 && cc >= 97 && cc <= 122) { ch = String.fromCharCode(cc - 32) }
+            } else if (touch) { ch = unicodeCase(ch, up ? 1 : 0) }
             first = false
             out = out + ch
         }
@@ -2685,7 +2692,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // scalar sites and that walk.
     function isPatOp(pe) {
         if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") { return true }
-        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") { return true }
+        if (pe == "^" || pe == "^^" || pe == "," || pe == ",," || pe == "~" || pe == "\x7e\x7e") { return true }
         return (pe == "/" || pe == "//")
     }
     function applyPatOp(v, pe, anchor, pat, rep) {
@@ -2695,7 +2702,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pat == "" && anchor == "") { return v }
             return replacePat(v, pat, rep, rmode)
         }
-        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") { return caseMap(v, pe, pat) }
+        if (pe == "^" || pe == "^^" || pe == "," || pe == ",," || pe == "~" || pe == "\x7e\x7e") { return caseMap(v, pe, pat) }
         if (pat == "") { return v }
         return stripPat(v, pat, (pe == "#" || pe == "##"), (pe == "##" || pe == "%%"))
     }
@@ -2762,7 +2769,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     }
                     byRef[rk] = paramCore(its, null)
                 }
-                if (gn != "") { var gv = {v: ""}; onRefGlobal(gn, function() { gv.v = byRef[rk]() }); return gv.v }
+                if (gn != "") {
+                    var gv = {v: ""}
+                    refGlobPn = pn
+                    onRefGlobal(gn, function() { gv.v = byRef[rk]() })
+                    refGlobPn = ""
+                    return gv.v
+                }
                 return byRef[rk]()
             }
         }
@@ -3116,6 +3129,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "" && name == "*" && !indirect) { return function() { return starJoin(posParams) } }
         if (op == "") { return function() { return getVarVal(nameOf()) } }
         return function() {
+            // Read through a circular nameref, a default is stored through it as a scalar
+            // store is, with refGlobStore's warning.
+            var gp = refGlobPn
+            refGlobPn = ""
             var tn = nameOf()
             var v = (tn == null) ? "" : getVarVal(tn)
             var colon = (op.charAt(0) == ":")
@@ -3126,6 +3143,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o == "=") {
                 if (blank) {
                     var d = (wordT != null) ? wordJoin(wordT()) : ""
+                    if (gp != "" && !refQuiet) { diagErr("warning: " + gp + ": maximum nameref depth (8) exceeded\n") }
                     // A readonly NAME abandons the line, as an expansion error does.
                     if (tn != null && roRefused(tn, "")) { arithErr = true; return "" }
                     if (tn != null) { d = storeAttr(tn, d, false) }
@@ -3303,6 +3321,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var declOwn = ""
         // One name: its attributes, then its value (v, or the assignment's own literal).
         var declOne = function(k, v) {
+            // A nameref cannot be an integer: -n with -i fails, silently, and declares
+            // nothing (bash 5.3). Twin of declOne in bash-to-llvm-ir.abnf.
+            if (isRef && integer) { roFail = true; return }
             // Without -n a declaration of a nameref acts on what it refers to: attributes,
             // value and a new local land on the target (bash 5.3: declare -n r=t; declare -r r
             // makes t readonly; r='a[1]' takes the array a). A function's first local of the
@@ -3446,6 +3467,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 arrs[arrKey(names[k])] = null
                 if (clean) { unsetVar(names[k]) }
             }
+            // -n takes away -i, -u, -l and -c; a case attribute given with it stays (bash
+            // 5.3: local -i n; local -n n=m is declare -n n="m").
+            if (isRef) { intVars["$" + names[k]] = false; upVars["$" + names[k]] = false; loVars["$" + names[k]] = false }
             if (integer) { intVars["$" + names[k]] = true }
             var cl = bashDeclCase(caseLetter(names[k]), flags, plus)
             upVars["$" + names[k]] = cl == "u" || cl == "c"
@@ -4164,6 +4188,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return ""
     }
+    var refGlobPn = ""   // the circular nameref a read refGlobal resolved runs through
     function onRefGlobal(name, act) {
         noRef = noRef + 1
         onGlobal(name, act)
@@ -4179,12 +4204,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // An assignment record retargeted through a nameref; null after a circular one, except
     // that an element or array literal store lands on the nameref itself, marked circ for
-    // refCircDrop (bash 5.3). Twin of rt_nref_arr.
+    // refCircDrop (bash 5.3) - or, when refGlobal resolves the chain, on that global
+    // variable (glob: the caller stores with it in effect), which keeps the nameref. Twin of
+    // rt_nref_arr.
     function refAssign(a) {
         if (!anyRef || a.circ == true) { return a }
         var rn = refTarget(a.name)
         if (rn == "" && (a.idxT != null || a.lit != null)) {
-            return {name: a.name, idxT: a.idxT, aqT: a.aqT, op: a.op, valT: a.valT, lit: a.lit, isrc: a.isrc, lbl: a.lbl, circ: true}
+            var gn = refGlobal(a.name)
+            return {name: (gn != "") ? gn : a.name, idxT: a.idxT, aqT: a.aqT, op: a.op, valT: a.valT, lit: a.lit, isrc: a.isrc, lbl: a.lbl, circ: true, glob: gn != "", keep: gn != ""}
         }
         if (rn == "") { arithErr = true; return null }
         if (rn == a.name) { return a }
@@ -4201,6 +4229,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function refCircDrop(a, warn) {
         if (a.circ != true) { return }
         if (warn && !refQuiet) { diagErr("warning: " + a.name + ": circular name reference\n") }
+        if (a.keep == true) { return }
         refVars["$" + a.name] = false
         unsetVar(a.name)
     }
@@ -5269,7 +5298,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1], aq: items[2].aqa} }
     function mkArElem(items) {
         var name0 = items[0].lhs, w = items[1], aq = items[2].aqa
-        return function() { var name = arElemName(name0, true); return arEval(scGet(name, subKeyAr(name, idxRaw(name, w, aq)))) }
+        return function() { var name = arElemName(name0, true); return arEval(arElem(name, subKeyAr(name, idxRaw(name, w, aq)))) }
     }
     // The current value of an assignment target, and the store back into it; `key` is null
     // for a plain name. arLhsName is the variable the target is in.
@@ -5292,12 +5321,42 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (sub == "@" || sub == "*" || assocFact(name, false)) { return sub }
         return arrIdxKey(name, arSubEval(sub), name)
     }
-    function arLhsGet(name, key) { return arEval((key != null) ? scGet(name, key) : getVarVal(name)) }
+    function arLhsGet(name, key) {
+        if (key == null) { return arEval(getVarVal(name)) }
+        var v = arElem(name, key)
+        arRmwRef(name)
+        return arEval(v)
+    }
     function arLhsSet(name, key, v) {
         if (arithErr) { return }
         // A readonly name is an arithmetic error: (( )) and let fail, $(( )) abandons the line.
         if (roRefused(name, "")) { arithErr = true; return }
-        if (key != null) { arrSet(name, key, numToStr(v)) } else { setVarVal(name, numToStr(v)) }
+        arSet(name, key, numToStr(v))
+    }
+    // An arithmetic store of s to NAME (NAME[key]). bash's bind_int_variable looks the name
+    // up before it stores, so a circular nameref chain warns once more than an assignment
+    // does: NAME is still the nameref (arElemName keeps it for an element), and the store
+    // lands on the global variable refGlobal finds - an array's element 0 for a scalar
+    // store to an array name, warned as an element store - or, outside a function, nowhere
+    // for a scalar and on the nameref itself, which stops being one, for an element. Twin
+    // of rt_ar_nset.
+    function arSet(name, key, s) {
+        if (anyRef && attrOn(refVars, name) && refTarget(name) == "") {
+            var gn = refGlobal(name)
+            if (key == null && gn != "") {
+                var ga = {v: false}
+                onRefGlobal(gn, function() { ga.v = isArr(gn) })
+                if (!ga.v) { setVarVal(name, s); return }
+                key = "0"
+            }
+            if (!refQuiet) { diagErr("warning: " + name + ": circular name reference\n") }
+            if (gn != "") { onRefGlobal(gn, function() { arrAdopt(gn); arrSet(gn, key, s) }); return }
+            if (key == null) { return }
+            refVars["$" + name] = false
+            unsetVar(name)
+        }
+        // An element store makes a set scalar its element 0: x=7; (( x[2]=4 )) is (7 '' 4).
+        if (key != null) { arrAdopt(name); arrSet(name, key, s) } else { setVarVal(name, s) }
     }
     // An arithmetic error: bash reports it on standard error and abandons the command, so
     // only the first is reported and nothing after it is stored (arLhsSet, arStore).
@@ -5670,7 +5729,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arElemName(nm, sub) {
         if (!sub || !anyRef || !attrOn(refVars, nm)) { return nm }
         var t = refTarget(nm)
-        return (t == "") ? nm : splitSubscript(t).name
+        if (t != "") { return splitSubscript(t).name }
+        // While `let` runs, its arguments not being pre-expanded, bash's check of NAME[SUB]
+        // (valid_array_reference) looks NAME up once more.
+        if (arPfx == "let: ") { refTarget(nm) }
+        return nm
+    }
+    // The store of an element an operator just read (++, op=) looks a circular nameref up
+    // once more than a plain assignment's: bash reads, then binds, each with its own lookup.
+    // Twin of ar_rmw.
+    function arRmwRef(name) { if (anyRef && attrOn(refVars, name)) { refTarget(name) } }
+    // An element of NAME in arithmetic. Through a circular nameref arElemName kept, the
+    // read looks the name up again (another warning) and reads the global variable
+    // refGlobal finds, else nothing. Twin of rt_ar_nget.
+    function arElem(name, key) {
+        if (anyRef && attrOn(refVars, name) && refTarget(name) == "") {
+            var gn = refGlobal(name)
+            var gv = {v: ""}
+            if (gn != "") { onRefGlobal(gn, function() { gv.v = scGet(gn, key) }) }
+            return gv.v
+        }
+        return scGet(name, key)
     }
     function arName() {
         var s0 = arP
@@ -5733,7 +5812,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (arNoeval > 0) { return 0 }
         // bash 5.3 reports it twice.
         if (key == AR_NOSUB) { diagErr(nm + "[]: bad array subscript\n"); diagErr(nm + "[]: bad array subscript\n"); return 0 }
-        var v = (key != null) ? scGet(nm, key) : getVarVal(nm)
+        var v = (key != null) ? arElem(nm, key) : getVarVal(nm)
         if (v == "") { return 0 }
         if (arDepth >= 1024) { return arErr("expression recursion level exceeded") }
         return arEval(v)
@@ -5742,7 +5821,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (arNoeval > 0 || arithErr) { return v }
         if (key == AR_NOSUB) { diagErr(arPfx + "`" + nm + "[]': not a valid identifier\n"); return v }
         if (roRefused(nm, "")) { arBad = true; arithErr = true; return v }
-        if (key != null) { arrSet(nm, key, numToStr(v)) } else { setVarVal(nm, numToStr(v)) }
+        arSet(nm, key, numToStr(v))
         return v
     }
     // One binary operator of the string evaluator: the thunks' arOp, with / and % checked here
@@ -5778,6 +5857,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v2 = arValue(nm, key)
             arWs()
             if ((arAt(0) == 43 && arAt(1) == 43) || (arAt(0) == 45 && arAt(1) == 45)) {
+                if (key != null) { arRmwRef(nm) }
                 arStore(nm, key, arOp((arAt(0) == 43) ? "+" : "-", v2, 1))
                 arP = arP + 2
             }
@@ -5798,7 +5878,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var nm = arElemName(arName(), arAt(0) == 91)
                 var key = arSubscript(nm)
                 if (arBad) { return 0 }
-                return arStore(nm, key, arOp((cc == 43) ? "+" : "-", arValue(nm, key), 1))
+                var pv = arValue(nm, key)
+                if (key != null) { arRmwRef(nm) }
+                return arStore(nm, key, arOp((cc == 43) ? "+" : "-", pv, 1))
             }
             arP = save
         }
@@ -5981,7 +6063,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = arAssignS()
             if (arBad) { return 0 }
             if ((op == "/=" || op == "%=") && arIsZero(v) && arNoeval == 0) { return arErrTok("division by 0", arLaTok(arS, arP)) }
-            if (op != "=") { v = arApply(op.slice(0, op.length - 1), arValue(nm, key), v) }
+            if (op != "=") {
+                var ov = arValue(nm, key)
+                if (key != null) { arRmwRef(nm) }
+                v = arApply(op.slice(0, op.length - 1), ov, v)
+            }
             if (arBad) { return 0 }
             return arStore(nm, key, v)
         }
@@ -6270,17 +6356,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         a = refAssign(a)
         if (a == null) { return }
-        var isAs = assocFact(a.name, assoc)
-        if (a.lit != null) {
-            var lv = evalArrayLit(a.lit, isAs)
+        // A store refAssign put on a global expands its value first, with the nameref in
+        // effect, as any other store does.
+        var ga = a
+        if (ga.glob == true) {
+            ga.glob = false
+            var gas = {v: false}
+            if (ga.lit != null) { onRefGlobal(ga.name, function() { gas.v = assocFact(ga.name, assoc) }) }
+            var glv = (ga.lit != null) ? evalArrayLit(ga.lit, gas.v) : null
+            var gv = (ga.lit == null && ga.valT != null) ? wordJoin(ga.valT()) : ""
             if (arithErr || abortSignal != null) { return }
-            refCircDrop(a, false)
-            // A replacing literal drops a scalar of the name; an appending one keeps it as element 0.
-            if (a.op != "+=") { unsetVar(a.name) } else if (!isAs) { arrAdopt(a.name) }
-            applyArrayLit(a.name, lv, a.op == "+=", assoc, decl)
+            onRefGlobal(ga.name, function() { if (ga.lit != null) { litStore(ga, glv, assoc, decl) } else { runAssignV(ga, assoc, gv, decl) } })
+            return
+        }
+        if (a.lit != null) {
+            var lv = evalArrayLit(a.lit, assocFact(a.name, assoc))
+            if (arithErr || abortSignal != null) { return }
+            litStore(a, lv, assoc, decl)
             return
         }
         runAssignV(a, assoc, (a.valT != null) ? wordJoin(a.valT()) : "", decl)
+    }
+    // The array literal a with its words expanded (lv) stored.
+    function litStore(a, lv, assoc, decl) {
+        refCircDrop(a, false)
+        // A replacing literal drops a scalar of the name; an appending one keeps it as element 0.
+        if (a.op != "+=") { unsetVar(a.name) } else if (!assocFact(a.name, assoc)) { arrAdopt(a.name) }
+        applyArrayLit(a.name, lv, a.op == "+=", assoc, decl)
     }
     // The key NAME[SUB]=v stores under, w being SUB expanded and lbl the "NAME[SUB]" an error
     // quotes as written. An indexed array's SUB is arithmetic even when it expands to @; a
@@ -6327,6 +6429,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function runAssignV(a, assoc, v, decl) {
         a = refAssign(a)
         if (a == null) { return }
+        if (a.glob == true) {
+            var ga = a
+            ga.glob = false
+            onRefGlobal(ga.name, function() { runAssignV(ga, assoc, v, decl) })
+            return
+        }
         var isAs = assocFact(a.name, assoc)
         if (a.idxT != null) {
             // A declaration makes NAME an indexed array before it reads SUB, so a SUB it

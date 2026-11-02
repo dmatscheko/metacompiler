@@ -1174,6 +1174,53 @@ st=1
 s127g
 declare -ft s127g'
 }
+# ===== SECTION 128: circular namerefs in stores and arithmetic; case toggling =====
+# Through a nameref chain that closes on a local, an element store, an array literal and an
+# arithmetic store land on the global variable of that name and leave the nameref; an
+# arithmetic store looks the name up once more than an assignment (one more warning), `let`
+# once more again for each NAME[SUB], and outside a function an arithmetic scalar store
+# through a circular chain stores nothing. An arithmetic element store makes a set scalar
+# element 0. ${v~} and ${v~~} toggle the case of the first / every ASCII letter, a pattern
+# picking the characters. -n takes -i and the case attributes away, and fails with -i.
+# declare -ft with no name prints only the traced functions, whatever the others hold.
+# Every expected value is bash 5.3's.
+s128() {
+  local e f c='circular name reference' m='maximum nameref depth'
+  # s128c TEXT WORD: how many lines TEXT has, and how many of them hold WORD.
+  s128c() { local IFS=$'\n' l n=0 wd=$2; set -- $1; for l; do [[ $l == *"$wd"* ]] && n=$(( n + 1 )); done; echo "$# $n"; }
+  s128a=(G0 G1)
+  s128f() { local -n s128a=s128a; s128a[1]=Q; s128a[3]+=R; echo "${s128a[3]} ${#s128a[@]}"; s128a=(n "${s128a[1]}"); s128a+=(o); declare -p s128a; }
+  e=$(s128f 2>/dev/null; declare -p s128a); f=$(s128f 2>&1 >/dev/null)
+  check sgc1 "$e $(s128c "$f" "$c")" 'R 3
+declare -n s128a="s128a"
+declare -a s128a=([0]="n" [1]="Q" [2]="o") 13 13'
+  s128g() { local -n s128s=s128s; (( s128s = 5 )); let s128s+=1; (( s128s[2] = 4 )); let 's128s[3]=s128s[2]+1'; local x='s128s[0]++'; let x; echo $(( s128s[3] )) $(( s128s )); }
+  s128s=1; e=$(s128g 2>/dev/null; declare -p s128s); f=$(s128g 2>&1 >/dev/null)
+  check sgc2 "$e $(s128c "$f" "$m")" '5 7
+declare -a s128s=([0]="7" [2]="4" [3]="5") 26 2'
+  s128k() { local -n s128d=s128d; echo "${s128d:=DEF} ${s128d=X} ${s128d:-Y}"; }
+  unset s128d; e=$(s128k 2>/dev/null; echo "$s128d"); f=$(s128k 2>&1 >/dev/null)
+  check sgc3 "$e $(s128c "$f" "$m")" 'DEF DEF DEF
+DEF 6 1'
+  e=$(declare -n s128q=s128r s128r=s128q; (( s128q = 5 )); echo "st=$?"; (( s128q[1] = 6 )); declare -p s128q; declare -n s128t=s128u s128u=s128t; let 's128t[2]=7'; declare -p s128t)
+  f=$( (declare -n s128q=s128r s128r=s128q; (( s128q = 5 )); (( s128q[1] = 6 )); declare -n s128t=s128u s128u=s128t; let 's128t[2]=7') 2>&1)
+  check sgc4 "$e $(s128c "$f" "$c")" 'st=0
+declare -n s128q="s128r"
+declare -n s128t="s128u" 9 8'
+  e=$(x=7; (( x[2]=4 )); y=8; let 'y[1]=5'; z=9; s='z[3]=1'; (( $s )); declare -p x y z)
+  check sae1 "$e" 'declare -a x=([0]="7" [2]="4")
+declare -a y=([0]="8" [1]="5")
+declare -a z=([0]="9" [3]="1")'
+  local v=hELLo a=(abC Def) u=$'\xc3\xa9Ab' t=aB-1
+  check stc1 "${v~} ${v~~} ${v~~[lLb]} ${v~[a-z]} ${a[*]~} ${a[1]~~} ${u~} ${u~~} ${t~~?}" $'HELLo HellO hEllo HELLo AbC def dEF \xc3\xa9Ab \xc3\xa9aB Ab-1'
+  e=$(s128m=3; s128n() { local -i n; local -n n=s128m; declare -p n; local -u o=q; local -n o=s128m; declare -p o; local -n -i p=s128m; echo "st=$?"; n=4+1; declare -p s128m; }; s128n)
+  check snd1 "$e" 'declare -n n="s128m"
+declare -n o="s128m"
+st=1
+declare -- s128m="4+1"'
+  e=$(s128p() { echo "$(case a in a) echo x;; esac)"; }; s128o() { :; }; declare -ft s128o; declare -ft; echo "st=$?")
+  check sdf1 "$e" $'s128o () \n{ \n    :\n}\ndeclare -ft s128o\nst=0'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -1214,5 +1261,6 @@ s124  # SECTION-CALL 124
 s125  # SECTION-CALL 125
 s126  # SECTION-CALL 126
 s127  # SECTION-CALL 127
+s128  # SECTION-CALL 128
 echo "full: $checks checks, $fails failures"
 exit $fails

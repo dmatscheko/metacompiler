@@ -609,7 +609,7 @@ PeGlobSeg   = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | BraceBare ;
 
 // ${v^} ${v^^} ${v,} ${v,,} : case conversion of the first / of every character.
 PeCaseForm  = PeTarget PeCaseOp [ PeGlobArg ] ;
-PeCaseOp    <~~ push({pe: up.in}) ~~> = "^^" | "^" | ",," | "," ;
+PeCaseOp    <~~ push({pe: up.in}) ~~> = "^^" | "^" | ",," | "," | "\x7e\x7e" | "\x7e" ;
 
 // ${v/pat/rep} first match, ${v//pat/rep} every match, ${v/#pat/rep} anchored at the
 // start, ${v/%pat/rep} anchored at the end. The replacement may be omitted (delete).
@@ -1699,6 +1699,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtNrefUnglob = rtDecl("rt_nref_unglob", false, [])
     var rtNrefArr = rtDecl("rt_nref_arr", true, [1, 0, 0])
     var rtNrefCirc = rtDecl("rt_nref_circ", false, [])
+    var rtNrefArname = rtDecl("rt_nref_arname", true, [1])
+    var rtArNget = rtDecl("rt_ar_nget", true, [1, 1])
+    var rtArNset = rtDecl("rt_ar_nset", false, [1, 1, 1, 0])
+    var rtArRmw = rtDecl("ar_rmw", false, [1, 1])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
     // i32 rt_decl_word(i8* w, i32 d, i32 x, i32 at, i8* who): one computed operand of a
     // declaration, and i8* rt_decl_name(i8* w) the NAME it starts with (bash-rt.c).
@@ -2263,7 +2267,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // languages/bash-interpreter.abnf's isPatOp / applyPatOp are the same table.
     function isPatOp(pe) {
         if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") { return true }
-        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") { return true }
+        if (pe == "^" || pe == "^^" || pe == "," || pe == ",," || pe == "~" || pe == "\x7e\x7e") { return true }
         return (pe == "/" || pe == "//")
     }
     function patOpKind(pe) {
@@ -2278,6 +2282,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pe == "^^") { return 1 }
         if (pe == ",") { return 2 }
         if (pe == ",,") { return 3 }
+        if (pe == "~") { return 5 }
+        if (pe == "\x7e\x7e") { return 6 }
         if (pe == "/" || pe == "//") {
             if (anchor == "#") { return 2 }
             if (anchor == "%") { return 3 }
@@ -2889,11 +2895,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtStrip, [v, rp.v, llvm.constant.NewInt(i32, smode)])}
             }}
         }
-        if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") {
-            var cmode = 0
-            if (pe == "^^") { cmode = 1 }
-            if (pe == ",") { cmode = 2 }
-            if (pe == ",,") { cmode = 3 }
+        if (pe == "^" || pe == "^^" || pe == "," || pe == ",," || pe == "~" || pe == "\x7e\x7e") {
+            var cmode = patOpMode(pe, "")
             // PeCaseForm's optional pattern (${s^^[bn]} on banana is BaNaNa) is rt_case's third
             // operand; "" is the absent case.
             var cpW = (words.length > 0) ? words[0] : null
@@ -2946,7 +2949,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, indirect ? "!" + name : name), msg])}
             }
             var picked = b.NewSelect(blank, d, v)
-            if (o == "=" && t6.v != null) { b.NewCall(rtSetByName, [t6.v, picked, zero, refAttrs(b, t6.v, false)]) }
+            // Only an unset (or empty) target is stored to, and so warned about through a
+            // circular nameref.
+            if (o == "=" && t6.v != null) {
+                var dsB = curF.NewBlock(""), djB = curF.NewBlock("")
+                b.NewCondBr(blank, dsB, djB)
+                dsB.NewCall(rtSetByName, [t6.v, d, zero, refAttrs(dsB, t6.v, false)])
+                dsB.NewBr(djB)
+                b = djB
+            }
             if (o == "=" && t6.v == null) {
                 // the default is stored under the name's attributes, and expands as stored
                 var setB = curF.NewBlock(""), joinB = curF.NewBlock("")
@@ -3439,13 +3450,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var nmv = arrNameOf(b, name)
             var rk = subKeyOf(b, name, w, nmv, false, aq, true)
-            return {b: rk.b, v: rk.b.NewCall(rtArith, rk.b.NewCall(rtScGet, [(nmv != null) ? nmv : gepStr(rk.b, name), rk.k]))}
+            return {b: rk.b, v: rk.b.NewCall(rtArith, (nmv != null) ? rk.b.NewCall(rtArNget, [nmv, rk.k]) : rk.b.NewCall(rtScGet, [gepStr(rk.b, name), rk.k]))}
         }
     }
-    // The array NAME[SUB] is in, as an i8*, when NAME is a nameref: the array it names
-    // (rt_nref_base); else null, for the name itself. Twin of arElemName in
-    // bash-interpreter.abnf.
-    function arrNameOf(b, name) { return attrOn(refVars, name) ? b.NewCall(rtNrefBase, gepStr(b, name)) : null }
+    // The array NAME[SUB] is in, as an i8*, when NAME is a nameref: the array it names, or
+    // the nameref itself for a circular chain (rt_nref_arname); else null, for the name
+    // itself. Its element is read by rt_ar_nget and stored by rt_ar_nset. Twin of
+    // arElemName in bash-interpreter.abnf.
+    function arrNameOf(b, name) { return attrOn(refVars, name) ? b.NewCall(rtNrefArname, gepStr(b, name)) : null }
     // An assignment target's key ({b, k, nm}: k null for a plain name, nm as arrNameOf), its
     // value, and the store.
     function arLhsKey(b, lhs) {
@@ -3454,9 +3466,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rk = subKeyOf(b, lhs.lhs, lhs.sub, nmv, false, lhs.aq, true)
         return {b: rk.b, k: rk.k, nm: nmv}
     }
+    // Only an operator that stores back reads its target here (++, op=): through a nameref
+    // the store then looks the name up once more (ar_rmw).
     function arLhsGet(b, name, rk) {
         if (rk.k == null) { return b.NewCall(rtArith, varString(b, name)) }
-        return b.NewCall(rtArith, b.NewCall(rtScGet, [(rk.nm != null) ? rk.nm : gepStr(b, name), rk.k]))
+        if (rk.nm == null) { return b.NewCall(rtArith, b.NewCall(rtScGet, [gepStr(b, name), rk.k])) }
+        var ev = b.NewCall(rtArNget, [rk.nm, rk.k])
+        b.NewCall(rtArRmw, [rk.nm, rk.k])
+        return b.NewCall(rtArith, ev)
     }
     // Nothing is stored once an error has been raised: bash abandons the whole expression,
     // so `(( w = 2, w2 = 1/0 ))` sets w alone. Twin of arLhsSet in bash-interpreter.abnf.
@@ -3466,9 +3483,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gArithErr), zero), st, jb)
         // A readonly name is an arithmetic error: (( )) and let fail, $(( )) abandons the line.
         if (roRefused(st, name, "")) { st.NewStore(one, gArithErr) }
+        else if (k == null && attrOn(refVars, name) && refAlias(name) == null) {
+            var nv = gepStr(st, name)
+            st.NewCall(rtArNset, [nv, nullStr, st.NewCall(rtInt2str, v), refAttrs(st, nv, true)])
+        }
         else if (k == null) { storeVar(st, name, st.NewCall(rtInt2str, v)) }
+        else if (rk.nm != null) { st.NewCall(rtArNset, [rk.nm, k, st.NewCall(rtInt2str, v), zero]) }
         else {
-            st.NewCall(rtArrIset, [(rk.nm != null) ? rk.nm : gepStr(st, name), k, st.NewCall(rtInt2str, v)])
+            // An element store makes a set scalar its element 0 (rt_arr_adopt).
+            var adB = curF.NewBlock(""), isB = curF.NewBlock("")
+            st.NewCondBr(st.NewICmp(llvm.enum.IPredNE, loadVar(st, name), unsetPtr(st)), adB, isB)
+            adB.NewCall(rtArrAdopt, [gepStr(adB, name), llvm.constant.NewInt(i32, getVarId(name))])
+            adB.NewBr(isB)
+            st = isB
+            st.NewCall(rtArrIset, [gepStr(st, name), k, st.NewCall(rtInt2str, v)])
         }
         st.NewBr(jb)
         return jb
@@ -3877,15 +3905,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         else if (assoc != 1) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(name))]) }
         // A literal makes the name a SET array even with no element (rt_arr_mark).
         b.NewCall(rtArrMark, nm)
-        if (assoc == 1) { return emitAssocLit(b, name, nm, vals) }
-        if (assoc == 0) { return emitIndexedLit(b, name, nm, vals, append) }
+        if (assoc == 1) { return emitAssocLit(b, name, nm, vals, false) }
+        if (assoc == 0) { return emitIndexedLit(b, name, nm, vals, append, false) }
+        // Through a nameref the array may be a global rt_nref_arr put in effect.
+        var ug = attrOn(refVars, name)
         var asB = curF.NewBlock(""), ixB = curF.NewBlock(""), jB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, nm), zero), asB, ixB)
-        emitAssocLit(asB, name, nm, vals).NewBr(jB)
-        emitIndexedLit(ixB, name, nm, vals, append).NewBr(jB)
+        emitAssocLit(asB, name, nm, vals, ug).NewBr(jB)
+        emitIndexedLit(ixB, name, nm, vals, append, ug).NewBr(jB)
+        if (ug) { jB.NewCall(rtNrefUnglob) }
         return jB
     }
-    function emitAssocLit(b, name, nm, vals) {
+    function emitAssocLit(b, name, nm, vals, ug) {
         var i
         // An ASSOCIATIVE array literal whose first element is a bare word is KEY VALUE pairs -
         // bash 5.3.15 reads `declare -A b=(one two three four)` as b[one]=two b[three]=four, a
@@ -3916,9 +3947,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (pendKey != null) { emitAkSet(abox, name, nm, pendKey, emptyPtr(abox.b), pendSrc, null) }
         if (!ended) { abox.b.NewBr(stop) }
-        return emitAbortCheck(stop)
+        return emitAbortCheck(stop, ug)
     }
-    function emitIndexedLit(b, name, nm, vals, append) {
+    function emitIndexedLit(b, name, nm, vals, append, ug) {
         var i
         // In an INDEXED literal a bare word takes the index after the element before it
         // (b=([3]=c [1]=a b) is 1 2 3 = a b c), so the next index is threaded through
@@ -3931,7 +3962,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // A bad subscript, or under -i an element that is an arithmetic error, stops the
         // literal and abandons the line.
-        return emitAbortCheck(b)
+        return emitAbortCheck(b, ug)
     }
     // One key k and value v of an associative literal, stored unless rt_arr_akbad refuses
     // an empty k, quoting src: a refused [k]=v jumps to stop, ending the literal, and a
@@ -4016,7 +4047,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var pfx = soft ? b.NewLoad(i8ptr, gArPfx) : null
             if (soft) { b.NewStore(emptyPtr(b), gArPfx) }
             // Through a nameref, the element is the named array's (rt_nref_arr), or a circular
-            // one's own once the subscript is good (rt_nref_circ).
+            // one's own once the subscript is good (rt_nref_circ), or the global's, put in
+            // effect until rt_nref_unglob.
             if (viaRef) {
                 nm = b.NewCall(rtNrefArr, [nm, zero, one])
                 b = emitAbortCheck(b)
@@ -4033,14 +4065,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, rf, zero), skipB, setB)
                 b = setB
             }
-            b = emitAbortCheck(b)
+            b = emitAbortCheck(b, viaRef)
             if (viaRef) { b.NewCall(rtNrefCirc) }
             if (!viaRef) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
             var ebox = {b: b}
             emitElemSet(ebox, a.name, nm, rk.k, (a.op == "+=") ? b.NewCall(rtArrGet, [nm, rk.k]) : null, v, assoc, mk)
-            if (skipB == null) { return ebox.b }
-            ebox.b.NewBr(skipB)
-            return skipB
+            if (skipB != null) {
+                ebox.b.NewBr(skipB)
+                ebox.b = skipB
+            }
+            if (viaRef) { ebox.b.NewCall(rtNrefUnglob) }
+            return ebox.b
         }
         // On an array name, a scalar assignment is to element 0 and `+=` appends to its text
         // (bash 5.3 answers `abd c` for e=(ab c); e+=d), both under the array's attributes.
@@ -4447,6 +4482,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Set while declOne runs again past the -n checks it has emitted.
         var nrefDone = false
         var declOne = function(b, j, v) {
+            // -n with -i fails, silently. Twin of declOne in bash-interpreter.abnf.
+            if (isRef && integer) { roFail = true; return b }
             var a = asgs[j]
             var refChk = isRef && a != null && a.lit == null && a.idxT == null
             if (refChk && v == null && (a.valT == null || a.valT.c != undefined)) {
@@ -4597,6 +4634,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = joinB
                 } else { freshLocal(b, j) }
             }
+            // -n takes away -i, -u, -l and -c; a case attribute given with it stays. Without
+            // a value, a set variable may still be refused when this runs (rt_nref_noarr),
+            // which these compile-time attributes cannot follow: they stay then.
+            if (isRef && (asgs[j] != null || fresh)) { intVars["$" + names[j]] = false; upVars["$" + names[j]] = false; loVars["$" + names[j]] = false }
             if (integer) { intVars["$" + names[j]] = true }
             var cl = bashDeclCase(caseLetter(names[j]), flags, plus)
             upVars["$" + names[j]] = cl == "u" || cl == "c"
@@ -6369,12 +6410,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the (sub)shell (exited 1); an arithmetic or substring error abandons the command line
     // (exited 2, which a subshell treats as any exit and a top-level line catches - see
     // runProgram). Both leave status 1. Twin of takeAbort in bash-interpreter.abnf.
-    function emitAbortCheck(b) {
+    // ug: a global binding a nameref store put in effect goes back first (rt_nref_unglob).
+    function emitAbortCheck(b, ug) {
         var ab = b.NewLoad(i32, gAbort)
         var isAb = b.NewICmp(llvm.enum.IPredNE, ab, zero)
         var isAr = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gArithErr), zero)
         var kill = curF.NewBlock(""), cont = curF.NewBlock("")
         b.NewCondBr(b.NewOr(isAb, isAr), kill, cont)
+        if (ug == true) { kill.NewCall(rtNrefUnglob) }
         kill.NewStore(zero, gAbort)
         kill.NewStore(zero, gArithErr)
         kill.NewStore(emptyPtr(kill), gArPfx)   // no command prefix outlives the line
@@ -6737,25 +6780,45 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return acc
     }
     // The definition of fn in force (fnk_fn picks it) as bash prints it. A definition the
-    // printer does not model is refused here, where printing it is compiled.
-    function emitFnText(b, fn) {
+    // printer does not model is refused here, where printing it is compiled - unless lazy:
+    // then the caller has made printing it stop the shell (emitFnTextBad).
+    function emitFnText(b, fn, lazy) {
         var nd = funcDefs["$" + fn]
         var k = (nd > 1) ? fnDefOf(b, fn) : null
         var t = null
         var j
         for (j = nd; j >= 1; j--) {
             var d = funcTexts["$" + fn + "#" + j]
-            if (d.err != undefined) { fail("printing a function body that holds " + d.err + " is not supported") }
-            var g = gepStr(b, d.text)
+            if (d.err != undefined && lazy != true) { fail("printing a function body that holds " + d.err + " is not supported") }
+            var g = gepStr(b, (d.err != undefined) ? "" : d.text)
             t = (t == null) ? g : b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, j)), g, t)
         }
         return t
+    }
+    // {v, err}: v an i1, whether the definition of fn in force is one the printer does not
+    // model (err names what); null when fn has none.
+    function emitFnTextBad(b, fn) {
+        var nd = funcDefs["$" + fn]
+        var k = (nd > 1) ? fnDefOf(b, fn) : null
+        var bad = null
+        var err = ""
+        var j
+        for (j = 1; j <= nd; j++) {
+            var d = funcTexts["$" + fn + "#" + j]
+            if (d.err == undefined) { continue }
+            err = d.err
+            var hit = (k == null) ? llvm.constant.NewInt(llvm.types.I1, 1) : b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, j))
+            bad = (bad == null) ? hit : b.NewOr(bad, hit)
+        }
+        return (bad == null) ? null : {v: bad, err: err}
     }
     // declare -f / -F: with names and an attribute (-t, +t) and no -p, they set or clear it
     // on each function, a name that is none failing silently. Otherwise they print: -f the
     // definitions, -F the names, and a function's attribute line `declare -ft NAME` when no
     // name is given or with -p; with no name an attribute picks the functions holding it,
-    // and with -p a name that is none is "not found". Twin of declFuncs in
+    // and with -p a name that is none is "not found". With no name, the functions printed are
+    // the ones defined when it runs, so a definition the printer does not model stops the
+    // shell then (status 2) instead of refusing the program. Twin of declFuncs in
     // bash-interpreter.abnf.
     function emitDeclFuncs(b, kw, q, names, flags, plus) {
         var p = flags.indexOf("p") >= 0
@@ -6788,16 +6851,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var def = fnIsDefined(b, fn)
             var tr = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(b.NewLoad(i32, fnSlot(fn)), trB), zero)
+            var shown = (tOn && names.length == 0) ? b.NewAnd(def, tr) : def
+            var bad = (q == "f" && names.length == 0) ? emitFnTextBad(b, fn) : null
+            if (bad != null) {
+                var stopB = curF.NewBlock(""), goB = curF.NewBlock("")
+                b.NewCondBr(b.NewAnd(shown, bad.v), stopB, goB)
+                emitOnStderr(stopB, gepStr(stopB, c.file + ": " + kw + ": printing a function body that holds " + bad.err + " cannot be compiled\n"))
+                stopB.NewStore(llvm.constant.NewInt(i32, 2), gExitCode)
+                stopB.NewStore(one, gExited)
+                stopB.NewBr(viaUnwind(curExit, curExitRd))
+                b = goB
+            }
             var line = null
             if (q == "f") {
-                line = b.NewCall(rtStrcat, [emitFnText(b, fn), gepStr(b, "\n")])
+                line = b.NewCall(rtStrcat, [emitFnText(b, fn, bad != null), gepStr(b, "\n")])
                 if (full) { line = b.NewCall(rtStrcat, [line, b.NewSelect(tr, gepStr(b, "declare -ft " + fn + "\n"), emptyPtr(b))]) }
             } else if (full) {
                 line = b.NewSelect(tr, gepStr(b, "declare -ft " + fn + "\n"), gepStr(b, "declare -f " + fn + "\n"))
             } else {
                 line = gepStr(b, fn + "\n")
             }
-            var shown = (tOn && names.length == 0) ? b.NewAnd(def, tr) : def
             b.NewCall(rtPrints, b.NewSelect(shown, line, emptyPtr(b)))
             if (p && names.length > 0) {
                 var miss = curF.NewBlock(""), cont = curF.NewBlock("")
