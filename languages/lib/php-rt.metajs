@@ -2682,7 +2682,7 @@ function phPropFit(cls, name, v) {
 function phSlotFit(k, name, typ, v) {
     var r = phTypeFit(typ, v, k)
     if (r === phTypeBad) {
-        phRaise("TypeError", "Cannot assign " + phValueName(v) + " to property " + phStr(k["__name"]) + "::$" + name + " of type " + phsTypeText(typ))
+        phRaise("TypeError", "Cannot assign " + phValueName(v) + " to property " + phStr(k["__name"]) + "::$" + name + " of type " + phsTypeText(typ, ""))
     }
     return r
 }
@@ -2784,7 +2784,7 @@ function js_phargerr(v, typ, self, n, pname, who, scope, where, rest) {
     var site = phStr(where)
     if (site != "") { site = ", called" + site }
     phRaise("TypeError", phFnShown(who, scope) + "(): Argument #" + at + " (" + phStr(pname) + ") must be of type "
-        + phsTypeText(t) + ", " + phValueName(bad) + " given" + site)
+        + phsTypeText(t, "") + ", " + phValueName(bad) + " given" + site)
     return undefined
 }
 // v, what a function declaring return type typ returns (undefined: it ended
@@ -2800,7 +2800,7 @@ function js_phretfit(v, typ, self, lsb, who, scope, refused) {
         if (r !== phTypeBad && refused !== true) { return r }
         given = phValueName(v)
     }
-    phRaise("TypeError", name + "(): Return value must be of type " + phsTypeText(phSigType(typ, self, undefined)) + ", " + given + " returned")
+    phRaise("TypeError", name + "(): Return value must be of type " + phsTypeText(phSigType(typ, self, undefined), rtIsNil(lsb) ? "" : phStr(lsb["__name"])) + ", " + given + " returned")
     return undefined
 }
 

@@ -187,7 +187,7 @@ CloseAhead  = :script(~~ "pure";
 // A function definition: function name($a, $b) { ... } with explicit return. The
 // parameter and return types are checked at the call and at each return.
 // 'function &name()' returns by REFERENCE (DefAmp, refFnEnter).
-Def         <~~ push(makeFun(takeAll())); refFnStack.pop() ~~>
+Def         <~~ push(makeFun(takeAll(), callSite(up.pos))); refFnStack.pop() ~~>
             = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(noteFnName(up.in)); refFnEnter(up.in, "$"); genPush(); fnEnter(); cloEnterFn(up.in, false, up.pos) ~~> ParamList [ ReturnType ] Block ;
 DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
@@ -239,7 +239,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: of its modifiers only the visibility is kept, and a reference-return
 // '&' is accepted and ignored; an abstract/interface method has no body (';'
 // instead of a block -> empty method).
-MethodDecl  <~~ push({method: makeFun(takeAll())}); refFnStack.pop() ~~>
+MethodDecl  <~~ push({method: makeFun(takeAll(), callSite(up.pos))}); refFnStack.pop() ~~>
             = [ AttrGrp ] { MethMod } KwFunction [ DefAmp ] MethodName <~~ push(noteFnName(up.in)); refFnEnter(up.in, "->"); genPush(); fnEnter(); cloEnterFn(up.in, true, up.pos) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: 'const A = 1, B = 2;', with PHP 8.3's typed form ('const int
 // SIZE = 4') and any modifier (final/public/...). They are published on the class
@@ -560,7 +560,7 @@ ForeachV2T  <~~ push({v2: pop()}) ~~>
 // value.
 FeRef       <~~ noteRef(); push({feref: true}) ~~> = "&" ;
 
-Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in), retDepr(up.pos))) ~~>
+Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in), retDepr(up.pos), callSite(up.pos))) ~~>
             = KwReturn [ Expression ] Semi ;
 // 'break 2' / 'continue 2' leave that many enclosing loops (and switches). The level
 // is a literal integer in PHP - it has to be known where the jump is emitted - so it
@@ -1227,7 +1227,7 @@ NewAnon     <~~ push(makeNewAnon(takeAll(), up.start)) ~~>
 // the body pushes a bare thunk, and makeArrowFn has to tell them apart.
 ArrowFn     <~~ push(makeArrowFn(takeAll())) ~~>
             = [ AttrGrp ] [ CloStatic ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
-ArrowBody   <~~ push({arrowbody: pop()}) ~~>
+ArrowBody   <~~ push({arrowbody: pop(), d: retDepr(up.pos), at: callSite(up.pos)}) ~~>
             = Expression ;
 // match (subject) { c1, c2 => e, default => e } : PHP 8's match EXPRESSION. Each arm
 // compares with '===' (js_phseq), which is why it needed the boxed float first:
@@ -1272,7 +1272,7 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
-ClosureExpr <~~ push(makeClosure(takeAll())); refFnStack.pop() ~~>
+ClosureExpr <~~ push(makeClosure(takeAll(), callSite(up.pos))); refFnStack.pop() ~~>
             = [ AttrGrp ] [ CloStatic ] KwFunction <~~ cloEnter(up.pos); genPush(); fnEnter(); refFnStack.push(false) ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
 // A static closure (or arrow function) binds no $this (cloEnter).
 CloStatic   <~~ cloStatic = true ~~> = "static" KwEnd ;
@@ -3031,8 +3031,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     function makeConstStmt() { return function(b) { return b } }
-    // d is the site a callable return type's deprecations stand at (retDepr).
-    function makeReturn(items, rv, rt, d) {
+    // d is the site a callable return type's deprecations stand at (retDepr), at
+    // the statement's site (callSite), where its return type's check stands.
+    function makeReturn(items, rv, rt, d, at) {
         var t = items.length > 0 ? items[0] : null
         return function(b) {
             var v = hNull
@@ -3046,6 +3047,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 v = callExt(b, "js_get", [cellV, emitStr(b, "v")])
             } else if (t != null) { var r = t(b); b = r.b; v = r.v }
             if (curRet != null) {
+                if (at != 0) { siteStore(b, at) }
                 var fit = emitRetFit(b, v, d)
                 b = fit.b
                 v = fit.v
@@ -4701,7 +4703,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var pname = h.hparam == null || h.hparam == undefined ? "$value" : h.hparam
             var body = h.hbodyT
             if (body == null) {
-                body = isGet ? makeBody([makeReturn([h.harrowT])])
+                body = isGet ? makeBody([makeReturn([h.harrowT], null, null, null, 0)])
                              : makeBody([makeHookStore(prop.name, h.harrowT)])
             }
             var savedBacking = hookBacking
@@ -5798,12 +5800,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (chk != null) { chk.clo = true }
         return chk
     }
-    function makeClosure(items) {
+    // end is the site of the closing brace (argCheckOf).
+    function makeClosure(items, end) {
         var isGen = genPop()
         fnLeave()
         var sc = cloLeave()
         var pl = paramList(items, sc.pos)
         pl.rty = retTypeOf(pl.rty, isGen)
+        pl.end = end
         var body = null
         var byVal = []
         var byRef = []
@@ -5848,10 +5852,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var isGen = genPop()
         var pl = paramList(items, cloScopes[cloScopes.length - 1].pos)
         pl.rty = retTypeOf(pl.rty, isGen)
-        var bodyT = null
+        var ab = null
         var mark = 0
         for (var i = 0; i < items.length; i++) {
-            if (items[i].arrowbody != undefined) { bodyT = items[i].arrowbody }
+            if (items[i].arrowbody != undefined) { ab = items[i] }
             else if (items[i].vmark != undefined) { mark = items[i].vmark }
         }
         // An arrow function captures BY VALUE, automatically: every '$name' the body
@@ -5861,7 +5865,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // resolves through the defining scope, as in every closure.
         var captured = varsSince(mark, pl.params.concat(["$this"]))
         var sc = cloLeave()
-        var body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, [], makeBody([makeReturn([bodyT])])))))
+        var body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, [], makeBody([makeReturn([ab.arrowbody], null, null, ab.d, ab.at)])))))
         var desc = cloDesc(sc, captured, pl)
         var chk = cloArgCheck(pl, sc)
         pl.live = sc.live
@@ -8499,7 +8503,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // zend_compile_params); who, the name the error shows; clo, a closure, whose
     // class scope is read from its frame; lib, a library method standing for an
     // internal one, which also refuses more than max arguments (-1: none), the
-    // variadic tail at rest (-1: none) counting toward them.
+    // variadic tail at rest (-1: none) counting toward them; end, the site of the
+    // closing brace a body that ends without a return statement checks its return
+    // type at (0: none).
     function argCheckOf(fn, who, lib) {
         var req = 0
         for (var i = 0; i < fn.params.length; i++) {
@@ -8516,7 +8522,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (!lib && req == 0 && !typed) { return null }
         if (lib && req == 0 && max < 0 && !typed) { return null }
         return {req: req, max: max, rest: fn.rest, who: who, sig: sigText(fn.params, fn.rest), clo: false, lib: lib,
-                tys: tys, rty: rty, names: fn.params, zpps: fn.zpps, cbs: fn.cbs, at: fn.at == undefined ? 0 : fn.at}
+                tys: tys, rty: rty, names: fn.params, zpps: fn.zpps, cbs: fn.cbs, at: fn.at == undefined ? 0 : fn.at,
+                end: fn.end == undefined ? 0 : fn.end}
     }
     function zppAny(zpps) {
         if (zpps == undefined) { return false }
@@ -8877,6 +8884,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curThisSure = savedSure
         if (!isCtl) { emitFrameLeave(endB, hNull) }
         if (!isCtl && curRet != null) {
+            if (curRet.end != 0) { siteStore(endB, curRet.end) }
             var fitR = emitRetFit(endB, hUndef, null)
             emitFramePop(fitR.b)
             fitR.b.NewRet(fitR.v)
@@ -9010,7 +9018,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // the collected PHP array (emitPhArgs packs the tail), so no prologue is needed -
     // this hook stays for symmetry with paramDefaults and simply passes the body on.
     function variadicPrologue(pl, body) { return body }
-    function makeFun(raw) {
+    // end is the site of the closing brace (argCheckOf).
+    function makeFun(raw, end) {
         var isGen = genPop()
         fnLeave()
         var sc = cloLeave()
@@ -9082,7 +9091,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             inner = makeBody(stmts)
         }
         return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt, live: sc.live, gen: isGen,
-                tys: pl.tys, rty: retTypeOf(pl.rty, isGen), zpps: pl.zpps, cbs: pl.cbs, at: pl.at,
+                tys: pl.tys, rty: retTypeOf(pl.rty, isGen), zpps: pl.zpps, cbs: pl.cbs, at: pl.at, end: end,
                 lib: phpLibDepth > 0 && name.substring(0, 5) != "__mec",
                 fname: phpLibDepth > 0 && name.substring(0, 5) == "__mec" ? undefined : name,
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}
@@ -9840,7 +9849,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var pt = pvs[j].typ
                 if (pvs[j].pnull === true && pt != "" && phpTypeOrNull(pt) != pt) {
                     fail("Cannot use null as default value for parameter $" + pvs[j].name + " of type "
-                         + phsTypeText(self != "" ? phsTypeSubstSelf(pt, self, parent) : pt))
+                         + phsTypeText(self != "" ? phsTypeSubstSelf(pt, self, parent) : pt, ""))
                 }
             }
         }
@@ -10010,7 +10019,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function emitConstDecl(b, clsV, clsName, rec) {
         var cv = hNull
         if (rec.cinit != null) {
-            var idx = emitFunc([], makeBody([makeReturn([rec.cinit])]), true, false, clsName)
+            var idx = emitFunc([], makeBody([makeReturn([rec.cinit], null, null, null, 0)]), true, false, clsName)
             cv = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [cv, emitStr(b, "__lazyconst"), callExt(b, "js_closure", [handle(idx), curScopeV])])
         }

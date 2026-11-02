@@ -3246,17 +3246,24 @@ func (rt *jsrt) phpWeakInt(v interface{}) interface{} {
 	return nil
 }
 
-// phpTypeText is a declared type as PHP prints it (zend_type_to_string). Twin
-// of phsTypeText in languages/lib/php-strings.js.
-func phpTypeText(typ string) string {
+// phpTypeText is a declared type as PHP prints it (zend_type_to_string_resolved),
+// static shown as stat when that is not "". Twin of phsTypeText in
+// languages/lib/php-strings.js.
+func phpTypeText(typ, stat string) string {
 	alts := phpTypeAlts(typ)
-	order := []string{"object", "array", "string", "int", "float", "bool", "false", "true"}
+	order := []string{"static", "callable", "object", "array", "string", "int", "float", "bool", "false", "true", "void", "never"}
 	var out []string
 	hasNull := false
 	for _, a := range alts {
 		lc := phpCase(a, false)
-		if lc == "null" {
+		switch lc {
+		case "mixed":
+			return "mixed"
+		case "null":
 			hasNull = true
+			continue
+		case "iterable":
+			out = append(out, "Traversable")
 			continue
 		}
 		builtin := false
@@ -3272,8 +3279,12 @@ func phpTypeText(typ string) string {
 	}
 	for _, o := range order {
 		for _, a := range alts {
-			if phpCase(a, false) == o {
-				out = append(out, o)
+			if lc := phpCase(a, false); lc == o || (lc == "iterable" && o == "array") {
+				if o == "static" && stat != "" {
+					out = append(out, stat)
+				} else {
+					out = append(out, o)
+				}
 			}
 		}
 	}
@@ -3281,7 +3292,7 @@ func phpTypeText(typ string) string {
 	if !hasNull {
 		return s
 	}
-	if len(out) == 1 && !strings.Contains(s, "&") && phpCase(s, false) != "mixed" {
+	if len(out) == 1 && !strings.Contains(s, "&") {
 		return "?" + s
 	}
 	if len(out) == 0 {
@@ -3306,7 +3317,7 @@ func (rt *jsrt) phpPropFit(cls *jsObject, name string, v interface{}) interface{
 func (rt *jsrt) phpSlotFit(k *jsObject, name, typ string, v interface{}) interface{} {
 	r, ok := rt.phpTypeFit(typ, v, k)
 	if !ok {
-		rt.phpRaise("TypeError", "Cannot assign "+rt.phpValueName(v)+" to property "+rt.phpStr(k.props["__name"])+"::$"+name+" of type "+phpTypeText(typ))
+		rt.phpRaise("TypeError", "Cannot assign "+rt.phpValueName(v)+" to property "+rt.phpStr(k.props["__name"])+"::$"+name+" of type "+phpTypeText(typ, ""))
 	}
 	return r
 }
@@ -4319,7 +4330,7 @@ func init() {
 				where = ", called" + where
 			}
 			rt.phpRaise("TypeError", rt.phpFnShown(u(a[5]), u(a[6]))+"(): Argument #"+strconv.Itoa(n)+" ("+rt.phpStr(u(a[4]))+
-				") must be of type "+phpTypeText(typ)+", "+rt.phpValueName(v)+" given"+where)
+				") must be of type "+phpTypeText(typ, "")+", "+rt.phpValueName(v)+" given"+where)
 			return 0
 		}
 		// js_phretfit(v, typ, self, lsb, who, scope, refused): v, what a function
@@ -4344,7 +4355,11 @@ func init() {
 				given = rt.phpValueName(v)
 			}
 			shown, _ := rt.phpSigType(u(a[1]), u(a[2]), nil)
-			rt.phpRaise("TypeError", name+"(): Return value must be of type "+phpTypeText(shown)+", "+given+" returned")
+			stat := ""
+			if lsb, ok := u(a[3]).(*jsObject); ok {
+				stat = rt.phpStr(lsb.props["__name"])
+			}
+			rt.phpRaise("TypeError", name+"(): Return value must be of type "+phpTypeText(shown, stat)+", "+given+" returned")
 			return 0
 		}
 		// The floor's js_rt_missvar hook, php half. Twin of js_phmissname in

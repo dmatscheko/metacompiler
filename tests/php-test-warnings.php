@@ -337,11 +337,15 @@ class WarnCbD extends WarnCbA {
     public function s(callable|string $c) { return "s"; }
     const V = __LINE__; public function v(int $n, callable ...$cs) { return count($cs); }
     public function r($c): callable { $GLOBALS["warnRet"] = __LINE__; return $c; }
+    public function &rr($c): callable { $GLOBALS["warnRet"] = __LINE__; return $c; }
+    public function ra($c) { $f = fn($x): callable => $x; $GLOBALS["warnRet"] = __LINE__; return $f($c); }
     public function go() {
         $v = $this->u("parent::m"); check("cb-union-parent", [$v, lastErr()], ["u", want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', self::U)]);
         $v = $this->s("parent::m"); check("cb-union-string", [$v, lastErr()], ["s", null]);
         $v = $this->v(1, "strlen", "parent::m"); check("cb-variadic-parent", [$v, lastErr()], [2, want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', self::V)]);
         $v = $this->r("parent::m"); check("cb-return-parent", [$v, lastErr()], ["parent::m", want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', $GLOBALS["warnRet"])]);
+        $v = $this->rr("parent::m"); check("cb-return-byref-parent", [$v, lastErr()], ["parent::m", want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', $GLOBALS["warnRet"])]);
+        $v = $this->ra("parent::m"); check("cb-return-arrow-parent", [$v, lastErr()], ["parent::m", want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', $GLOBALS["warnRet"])]);
     }
 }
 (new WarnCbD)->go();

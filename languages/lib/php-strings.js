@@ -392,23 +392,27 @@ function phsTypeAlts(typ) {
     return out
 }
 
-// A declared type as PHP prints it (zend_type_to_string): class names first,
-// then the builtin types in PHP's order, and null as a '?' prefix on a lone
-// type or as a last '|null'. Twin of phpTypeText in abnf/jsrtphp.go.
-function phsTypeText(typ) {
+// A declared type as PHP prints it (zend_type_to_string_resolved): the class
+// names in their declared order, iterable standing as Traversable among them,
+// then the builtin types in PHP's fixed order, lower-cased, static shown as
+// stat (the called class; "" for none). null is a '?' prefix on a lone type or
+// a last '|null'; mixed stands alone. Twin of phpTypeText in abnf/jsrtphp.go.
+function phsTypeText(typ, stat) {
     var alts = phsTypeAlts(typ)
-    var order = ["object", "array", "string", "int", "float", "bool", "false", "true"]
-    var builtin = ",object,array,string,int,float,bool,false,true,"
+    var order = ["static", "callable", "object", "array", "string", "int", "float", "bool", "false", "true", "void", "never"]
+    var builtin = ",mixed,null,static,callable,object,array,string,int,float,bool,false,true,void,never,"
     var s = ""
     var n = 0
     var hasNull = false
     var i = 0
     while (i < alts.length) {
         var lc = phsCase(alts[i], false)
+        if (lc == "mixed") { return "mixed" }
         if (lc == "null") { hasNull = true }
         else if (builtin.indexOf("," + lc + ",") < 0) {
             if (n > 0) { s = s + "|" }
-            if (alts[i].indexOf("&") >= 0 && alts.length > 1) { s = s + "(" + alts[i] + ")" } else { s = s + alts[i] }
+            if (lc == "iterable") { s = s + "Traversable" }
+            else if (alts[i].indexOf("&") >= 0 && alts.length > 1) { s = s + "(" + alts[i] + ")" } else { s = s + alts[i] }
             n = n + 1
         }
         i = i + 1
@@ -417,9 +421,10 @@ function phsTypeText(typ) {
     while (o < order.length) {
         var j = 0
         while (j < alts.length) {
-            if (phsCase(alts[j], false) == order[o]) {
+            var lj = phsCase(alts[j], false)
+            if (lj == order[o] || (lj == "iterable" && order[o] == "array")) {
                 if (n > 0) { s = s + "|" }
-                s = s + order[o]
+                s = s + (order[o] == "static" && stat != "" ? stat : order[o])
                 n = n + 1
             }
             j = j + 1
@@ -427,7 +432,7 @@ function phsTypeText(typ) {
         o = o + 1
     }
     if (!hasNull) { return s }
-    if (n == 1 && s.indexOf("&") < 0 && phsCase(s, false) != "mixed") { return "?" + s }
+    if (n == 1 && s.indexOf("&") < 0) { return "?" + s }
     if (n == 0) { return "null" }
     return s + "|null"
 }

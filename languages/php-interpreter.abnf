@@ -191,7 +191,7 @@ CloseAhead  = :script(~~ "pure";
 // A function definition: function name($a, $b) { ... } with explicit return. The
 // parameter and return types are checked at the call and at each return.
 // 'function &name()' returns by REFERENCE (DefAmp, refFnEnter).
-Def         <~~ push(makeFun(takeAll())); refFnStack.pop() ~~>
+Def         <~~ push(makeFun(takeAll(), callSite(up.pos))); refFnStack.pop() ~~>
             = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(up.in); refFnEnter(up.in, "$"); genPush(); fnEnter(); cloEnterFn(up.in, false, up.pos) ~~> ParamList [ ReturnType ] Block ;
 DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
@@ -230,7 +230,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: of its modifiers only 'static' and the visibility are kept, and '&'
 // returns by reference as a function's does (refFnEnter); an abstract/interface
 // method has no body (';' instead of a block -> empty method).
-MethodDecl  <~~ push({method: makeFun(takeAll())}); refFnStack.pop() ~~>
+MethodDecl  <~~ push({method: makeFun(takeAll(), callSite(up.pos))}); refFnStack.pop() ~~>
             = [ AttrGrp ] { PropMod } KwFunction [ DefAmp ] MethodName <~~ push(up.in); refFnEnter(up.in, "->"); genPush(); fnEnter(); cloEnterFn(up.in, true, up.pos) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: const A = 1, B = 2; with an optional TYPE before the first name
 // (the typed class constants of PHP 8.3). The typed form has to be its own
@@ -533,7 +533,7 @@ ForeachV2T  <~~ push({v2: pop()}) ~~>
 // 'as &$v' aliases the array ELEMENT, so writing $v writes back into the array.
 FeRef       <~~ push({byref: true}) ~~> = "&" ;
 
-Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in), retDepr(up.pos))) ~~>
+Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in), retDepr(up.pos), callSite(up.pos))) ~~>
             = KwReturn [ Expression ] Semi ;
 Break       <~~ push(makeBreak(takeAll())) ~~>
             = KwBreak [ JumpLevel ] Semi ;
@@ -1145,7 +1145,7 @@ AnonArgs    <~~ push({sargs: takeAll()}) ~~>
 // cannot change what an already-created fn sees), which is what makeArrowFn snapshots.
 ArrowFn     <~~ push(makeArrowFn(takeAll())) ~~>
             = [ AttrGrp ] [ CloStatic ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
-ArrowBody   <~~ push({body: arrowBody(pop())}) ~~>
+ArrowBody   <~~ push({body: arrowBody(pop(), retDepr(up.pos), callSite(up.pos))}) ~~>
             = Expression ;
 // match (subject) { c1, c2 => e, default => e } : an EXPRESSION whose arms are
 // compared with === (never with ==), first match wins, default may sit anywhere.
@@ -1211,7 +1211,7 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
-ClosureExpr <~~ push(makeClosure(takeAll())); refFnStack.pop() ~~>
+ClosureExpr <~~ push(makeClosure(takeAll(), callSite(up.pos))); refFnStack.pop() ~~>
             = [ AttrGrp ] [ CloStatic ] KwFunction <~~ cloEnter(up.pos); genPush(); fnEnter(); refFnStack.push(false) ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
 // A static closure (or arrow function) binds no $this (cloEnter).
 CloStatic   <~~ cloStatic = true ~~> = "static" KwEnd ;
@@ -2041,7 +2041,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var where = argset.site == undefined || argset.site == "" ? "" : ", called" + argset.site
         if (p.at != "") { phpSite = p.at }
         phpRaise("TypeError", phpFnShown(who, cls) + "(): Argument #" + n + " (" + p.name + ") must be of type "
-            + phsTypeText(p.rel ? phpTypeResolve(p.typ, false) : p.typ) + ", " + phpValueName(v) + " given" + where)
+            + phsTypeText(p.rel ? phpTypeResolve(p.typ, false) : p.typ, "") + ", " + phpValueName(v) + " given" + where)
     }
     // A string or an array v as a type with a callable alternative takes it
     // (phpCallableRest's cb, whose rest spells self or parent when rel), or
@@ -2070,9 +2070,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // function that ends without a return statement returns none. A string or
     // array returned to a type with a callable alternative is judged as phpCbFit
     // judges an argument, its deprecations raised at the return statement (the
-    // signal's d). Twin of js_phretfit in abnf/jsrtphp.go and lib/php-rt.metajs,
+    // signal's d). The check stands at the return statement (the signal's at),
+    // or at end, the site of the function's closing brace, when the body ends
+    // without one. Twin of js_phretfit in abnf/jsrtphp.go and lib/php-rt.metajs,
     // and of emitRetFit in php-to-llvm-ir.abnf.
-    function phpRetCheck(body, rtype, isGen, who) {
+    function phpRetCheck(body, rtype, isGen, who, end) {
         var lc = phsCase(rtype, false)
         if (rtype == "" || isGen || lc == "void" || phpLibDepth > 0) { return body }
         var rel = phpTypeRel(rtype)
@@ -2081,9 +2083,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function() {
             var r = anytype
             r = body()
+            var ret = isSig(r) && r.ret === true
+            phpSite = ret ? r.at : end
             var name = phpFnShown(who, CLO_SCOPE)
             if (lc == "never") { phpRaise("TypeError", name + "(): never-returning function must not implicitly return") }
-            var ret = isSig(r) && r.ret === true
             var v = anytype
             v = ret ? r.v : null
             var fit = anytype
@@ -2093,7 +2096,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             else { fit = phpTypeFit(rel ? phpTypeResolve(rtype, true) : rtype, v, ctxSelf()) }
             if (fit === phpTypeBad) {
-                phpRaise("TypeError", name + "(): Return value must be of type " + phsTypeText(rel ? phpTypeResolve(rtype, false) : rtype)
+                var stat = anytype
+                stat = ctxStatic()
+                phpRaise("TypeError", name + "(): Return value must be of type "
+                    + phsTypeText(rel ? phpTypeResolve(rtype, false) : rtype, stat == null ? "" : stat.__name)
                     + ", " + (ret ? phpValueName(v) : "none") + " returned")
             }
             return {ret: true, v: fit}
@@ -2619,18 +2625,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return 1
     }
     function makeConstStmt() { return function() { return null } }
-    // d is the site a callable return type's deprecations stand at (retDepr),
-    // which the signal carries to phpRetCheck.
-    function makeReturn(items, rv, rt, d) {
+    // d is the site a callable return type's deprecations stand at (retDepr), at
+    // the statement's own (callSite); the signal carries both to phpRetCheck.
+    function makeReturn(items, rv, rt, d, at) {
         var t = items.length > 0 ? items[0] : null
-        if (d != null && rt == null && rv == null) { return function() { return {ret: true, v: t != null ? t() : null, d: d} } }
         if (rt != null) {
             // An element or property returned by reference is fetched for writing,
             // created if missing, and its cell is what the caller binds.
             return function() {
                 var cell = targetCell(rt)
                 refRetCell = cell
-                return {ret: true, v: cell.v}
+                return {ret: true, v: cell.v, d: d, at: at}
             }
         }
         if (rv != null) {
@@ -2641,10 +2646,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var v = anytype
                 v = t != null ? t() : null
                 refRetCell = rv == "" ? null : varCell(rv)
-                return {ret: true, v: v}
+                return {ret: true, v: v, d: d, at: at}
             }
         }
-        return function() { return {ret: true, v: t != null ? t() : null} }
+        return function() { return {ret: true, v: t != null ? t() : null, d: d, at: at} }
     }
     // 'function &f()': the functions declared to return by reference, by lower-cased
     // name after "$" ("->" for a method), and for each function being parsed whether
@@ -5881,13 +5886,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         out.byref = br
         return out
     }
-    function makeClosure(items) {
+    // end is the site of the closing brace (phpRetCheck).
+    function makeClosure(items, end) {
         var isGen = genPop()
         fnLeave()
         var sc = cloLeave()
         var d = splitClosure(items)
         var params = d.params
-        var body = phpRetCheck(d.body, d.rtype, isGen, sc.name)
+        var body = phpRetCheck(d.body, d.rtype, isGen, sc.name, end)
         var byval = d.byval
         var byref = d.byref
         var uses = []
@@ -6126,7 +6132,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return fnCallable(cbResolve(fc, true))
     }
     // An arrow function's body: its one expression, returned.
-    function arrowBody(t) { return function() { return {ret: true, v: t()} } }
+    function arrowBody(t, d, at) { return function() { return {ret: true, v: t(), d: d, at: at} } }
     // fn (...) => expr : auto-capture BY VALUE, of exactly the variables the body
     // mentions (varLog since the 'fn' keyword, minus this function's own parameters).
     // The snapshot goes into ONE overlay scope on top of the live chain, so a name the
@@ -6151,7 +6157,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         for (var k = 0; k < params.length; k++) { names.push(params[k].name) }
         var captured = varsSince(mark, names)
         var sc = cloLeave()
-        var body = phpRetCheck(d.body, d.rtype, isGen, sc.name)
+        var body = phpRetCheck(d.body, d.rtype, isGen, sc.name, "")
         var desc = cloDesc(sc, captured, params)
         var self = sc.self
         var fi = cloFrame(sc, params)
@@ -7354,8 +7360,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
-    // because a static method must run with no $this.
-    function makeFun(items) {
+    // because a static method must run with no $this. end is the site of the
+    // closing brace (phpRetCheck).
+    function makeFun(items, end) {
         fnLeave()
         var sc = cloLeave()
         var isGen = genPop()
@@ -7378,7 +7385,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         if (vis != "") { mVisNames["$" + phsCase(name, false)] = true }
-        var rec = {name: name, params: params, body: phpRetCheck(body != null ? body : makeBody([]), rtype, isGen, name),
+        var rec = {name: name, params: params, body: phpRetCheck(body != null ? body : makeBody([]), rtype, isGen, name, end),
                    isStatic: isStatic, isGen: isGen, vis: vis,
                    lib: phpLibDepth > 0, hid: phpLibDepth > 0 && name.substring(0, 5) == "__mec"}
         // A library method stands for an internal one, which checks its count
@@ -7722,7 +7729,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var pt = promoted[nq].ptyp
             if (promoted[nq].pnull === true && pt != "" && phpTypeOrNull(pt) != pt) {
                 fail("Cannot use null as default value for parameter " + promoted[nq].name + " of type "
-                     + phsTypeText(self != "" ? phsTypeSubstSelf(pt, self, parent) : pt))
+                     + phsTypeText(self != "" ? phsTypeSubstSelf(pt, self, parent) : pt, ""))
             }
         }
         return p
@@ -8906,7 +8913,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phpCast("int", f)
     }
     function phpTypeErr(k, pname, v, typ) {
-        phpRaise("TypeError", "Cannot assign " + phpValueName(v) + " to property " + k.__name + "::$" + pname + " of type " + phsTypeText(typ))
+        phpRaise("TypeError", "Cannot assign " + phpValueName(v) + " to property " + k.__name + "::$" + pname + " of type " + phsTypeText(typ, ""))
     }
     // A write of v to property pname of o: v as its declared type takes it.
     function phpPropFit(o, pname, v) {

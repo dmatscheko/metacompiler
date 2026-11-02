@@ -2275,6 +2275,64 @@ function s97() {
         && s97try(fn() => s97vu(1, [1])) === "TE s97vu(): Argument #2 (\$a) must be of type callable|int, array given");
 }
 
+// ===== SECTION 98: return-type errors stand at the return; the order of a type's text =====
+// A return value's TypeError is raised by the ZEND_VERIFY_RETURN_TYPE opcode,
+// which stands at the return statement - an arrow function's expression - or,
+// for a body that ends without one, at the function's closing brace. A type's
+// text names its classes first, in declared order (iterable as Traversable),
+// then static (as the called class), callable, object, array, string, int,
+// float, bool and null (zend_type_to_string_resolved).
+class S98A {
+    public function m(): string {
+        return [];
+    }
+    public static function s(): static|int {
+        return "x";
+    }
+    public function q(): S98A|static {
+        return new S98B;
+    }
+    public function none(): int {
+        $x = 1;
+    }
+}
+class S98B {}
+class S98C extends S98A {}
+function s98a($x): int {
+    $y = $x;
+    return $y;
+}
+function s98u(int|callable|S98A|null $x) { return $x; }
+function s98i(?iterable $x) { return $x; }
+function s98r($x): iterable|INT { return $x; }
+function s98c($x): callable|S98B { return $x; }
+function s98lines($f) {
+    try { $f(); return "none"; } catch (TypeError $e) { return $e->getLine() . " " . $e->getMessage(); }
+}
+function s98() {
+    $l = __LINE__;
+    $c = function (): int {
+        return "q";
+    };
+    $g = fn(): int => "w";
+    $got = [s98lines(fn() => s98a("s")), s98lines(fn() => (new S98A)->m()), s98lines(fn() => (new S98A)->none()),
+            s98lines($c), s98lines($g)];
+    check("ret-line", $got === [
+        ($l - 10) . " s98a(): Return value must be of type int, string returned",
+        ($l - 26) . " S98A::m(): Return value must be of type string, array returned",
+        ($l - 16) . " S98A::none(): Return value must be of type int, none returned",
+        ($l + 2) . " {closure:s98():" . ($l + 1) . "}(): Return value must be of type int, string returned",
+        ($l + 4) . " {closure:s98():" . ($l + 4) . "}(): Return value must be of type int, string returned"]);
+    $o = new stdClass;
+    check("type-text-order", s97try(fn() => s98u($o)) === "TE s98u(): Argument #1 (\$x) must be of type S98A|callable|int|null, stdClass given"
+        && s97try(fn() => s98i($o)) === "TE s98i(): Argument #1 (\$x) must be of type Traversable|array|null, stdClass given"
+        && s97try(fn() => s98r("x")) === "TE s98r(): Return value must be of type Traversable|array|int, string returned"
+        && s97try(fn() => s98c(1)) === "TE s98c(): Return value must be of type S98B|callable, int returned");
+    check("type-text-static", s97try(fn() => S98A::s()) === "TE S98A::s(): Return value must be of type S98A|int, string returned"
+        && s97try(fn() => S98C::s()) === "TE S98A::s(): Return value must be of type S98C|int, string returned"
+        && s97try(fn() => (new S98C)->q()) === "TE S98A::q(): Return value must be of type S98A|S98C, S98B returned");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2317,6 +2375,7 @@ function main() {
     s95(); // SECTION-CALL 95
     s96(); // SECTION-CALL 96
     s97(); // SECTION-CALL 97
+    s98(); // SECTION-CALL 98
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
