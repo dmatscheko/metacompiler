@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1165 kotlin: direct `java.lang.System.x()` calls in the compiler · P3 · KT · OPEN [V]
+### T-1165 kotlin: direct `java.lang.System.x()` calls in the compiler · P3 · KT · IN PROGRESS (KT worker, round 54) [V]
 Found while closing T-1164; oracle kotlinc 2.2.21.
 - Compiler (run and native): `fun main() { println(java.lang.System.nanoTime() > 0L) }` fails "js runtime error: unknown name: java.lang.System"; kotlinc and the interpreter print true. `ktPkgMember` (jsrtkotlin.go) and its layer-2 twin look up only globals (`ktGlobalFn`); System is not a global — the emitter declares it into scope on demand. `java.lang.Long.signum`, `java.lang.Math.abs`, `java.lang.Integer.signum` direct calls work. Also check `java.lang.System.currentTimeMillis()`, `.identityHashCode(x)` and `java.lang.System.out.println`.
 
