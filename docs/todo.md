@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1130** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1131** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -147,15 +147,22 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1127 bash: test arity errors, declare through circular -i nameref, readonly circular warning · P3 · SH · IN PROGRESS (SH worker, round 40) [V]
+### T-1130 bash: compiled test with run-time operators, test -o/-R, -n on subscripted names, circular nameref declarations with attributes · P3 · SH · OPEN [V]
 
-Found while probing T-1124. All three diverge from bash 5.3 (LC_ALL=C) in the interpreter, the compiled run, or both:
+Found while working T-1127. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
-1. Malformed `test` expressions. `test 1 -eq 1 x` must print `test: too many arguments` and return status 2. `test x -eq` must print `test: x: unary operator expected` and return status 2. `[ 1 -eq 1 x ]` must print `[: too many arguments` and return status 2.
-2. `declare -i w=1; m(){ local -n w=w; declare w=9+1; }; m; echo w=$w` must print bash's warnings (`local: warning: w: circular name reference`, then three `warning: w: circular name reference` lines), then `declare: \`9+1': invalid variable name for name reference`, then `w=1`.
-3. `readonly r=1; f(){ local -n r=r; }; f` is missing bash's `local: warning: r: circular name reference` line, which comes before `local: r: readonly variable`.
+1. Compiled `test` / `[` cannot handle operators or argument lists that exist only at run time. `op=-eq; test 1 $op 2` gives 0 in the compiled run, where bash gives 1. `set -- 1 -eq 2; test "$@"` also gives 0, where bash gives 1. The interpreter is right in both cases. The compiled path needs a run-time fallback that runs the same posixtest/expr parser on the expanded argument list.
+2. `-o OPTION` and `-R NAME` in `test` and `[[ ]]` always answer false, in both engines. For example, bash gives true for `test -o braceexpand`, and for `-R` on a nameref.
+3. `-n` with a subscripted name, in all engines. `f(){ local -n 'z[1]=z'; }` must print `local: z[1]: reference variable cannot be an array` and return status 1; ours succeeds silently. With r readonly, `local -n 'r[1]=r'` must print the same error, but ours prints `r: readonly variable`.
+4. A circular local nameref declared with attributes, `+=` or an array literal (for a function `local -n w=w`, then the declaration). Bash's answers:
+   - `declare -i w=x`: status 1, and w ends up as `declare -in w="w"`.
+   - `declare -r w=x` gives `-nr w="x"`; `declare -x w=x` gives `-nx w="x"`.
+   - `declare w+=x` gives `w="wx"`.
+   - `declare w=(x y)` makes an `-an` array, with two extra warnings.
+   Ours: the interpreter abandons the line, and the compiled leg prints "maximum nameref depth" and leaves `w="w"`.
+5. At top level, `declare -n r=$x` where `$x` expands to `r`, and r is readonly or an array: the compiled leg checks for self-reference after the readonly/array check. Bash checks self-reference first, as it already does for a literal value.
 
-Verify each one with a four-leg probe (`tests/probe.sh bash`) against `/opt/homebrew/bin/bash`, and diff the `.err` files too.
+Verify with `tests/probe.sh bash` on all four legs, and diff the `.err` files. Note that a function wrapper like `t(){ "$@"; }` puts the command name in a variable, which the compiler refuses by design; use direct calls in probes.
 
 # C — C subset
 
@@ -1189,6 +1196,7 @@ T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-st
 T-1124 bash: test/[ -eq "integer expected"; compiled circular nameref loses -i; compiled `type` refuses unprintable bodies — merged f8f91736: test/[ integer-expected status 2 (digits fast path), compiled circular nameref keeps -i, lazy compiled type; local -i n; local -n n documented LIMIT; SECTION 129 in new bash-test-full.6.sh; 4-leg probe + stderr match bash 5.3; full matrix 605/605; bench -0.63%
 T-1126 ruby: Hash Array keys use eql? (not ==); endless Range blockless enumerators; Infinity #size of endless streams; method(:x).owner — merged 42ac0d48: eql?-based Hash keys/set ops (deep eql in all 3 engines, Float key index), endless-range blockless enumerators + to_enum streaming, Infinity/nil stream sizes (each_slice FloatDomainError per MRI), Method#owner + public_methods(false) via own-method rows; 4-leg probe matches ruby 2.6; matrix 605/605; bench -0.01%
 T-1125 kotlin: program-class toString/hashCode agreement; synchronized; Integer.toHexString; data-class hashCode with Unit; printing a function value — merged f8958f7a: Object#toString = binary name@hex(hashCode) via overrides (kotlin.Any hashCode only on chain root, super.hashCode works), synchronized{}, Integer/Long statics, Unit hash consistency, function-value printing (refs match oracle; lambdas print $$Lambda@1 stand-in by design), typed array copies + array+x stays an array; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench +0.01%
+T-1127 bash: test arity errors, declare through circular -i nameref, readonly circular warning — merged b302a5c7: bash 5.3 test.c parser port (arity rules, all syntax diagnostics, status 2) in both engines; circular/self nameref declarations (double-lookup warnings, invalid-name error, self-ref check before readonly); 4-leg probe + stderr match bash 5.3; matrix 605/605; bench +0.04%/+0.02%
 
 # Settled — do not re-open
 
