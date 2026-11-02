@@ -2826,6 +2826,11 @@ NotMemberKw = :script(~~ "pure";
     function kThrowExc(clsName, msg) {
         throw {__exc: true, v: {__class: globalScope[clsName], message: msg}}
     }
+    // A stale subList (ktLinkStale) throws on its next use. Twin of ktLinkCheck in
+    // abnf/jsrtkotlin.go and k4LinkCheck in languages/lib/kotlin-rt.metajs.
+    function kLinkCheck(a) {
+        if (ktLinkStale(a)) { kThrowExc("ConcurrentModificationException", null) }
+    }
     // A call nested past the JVM's stack is java.lang.StackOverflowError with a
     // null message. How deep the JVM gets depends on its stack size and the
     // frames' sizes; this limit is ours. Twin of the js_rt_deep hook the compiler
@@ -5616,6 +5621,7 @@ NotMemberKw = :script(~~ "pure";
         // separated by a comma and a space, a String element unquoted (not
         // JavaScript's Array.prototype.toString "1,2").
         if (Array.isArray(v)) {
+            kLinkCheck(v)
             var out = "["
             for (var ai = 0; ai < v.length; ai++) {
                 if (ai > 0) { out += ", " }
@@ -7832,6 +7838,15 @@ NotMemberKw = :script(~~ "pure";
             for (i = 0; i < es.length; i++) { es[i] = f }
             return {v: undefined}
         }
+        // replaceAll sets each element to f(element). ArrayList's own replaceAll
+        // counts as a structural change (its modCount++); every other list's sets.
+        // Twin of the same arm of ktSeqMethodK in abnf/jsrtkotlin.go and
+        // languages/lib/kotlin-rt.metajs.
+        if (name == "replaceAll") {
+            for (i = 0; i < es.length; i++) { es[i] = f(es[i]) }
+            if (kArrJvmClass(es) == "java.util.ArrayList") { arrModBump(es) }
+            return {v: undefined}
+        }
         if (name == "onEach") {
             for (i = 0; kForNext(es, i, n0); i++) { f(es[i]) }
             return {v: es}
@@ -7898,7 +7913,7 @@ NotMemberKw = :script(~~ "pure";
                 if (shi > es.length) { kThrowExc("IndexOutOfBoundsException", "toIndex = " + shi) }
                 if (slo > shi) { kThrowExc("IllegalArgumentException", "fromIndex(" + slo + ") > toIndex(" + shi + ")") }
                 for (i = slo; i < shi; i++) { out.push(es[i]) }
-                return {v: kArrClassed(out, ktSubListClass(kArrJvmClass(es)))}
+                return {v: ktSubLink(es, kArrClassed(out, ktSubListClass(kArrJvmClass(es))), slo)}
             }
             for (i = 0; i < idxs.length; i++) { out.push(es[kNum(idxs[i])]) }
             return {v: out}
@@ -8146,6 +8161,13 @@ NotMemberKw = :script(~~ "pure";
                 kMapDropAt(m, kMapFind(m, f))
             }
             return {v: name == "putIfAbsent" ? cur : nv}
+        }
+        // replaceAll sets every value to f(key, value), in iteration order. Twin of
+        // the same case of ktMapMethod in abnf/jsrtkotlin.go and
+        // languages/lib/kotlin-rt.metajs.
+        if (name == "replaceAll") {
+            for (i = 0; i < m.keys.length; i++) { m.vals[i] = f(m.keys[i], m.vals[i]) }
+            return {v: undefined}
         }
         // compute, computeIfPresent and replace are java.util.Map's defaults too:
         // compute stores the function's value or, when it is null, removes the key;
@@ -8906,6 +8928,7 @@ NotMemberKw = :script(~~ "pure";
             var lkp = anytype
             lkp = ktLinkOf(tgt)
             if (lkp !== null && lkp.__lnkBusy !== true) {
+                kLinkCheck(tgt)
                 var lkr = anytype
                 lkp.__lnkBusy = true
                 try { lkr = mcall(target, name, args, spec) } finally { lkp.__lnkBusy = false }
@@ -12905,7 +12928,10 @@ NotMemberKw = :script(~~ "pure";
             if (jp != null) { return jp.v }
         }
         if (Array.isArray(o)) {
-            if (name == "size") { return o.length }
+            if (name == "size") {
+                kLinkCheck(o)
+                return o.length
+            }
             var ax = anytype
             ax = kIdxExt(o, name)
             if (ax !== undefined) { return ax }
@@ -13270,7 +13296,7 @@ NotMemberKw = :script(~~ "pure";
         var isArr = Array.isArray(v)
         if (!isArr && !kIsSet(v) && !kIsMap(v)) { return undefined }
         if (t.indexOf("Mutable") == 0) {
-            if (kCollJvmClass(v).indexOf("kotlin.collections.Empty") == 0) { return false }
+            if (ktRoJvmClass(kCollJvmClass(v))) { return false }
             t = t.substring(7)
         }
         if (kIsMap(v)) {
@@ -13780,8 +13806,13 @@ NotMemberKw = :script(~~ "pure";
             if (sk == 4 || sk < 0 - 3) { kRoGuard(o, "set", [i, v]) }
             var wix = kNum(i)
             if (wix < 0 || wix >= o.length) { kIndexOob("IndexOutOfBoundsException", wix, o.length) }
+            if (ktLinkOf(o) !== null) {
+                kLinkCheck(o)
+                o[wix] = v
+                ktLinkSync(o, null)
+                return
+            }
             o[wix] = v
-            if (ktLinkOf(o) !== null) { ktLinkSync(o, null) }
             return
         }
         if (kIsMap(o)) {
@@ -14140,7 +14171,7 @@ NotMemberKw = :script(~~ "pure";
         "reduceRightOrNull:LRADBT remove:LDSM removeAll:LDS removeAt:LD removeFirst:LDS " +
         "removeFirstOrNull:LD removeIf:LDS removeLast:LDS removeLastOrNull:LD " +
         "removePrefix:BT removeRange:BT removeSuffix:BT removeSurrounding:BT repeat:BT " +
-        "replace:MBTX replaceFirst:BTX replaceFirstChar:T replaceIndent:T " +
+        "replace:MBTX replaceAll:LDM replaceFirst:BTX replaceFirstChar:T replaceIndent:T " +
         "requireNoNulls:LRQGDS retainAll:LDS reverse:LADB reversed:LRAGDSMBT reversedArray:A " +
         "run:LRAQGDSMBTCXHU runCatching:LRAQGDSMBTCXHU runningFold:LRAQGDSBT " +
         "runningReduce:LRAQGDSBT scan:LRAQGDSBT set:LADMB setCharAt:B setLength:B setRange:B " +

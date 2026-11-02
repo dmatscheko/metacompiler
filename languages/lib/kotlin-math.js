@@ -478,14 +478,16 @@ var ktJuAbs = "java.util.AbstractList$"
 
 // l.subList(..): ArrayList's own SubList, java's AbstractList one (RandomAccess
 // for an array-backed list), a ListBuilder's BuilderSubList, kotlin's AbstractList
-// one for a ReversedListReadOnly; an EmptyList answers itself.
+// one for a ReversedListReadOnly and a primitive array's asList; an EmptyList
+// answers itself.
 function ktSubListClass(jc) {
     if (jc == "java.util.ArrayList" || jc == "java.util.ArrayList$SubList") { return "java.util.ArrayList$SubList" }
     if (jc == "kotlin.collections.builders.ListBuilder" || jc == "kotlin.collections.builders.ListBuilder$BuilderSubList") {
         return "kotlin.collections.builders.ListBuilder$BuilderSubList"
     }
     if (jc == "kotlin.collections.EmptyList") { return jc }
-    if (jc == "kotlin.collections.ReversedListReadOnly") { return "kotlin.collections.AbstractList$SubList" }
+    if (jc == "kotlin.collections.ReversedListReadOnly" || jc == "kotlin.collections.AbstractList$SubList" ||
+        jc.indexOf(ktaAsListPfx) == 0) { return "kotlin.collections.AbstractList$SubList" }
     if (jc == "java.util.Arrays$ArrayList" || jc == "java.util.Collections$SingletonList" || jc == ktJuAbs + "RandomAccessSubList") {
         return ktJuAbs + "RandomAccessSubList"
     }
@@ -500,25 +502,48 @@ function ktSubListClass(jc) {
 // order here); "" for an unsigned array and for an Array, whose Arrays$ArrayList
 // is its kind (-4). Go twin: ktaAsListClass in abnf/jsrtkotlin.go.
 var ktaAsListNums = [3, 4, 6, 5, 8, 7, 1, 2]
+var ktaAsListPfx = "kotlin.collections.ArraysKt___ArraysJvmKt$asList$"
 function ktaAsListClass(k) {
     if (k < 5 || k - 5 >= ktaAsListNums.length) { return "" }
-    return "kotlin.collections.ArraysKt___ArraysJvmKt$asList$" + ktaAsListNums[k - 5]
+    return ktaAsListPfx + ktaAsListNums[k - 5]
 }
 
-// A live list view - an Array's asList, a List's asReversed - is a list of its
-// own, linked both ways to the list it reads: each side's props __lnk lists
-// {a: the other list, rev: whether it reads it reversed}. java's view shares its
-// backing list's storage; here a member call, an indexed write or a `+=` on either
-// side copies its contents across (ktLinkSync), through every list linked on
-// (views form a tree, so `from` is the only edge to skip), a size change counting
-// as a structural change of the copy. Go twin: ktLink / ktLinkSync in
+// Whether jc is one of kotlin.collections' read-only classes, which no Mutable*
+// type test or cast accepts: the Empty* singletons, a primitive array's asList, a
+// ReversedListReadOnly and kotlin's AbstractList$SubList. Go twin: ktRoJvmClass in
+// abnf/jsrtkotlin.go.
+function ktRoJvmClass(jc) {
+    return jc.indexOf("kotlin.collections.Empty") == 0 || jc.indexOf(ktaAsListPfx) == 0 ||
+        jc == "kotlin.collections.ReversedListReadOnly" || jc == "kotlin.collections.AbstractList$SubList"
+}
+
+// A live list view - an Array's asList, a List's asReversed, a subList - is a list
+// of its own, linked both ways to the list it reads: each side's props __lnk lists
+// {a: the other list, rev: whether it reads it reversed, sl: null, or a subList's
+// window, shared by both ends}. java's view shares its backing list's storage;
+// here a member call, an indexed write or a `+=` on either side copies its
+// contents across (ktLinkSync), through every list linked on (views form a tree,
+// so `from` is the only edge to skip), a size change counting as a structural
+// change of the copy. Go twin: ktLink / ktSubLink / ktLinkSync in
 // abnf/jsrtkotlin.go.
 function ktLink(owner, view, rev) {
-    ktLinkAdd(owner, view, rev)
-    ktLinkAdd(view, owner, rev)
+    ktLinkAdd(owner, view, rev, null)
+    ktLinkAdd(view, owner, rev, null)
     return view
 }
-function ktLinkAdd(a, b, rev) {
+// A subList's window is {up: the backing list, off, n, mod: up's arrMod when the
+// two last agreed}. A write through the subList splices it back over the window;
+// a write to the backing list refreshes the window, unless the backing list has
+// changed structurally since: the subList is then stale for good (java's
+// checkForComodification, ktLinkStale) and the backing list drops its link.
+function ktSubLink(owner, view, off) {
+    var sl = anytype
+    sl = {up: owner, off: off, n: view.length, mod: arrMod(owner)}
+    ktLinkAdd(owner, view, false, sl)
+    ktLinkAdd(view, owner, false, sl)
+    return view
+}
+function ktLinkAdd(a, b, rev, sl) {
     var p = anytype
     p = arrProps(a)
     if (p === undefined) {
@@ -526,7 +551,7 @@ function ktLinkAdd(a, b, rev) {
         arrPropsSet(a, p)
     }
     if (p.__lnk === undefined) { p.__lnk = [] }
-    p.__lnk.push({a: b, rev: rev})
+    p.__lnk.push({a: b, rev: rev, sl: sl})
 }
 // The props of a linked list, else null.
 function ktLinkOf(a) {
@@ -536,17 +561,70 @@ function ktLinkOf(a) {
     if (p.__lnk === undefined) { return null }
     return p
 }
-function ktLinkSync(a, from) {
+// Whether a subList, or a subList it is a window of, outlived a structural
+// change of its backing list.
+function ktLinkStale(a) {
+    var p = anytype
+    p = ktLinkOf(a)
+    if (p === null) { return false }
     var ls = anytype
-    ls = arrProps(a).__lnk
+    ls = p.__lnk
+    for (var i = 0; i < ls.length; i++) {
+        var sl = anytype
+        sl = ls[i].sl
+        if (sl !== null && sl.up === ls[i].a) {
+            if (arrMod(sl.up) != sl.mod) { return true }
+            return ktLinkStale(sl.up)
+        }
+    }
+    return false
+}
+function ktLinkSync(a, from) {
+    var p = anytype
+    p = arrProps(a)
+    var ls = anytype
+    ls = p.__lnk
+    var keep = anytype
+    keep = []
     for (var i = 0; i < ls.length; i++) {
         var b = anytype
         b = ls[i].a
+        var sl = anytype
+        sl = ls[i].sl
+        var live = true
         if (b !== from) {
-            ktLinkCopy(b, a, ls[i].rev)
-            ktLinkSync(b, a)
+            if (sl === null) {
+                ktLinkCopy(b, a, ls[i].rev)
+            } else if (sl.up === b) {
+                ktLinkSplice(b, a, sl)
+            } else if (arrMod(a) == sl.mod) {
+                for (var j = 0; j < b.length; j++) { b[j] = a[sl.off + j] }
+            } else {
+                live = false
+            }
+            if (live) { ktLinkSync(b, a) }
         }
+        if (live) { keep.push(ls[i]) }
     }
+    if (keep.length != ls.length) { p.__lnk = keep }
+}
+// A subList's contents over its window of up; a size change moves up's tail.
+function ktLinkSplice(up, sub, sl) {
+    var n = sub.length
+    var i = 0
+    if (n == sl.n) {
+        for (i = 0; i < n; i++) { up[sl.off + i] = sub[i] }
+    } else {
+        var tail = anytype
+        tail = []
+        for (i = sl.off + sl.n; i < up.length; i++) { tail.push(up[i]) }
+        while (up.length > sl.off) { up.pop() }
+        for (i = 0; i < n; i++) { up.push(sub[i]) }
+        for (i = 0; i < tail.length; i++) { up.push(tail[i]) }
+        arrModBump(up)
+        sl.n = n
+    }
+    sl.mod = arrMod(up)
 }
 function ktLinkCopy(dst, src, rev) {
     var n = src.length

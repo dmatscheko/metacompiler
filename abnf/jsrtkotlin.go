@@ -2031,6 +2031,9 @@ func init() {
 				}
 			}
 			if lst, isArr := recv.(*jsArray); isArr {
+				if lst.props != nil {
+					rt.ktLinkCheck(lst)
+				}
 				if lst.kind == ktArrFixed || lst.kind == ktArrVals || lst.kind < ktArrLinked {
 					if v, handled := rt.ktRoGuard(lst, mname, arr.elems); handled {
 						return rt.wrap(v)
@@ -3284,6 +3287,9 @@ func init() {
 			// `size` of its own - the fast-path-versus-dispatcher trap recorded in
 			// docs/abnf-dialect-gotchas.md.
 			if name == "size" && isUndefOrNull(u(r)) {
+				if ao, isArr := o.(*jsArray); isArr && ao.props != nil {
+					rt.ktLinkCheck(ao)
+				}
 				lr := m["js_get"]([]uint64{a[0], rt.wrapStr("length")})
 				if !isUndefOrNull(u(lr)) {
 					return lr
@@ -3476,6 +3482,7 @@ func init() {
 					}
 				}
 				if ao.props != nil && ktLinks(ao) != nil {
+					rt.ktLinkCheck(ao)
 					r := baseSet(a)
 					ktLinkSync(ao, nil)
 					return r
@@ -4348,6 +4355,9 @@ func (rt *jsrt) ktpRender(v interface{}, depth int) string {
 		// `println(listOf("x", "y"))` is `[x, y]`.
 		return t
 	case *jsArray:
+		if t.props != nil {
+			rt.ktLinkCheck(t)
+		}
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
 			parts[i] = rt.ktpRender(e, depth+1)
@@ -6833,6 +6843,15 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			es[i] = f
 		}
 		return jsUndef, true
+	// replaceAll: twin of the same arm of kSeqMethod in kotlin-interpreter.abnf.
+	case "replaceAll":
+		for i := range es {
+			es[i] = rt.ktCall(f, es[i])
+		}
+		if ktArrJvmClass(o) == "java.util.ArrayList" {
+			o.mod++
+		}
+		return jsUndef, true
 	case "onEach":
 		for i := 0; rt.ktIterMore(ck, o, i); i++ {
 			e := o.elems[i]
@@ -6925,7 +6944,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		case lo > hi:
 			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("fromIndex(%d) > toIndex(%d)", lo, hi))
 		}
-		return ktArrClassed(arr(append([]interface{}{}, es[lo:hi]...)), ktSubListClass(ktArrJvmClass(o))), true
+		return ktSubLink(o, ktArrClassed(arr(append([]interface{}{}, es[lo:hi]...)), ktSubListClass(ktArrJvmClass(o))), lo), true
 	case "zipWithNext":
 		out := []interface{}{}
 		for i := 1; rt.ktIterMore(ck, o, i); i++ {
@@ -7761,6 +7780,12 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			return cur, true
 		}
 		return nv, true
+	// replaceAll: twin of the same case of kMapMethod in kotlin-interpreter.abnf.
+	case "replaceAll":
+		for i, k := range keys.elems {
+			vals.elems[i] = rt.ktCall(f, k, vals.elems[i])
+		}
+		return jsUndef, true
 	// compute, computeIfPresent and replace: java.util.Map's defaults. Twin of
 	// kMapMethod in kotlin-interpreter.abnf, which has the rules.
 	case "compute", "computeIfPresent", "replace":
@@ -8861,7 +8886,7 @@ func ktRangeIsType(rg ktRange, t string) bool {
 // kotlin-interpreter.abnf and ktCollIsType in languages/lib/kotlin-rt.metajs.
 func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 	if strings.HasPrefix(t, "Mutable") {
-		if strings.HasPrefix(ktCollJvmClass(v), "kotlin.collections.Empty") {
+		if ktRoJvmClass(ktCollJvmClass(v)) {
 			return false, true
 		}
 		t = t[len("Mutable"):]
@@ -9465,7 +9490,7 @@ var ktBuiltinMembers = func() map[string]string {
 		"reduceRightOrNull:LRADBT remove:LDSM removeAll:LDS removeAt:LD removeFirst:LDS " +
 		"removeFirstOrNull:LD removeIf:LDS removeLast:LDS removeLastOrNull:LD " +
 		"removePrefix:BT removeRange:BT removeSuffix:BT removeSurrounding:BT repeat:BT " +
-		"replace:MBTX replaceFirst:BTX replaceFirstChar:T replaceIndent:T " +
+		"replace:MBTX replaceAll:LDM replaceFirst:BTX replaceFirstChar:T replaceIndent:T " +
 		"requireNoNulls:LRQGDS retainAll:LDS reverse:LADB reversed:LRAGDSMBT reversedArray:A " +
 		"run:LRAQGDSMBTCXHU runCatching:LRAQGDSMBTCXHU runningFold:LRAQGDSBT " +
 		"runningReduce:LRAQGDSBT scan:LRAQGDSBT set:LADMB setCharAt:B setLength:B setRange:B " +
@@ -11170,31 +11195,73 @@ func ktaAsListClass(k int) string {
 	if k < ktArrPrim || k-ktArrPrim >= len(nums) {
 		return ""
 	}
-	return "kotlin.collections.ArraysKt___ArraysJvmKt$asList$" + strconv.Itoa(nums[k-ktArrPrim])
+	return ktaAsListPfx + strconv.Itoa(nums[k-ktArrPrim])
 }
 
-// A live list view (an Array's asList, a List's asReversed) linked both ways to the
-// list it reads, under the props key __lnk. Twin of ktLink / ktLinkSync in
-// languages/lib/kotlin-math.js, which has the rules.
+const ktaAsListPfx = "kotlin.collections.ArraysKt___ArraysJvmKt$asList$"
+
+// ktRoJvmClass is whether jc is a read-only kotlin.collections class. Twin of
+// ktRoJvmClass in languages/lib/kotlin-math.js, which has the rule.
+func ktRoJvmClass(jc string) bool {
+	return strings.HasPrefix(jc, "kotlin.collections.Empty") || strings.HasPrefix(jc, ktaAsListPfx) ||
+		jc == "kotlin.collections.ReversedListReadOnly" || jc == "kotlin.collections.AbstractList$SubList"
+}
+
+// A live list view (an Array's asList, a List's asReversed, a subList) linked both
+// ways to the list it reads, under the props key __lnk. Twin of ktLink /
+// ktSubLink / ktLinkStale / ktLinkSync in languages/lib/kotlin-math.js, which has
+// the rules.
 type ktLinkEnd struct {
 	a   *jsArray
 	rev bool
+	sl  *ktSubWin
+}
+
+// ktSubWin is a subList's window of its backing list up.
+type ktSubWin struct {
+	up          *jsArray
+	off, n, mod int
 }
 
 func ktLink(owner, view *jsArray, rev bool) *jsArray {
-	ktLinkAdd(owner, view, rev)
-	ktLinkAdd(view, owner, rev)
+	ktLinkAdd(owner, ktLinkEnd{view, rev, nil})
+	ktLinkAdd(view, ktLinkEnd{owner, rev, nil})
 	return view
 }
 
-func ktLinkAdd(a, b *jsArray, rev bool) {
+func ktSubLink(owner, view *jsArray, off int) *jsArray {
+	sl := &ktSubWin{owner, off, len(view.elems), owner.mod}
+	ktLinkAdd(owner, ktLinkEnd{view, false, sl})
+	ktLinkAdd(view, ktLinkEnd{owner, false, sl})
+	return view
+}
+
+func ktLinkAdd(a *jsArray, e ktLinkEnd) {
 	p, has := a.props.(*jsObject)
 	if !has {
 		p = newJSObject()
 		a.props = p
 	}
 	ls, _ := p.props["__lnk"].([]ktLinkEnd)
-	p.set("__lnk", append(ls, ktLinkEnd{b, rev}))
+	p.set("__lnk", append(ls, e))
+}
+
+func ktLinkStale(a *jsArray) bool {
+	for _, l := range ktLinks(a) {
+		if l.sl != nil && l.sl.up == l.a {
+			return l.a.mod != l.sl.mod || ktLinkStale(l.a)
+		}
+	}
+	return false
+}
+
+// ktLinkCheck throws a stale subList's ConcurrentModificationException. Twin of
+// kLinkCheck in kotlin-interpreter.abnf and k4LinkCheck in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktLinkCheck(a *jsArray) {
+	if ktLinkStale(a) {
+		rt.ktRaiseV("ConcurrentModificationException", jsNull)
+	}
 }
 
 func ktLinks(a *jsArray) []ktLinkEnd {
@@ -11206,24 +11273,54 @@ func ktLinks(a *jsArray) []ktLinkEnd {
 }
 
 func ktLinkSync(a, from *jsArray) {
-	for _, l := range ktLinks(a) {
-		if l.a == from {
-			continue
-		}
-		dst, n := l.a, len(a.elems)
-		if len(dst.elems) != n {
-			dst.elems = make([]interface{}, n)
-			dst.dropIdx()
-			dst.mod++
-		}
-		for i, e := range a.elems {
-			if l.rev {
-				i = n - 1 - i
+	ls := ktLinks(a)
+	keep := ls[:0:0]
+	for _, l := range ls {
+		if l.a != from {
+			dst := l.a
+			switch {
+			case l.sl == nil:
+				n := len(a.elems)
+				if len(dst.elems) != n {
+					dst.elems = make([]interface{}, n)
+					dst.mod++
+				}
+				for i, e := range a.elems {
+					if l.rev {
+						i = n - 1 - i
+					}
+					dst.elems[i] = e
+				}
+				dst.dropIdx()
+			case l.sl.up == dst:
+				ktLinkSplice(dst, a, l.sl)
+			case a.mod == l.sl.mod:
+				copy(dst.elems, a.elems[l.sl.off:])
+				dst.dropIdx()
+			default:
+				continue
 			}
-			dst.elems[i] = e
+			ktLinkSync(dst, a)
 		}
-		ktLinkSync(dst, a)
+		keep = append(keep, l)
 	}
+	if len(keep) != len(ls) {
+		a.props.(*jsObject).set("__lnk", keep)
+	}
+}
+
+func ktLinkSplice(up, sub *jsArray, sl *ktSubWin) {
+	n := len(sub.elems)
+	if n == sl.n {
+		copy(up.elems[sl.off:], sub.elems)
+	} else {
+		tail := append([]interface{}{}, up.elems[sl.off+sl.n:]...)
+		up.elems = append(append(up.elems[:sl.off:sl.off], sub.elems...), tail...)
+		up.mod++
+		sl.n = n
+	}
+	up.dropIdx()
+	sl.mod = up.mod
 }
 
 // The JVM classes of the objects a collection of JVM class jc hands out, "" where
@@ -11232,6 +11329,9 @@ func ktLinkSync(a, from *jsArray) {
 const ktJuAbs = "java.util.AbstractList$"
 
 func ktSubListClass(jc string) string {
+	if strings.HasPrefix(jc, ktaAsListPfx) {
+		return "kotlin.collections.AbstractList$SubList"
+	}
 	switch jc {
 	case "java.util.ArrayList", "java.util.ArrayList$SubList":
 		return "java.util.ArrayList$SubList"
@@ -11239,7 +11339,7 @@ func ktSubListClass(jc string) string {
 		return "kotlin.collections.builders.ListBuilder$BuilderSubList"
 	case "kotlin.collections.EmptyList":
 		return jc
-	case "kotlin.collections.ReversedListReadOnly":
+	case "kotlin.collections.ReversedListReadOnly", "kotlin.collections.AbstractList$SubList":
 		return "kotlin.collections.AbstractList$SubList"
 	case "java.util.Arrays$ArrayList", "java.util.Collections$SingletonList", ktJuAbs + "RandomAccessSubList":
 		return ktJuAbs + "RandomAccessSubList"

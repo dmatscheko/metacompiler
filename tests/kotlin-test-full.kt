@@ -7534,6 +7534,88 @@ fun s172() {
 }
 
 
+// ===== SECTION 173: subList as a live view, replaceAll, a primitive asList's cast =====
+// A subList reads and writes its list's window both ways, a size change moving the
+// list's tail; a structural change of the list makes the subList throw
+// ConcurrentModificationException on its next use. MutableList.replaceAll and
+// MutableMap.replaceAll (ArrayList's counts as a structural change), and a
+// primitive array's asList is a read-only kotlin list no Mutable cast accepts.
+fun cme173(f: () -> Any?): String = try { "" + f() } catch (e: ConcurrentModificationException) { "CME" + e.message }
+
+fun s173() {
+    val n = listOf(0, 1, 2, 3, 4, 5, 6)
+    val ml = mutableListOf(n[1], n[2], n[3], n[4])
+    ml.subList(n[0], n[2]).clear()
+    val a = mutableListOf(n[1], n[2], n[3], n[4], n[5], n[6])
+    val s = a.subList(n[1], n[4])
+    a[n[2]] = 30
+    val seen = s.toString()
+    s[0] = 20
+    s.add(7)
+    check("sl173a", ml == listOf(3, 4) && seen == "[2, 30, 4]" && a == listOf(1, 20, 30, 4, 7, 5, 6) &&
+        s == listOf(20, 30, 4, 7) && s.size == 4)
+    s.removeAt(0)
+    val s2 = s.subList(n[1], n[3])
+    s2.add(99)
+    s2.sortDescending()
+    check("sl173b", a == listOf(1, 30, 99, 7, 4, 5, 6) && s == listOf(30, 99, 7, 4) && s2 == listOf(99, 7, 4))
+    a.add(100)
+    check("sl173c", cme173 { s.size } == "CMEnull" && cme173 { s.add(1) } == "CMEnull" &&
+        cme173 { s.toString() } == "CMEnull" && cme173 { s2.size } == "CMEnull" &&
+        cme173 { s[0] = 5 } == "CMEnull" && a == listOf(1, 30, 99, 7, 4, 5, 6, 100))
+    val b = mutableListOf(n[1], n[2], n[3], n[4])
+    val x1 = b.subList(n[0], n[2])
+    val x2 = b.subList(n[2], n[4])
+    x1.add(9)
+    val d = mutableListOf(n[5], n[6], n[1])
+    val dv = d.subList(n[0], n[1])
+    d.sort()
+    val e = mutableListOf(n[5], n[6], n[1])
+    val ev = e.subList(n[0], n[2])
+    e[0] = 1
+    check("sl173d", b == listOf(1, 2, 9, 3, 4) && cme173 { x2.size } == "CMEnull" && x1 == listOf(1, 2, 9) &&
+        cme173 { dv.size } == "CMEnull" && ev == listOf(1, 6))
+    val c = mutableListOf(n[1], n[2], n[3], n[4], n[5])
+    c.subList(n[1], n[4]).reverse()
+    val r1 = c.toString()
+    c.subList(n[0], n[3]).fill(0)
+    c.subList(n[1], n[3]).removeAll { it == 0 }
+    val ar = arrayOf(n[1], n[2], n[3], n[4])
+    val asl = ar.asList().subList(n[1], n[3]) as MutableList<Int>
+    asl[0] = 20
+    ar[2] = 30
+    val mr = mutableListOf(n[1], n[2], n[3], n[4])
+    val rs = mr.asReversed().subList(n[0], n[2])
+    rs[0] = 40
+    check("sl173e", r1 == "[1, 4, 3, 2, 5]" && c == listOf(0, 2, 5) && c.subList(0, 2).javaClass.name == "java.util.ArrayList\$SubList" &&
+        ar.toList() == listOf(1, 20, 30, 4) && asl == listOf(20, 30) && mr == listOf(1, 2, 3, 40) && rs == listOf(40, 3))
+    val l = mutableListOf(n[1], n[2])
+    l.replaceAll { it + 1 }
+    val m = mutableMapOf("a" to n[1], "b" to n[5])
+    m.replaceAll { _, v -> v * 2 }
+    val m1 = m.toString()
+    m.replaceAll { k, v -> v + k.length }
+    val lr = l.toString()
+    val lc = cme173 { for (x in l) l.replaceAll { it * 10 } }
+    for (k in m.keys) m.replaceAll { _, v -> v + 1 }
+    val big = mutableListOf(n[1], n[2], n[3], n[4], n[5])
+    big.subList(n[1], n[3]).replaceAll { -it }
+    val dq = ArrayDeque(listOf(n[1], n[2]))
+    dq.replaceAll { it + 5 }
+    val tm = sortedMapOf(n[2] to "b", n[1] to "a")
+    tm.replaceAll { k, v -> v + k }
+    check("ra173f", lr == "[2, 3]" && m1 == "{a=2, b=10}" && lc == "CMEnull" && l == listOf(20, 30) &&
+        m.toString() == "{a=5, b=13}" && big == listOf(1, -2, -3, 4, 5) && dq == listOf(6, 7) &&
+        tm.toString() == "{1=a1, 2=b2}")
+    val ia = intArrayOf(n[1], n[2], n[3])
+    val il = ia.asList()
+    check("ca173g", il !is MutableList<*> && (il as? MutableList<Int>) == null &&
+        uoe170 { (il as MutableList<Int>).set(0, 9) } == "C:kotlin.collections.ArraysKt___ArraysJvmKt\$asList\$3 cannot be cast to kotlin.collections.MutableList" &&
+        il.subList(0, 1).javaClass.name == "kotlin.collections.AbstractList\$SubList" && il.subList(0, 1) !is MutableList<*> &&
+        doubleArrayOf(1.0).asList() !is MutableCollection<*> && arrayOf(n[1]).asList() is MutableList<*> && ia.toList() == listOf(1, 2, 3))
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7703,6 +7785,7 @@ fun main() {
     s170() // SECTION-CALL 170
     s171() // SECTION-CALL 171
     s172() // SECTION-CALL 172
+    s173() // SECTION-CALL 173
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
