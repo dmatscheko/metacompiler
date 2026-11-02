@@ -3049,6 +3049,45 @@ func rubyBinEq(b *jsRBin, o interface{}) bool {
 	return ob == b.b && (oe == b.encName() || rubyAsciiOnly(ob))
 }
 
+// rubyScrubSplit is the bytes b of a String in encoding enc cut at its invalid
+// sequences: the even entries are the valid runs, the odd ones the sequences
+// #scrub hands its block. Twin of rbsScrubSplit in lib/ruby-str.js.
+func rubyScrubSplit(b, enc string) []string {
+	var parts []string
+	run := 0
+	for i := 0; i < len(b); {
+		n, bad := 1, b[i] >= 128 && enc == "US-ASCII"
+		if b[i] >= 128 && enc == "UTF-8" {
+			if r, rn := utf8.DecodeRuneInString(b[i:]); r == utf8.RuneError && rn <= 1 {
+				n, _ = rubyU8Bad(b[i:])
+				bad = true
+			} else {
+				n = rn
+			}
+		}
+		if bad {
+			parts = append(parts, b[run:i], b[i:i+n])
+			run = i + n
+		}
+		i += n
+	}
+	return append(parts, b[run:])
+}
+
+// rubyScrubBlock is String#scrub with a block, of the bytes b in encoding enc.
+// Twin of scrubBlock in ruby-interpreter.abnf.
+func (rt *jsrt) rubyScrubBlock(b, enc string, blk interface{}) interface{} {
+	parts := rubyScrubSplit(b, enc)
+	var sb strings.Builder
+	sb.WriteString(parts[0])
+	for k := 1; k < len(parts); k += 2 {
+		rb, _ := rt.rubyStrBE(rt.call(blk, jsUndef, []interface{}{rubyEncStr(parts[k], enc)}))
+		sb.WriteString(rb)
+		sb.WriteString(parts[k+1])
+	}
+	return rubyEncStr(sb.String(), enc)
+}
+
 // rubyU8Bad is the invalid UTF-8 sequence at the start of b as MRI's transcoder
 // delimits it: its length, and 0 for a byte that starts no character, 1 for a
 // sequence b ends inside, 2 for one the next byte breaks. Twin of rbsU8Bad in
@@ -3363,6 +3402,11 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		if blk == nil {
 			return rt.rubyStrEncode(t.b, enc, name, pos)
 		}
+		return rt.rubyScrubBlock(t.b, enc, blk)
+	case "scrub!", "encode!":
+		nb, ne := rt.rubyStrBE(rt.rubyBinMethod(t, strings.TrimSuffix(name, "!"), args))
+		t.retag(nb, ne)
+		return t
 	}
 	// Twin of the case-mapping arm of binMethod in ruby-interpreter.abnf.
 	switch cn := strings.TrimSuffix(name, "!"); cn {

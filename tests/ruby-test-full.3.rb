@@ -1616,6 +1616,31 @@ def s194
         "dumped string contained Unicode escape but used force_encoding", "non-ASCII character detected",
         "string contains null byte", "invalid Unicode escape"] && "".respond_to?(:undump))
 end
+# ===== SECTION 195: String#scrub! / #encode! of invalid and binary Strings =====
+# The bang forms change the String in place to what scrub / encode answer,
+# bytes and encoding, and answer the String itself even when nothing changed;
+# scrub's block receives each invalid sequence. /usr/bin/ruby 2.6 settles each.
+def s195
+  a = "\xff"
+  t = [a]
+  r = [a.scrub!("?"), "ab\xffc".scrub!, "abc".scrub!, "\xff".b.scrub!("?")]
+  check("sc195a", r[0].equal?(a) && t == ["?"] && a.valid_encoding? && r[1] == "ab\u{fffd}c" && r[2] == "abc" &&
+        r[3] == "\xFF".b && r[3].encoding == Encoding::BINARY)
+  e = "x\xe3\x81y\xff"
+  f = "\xff".force_encoding("US-ASCII")
+  check("sc195b", "x\xe3\x81y".scrub { |bad| "<#{bad.unpack1('H*')}>" } == "x<e381>y" &&
+        e.scrub! { |bad| bad.bytesize.to_s }.equal?(e) && e == "x2y1" && f.scrub! == "?" && f.encoding == Encoding::US_ASCII)
+  g = "\xffz"
+  h = "caf\u{e9}"
+  k = "abc".b
+  n = "ok"
+  j = "\xffq".b
+  jm = begin; j.encode!("UTF-8"); rescue Encoding::UndefinedConversionError => x; x.message; end
+  check("sc195c", g.encode!("UTF-8", invalid: :replace, replace: "?").equal?(g) && g == "?z" &&
+        h.encode!("ASCII-8BIT", undef: :replace) == "caf?" && h.encoding == Encoding::BINARY &&
+        k.encode!("UTF-8").encoding == Encoding::UTF_8 && n.encode!("US-ASCII").encoding == Encoding::US_ASCII &&
+        jm == "\"\\xFF\" from ASCII-8BIT to UTF-8" && j.bytes == [255, 113])
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1657,5 +1682,6 @@ s191() # SECTION-CALL 191
 s192() # SECTION-CALL 192
 s193() # SECTION-CALL 193
 s194() # SECTION-CALL 194
+s195() # SECTION-CALL 195
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

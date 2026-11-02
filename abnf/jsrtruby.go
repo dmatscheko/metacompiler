@@ -5484,6 +5484,15 @@ func (rt *jsrt) rubyStrMutate(b *jsRStr, name string, args []interface{}) interf
 			b.s = nv.s
 		}
 		return argAt(pos, 1)
+	case "scrub!", "encode!":
+		// Twin of the re-encoding bang arm of strMutate in ruby-interpreter.abnf.
+		switch nv := rt.rubyMethod(b.s, strings.TrimSuffix(name, "!"), args).(type) {
+		case *jsRBin:
+			b.bin = nv
+		default:
+			b.s = rt.rubyStr(nv)
+		}
+		return b
 	case "[]=":
 		var k2 interface{} = jsUndef
 		if len(args) > 2 {

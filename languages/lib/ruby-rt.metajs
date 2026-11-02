@@ -427,6 +427,11 @@ function rbBinMethod(t, name, args) {
     }
     if (name == "unpack" || name == "unpack1") { return rbStrUnpack(b, name, args) }
     if (name == "encode" || (name == "scrub" && blk === null)) { return rbStrEncode(b, enc, name, args) }
+    if (name == "scrub") { return rbScrubBlock(b, enc, blk) }
+    if (name == "scrub!" || name == "encode!") {
+        var nv = rbBinMethod(t, name.substring(0, name.length - 1), args)
+        return rbBinRetag(t, rbStrBytes(nv), rbStrEnc(nv))
+    }
     // Twin of the case-mapping arm of binMethod in ruby-interpreter.abnf.
     var cn = name
     if (name.charAt(name.length - 1) == "!") { cn = name.substring(0, name.length - 1) }
@@ -490,6 +495,17 @@ function rbEncArg(e) {
     var n = rbsEncCanon(rbStr(e))
     if (n == "") { rbRaiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rbStr(e)) }
     return n
+}
+// Twin of scrubBlock in ruby-interpreter.abnf.
+function rbScrubBlock(b, enc, blk) {
+    var parts = rbsScrubSplit(b, enc)
+    var out = parts[0]
+    var k = 1
+    while (k < parts.length) {
+        out = out + rbStrBytes(rbCall1(blk, rbEncStr(parts[k], enc))) + parts[k + 1]
+        k = k + 2
+    }
+    return rbEncStr(out, enc)
 }
 // Twin of strUndump in ruby-interpreter.abnf.
 function rbStrUndump(b, enc) {
@@ -650,6 +666,12 @@ function rbStrMutate(b, name, args) {
         var sv = rbEncStr(rbSetByte(rbsBinOf(b["__s"]), args), "UTF-8")
         if (rbIsBox(sv)) { rbBecomeBin(b, sv) } else { b["__s"] = sv["__s"] }
         return rbArgAt(args, 1)
+    }
+    // Twin of the re-encoding bang arm of strMutate in ruby-interpreter.abnf.
+    if (name == "scrub!" || name == "encode!") {
+        var ev = js_rxmcall(b["__s"], name.substring(0, name.length - 1), args)
+        if (rbIsBox(ev)) { rbBecomeBin(b, ev) } else { b["__s"] = rbSV(ev) }
+        return b
     }
     if (name == "[]=") {
         var k2 = anytype

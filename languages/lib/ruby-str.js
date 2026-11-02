@@ -916,6 +916,38 @@ function rbsU8Bad(b, i) {
 // invalid byte sequence and a character dst has no code for, null to raise;
 // err receives MRI's message and class then. Bytes in one encoding are copied
 // as they are unless inv is given (String#scrub's case).
+// The bytes b of a String in encoding enc cut at its invalid sequences (as
+// rbsU8Bad delimits them): the even entries are the valid runs, the odd ones
+// the sequences #scrub hands its block. Go twin: rubyScrubSplit in
+// abnf/jsrtrubystr.go.
+function rbsScrubSplit(b, enc) {
+    var parts = []
+    var run = ""
+    var i = 0
+    while (i < b.length) {
+        var c = b.charCodeAt(i)
+        var n = 1
+        var bad = c >= 128 && enc == "US-ASCII"
+        if (c >= 128 && enc == "UTF-8") {
+            n = rbsU8At(b, i)
+            if (n == 0) {
+                n = rbsU8Bad(b, i)[0]
+                bad = true
+            }
+        }
+        if (bad) {
+            parts.push(run)
+            parts.push(b.substring(i, i + n))
+            run = ""
+        } else {
+            run = run + b.substring(i, i + n)
+        }
+        i = i + n
+    }
+    parts.push(run)
+    return parts
+}
+
 function rbsEncode(b, src, dst, inv, undef, err) {
     if (src == dst && inv === null) { return b }
     var out = ""

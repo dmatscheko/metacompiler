@@ -4100,6 +4100,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "*") { return encStr(strRepeat(b, repeatCount(args[0], b.length, false)), enc) }
         if (name == "unpack" || name == "unpack1") { return strUnpack(b, name, args) }
         if (name == "encode" || (name == "scrub" && blk == null)) { return strEncode(b, enc, name, args) }
+        if (name == "scrub") { return scrubBlock(b, enc, blk) }
+        if (name == "scrub!" || name == "encode!") {
+            var nv = anytype
+            nv = binMethod(t, name.substring(0, name.length - 1), args, blk)
+            return binRetag(t, strBytes(nv), strEnc(nv))
+        }
         // Case mapping maps the ASCII letters of bytes that are not UTF-8 text;
         // of invalid UTF-8 it is MRI's ArgumentError. A bang method changes the
         // box, nil when nothing changed.
@@ -4169,6 +4175,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var n = rbsEncCanon(rstr(e))
         if (n == "") { raiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rstr(e)) }
         return n
+    }
+    // String#scrub with a block, of the bytes b in encoding enc: each invalid
+    // sequence becomes what the block answers for it. Twins: rubyScrubBlock in
+    // abnf/jsrtrubystr.go, rbScrubBlock in lib/ruby-rt.metajs.
+    function scrubBlock(b, enc, blk) {
+        var parts = rbsScrubSplit(b, enc)
+        var out = parts[0]
+        for (var k = 1; k < parts.length; k = k + 2) {
+            out = out + strBytes(blockCall(blk, [encStr(parts[k], enc)])) + parts[k + 1]
+        }
+        return encStr(out, enc)
     }
     // String#undump of the bytes b of a String in encoding enc (rbsUndump in
     // lib/ruby-str.js). Twins: rubyStrUndump in abnf/jsrtrubystr.go,
@@ -4364,6 +4381,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             sv = encStr(setByte(rbsBinOf(b.__rs), args), "UTF-8")
             if (isBin(sv)) { becomeBin(b, sv) } else { b.__rs = sv.__rs }
             return args[1]
+        }
+        // The re-encoding bang methods always answer the String, which takes the
+        // bytes and the encoding the plain method answers.
+        if (name == "scrub!" || name == "encode!") {
+            var ev = anytype
+            ev = mcall(b.__rs, name.substring(0, name.length - 1), args, blk)
+            if (isBin(ev)) { becomeBin(b, ev) } else { b.__rs = rsText(ev) }
+            return b
         }
         if (name == "[]=") {
             var nv = anytype
