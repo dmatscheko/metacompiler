@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1166** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1167** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -132,11 +132,11 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1162 bash: hidden NAME[SUB] locals through a nameref, `w=k export w=7`, hidePrefix before eval · P3 · SH · IN PROGRESS (SH worker, round 51) [V]
-Carried over from T-1159 (closed partial); oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- Both engines: after `local -n w=$1; declare -r w` (or `declare w`, `declare -i w`) with $1=`arr[2]`, bash makes a local literally named `arr[2]` that every later lookup through a nameref ending there finds instead of the element (reads, writes, `+=`, arithmetic, `unset`, `local -p`, callees via dynamic scope). Oracle: `declare w; w=5` leaves `arr[2]=c` and `local -p` shows `declare -- arr[2]="5"`; `declare -i w; w=2*3` reads back 6; after `declare -r w`, `export w=5` / `w=9` give `arr[2]: readonly variable`, status 1. Emulating it is a new variable kind across the interpreter, compiler and bash-rt.c (~30 nameref-resolution sites); currently a recorded limit at the declaration site in bash-to-llvm-ir.abnf. The engines also disagree with each other here (callee through caller's nameref after `declare w`: oracle `6 []`, interp `6 [7]` + arr[2]=z, compiler `6 [arr[2]]` + arr[2]=7) — at minimum make the two engines agree.
-- Both engines: `w=k export w=7` (or `readonly w=7`) inside a function through a prefix nameref — bash stores x=7 without the attribute (`declare -- x="7"`); ours prints `declare -x x="7"`.
-- Compiler: a prefix name refused only at run time, before `eval`, still has its array and run-time marks cleared by hidePrefix in the simple-command path.
+### T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local nameref (compiler), `export +x` · P3 · SH · OPEN [V]
+Carried over from T-1162 (closed partial); oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Both engines: `declare -a w` (a hidden array local) through a nameref chain ending at NAME[SUB] is not emulated; the engines agree with each other but not with the oracle.
+- Compiler, pre-existing: a callee using a caller's local nameref is unsupported even for plain assignments (`f(){ local -n w=x; g; }; g(){ w=8; }; x=1; f; echo $x` — oracle 8, compiler 1), so a callee also cannot reach a hidden NAME[SUB] local that way. The compiler tracks namerefs statically; needs a run-time nameref check on the callee's by-name stores/reads where a caller could have made the name a nameref, kept cost-neutral (emit only when some function declares a local nameref of that name).
+- Both engines: `export +x NAME=V` is handled as an option where bash differs (pre-existing message mismatch).
 
 # C — C subset
 
@@ -1206,6 +1206,7 @@ T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` cra
 T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-self ivars, NaN identity — merged d1f0a680 (partial): Float/Rational shift counts and bit index, digits radix, String#byteslice, bare nil?, stream-break count/sum/min_by..., nil-self ivars, Comparable#clamp check, walking upto; NaN identity carried to a follow-up; master four-leg probe matches ruby 2.6
 T-1161 kotlin: arity and Function-type checks of references to Java statics — merged 817db5dc: FunctionN arity of references from declared function types and a measured java-static table; retyping lambdas keep arity; master four-leg probe matches kotlinc 2.2.21
 T-1164 kotlin: java.lang.Long::name in the compiler, function types from collection element types — merged d758f6ce: java.lang-qualified static references in the compiler, function types from collection/map element types, stored references keep identity in the interpreter; master four-leg probe matches kotlinc 2.2.21
+T-1162 bash: hidden NAME[SUB] locals through a nameref, `w=k export w=7`, hidePrefix before eval — merged 2b3a0888 (partial): hidden NAME[SUB] scalar locals through a nameref in both engines, prefix export/readonly NAME=V through a nameref, hidePrefix before eval; hidden array locals and callee-through-caller-nameref carried to a follow-up; master probe matches bash 5.3
 
 # Settled — do not re-open
 
