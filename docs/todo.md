@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1156** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1157** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -135,17 +135,15 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1152 bash: circular/computed nameref stores, readonly and attribute leftovers · P3 · SH · IN PROGRESS (SH worker, round 48) [V]
-Found while closing T-1150; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- Both engines' compiler leg: `t() { local -n v=v; (( v = 3 )); echo "in $v"; }; readonly v=9; t` — oracle and interpreter print `local: warning: v: circular name reference`, `local: v: readonly variable`, `v: readonly variable`, `in 9`; run/native miss the arithmetic-store refusal and print `in 3` (pre-existing on main).
-- Compiler: readonly through a circular or computed nameref is not refused for the prefix assignment `w=q echo`, `read -a`, `mapfile`, `for w in`, or `eval 'w=q'`.
-- Compiler: `local -n w=$1; readonly w` (or `export w`) acts on the nameref instead of the target (circular and non-circular).
-- Both engines: `${w[1]:=q}` through a circular nameref misses two warnings and does not adopt the global scalar as element 0; the compiler also does not refuse it when the global is readonly; `${w[@]:=q}` gives no "bad array subscript".
-- Compiler: `w3[1]=q` through a circular nameref with global `w3=g` loses g as element 0 (oracle `([0]="g" [1]="q")`).
-- Interpreter: prefix assignment `w6=q echo x` through a circular nameref prints an extra warning and sets the nameref's value to "g".
-- Interpreter: array assignment through a nameref to a readonly non-circular target names the target; the oracle names the nameref (`w: readonly variable`).
-- Both engines: `local -i w=3` through a nameref to `arr[2]` — oracle sets nothing, status 0, `declare -p arr` not found.
-- Compiler lexical limits to record or lift: a direct by-name store after a computed nameref's -i/-u/-l; a readonly inside an untaken branch.
+### T-1156 bash: run-time readonly through namerefs, element-nameref declarations, eval refusals · P3 · SH · OPEN [V]
+Found while closing T-1152; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Compiler: `f1() { local -n w=$1; readonly w; }; s1=4; f1 s1; s1=5; echo "a $? $s1"` — oracle refuses (`s1: readonly variable`, the rest of the line is abandoned); run/native print `a 0 5`. `declare -p` shows the run-time mark 32768, but a later by-name store does not consult it (the lexical-limit trade-off; find a cost-neutral way, e.g. only for names a computed nameref could reach).
+- Compiler: `w=q declare -p w` through a circular nameref prints one warning too few and shows `declare -nx w="q"`; oracle: two warnings then `declare -x w="q"`.
+- Compiler: `declare -r w` in a function through a computed nameref to `arr[2]` shows `-nr` on the nameref; oracle leaves `declare -n`.
+- Both engines, top level: `declare -n r='arr[2]'; export r=5` — oracle prints "export: `arr[2]': not a valid identifier" and still stores; the interpreter adds -x to arr, the compiler omits the message.
+- Compiler, top level: `declare -i r=3` through an element nameref marks the nameref (`-in`) instead of making arr `-ai`.
+- Compiler: run-time arithmetic through a nameref (`ar_store`) passes at=0, so it is never refused; computed `eval "$s"` (`rt_eval_assign`) likewise ignores a readonly reached through a nameref.
+- Both engines: after `local -n w=''` is refused, `declare -p w` prints `declare: w: not found`; oracle `declare -- w`.
 
 # C — C subset
 
@@ -1205,6 +1203,7 @@ T-1150 bash: compiler nameref attribute placement, circular-vs-depth message, co
 T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.size, Object instance methods + top-level define_method, uncaught-exception backtrace "from" lines — merged 45589482: Kernel#then, NUM2LONG count args, exact big times.size, program methods on Object; master probes match ruby 2.6 in run/native, interp gaps pre-existing (filed)
 T-1151 kotlin: array == / === compare contents instead of identity; vararg member references; local-fun ::name; inherited/inner static result types — merged 9bd4cb20: array ==/=== identity (tagged vararg arrays), vararg member refs, local ::name in interp, inherited result types; master four-leg probe matches kotlinc 2.2.21
 T-1154 kotlin: `===` identity beyond arrays, array toString/contentHashCode, named spread, vararg element type — merged 0c4c7b54: === identity, array toString/contentHashCode/contentDeep*, named spread, vararg array static types; master four-leg probe matches kotlinc 2.2.21
+T-1152 bash: circular/computed nameref stores, readonly and attribute leftovers — merged 723b3b69: readonly/element stores through circular and computed namerefs, prefix/read/mapfile/for/eval refusals, ${w[i]:=} through circular refs; rt_prefix_ref slot guard added after master security review; master probe matches bash 5.3 except a run-time-readonly store (filed)
 
 # Settled — do not re-open
 
