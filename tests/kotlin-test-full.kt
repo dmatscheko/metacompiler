@@ -8057,6 +8057,50 @@ fun s180() {
 }
 
 
+// ===== SECTION 181: the arity of a reference to a builtin member =====
+// A reference to a builtin type's member is the FunctionN of that member's
+// parameters, plus the receiver of an unbound one: `"ab"::plus` is a Function1 and
+// String::plus a Function2. Regex.find takes (input, startIndex) where every other
+// find takes a predicate, and Array.fill (element, fromIndex, toIndex) where
+// MutableList.fill takes the element alone. A reference whose receiver is a call
+// takes what it names too, and a class's inherited equals takes its other.
+class Bx181(val v: Int) {
+    fun eat(x: Int, y: Int) = x + y
+    fun containsMatchIn(a: Int, b: Int, c: Int) = a + b + c
+}
+fun mk181() = Bx181(1)
+fun ar181(f: Any): Int = when (f) {
+    is Function7<*, *, *, *, *, *, *, *> -> 7
+    is Function6<*, *, *, *, *, *, *> -> 6
+    is Function4<*, *, *, *, *> -> 4
+    is Function3<*, *, *, *> -> 3
+    is Function2<*, *, *> -> 2
+    is Function1<*, *> -> 1
+    is Function0<*> -> 0
+    else -> -1
+}
+
+fun s181() {
+    val s = "abc"
+    val ml = mutableListOf(1, 2)
+    val l = listOf(1, 2)
+    val arr = arrayOf(1, 2)
+    val m = mutableMapOf("a" to 1)
+    val sb = StringBuilder("x")
+    val rx = Regex("a")
+    val n = 5
+    check("bra181a", listOf(ar181("ab"::plus), ar181(s::padStart), ar181(ml::set), ar181(l::indexOf), ar181(m::put),
+        ar181(sb::setCharAt), ar181(rx::find), ar181(arr::fill), ar181(ml::fill), ar181(n::coerceAtLeast),
+        ar181(arr::joinToString), ar181(s::length), ar181(m::getOrDefault)) == listOf(1, 2, 2, 1, 2, 2, 2, 3, 1, 1, 6, 0, 2))
+    check("ubr181b", listOf(ar181(String::plus), ar181(List<Int>::get), ar181(MutableList<Int>::set), ar181(Regex::find),
+        ar181(IntArray::fill), ar181(MutableMap<String, Int>::put), ar181(Int::coerceAtLeast), ar181(Char::isDigit),
+        ar181(String::length)) == listOf(2, 2, 3, 3, 4, 3, 2, 1, 1))
+    check("sfx181c", listOf(ar181(mk181()::eat), ar181(Bx181(3)::containsMatchIn), ar181(Bx181::containsMatchIn), ar181(listOf(1)::contains),
+        ar181(s.reversed()::padEnd), ar181(Bx181(2)::v), ar181(Bx181(1)::equals), ar181(Bx181::equals),
+        ar181(mk181()::toString)) == listOf(2, 3, 4, 1, 2, 0, 1, 2, 0))
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -8234,6 +8278,7 @@ fun main() {
     s178() // SECTION-CALL 178
     s179() // SECTION-CALL 179
     s180() // SECTION-CALL 180
+    s181() // SECTION-CALL 181
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -121,12 +121,65 @@ function ktRecvFnArity(t) {
 }
 // The parameter count of the member a `::` names, from the shapes of the program's
 // methods of its name (l, [min, max, names, ...] each): theirs when every one
-// agrees, else 0, which is also a property's and an unknown builtin's.
-function ktRefParams(l) {
-    if (l == undefined) { return 0 }
+// agrees, else 0, which is also a property's and an unknown builtin's. A class
+// that declares no `name` method still inherits Any.equals(other).
+function ktRefParams(l, name) {
+    if (l == undefined) { return name == "equals" ? 1 : 0 }
     var n = l[0][2].length
     for (var i = 1; i < l.length; i++) { if (l[i][2].length != n) { return 0 } }
     return n
+}
+// The parameter count of a builtin member a `::` names, as an arity spec: "n" on
+// every receiver, followed by <row><n> pairs where a member-table row
+// (ktBuiltinMembers in abnf/jsrtkotlin.go) differs - `find` is Iterable.find(pred)
+// but Regex.find(input, startIndex). Measured with kotlinc 2.2.21 as `T::name is
+// FunctionN` over every row and Int, Long and Double. An absent name takes no
+// parameters, is a property, or is overloaded so that kotlinc rejects a reference
+// to it without an expected type.
+var ktBuiltinArityTab = {}
+var ktBatn = ("add:1 addAll:1 addFirst:1 addLast:1 all:1 also:1 and:1 apply:1 binarySearch:3 " +
+    "coerceAtLeast:1 coerceAtMost:1 commonPrefixWith:2 commonSuffixWith:2 compareTo:1 compute:2 " +
+    "computeIfAbsent:2 computeIfPresent:2 contains:1 containsAll:1 containsKey:1 containsMatchIn:1 " +
+    "containsValue:1 contentDeepEquals:1 contentEquals:1 copyOfRange:2 delete:2 deleteCharAt:1 " +
+    "deleteRange:2 downTo:1 drop:1 dropLast:1 dropLastWhile:1 dropWhile:1 elementAt:1 " +
+    "elementAtOrElse:2 elementAtOrNull:1 ensureCapacity:1 equals:1 fill:1A3 filter:1 " +
+    "filterIndexed:1 filterKeys:1 filterNot:1 filterValues:1 find:1X2 findAll:2 findLast:1 floor:1 " +
+    "floorDiv:1 forEach:1 forEachIndexed:1 get:1 getOrDefault:2U1 getOrElse:2U1 getOrNull:1U0 " +
+    "getOrPut:2 ifBlank:1 ifEmpty:1 indexOf:1 indexOfFirst:1 indexOfLast:1 intersect:1 " +
+    "joinToString:6 lastIndexOf:1 matchEntire:1 matches:1 maxWith:1 maxWithOrNull:1 merge:3 " +
+    "minWith:1 minWithOrNull:1 mod:1 offer:1 offerFirst:1 offerLast:1 onEach:1 onEachIndexed:1 " +
+    "onFailure:1 onSuccess:1 or:1 padEnd:2 padStart:2 partition:1 plus:1 push:1 put:2 putAll:1 " +
+    "putIfAbsent:2 rangeTo:1 rangeUntil:1 reduce:1 reduceIndexed:1 reduceIndexedOrNull:1 " +
+    "reduceOrNull:1 reduceRight:1 reduceRightIndexed:1 reduceRightIndexedOrNull:1 " +
+    "reduceRightOrNull:1 remove:1 removeAll:1 removeAt:1 removeIf:1 removePrefix:1 removeSuffix:1 " +
+    "repeat:1 replace:3 replaceAll:1 replaceFirst:2 replaceIndent:1 retainAll:1 rotateLeft:1 " +
+    "rotateRight:1 runningReduce:1 set:2 setCharAt:2 setLength:1 setRange:3 setValue:3 shl:1 " +
+    "shr:1 slice:1 sortedWith:1 sortWith:1 split:2 subList:2 subSequence:2 subtract:1 take:1 " +
+    "takeIf:1 takeLast:1 takeLastWhile:1 takeUnless:1 takeWhile:1 toByteArray:1 toCharArray:4 " +
+    "trimMargin:1 union:1 until:1 ushr:1 xor:1").split(" ")
+for (var ktBati = 0; ktBati < ktBatn.length; ktBati++) {
+    var ktBatc = ktBatn[ktBati].indexOf(":")
+    ktBuiltinArityTab["$" + ktBatn[ktBati].substring(0, ktBatc)] = ktBatn[ktBati].substring(ktBatc + 1)
+}
+function ktBuiltinArity(name) {
+    var s = ktBuiltinArityTab["$" + name]
+    return s == undefined ? "0" : s
+}
+// What arity spec `spec` gives a receiver of member-table row `kind`. Twin of
+// ktSpecArity in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+function ktSpecArity(spec, kind) {
+    for (var i = 1; i + 1 < spec.length; i += 2) {
+        if (spec.charAt(i) == kind) { return spec.charCodeAt(i + 1) - 48 }
+    }
+    return spec.charCodeAt(0) - 48
+}
+// The member-table row of a builtin type's values, for an unbound `Regex::find`.
+function ktTypeKind(ty) {
+    var b = ktBaseName(ty)
+    if (b == "String") { return "T" }
+    if (b == "Char") { return "C" }
+    var k = ktExtKinds(b)
+    return k == "" ? "" : k.charAt(0)
 }
 // Whether a collection type is a Map (its `in`, get and containsKey take a KEY).
 function ktIsMapTy(ty) {

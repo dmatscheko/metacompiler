@@ -9824,7 +9824,7 @@ NotMemberKw = :script(~~ "pure";
                     // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an
                     // arbitrary expression. The value in hand is that receiver, so the
                     // reference is always a BOUND one.
-                    cur = (s.name == "class") ? kValClass(cur) : kRefMake(cur, s.name, true, null)
+                    cur = (s.name == "class") ? kValClass(cur) : kBoundRef(cur, s.name)
                 } else if (s.kind == "invoke") {
                     // The value in hand is the callee: a class descriptor constructs, a
                     // function value applies, and anything else is offered its `invoke`
@@ -12544,12 +12544,15 @@ NotMemberKw = :script(~~ "pure";
             if (!hv || isCls) {
                 var ur = kRefMake(null, name, false, baseName)
                 if (hv && base !== null && typeof base == "object" && base.__isclass === true) { ur.kcls = base }
-                ur.kparams = ur.kcls != undefined && kClsOwnProp(ur.kcls, name) ? 0 : ktRefParams(kMemberArity["$" + name])
+                if (ur.kcls == undefined && kIsTypeName(ktBaseName(baseName))) {
+                    ur.kparams = ktSpecArity(ktBuiltinArity(name), ktTypeKind(baseName))
+                } else {
+                    ur.kparams = ur.kcls != undefined && kClsOwnProp(ur.kcls, name) ? 0 : ktRefParams(kMemberArity["$" + name], name)
+                }
                 return ur
             }
-            var r = kRefMake(base, name, true, null)
+            var r = kBoundRef(base, name)
             r.kthis = (baseName == "this" || baseName.substring(0, 5) == "this@")
-            r.kparams = ktRefParams(kMemberArity["$" + name])
             return r
         }
     }
@@ -12562,6 +12565,18 @@ NotMemberKw = :script(~~ "pure";
     // this code. kbound false = the receiver is the first argument.
     function kRefMake(recv, name, bound, tname) {
         return {__propref: true, obj: recv, pname: name, kbound: bound, ktype: tname, kthis: false}
+    }
+    // A BOUND reference recv::name. Its arity is the program's methods of the name on
+    // a class instance, else the builtin member's (ktBuiltinArity) for the receiver's
+    // member-table row. Twin of js_ktrefarity in abnf/jsrtkotlin.go.
+    function kBoundRef(recv, name) {
+        var r = kRefMake(recv, name, true, null)
+        if (recv !== null && typeof recv == "object" && (recv.__class != undefined || recv.__isclass != undefined)) {
+            r.kparams = ktRefParams(kMemberArity["$" + name], name)
+        } else {
+            r.kparams = ktSpecArity(ktBuiltinArity(name), kIsBuiltinRecv(recv) ? kBuiltinKind(recv) : "")
+        }
+        return r
     }
     // A function value's toString, as Kotlin/JVM prints it without kotlin-reflect on
     // the class path (the stdlib alone): "function g (Kotlin reflection is not

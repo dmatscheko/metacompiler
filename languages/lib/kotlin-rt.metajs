@@ -8170,12 +8170,31 @@ var ktStdJvm = {"$Pair": "kotlin.Pair", "$Triple": "kotlin.Triple",
     "$Set": "java.util.Set", "$MutableSet": "java.util.Set", "$Map": "java.util.Map",
     "$MutableMap": "java.util.Map", "$Collection": "java.util.Collection",
     "$MutableCollection": "java.util.Collection", "$Runnable": "java.lang.Runnable"}
-// js_ktrefarity(ref, n) (jsrtkotlin.go): a reference's arity, which k4FnTypeIs
-// reads - the n parameters of what it names, and an unbound one's receiver.
-function js_ktrefarity(ref, n) {
+// js_ktrefarity(ref, n, spec) (jsrtkotlin.go): a reference's arity, which
+// k4FnTypeIs reads - the n parameters of what it names, and an unbound one's
+// receiver; a bound builtin receiver's from the arity spec.
+function js_ktrefarity(ref, n, spec) {
     var info = ktRefOf(ref)
-    if (k4IsRef(info)) { fnMetaSet(ref, "", info["bound"] === true ? n : n + 1) }
+    if (!k4IsRef(info)) { return ref }
+    if (info["bound"] !== true) {
+        fnMetaSet(ref, "", n + 1)
+        return ref
+    }
+    var recv = info["recv"]
+    if (spec !== undefined && !(ktIsObj(recv) && (recv["__class"] !== undefined || recv["__isclass"] !== undefined))) {
+        fnMetaSet(ref, "", ktSpecArity(spec, k4IsBuiltinRecv(recv) ? k4BuiltinKind(recv) : ""))
+    } else {
+        fnMetaSet(ref, "", n)
+    }
     return ref
+}
+// ktSpecArity (jsrtkotlin.go): what arity spec `spec` gives a receiver of
+// member-table row kind.
+function ktSpecArity(spec, kind) {
+    for (var i = 1; i + 1 < spec.length; i += 2) {
+        if (spec.charAt(i) == kind) { return spec.charCodeAt(i + 1) - 48 }
+    }
+    return spec.charCodeAt(0) - 48
 }
 // js_ktclasslit(base) is `base::class`.
 function js_ktclasslit(base) {

@@ -4765,7 +4765,7 @@ KwContract  = "contract" KwEnd ;
             // expression, so it is always a BOUND one.
             if (s.kind == "refsfx") {
                 if (s.name == "class") { return {b: b, v: callExt(b, "js_ktvalclass", [cur])} }
-                return {b: b, v: emitRefValue(b, cur, s.name)}
+                return {b: b, v: emitRefArity(b, emitRefValue(b, cur, s.name), ktRefParams(memberArity["$" + s.name], s.name), ktBuiltinArity(s.name))}
             }
             if (s.kind == "invoke") {
                 // The value in hand IS the callee. Same three cases the named `invoke`
@@ -8467,7 +8467,7 @@ KwContract  = "contract" KwEnd ;
             if (classNames["$" + name] == 1) {
                 ktDeclIndex()
                 var cps = ctorParamNames["$" + name]
-                rv = emitRefArity(b, rv, cps == undefined ? 0 : cps.length)
+                rv = emitRefArity(b, rv, cps == undefined ? 0 : cps.length, undefined)
             }
             return {b: b, v: rv}
         }
@@ -8532,16 +8532,23 @@ KwContract  = "contract" KwEnd ;
             ktDeclIndex()
             var ownP = classNames["$" + baseName] == 1 ? classOwnProps["$" + baseName] : undefined
             if (ownP != undefined && ownP["$" + name] == true) {
-                return {b: b, v: emitRefArity(b, callExt(b, "js_ktref", [baseV, emitStr(b, name), hUndef]), 0)}
+                return {b: b, v: emitRefArity(b, callExt(b, "js_ktref", [baseV, emitStr(b, name), hUndef]), 0, undefined)}
             }
-            return {b: b, v: emitRefArity(b, emitRefValue(b, baseV, name), ktRefParams(memberArity["$" + name]))}
+            // An unbound reference to a builtin type's member takes that member's
+            // parameters (ktBuiltinArity). Twin of makePropRef in kotlin-interpreter.abnf.
+            if (ktTypeNameSet["$" + ktBaseName(baseName)] == true) {
+                return {b: b, v: emitRefArity(b, emitRefValue(b, baseV, name), ktSpecArity(ktBuiltinArity(name), ktTypeKind(baseName)), undefined)}
+            }
+            return {b: b, v: emitRefArity(b, emitRefValue(b, baseV, name), ktRefParams(memberArity["$" + name], name), ktBuiltinArity(name))}
         }
     }
-    // js_ktrefarity(ref, n): a reference's arity, which decides `is FunctionN` - the
-    // n parameters of what it names, and an unbound one's receiver. Twin of
-    // kRefArity in kotlin-interpreter.abnf.
-    function emitRefArity(b, refV, n) {
-        return callExt(b, "js_ktrefarity", [refV, emitNum(b, n)])
+    // js_ktrefarity(ref, n, spec): a reference's arity, which decides `is FunctionN` -
+    // the n parameters of what it names, and an unbound one's receiver; a bound
+    // reference to a value that is no class instance takes the builtin member's
+    // count from the arity spec (ktBuiltinArity), undefined where n is final. Twin
+    // of kRefArity and kBoundRef in kotlin-interpreter.abnf.
+    function emitRefArity(b, refV, n, spec) {
+        return callExt(b, "js_ktrefarity", [refV, emitNum(b, n), spec == undefined ? hUndef : emitStr(b, spec)])
     }
     // js_ktref(base, name, ext). The EXTENSIONS of the name are handed to the
     // reference, because the runtime has no extension table, so that `Box::tripled` and

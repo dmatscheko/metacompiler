@@ -2403,13 +2403,19 @@ func init() {
 			return a[0]
 		}
 
-		// js_ktrefarity(ref, n) records a reference's arity, which ktFnTypeIs reads:
-		// the n parameters of what it names, and an unbound one's receiver. Twin of
-		// kRefArity in kotlin-interpreter.abnf and js_ktrefarity in
+		// js_ktrefarity(ref, n, spec) records a reference's arity, which ktFnTypeIs
+		// reads: the n parameters of what it names, and an unbound one's receiver. A
+		// bound reference whose receiver is no class instance names a builtin member,
+		// whose count the arity spec (ktBuiltinArity in kotlin-decltypes.js) gives
+		// for the receiver's member-table row; spec is undefined where n is final.
+		// Twin of kBoundRef in kotlin-interpreter.abnf and js_ktrefarity in
 		// languages/lib/kotlin-rt.metajs.
 		m["js_ktrefarity"] = func(a []uint64) uint64 {
 			if info, isRef := ktRefOf(u(a[0])); isRef {
 				n := int(rt.toNumber(u(a[1])))
+				if spec := u(a[2]); !isUndefOrNull(spec) && info.bound && !ktIsInstance(info.recv) {
+					n = ktSpecArity(rt.toString(spec), ktBuiltinKind(info.recv))
+				}
 				if !info.bound {
 					n++
 				}
@@ -10013,6 +10019,25 @@ var ktBuiltinProps = func() map[string]string {
 // ktBuiltinHasProp reports a builtin receiver whose kind declares `name` as a property.
 func ktBuiltinHasProp(recv interface{}, name string) bool {
 	return strings.IndexByte(ktBuiltinProps[name], ktBuiltinKind(recv)) >= 0
+}
+
+// ktSpecArity is what arity spec `spec` gives a receiver of member-table row kind:
+// its leading count, or the count after the row's letter. Twin of ktSpecArity in
+// languages/lib/kotlin-decltypes.js.
+func ktSpecArity(spec string, kind byte) int {
+	for i := 1; i+1 < len(spec); i += 2 {
+		if spec[i] == kind {
+			return int(spec[i+1] - '0')
+		}
+	}
+	return int(spec[0] - '0')
+}
+
+// ktIsInstance reports a class instance or a class descriptor, whose members are
+// the program's.
+func ktIsInstance(v interface{}) bool {
+	o, isObj := v.(*jsObject)
+	return isObj && (o.props["__class"] != nil || o.props["__isclass"] != nil)
 }
 
 // ktBuiltinLacks reports a builtin receiver that does not declare `name`, so an
