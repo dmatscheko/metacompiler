@@ -110,7 +110,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::topVal reference, Array<ProgramClass> JVM name, extension-function references · P3 · KT · OPEN [V]
+### T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::topVal reference, Array<ProgramClass> JVM name, extension-function references · P3 · KT · IN PROGRESS (KT worker, round 38) [V]
 
 Found while working T-1125. The oracle is kotlinc 2.2.21 (stdlib only, no kotlin-reflect).
 
