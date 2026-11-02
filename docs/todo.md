@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1157** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1158** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,17 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1153 ruby: big-Integer ranges, NaN vs bignum, Object-method self, float counts · P3 · RB · IN PROGRESS (RB worker, round 64) [V]
-Found while closing T-1148; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
-- `upto`/`downto`/`step` with a big-Integer bound hang instead of iterating or returning an Enumerator with the exact size.
-- Comparisons of Float::NAN against a big Integer (`<`, `<=>`, `==`) disagree with MRI.
-- Interpreter: a method a program adds to `Object` sees the wrong self on nil — `class Object; def greet; "hi #{self.class}"; end; end; p nil.greet` prints `"hi Object"`; MRI and the compiler print `"hi NilClass"`.
-- `first(n)` with a huge n on a lazy enumerator loops instead of finishing.
-- Interpreter: `"abc" * 2.9` gives `"abcabcabc"`; MRI truncates the count like NUM2LONG (`"abcabc"`). The compiler already agrees; check the other interpreter count-arg sites the same way.
+### T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-self ivars, NaN identity · P3 · RB · OPEN [V]
+Found while closing T-1153; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
+- `5[2.9]`, `5 << 2.9`, `5 >> 2.9` crash ("Float does not support '>>'"; run leg nil pointer); MRI truncates the count.
+- `5.digits(12.9)` — MRI [5]; interpreter and native give garbage floats, run crashes.
+- String#byteslice is missing (NoMethodError).
+- A bare `nil?` inside a method parses as `nil` followed by the `?;` char literal.
+- `count { break }` on an endless stream Enumerator hangs (rbaLazyEager runs "count" eagerly).
+- Compiled engines: an instance-variable read with nil as self crashes ("member ... of null"). Interpreter: `nil.instance_eval` is missing.
+- Interpreter and emitter: a user Comparable's clamp skips the min > max check.
+- Compiled engines: `n = Float::NAN; [n].include?(n)` is false; MRI true (identity first).
+- `upto` with a small receiver and a bound below 2**53 but large (e.g. 10**15) still builds an array instead of walking.
 
 # JS — JavaScript and TypeScript
 
@@ -1204,6 +1208,7 @@ T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.si
 T-1151 kotlin: array == / === compare contents instead of identity; vararg member references; local-fun ::name; inherited/inner static result types — merged 9bd4cb20: array ==/=== identity (tagged vararg arrays), vararg member refs, local ::name in interp, inherited result types; master four-leg probe matches kotlinc 2.2.21
 T-1154 kotlin: `===` identity beyond arrays, array toString/contentHashCode, named spread, vararg element type — merged 0c4c7b54: === identity, array toString/contentHashCode/contentDeep*, named spread, vararg array static types; master four-leg probe matches kotlinc 2.2.21
 T-1152 bash: circular/computed nameref stores, readonly and attribute leftovers — merged 723b3b69: readonly/element stores through circular and computed namerefs, prefix/read/mapfile/for/eval refusals, ${w[i]:=} through circular refs; rt_prefix_ref slot guard added after master security review; master probe matches bash 5.3 except a run-time-readonly store (filed)
+T-1153 ruby: big-Integer ranges, NaN vs bignum, Object-method self, float counts — merged 3c7ad439: big-Integer upto/downto/step walks with exact sizes, NaN vs bignum relations, nil self in Object methods, Enumerable#first cap, C-long count args; master four-leg probe matches ruby 2.6
 
 # Settled — do not re-open
 
