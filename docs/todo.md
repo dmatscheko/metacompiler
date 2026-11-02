@@ -138,7 +138,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` crash, hidden element locals · P3 · SH · OPEN [V]
+### T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` crash, hidden element locals · P3 · SH · IN PROGRESS (SH worker, round 50) [V]
 Found while closing T-1156; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Compiler: after `f1(){ local -n w=$1; readonly w; }; s=4; f1 s`, these are not refused (oracle refuses each, status 1, value stays 4; the interpreter is right): `read s <<< 9`, `declare s=5`, a function's `local s=6`, `unset s`, `printf -v s %s 7`, `for s in 1 2`, prefix `s=9 true`. Each path decides readonly at compile time; give each the run-time `rt_ro_name`/`rt_dyn_at` branch `roRtTest` has, emitted only when refAnywhere × roNames says it can matter.
 - `h(){ local -n w=x; w=k export w; echo "y $?"; declare -p x w; }; ( h )` — interpreter dies with `TypeError: Cannot read property 'length' of undefined at isFields`; compiler prints `declare -x x="k"` / `declare -nx w="x"`; oracle `y 0`, `declare -- x="1"`... (verify exact oracle text), `declare -n w="x"`.
