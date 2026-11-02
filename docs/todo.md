@@ -140,13 +140,13 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1109 php: user-function argument TypeError location/trace; callable in unions, return types, variadics · P3 · PHP · OPEN [V]
+### T-1109 php: user-function argument TypeError location/trace; callable in unions, return types, variadics · P3 · PHP · IN PROGRESS (PHP worker, round 49) [V]
 
 Spec: zend_verify_arg_error (Zend/zend_execute.c) and zend_verify_callable / zend_verify_return_type.
 - An argument TypeError on a user function: getLine()/getFile() must give the function's declaration line, not the caller's. The uncaught message must add ", called in F on line N" as now, plus the declaration site. The trace must show the real argument (`h(Array)`, not `h(NULL)`). Repros: scratchpad/PHP48/ti.php and ti2.php.
 - `callable` inside a union (`callable|string`), a `callable` return type, and variadic `callable ...$cs` parameters still get only the shape test. They need the zend_is_callable check, and the deprecations, that plain `callable` parameters now get.
 
-### T-1110 php: microtime() missing; native uncaught "Call to undefined function" prints "in :0" · P3 · PHP · OPEN [V]
+### T-1110 php: microtime() missing; native uncaught "Call to undefined function" prints "in :0" · P3 · PHP · IN PROGRESS (PHP worker, round 49) [V]
 
 - microtime() is not implemented. Add microtime(bool $as_float = false): the string form is "0.12345600 1700000000" (msec part with 8 decimals, then a space and the seconds); with true it returns a float. Tests may only check the shape, because the value changes from run to run.
 - Native only: an uncaught "Call to undefined function f()" prints "in :0" / "Unknown on line 0", while the interpreter shows the file and line. Give the native call site the same location the interpreter uses.
