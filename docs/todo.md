@@ -105,7 +105,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1142 kotlin: per-class program-method arity, interpreter named args on builtins shadowed by a class method name · P3 · KT · OPEN [V]
+### T-1142 kotlin: per-class program-method arity, interpreter named args on builtins shadowed by a class method name · P3 · KT · IN PROGRESS (KT worker, round 43) [V]
 
 Found while working T-1140. The oracle is kotlinc 2.2.21 (stdlib only).
 
