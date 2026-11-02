@@ -637,6 +637,42 @@ function ktNoteClass(txt, from, to) {
     var name = txt.substring(i + 5, j)
     if (ktClassExt["$" + name] == undefined) { ktClassNames.push(name) }
     ktClassExt["$" + name] = {from: from, to: to}
+    ktNoteSupers(name, c.srcSlice(from, to))
+}
+// The supertypes a type declaration's header names (`class B : A(), I by d`), by
+// simple name, which ktChainFunRet searches for an inherited method.
+var ktTypeSupers = {}
+function ktNoteSupers(name, raw) {
+    var i = raw.indexOf(name)
+    if (i < 0) { return }
+    i = i + name.length
+    var depth = 0
+    var colon = -1
+    while (i < raw.length) {
+        var ch = raw.charAt(i)
+        if (ch == "\"" || ch == "'") {
+            var q = ktQuoteEnd(raw, i)
+            if (q < 0) { return }
+            i = q + 1
+            continue
+        }
+        if (ch == "(" || ch == "[" || ch == "<") { depth++ }
+        else if (ch == ")" || ch == "]" || (ch == ">" && raw.charAt(i - 1) != "-")) { depth-- }
+        else if (depth == 0 && ch == "{") { break }
+        else if (depth == 0 && ch == ":" && colon < 0) { colon = i }
+        i++
+    }
+    if (colon < 0) { return }
+    var items = ktSplitTop(raw.substring(colon + 1, i), ",")
+    var out = []
+    for (var k = 0; k < items.length; k++) {
+        var t = ktTrimWs(items[k])
+        var e = 0
+        while (e < t.length && (ktIdChar(t.charAt(e)) || t.charAt(e) == ".")) { e++ }
+        var sup = t.substring(t.lastIndexOf(".", e) + 1, e)
+        if (sup != "") { out.push(sup) }
+    }
+    ktTypeSupers["$" + name] = out
 }
 // The innermost class whose body holds offset `at`, or "".
 function ktClassAt(at) {
@@ -706,6 +742,7 @@ function ktNoteTypeName(txt, kw, from, to) {
     ktDeclTypeNames["$" + name] = true
     if (ktTypeExt["$" + name] == undefined) { ktTypeExtNames.push(name) }
     ktTypeExt["$" + name] = {from: from, to: to}
+    ktNoteSupers(name, c.srcSlice(from, to))
 }
 // The JVM binary name of a type the program declares, written t (`Inner`,
 // `Outer.Inner`): its enclosing type declarations and itself joined by `$`
@@ -1635,7 +1672,7 @@ function ktChainTy(s) {
             i = ce
         } else {
             var d = ktDeclAt(w)
-            ty = d == null ? "" : (d.ty != "" ? d.ty : ktDeclLty(d))
+            ty = d == null ? ktNestedCtorHead(w, s, i) : (d.ty != "" ? d.ty : ktDeclLty(d))
         }
     } else {
         return ""
@@ -1677,6 +1714,21 @@ function ktChainTy(s) {
         }
     }
     return ty
+}
+// A class name w heading a chain s whose next step `.Nested(` constructs a class
+// declared in it: w, so that step types as that class (ktMethodTy); "" else.
+function ktNestedCtorHead(w, s, i) {
+    if (ktClassExt["$" + w] == undefined) { return "" }
+    var j = ktSkipWs(s, i)
+    if (s.charAt(j) != ".") { return "" }
+    j = ktSkipWs(s, j + 1)
+    var m = j
+    while (j < s.length && ktIdChar(s.charAt(j))) { j++ }
+    var n = s.substring(m, j)
+    var e = ktClassExt["$" + n]
+    var o = ktClassExt["$" + w]
+    if (e == undefined || e.from < o.from || e.to > o.to || s.charAt(ktSkipWs(s, j)) != "(") { return "" }
+    return w
 }
 // The type a call `name(...)` (its text t) yields: a class's constructor, a
 // declared function's result, a builder's collection - typed by its explicit type
@@ -1730,8 +1782,10 @@ function ktMethodTy(ty, name, call) {
     var base = ktBaseName(ty)
     if (ty.charAt(ty.length - 1) == "?") { return "" }
     if (ktClassExt["$" + base] != undefined) {
-        var own = ktOwnFunRet(base, name)
+        var own = ktChainFunRet(base, name)
         if (own != undefined) { return own }
+        // `d.Inner()` constructs the inner class it names.
+        if (ktClassExt["$" + name] != undefined && ktTrimWs(call).charAt(0) == "(") { return name }
         return ktFunRets["$" + name] != undefined ? ktFunRet(name) : ""
     }
     var args = ktTrimWs(call)
@@ -1985,12 +2039,20 @@ function ktNoteFunRet(raw, at) {
     ktFunRets["$" + name] = f
 }
 function ktFunRet(name) { return ktFunRetTy(ktFunRets["$" + name]) }
-// The result type of the method `name` that class cls itself declares (cls is the
-// innermost class around the declaration), undefined when it declares none.
-function ktOwnFunRet(cls, name) {
+// The result type of the method `name` that type cls declares (cls is the innermost
+// type around the declaration) or inherits from a supertype its header names
+// (ktTypeSupers), undefined when there is none.
+function ktChainFunRet(cls, name) {
     var l = ktFunDecls["$" + name]
     if (l == undefined) { return undefined }
-    for (var i = 0; i < l.length; i++) { if (ktClassAt(l[i].pos) == cls) { return ktFunRetTy(l[i]) } }
+    var queue = [cls]
+    for (var g = 0; g < queue.length && g < 64; g++) {
+        for (var i = 0; i < l.length; i++) {
+            if (ktOuterDecl({from: l[i].pos, to: l[i].pos}) == queue[g]) { return ktFunRetTy(l[i]) }
+        }
+        var sups = ktTypeSupers["$" + queue[g]]
+        for (var k = 0; sups != undefined && k < sups.length; k++) { queue.push(sups[k]) }
+    }
     return undefined
 }
 function ktFunRetTy(f) {

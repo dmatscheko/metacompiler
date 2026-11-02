@@ -5797,17 +5797,28 @@ NotMemberKw = :script(~~ "pure";
         var params = items[2].params
         var body = items[3]
         var thisAt = "this@" + items[1]
-        var fn = function() {
-            var fr = {}
-            if (kThisLblUsed["$" + thisAt] === true) { scopePut(fr, thisAt, arguments[0]) }
-            return runFrame([globalScope, fr], arguments[0], true, params, arguments, 1, body)
-        }
+        var fn = kExtClosure(thisAt, params, body)
         extFuns["$" + items[1]] = fn
         var old = extTyped["$" + items[1]]
         var l = []
         if (old != undefined) { for (var i = 0; i < old.length; i++) { if (old[i].ty != ty) { l.push(old[i]) } } }
-        l.push({ty: ty, fn: fn})
+        // vfn: with a vararg, the closure a `::` reference calls (kVarargRefParams).
+        var rp = kVarargRefParams(params)
+        l.push({ty: ty, fn: fn, vfn: rp == null ? null : kExtClosure(thisAt, rp, body)})
         extTyped["$" + items[1]] = l
+    }
+    function kExtClosure(thisAt, params, body) {
+        return function() {
+            var fr = {}
+            if (kThisLblUsed["$" + thisAt] === true) { scopePut(fr, thisAt, arguments[0]) }
+            return runFrame([globalScope, fr], arguments[0], true, params, arguments, 1, body)
+        }
+    }
+    // The closure a reference to the extension fn of name calls: its vfn, if any.
+    function kExtRefFn(name, fn) {
+        var l = extTyped["$" + name]
+        for (var i = 0; i < l.length; i++) { if (l[i].fn === fn && l[i].vfn != null) { return l[i].vfn } }
+        return fn
     }
     function extResolves(name) {
         if (extFuns["$" + name] == undefined) { return false }
@@ -7672,9 +7683,7 @@ NotMemberKw = :script(~~ "pure";
         if (name == "contentToString" || name == "contentDeepToString") { return {v: kstr(es)} }
         if (name == "contentEquals" || name == "contentDeepEquals") {
             var oth = args.length > 0 ? args[0] : null
-            if (!Array.isArray(oth) || oth.length != es.length) { return {v: false} }
-            for (i = 0; i < es.length; i++) { if (!kEq(es[i], oth[i], false)) { return {v: false} } }
-            return {v: true}
+            return {v: Array.isArray(oth) && kContentEq(es, oth, name == "contentDeepEquals")}
         }
         if (name == "sortedBy") { return {v: kSortBy(es, f, false)} }
         if (name == "sortedByDescending") { return {v: kSortBy(es, f, true)} }
@@ -9288,6 +9297,9 @@ NotMemberKw = :script(~~ "pure";
         if (t == "number") { return v | 0 }
         if (t == "string") { return strHash(v) }
         if (Array.isArray(v)) {
+            // An Array hashes by identity, like its equals (kStructEq): the identity
+            // stand-in 1.
+            if (kIsJvmArr(v)) { return 1 }
             var lh = 1
             for (var i = 0; i < v.length; i++) { lh = (Math.imul(31, lh) + kHash(v[i])) | 0 }
             return lh
@@ -9563,6 +9575,25 @@ NotMemberKw = :script(~~ "pure";
         }
         return false
     }
+    // contentEquals over two arrays' elements: element-wise equals, so a nested array
+    // compares by identity, unless deep (contentDeepEquals), which compares two
+    // nested arrays by their contents in turn. Twin of ktContentEq in
+    // abnf/jsrtkotlin.go.
+    function kContentEq(es, oth, deep) {
+        if (oth.length != es.length) { return false }
+        for (var i = 0; i < es.length; i++) {
+            if (deep && Array.isArray(es[i]) && Array.isArray(oth[i]) && kIsJvmArr(es[i]) && kIsJvmArr(oth[i])) {
+                if (!kContentEq(es[i], oth[i], true)) { return false }
+            } else if (!kEq(es[i], oth[i], false)) { return false }
+        }
+        return true
+    }
+    // An Array or a primitive array, as opposed to a List, a Sequence or a view
+    // sharing the host array. Twin of ktIsJvmArr in abnf/jsrtkotlin.go.
+    function kIsJvmArr(a) {
+        var k = arrKind(a)
+        return k == 1 || k >= 5
+    }
     // The structural-equality half of kEq, over the shapes the runtime models without a
     // class descriptor: a list/array (a plain host array), a set, a map (the {__dict,
     // keys, vals} handle), a range and a Pair/Triple. Answers 1 for equal, -1 for not
@@ -9581,6 +9612,9 @@ NotMemberKw = :script(~~ "pure";
         }
         if (Array.isArray(a) || Array.isArray(b)) {
             if (!Array.isArray(a) || !Array.isArray(b)) { return -1 }
+            // An Array is a JVM array, whose equals is identity (only contentEquals
+            // compares elements): `intArrayOf(1) == intArrayOf(1)` is false.
+            if (kIsJvmArr(a) || kIsJvmArr(b)) { return a === b ? 1 : -1 }
             if (a.length !== b.length) { return -1 }
             for (var i = 0; i < a.length; i++) { if (!kEq(a[i], b[i], false)) { return -1 } }
             return 1
@@ -10561,7 +10595,10 @@ NotMemberKw = :script(~~ "pure";
                     nv = named[p.pname]
                     va = Array.isArray(nv) ? nv : kIterable(nv)
                 }
-                declVar(p.pname, va)
+                // The array Kotlin binds: an IntArray for Int, ..., else an Array.
+                // Twin of js_ktvararr in abnf/jsrtkotlin.go.
+                var vk = ktaKindOf(p.ty)
+                declVar(p.pname, arrKindSet(va, vk == 0 ? 1 : vk))
                 // The parameters after a vararg take only named arguments (and the
                 // trailing lambda, which kTrailArg passed by name).
                 off = args.length
@@ -10676,17 +10713,13 @@ NotMemberKw = :script(~~ "pure";
     function kRetAdopt(f, v) {
         return (f.rty == undefined || f.rty == "") ? v : kAdoptVal(v, f.rty)
     }
-    // A top-level function's name, remembered against its closure so that
-    // `::topLevelFun.name` can answer it (Kotlin: KFunction.name). A function VALUE
-    // carries no name of its own here, and a side table keyed by identity is safe
-    // because these closures are built once, at registration, and never copied: the
-    // tag-stack round trip that loses a thunk's identity under goja happens at BUILD
-    // time, not while the program runs. The table is one entry per declared function.
-    var fnRefFns = []
+    // A declared function's name, kept on its closure (fnMetaSet) so that
+    // `::f.name` can answer it (Kotlin: KFunction.name); a lambda's is "". fnRefNames
+    // lists the top-level ones.
     var fnRefNames = []
     function fnRefName(v) {
-        for (var i = 0; i < fnRefFns.length; i++) { if (fnRefFns[i] === v) { return fnRefNames[i] } }
-        return undefined
+        var n = fnMeta(v, "name")
+        return (n === undefined || n == "") ? undefined : n
     }
     function registerFun(f) {
         registerFunAs(f, f.name, f.params)
@@ -10694,13 +10727,10 @@ NotMemberKw = :script(~~ "pure";
         if (rp != null) { registerFunAs(f, f.name + "$vref", rp) }
     }
     function registerFunAs(f, key, params) {
-        var cl = makeFunClosure(f, params)
-        // Its arity, which `::f is FunctionN` tests (as makeLambda's). Twin of
-        // makeFunStmt in kotlin-to-llvm-ir.abnf.
-        if (params.length > 0) { cl = fnMetaSet(cl, "", params.length) }
-        fnRefFns.push(cl)
+        // Its name and arity, which `::f is FunctionN` tests (as makeLambda's). Twin
+        // of makeFunStmt in kotlin-to-llvm-ir.abnf.
         fnRefNames.push(f.name)
-        globalScope[key] = cl
+        globalScope[key] = fnMetaSet(makeFunClosure(f, params), f.name, params.length)
     }
     // A reference to a function with a vararg parameter is a KFunction whose
     // parameter IS the array: `val r = ::f; r(intArrayOf(1, 2))` binds xs to that
@@ -10777,11 +10807,11 @@ NotMemberKw = :script(~~ "pure";
         }
     }
     function makeLocalFunClosure(f, params, captured) {
-        return function() {
+        return fnMetaSet(function() {
             var base = captured.slice(0)
             base.push({})
             return kRetAdopt(f, runFrame(base, undefined, false, params, arguments, 0, f.body))
-        }
+        }, f.name, params.length)
     }
     function makeFunClosure(f, params) {
         return function() {
@@ -10790,12 +10820,13 @@ NotMemberKw = :script(~~ "pure";
             return kRetAdopt(f, invokeBody(params, f.body, undefined, "this", args))
         }
     }
-    function makeMethodClosure(f) {
+    function makeMethodClosure(f) { return makeMethodClosureAs(f, f.params) }
+    function makeMethodClosureAs(f, params) {
         return kMethodArity(function() {
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return kRetAdopt(f, invokeBody(f.params, f.body, self, "this", args))
+            return kRetAdopt(f, invokeBody(params, f.body, self, "this", args))
         }, f)
     }
     // A method closure records its parameter count, which a `::` reference to its
@@ -11263,6 +11294,10 @@ NotMemberKw = :script(~~ "pure";
         for (var i = 0; i < parts.methods.length; i++) {
             cls[parts.methods[i].name] = makeMethodClosure(parts.methods[i])
             classMethodNames["$" + parts.methods[i].name] = true
+            // A method with a vararg also binds, under name$vref, the closure a `::`
+            // reference calls (kVarargRefParams).
+            var vrp = kVarargRefParams(parts.methods[i].params)
+            if (vrp != null) { cls[parts.methods[i].name + "$vref"] = makeMethodClosureAs(parts.methods[i], vrp) }
         }
         for (var a = 0; a < parts.accessors.length; a++) {
             var p = parts.accessors[a]
@@ -12528,7 +12563,10 @@ NotMemberKw = :script(~~ "pure";
             var chain = findThisChain()
             for (var ci = 0; ci < chain.length; ci++) {
                 var r = chain[ci]
-                if (r !== null && r !== undefined && typeof r == "object" && hasOwn(r, name)) {
+                // A property of the implicit receiver, or a method with a vararg, which
+                // the reference calls through its name$vref (kRefApply).
+                if (r !== null && r !== undefined && typeof r == "object" &&
+                    (hasOwn(r, name) || lookupMethod(r, name + "$vref") != null)) {
                     var br = propRefOf(r, name)
                     br.kthis = true
                     return br
@@ -12824,7 +12862,12 @@ NotMemberKw = :script(~~ "pure";
         var recv = anytype // Any receiver type reaches a reference.
         recv = kRefRecv(r, args)
         if (kIsVarHolder(recv)) { return kRefRead(recv, r.pname) }
-        if (lookupMethod(recv, r.pname) != null) { return mcall(recv, r.pname, kRefRest(r, args)) }
+        if (lookupMethod(recv, r.pname) != null) {
+            // A method with a vararg binds the reference's array argument as it is.
+            // Twin of ktRefApply in abnf/jsrtkotlin.go.
+            var mn = lookupMethod(recv, r.pname + "$vref") != null ? r.pname + "$vref" : r.pname
+            return mcall(recv, mn, kRefRest(r, args))
+        }
         // A member the receiver really HAS wins over a same-named extension, which is
         // Kotlin's rule for the call too.
         if (recv !== null && recv !== undefined && typeof recv == "object" && hasOwn(recv, r.pname)) {
@@ -12833,7 +12876,7 @@ NotMemberKw = :script(~~ "pure";
         // An EXTENSION function - `Box::tripled`, `b::tripled`. extFor is the same
         // resolution the call `b.tripled()` uses.
         var rxf = extFor(r.pname, recv)
-        if (rxf != null) { return rxf.apply(undefined, concat2impl([recv], kRefRest(r, args))) }
+        if (rxf != null) { return kExtRefFn(r.pname, rxf).apply(undefined, concat2impl([recv], kRefRest(r, args))) }
         if (recvFn(r.pname) != null) { return mcall(recv, r.pname, kRefRest(r, args)) }
         // A builtin member that is no property the receiver answers is a FUNCTION
         // reference: `Int::toString`, `String::uppercase`. Twin of ktRefApply in

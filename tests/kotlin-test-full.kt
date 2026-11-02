@@ -8263,6 +8263,48 @@ fun s185() {
         listOf(intArrayOf(1), intArrayOf(1, 2, 3)).map(::loc) == listOf(10, 30))
 }
 
+// ===== SECTION 186: arrays compare by identity, vararg member references, local ::name, inherited result types =====
+// An Array is a JVM array: `==`, `!=`, equals() and `===` are identity, and only
+// contentEquals compares elements, so an Array is a map key and set element by
+// identity and a List or a Pair holding one compares it by identity too;
+// contentDeepEquals compares nested arrays by their contents. A vararg parameter is
+// such an array (an IntArray for Int), and a spread passes a copy. A reference to a
+// method or extension with a vararg takes the array itself. `::loc.name` of a local
+// function is its name. A method's static result type is found along the receiver
+// class's supertypes, and through an inner or nested class constructed off a
+// receiver (kotlinc 2.2.21).
+fun fi186(vararg xs: Int) = xs
+fun <T> fa186(vararg xs: T) = xs
+open class M186(val k: Int) { fun s(vararg xs: Int) = k + xs.sum(); fun me() = (::s)(intArrayOf(7)) }
+fun M186.e(vararg xs: Int) = k * 10 + xs.sum()
+open class A186 { fun m(): Int = 1 }
+class B186 : A186()
+class C186 { fun m(): List<Int> = listOf(1) }
+class D186 { inner class E186 { fun m(): Long = 2L }; class N186 { fun m(): Double = 2.0 } }
+
+fun s186() {
+    val b = intArrayOf(1, 2); val c = intArrayOf(1, 2); val d = b
+    val s1 = arrayOf("a"); val s2 = arrayOf("a")
+    check("arreq186a", b !== c && b === d && b != c && !b.equals(c) && b.equals(d) && b.contentEquals(c) &&
+        s1 != s2 && charArrayOf('x') != charArrayOf('x') && fi186(*b) !== b && fi186(*b) != b &&
+        fa186(1, 2) != fa186(1, 2) && fi186(1).javaClass.name == "[I")
+    val m = HashMap<IntArray, String>(); m[b] = "x"
+    val st = HashSet<IntArray>(); st.add(b); st.add(c); st.add(d)
+    check("arreq186b", m[c] == null && m[d] == "x" && st.size == 2 && !listOf(b).contains(c) && listOf(b).indexOf(d) == 0 &&
+        listOf(b) != listOf(c) && listOf(b) == listOf(d) && Pair(b, 1) != Pair(c, 1) && setOf(b, c).size == 2 &&
+        (when (b) { c -> "c"; d -> "d"; else -> "-" }) == "d" && listOf(1, 2) == listOf(1, 2) &&
+        !arrayOf(b).contentEquals(arrayOf(c)) && arrayOf(b).contentDeepEquals(arrayOf(c)))
+    val mm = M186(100)
+    check("vref186c", (mm::s)(intArrayOf(1, 2)) == 103 && (M186::s)(mm, intArrayOf(3)) == 103 && mm.me() == 107 &&
+        listOf(intArrayOf(1), intArrayOf(2, 3)).map(mm::s) == listOf(101, 105) && (mm::e)(intArrayOf(1, 2)) == 1003 &&
+        (M186::e)(mm, intArrayOf(3)) == 1003)
+    fun loc186(x: Int) = x
+    check("lref186d", ::loc186.name == "loc186" && listOf(::loc186).map { it.name } == listOf("loc186"))
+    val dd = D186()
+    check("jstat186e", B186().m().javaClass.name == "int" && dd.E186().m().javaClass.name == "long" &&
+        D186.N186().m().javaClass.name == "double" && C186().m().size == 1)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8446,6 +8488,7 @@ fun main() {
     s183() // SECTION-CALL 183
     s184() // SECTION-CALL 184
     s185() // SECTION-CALL 185
+    s186() // SECTION-CALL 186
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

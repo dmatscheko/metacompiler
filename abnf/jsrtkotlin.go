@@ -2393,7 +2393,9 @@ func init() {
 			for s := sc; s != nil; s = s.parent {
 				if t, ok := s.get("this"); ok {
 					if obj, isObj := t.(*jsObject); isObj {
-						if _, has := obj.props[name]; has {
+						// A property or a method of the implicit receiver: `::m` in a
+						// class body is bound to this.
+						if _, has := obj.props[name]; has || ktClassChainHas(obj, name) {
 							return w(rt.ktMakeRef(&ktRefInfo{recv: obj, name: name, bound: true}))
 						}
 					}
@@ -2513,6 +2515,16 @@ func init() {
 		m["js_ktarrclassed"] = func(a []uint64) uint64 {
 			if arr, isArr := u(a[0]).(*jsArray); isArr && arr.kind == ktArrArray {
 				ktArrClassed(arr, rt.toString(u(a[1])))
+			}
+			return a[0]
+		}
+		// js_ktvararr(xs, ty) makes the list a `vararg xs: ty` parameter collects
+		// the array Kotlin binds: an IntArray for Int, ... (ktaKindOf), an Array for
+		// any other element type. Twin of bindParams in kotlin-interpreter.abnf and
+		// js_ktvararr in languages/lib/kotlin-rt.metajs.
+		m["js_ktvararr"] = func(a []uint64) uint64 {
+			if arr, isArr := u(a[0]).(*jsArray); isArr {
+				arr.kind = ktVarargKind(rt.toString(u(a[1])))
 			}
 			return a[0]
 		}
@@ -5610,7 +5622,15 @@ func (rt *jsrt) ktStructEq(a, b interface{}) (bool, bool) {
 	aa, aIsArr := a.(*jsArray)
 	ba, bIsArr := b.(*jsArray)
 	if aIsArr || bIsArr {
-		if !aIsArr || !bIsArr || len(aa.elems) != len(ba.elems) {
+		if !aIsArr || !bIsArr {
+			return false, true
+		}
+		// An Array is a JVM array, whose equals is identity (only contentEquals
+		// compares elements): `intArrayOf(1) == intArrayOf(1)` is false.
+		if ktIsJvmArr(aa) || ktIsJvmArr(ba) {
+			return aa == ba, true
+		}
+		if len(aa.elems) != len(ba.elems) {
 			return false, true
 		}
 		for i := range aa.elems {
@@ -6729,15 +6749,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return rt.ktpRender(arr(es), 0), true
 	case "contentEquals", "contentDeepEquals":
 		other, ok := argAt(args, 0).(*jsArray)
-		if !ok || len(other.elems) != len(es) {
-			return false, true
-		}
-		for i, e := range es {
-			if !rt.ktEqVals(e, other.elems[i]) {
-				return false, true
-			}
-		}
-		return true, true
+		return ok && rt.ktContentEq(es, other.elems, name == "contentDeepEquals"), true
 	case "sortedBy", "sortedByDescending":
 		return ktSortBy(rt, es, f, name == "sortedByDescending"), true
 	case "maxOrNull", "minOrNull":
@@ -7594,6 +7606,11 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 	}
 	switch t := v.(type) {
 	case *jsArray:
+		// An Array hashes by identity, like its equals (ktStructEq): the identity
+		// stand-in 1.
+		if ktIsJvmArr(t) {
+			return 1
+		}
 		var h int32 = 1
 		for _, e := range t.elems {
 			h = 31*h + int32(ktElemHash(rt, e))
@@ -12212,6 +12229,46 @@ func ktIterClass(jc string) string {
 	return m + "$" + k + "Iterator"
 }
 
+// ktIsJvmArr reports an Array or a primitive array, as opposed to a List, a
+// Sequence or a view sharing the host array. Twin of kIsJvmArr in
+// kotlin-interpreter.abnf and ktIsJvmArr in languages/lib/kotlin-rt.metajs.
+func ktIsJvmArr(a *jsArray) bool { return a.kind == ktArrArray || a.kind >= ktArrPrim }
+
+// ktContentEq is contentEquals over two arrays' elements: element-wise equals, so a
+// nested array compares by identity, unless deep (contentDeepEquals), which
+// compares two nested arrays by their contents in turn. Twin of kContentEq in
+// kotlin-interpreter.abnf and k3ContentEq in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktContentEq(es, other []interface{}, deep bool) bool {
+	if len(other) != len(es) {
+		return false
+	}
+	for i, e := range es {
+		if deep {
+			ea, aok := e.(*jsArray)
+			oa, bok := other[i].(*jsArray)
+			if aok && bok && ktIsJvmArr(ea) && ktIsJvmArr(oa) {
+				if !rt.ktContentEq(ea.elems, oa.elems, true) {
+					return false
+				}
+				continue
+			}
+		}
+		if !rt.ktEqVals(e, other[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// ktVarargKind is the kind of the array a `vararg` parameter of element type ty
+// binds: its primitive array, else an Array.
+func ktVarargKind(ty string) int {
+	if k := ktaKindOf(ty); k != 0 {
+		return k
+	}
+	return ktArrArray
+}
+
 // ktArrTagged marks a fresh array with a kind number.
 func ktArrTagged(a *jsArray, k int) *jsArray {
 	a.kind = k
@@ -12605,6 +12662,13 @@ func (rt *jsrt) ktRefApply(info *ktRefInfo, args []interface{}) interface{} {
 	recv := ktRefRecv(info, args)
 	if o, isObj := recv.(*jsObject); isObj {
 		if ktClassChainHas(o, info.name) {
+			// A method with a vararg binds the reference's array argument as it is,
+			// through the name$vref twin the emitter adds (emitMethodInto). Twin of
+			// kRefApply in kotlin-interpreter.abnf and ktRefApply in
+			// languages/lib/kotlin-rt.metajs.
+			if ktClassChainHas(o, info.name+"$vref") {
+				return ktMemberCall(recv, info.name+"$vref", ktRefRest(info, args))
+			}
 			return ktMemberCall(recv, info.name, ktRefRest(info, args))
 		}
 		// A member the receiver really HAS wins over a same-named extension, which is

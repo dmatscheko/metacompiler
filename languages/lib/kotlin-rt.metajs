@@ -125,6 +125,13 @@ function ktIsArr(v) {
     return typeof v["length"] == "number"
 }
 
+// An Array or a primitive array, as opposed to a List, a Sequence or a view
+// sharing the host array. Twin of ktIsJvmArr in abnf/jsrtkotlin.go.
+function ktIsJvmArr(a) {
+    var k = arrKind(a)
+    return k == 1 || k >= 5
+}
+
 // k0IsRec is Go's `v.(*jsObject)`: an object that is NOT an array. Every Go arm
 // spelled `o, ok := v.(*jsObject)` is this test, because a *jsArray is its own
 // Go type there and is a plain object here.
@@ -1477,6 +1484,9 @@ function ktStructEq(a, b) {
     if (aArr || bArr) {
         if (!aArr) { return false }
         if (!bArr) { return false }
+        // An Array is a JVM array, whose equals is identity (only contentEquals
+        // compares elements): `intArrayOf(1) == intArrayOf(1)` is false.
+        if (ktIsJvmArr(a) || ktIsJvmArr(b)) { return a === b }
         if (a.length != b.length) { return false }
         var ai = 0
         while (ai < a.length) {
@@ -1634,6 +1644,9 @@ function ktElemHash(v) {
     // A NESTED collection hashes element-wise, exactly as kHash does in the other
     // half.
     if (ktIsArr(v)) {
+        // An Array hashes by identity, like its equals (ktStructEq): the identity
+        // stand-in 1.
+        if (ktIsJvmArr(v)) { return 1 }
         var lh = 1
         var li = 0
         while (li < v.length) {
@@ -5411,8 +5424,8 @@ function ktSeqMethodK(arr, name, args, kind) {
     // equals in Kotlin, so these two are how an array is printed and compared.
     if (name == "contentToString") { return ktRender(es) }
     if (name == "contentDeepToString") { return ktRender(es) }
-    if (name == "contentEquals") { return k3ContentEq(es, f) }
-    if (name == "contentDeepEquals") { return k3ContentEq(es, f) }
+    if (name == "contentEquals") { return k3ContentEq(es, f, false) }
+    if (name == "contentDeepEquals") { return k3ContentEq(es, f, true) }
     if (name == "sortedBy") { return ktSortBy(es, f, false) }
     if (name == "sortedByDescending") { return ktSortBy(es, f, true) }
     if (name == "maxOrNull") {
@@ -6076,14 +6089,24 @@ function k3IsRemoveAll(name) {
 
 // ----- arms of ktSeqMethod that need their own scope -------------------------
 
-function k3ContentEq(es, other) {
+// contentEquals over two arrays' elements: element-wise equals, so a nested array
+// compares by identity, unless deep (contentDeepEquals), which compares two nested
+// arrays by their contents in turn. Twin of ktContentEq in abnf/jsrtkotlin.go.
+function k3ContentEq(es, other, deep) {
     var i = 0
     if (!ktIsArr(other)) { return false }
     if (other.length != es.length) { return false }
     for (i = 0; i < es.length; i = i + 1) {
-        if (!ktEqVals(es[i], other[i])) { return false }
+        if (deep && k3BothJvmArr(es[i], other[i])) {
+            if (!k3ContentEq(es[i], other[i], true)) { return false }
+        } else if (!ktEqVals(es[i], other[i])) { return false }
     }
     return true
+}
+function k3BothJvmArr(a, b) {
+    if (!ktIsArr(a)) { return false }
+    if (!ktIsArr(b)) { return false }
+    return ktIsJvmArr(a) && ktIsJvmArr(b)
 }
 
 function k3FilterNotNull(es, req) {
@@ -7736,6 +7759,10 @@ function ktRefApply(info, args) {
     recv = k4bRefRecv(info, args)
     if (ktIsObj(recv)) {
         if (ktClassChainHas(recv, info["name"])) {
+            // A method with a vararg binds the reference's array argument as it is,
+            // through its name$vref twin.
+            var vn = info["name"] + "$vref"
+            if (ktClassChainHas(recv, vn)) { return ktSmcall(recv, vn, k4bRefRest(info, args)) }
             return ktSmcall(recv, info["name"], k4bRefRest(info, args))
         }
         // A member the receiver really HAS wins over a same-named extension,
@@ -8758,6 +8785,16 @@ function k4bAdoptAll(arr, ty) {
 function js_ktadoptfn(f, ty) {
     if (typeof f != "function") { return f }
     return function() { return k4bAdoptOne(f.apply(undefined, arguments), ty) }
+}
+// jsrtkotlin.go js_ktvararr: the list a `vararg xs: ty` parameter collects is the
+// array Kotlin binds, its primitive array or else an Array.
+function js_ktvararr(xs, ty) {
+    if (Array.isArray(xs)) {
+        var k = ktaKindOf(ty)
+        if (k == 0) { k = 1 }
+        arrKindSet(xs, k)
+    }
+    return xs
 }
 // jsrtkotlin.go js_ktarrclassed: an Array's JVM class, fixed by its builder's
 // explicit element type.
@@ -13476,7 +13513,7 @@ function js_ktbareref(env, name, prop) {
             var t = anytype
             t = scopeGet(s, "this")
             if (ktIsObj(t)) {
-                if (k4Own(t, name)) { return js_ktref(t, name) }
+                if (k4Own(t, name) || ktClassChainHas(t, name)) { return js_ktref(t, name) }
             }
         }
         s = scopeParent(s)

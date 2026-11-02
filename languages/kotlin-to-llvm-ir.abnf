@@ -1450,7 +1450,7 @@ RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
             = OpSameLine "::" RefName ;
 NnSfx       <~~ push({kind: "nn"}) ~~>
             = "!!" ;
-RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
+RefName     = KId <~~ push(noteRefName(up.in)) ~~> | "class" KwEnd <~~ push("class") ~~> ;
 // A call's EXPLICIT TYPE ARGUMENTS, captured for `xs.filterIsInstance<String>()`.
 // Twin of MTypeArgs in kotlin-interpreter.abnf; see there.
 MTypeArgs   <~~ push({mtargs: up.in}) ~~>
@@ -3968,9 +3968,16 @@ KwContract  = "contract" KwEnd ;
     // cannot pass - so testing for it is a sound "argument absent" test.
     function emitParamSig(b, sig, argsV, off) {
         if (sig == undefined || sig == null) { return b }
+        // The vararg's list is the array Kotlin binds (js_ktvararr), also when the
+        // caller packed it (orderLateVararg) and it is bound as it came.
+        var vty = (sig.varargAt < 0 || sig.tys == undefined) ? "" : sig.tys[sig.varargAt]
         if (sig.varargAt >= 0 && sig.vlate != true) {
             callExt(b, "js_scope_set", [curScopeV, emitStr(b, sig.params[sig.varargAt]),
-                                        callExt(b, "js_pyrest", [argsV, handle(sig.varargAt + off)])])
+                                        callExt(b, "js_ktvararr", [callExt(b, "js_pyrest", [argsV, handle(sig.varargAt + off)]),
+                                                                   emitStr(b, vty)])])
+        } else if (sig.varargAt >= 0) {
+            callExt(b, "js_ktvararr", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, sig.params[sig.varargAt])]),
+                                       emitStr(b, vty)])
         }
         for (var i = 0; i < sig.defs.length; i++) {
             if (sig.defs[i] == null) { continue }
@@ -5523,6 +5530,23 @@ KwContract  = "contract" KwEnd ;
             cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, m.params.length)])
         }
         callExt(b, "js_set", [clsV, emitStr(b, m.name), cloV])
+        // A referenced method whose last parameter is a vararg is also emitted with
+        // the signature that binds the array (vlate), under name$vref, which a `::`
+        // reference calls (ktRefApply). Twin of installMembers in
+        // kotlin-interpreter.abnf.
+        var s = m.sig
+        if (s != undefined && s.varargAt >= 0 && s.vlate != true &&
+            (refNames["$" + m.name] == true || bareRefNames["$" + m.name] == true)) {
+            var vsig = {params: s.params, defs: s.defs, tys: s.tys, varargAt: s.varargAt, vlate: true, rty: s.rty}
+            callExt(b, "js_set", [clsV, emitStr(b, m.name + "$vref"),
+                                  callExt(b, "js_closure", [handle(emitFunc(m.params, m.body, true, false, vsig)), curScopeV])])
+        }
+    }
+    // The names a `X::name` reference spells (RefName).
+    var refNames = {}
+    function noteRefName(n) {
+        refNames["$" + n] = true
+        return n
     }
     // Emit a class-style descriptor (methods closed over the current scope via js_closure)
     // plus an instance whose __class is the descriptor, then run the property initializers
@@ -7044,6 +7068,7 @@ KwContract  = "contract" KwEnd ;
         var ty = ktExtRecvTy(items[0].extRecv)
         var f = makeFun(items.slice(1), retEntry, reified)
         extFunNames["$" + f.name] = true
+        if (f.sig.varargAt >= 0 && f.sig.vlate != true) { extVrefKeys["$" + extKey(f.name, ty)] = true }
         var old = extRecvTys["$" + f.name]
         var l = []
         if (old != undefined) { for (var i = 0; i < old.length; i++) { if (old[i] != ty) { l.push(old[i]) } } }
@@ -7060,13 +7085,33 @@ KwContract  = "contract" KwEnd ;
                 }
             }
             var idx = emitFunc(f.params, body, true, false, f.sig)
+            // A referenced extension whose last parameter is a vararg also gets the
+            // signature that binds the array, under its key + "$vref", which
+            // emitRefValue hands the reference. Twin of registerExtFun in
+            // kotlin-interpreter.abnf.
+            var vidx = -1
+            if (extVrefName(f)) {
+                var s = f.sig
+                vidx = emitFunc(f.params, body, true, false,
+                                {params: s.params, defs: s.defs, tys: s.tys, varargAt: s.varargAt, vlate: true, rty: s.rty})
+            }
             emitExtDepth--
             defPos(b, f.pos)
             var clV = callExt(b, "js_closure", [handle(idx), curScopeV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "ext$" + f.name), clV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, extKey(f.name, ty)), clV])
+            if (vidx >= 0) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, extKey(f.name, ty) + "$vref"),
+                                             callExt(b, "js_closure", [handle(vidx), curScopeV])])
+            }
             return b
         }
+    }
+    // The extension keys declared with a trailing vararg; a referenced one has a
+    // "$vref" twin (makeExtFunStmt).
+    var extVrefKeys = {}
+    function extVrefName(f) {
+        return f.sig.varargAt >= 0 && f.sig.vlate != true && refNames["$" + f.name] == true
     }
     // A primary constructor parameter: a name, whether `val`/`var` makes it a property,
     // and the same default / vararg information an ordinary parameter carries.
@@ -8790,7 +8835,9 @@ KwContract  = "contract" KwEnd ;
                 extV = callExt(b, "js_arr_new", [])
                 for (var pi = 0; pi < picks.length; pi++) {
                     callExt(b, "js_arr_push", [extV, emitStr(b, picks[pi])])
-                    callExt(b, "js_arr_push", [extV, b.NewCall(rtKtGet(), [curScopeV, emitStr(b, extKey(name, picks[pi]))])])
+                    var xk = extKey(name, picks[pi])
+                    if (extVrefKeys["$" + xk] == true) { xk = xk + "$vref" }
+                    callExt(b, "js_arr_push", [extV, b.NewCall(rtKtGet(), [curScopeV, emitStr(b, xk)])])
                 }
             }
         }
