@@ -803,28 +803,40 @@ function bashDeclCase(cur, flags, plus) {
     return (r != "" && plus.indexOf(r) >= 0) ? "" : r
 }
 
-// The diagnostic for the first option letter keyword kw does not take (bash 5.3: export
-// and readonly take -aAfnp, the others -aAcfFgiIlnprtux, though the usage line leaves -c
-// out), its usage line included, or "". flags are the option words joined, their signs kept.
+// The option letters keyword kw takes (bash 5.3: export and readonly -aAfnp, the others
+// -aAcfFgiIlnprtux, though the usage line leaves -c out).
+function bashDeclOptSet(kw) {
+    return (kw == "export" || kw == "readonly") ? "aAfnp" : "aAcfFgiIlnprtux"
+}
+// The rest of bash's "invalid option" report of keyword kw, its usage line included.
+function bashDeclUsage(kw) {
+    var use = "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]"
+    if (kw == "typeset") { use = "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]" }
+    if (kw == "local") { use = "local [option] name[=value] ..." }
+    if (kw == "export") { use = "export [-fn] [name[=value] ...] or export -p [-f]" }
+    if (kw == "readonly") { use = "readonly [-aAf] [name[=value] ...] or readonly -p" }
+    return ": invalid option\n" + kw + ": usage: " + use + "\n"
+}
+// The diagnostic for the first option letter keyword kw does not take (bashDeclOptSet), its
+// usage line included, or "". flags are the option words, each with its sign and a space
+// before it. The message names the letter with its word's sign; a sign after a word's first
+// character is a letter like any other (bash 5.3: `declare +x=3` is "+=: invalid option",
+// `declare --x` is "--: invalid option"). Twin of rt_opt_bad in bash-rt.c.
 function bashDeclBadOpt(kw, flags) {
-    var ok = (kw == "export" || kw == "readonly") ? "aAfnp" : "aAcfFgiIlnprtux"
+    var ok = bashDeclOptSet(kw)
+    var sign = "-"
     var i
     for (i = 0; i < flags.length; i++) {
         var ch = flags.charAt(i)
-        if (ch == "-" || ch == "+" || ok.indexOf(ch) >= 0) { continue }
-        var use = "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]"
-        if (kw == "typeset") { use = "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]" }
-        if (kw == "local") { use = "local [option] name[=value] ..." }
-        if (kw == "export") { use = "export [-fn] [name[=value] ...] or export -p [-f]" }
-        if (kw == "readonly") { use = "readonly [-aAf] [name[=value] ...] or readonly -p" }
-        return kw + ": -" + ch + ": invalid option\n" + kw + ": usage: " + use + "\n"
+        if (ch == " ") { i = i + 1; sign = flags.charAt(i); continue }
+        if (ok.indexOf(ch) < 0) { return kw + ": " + sign + ch + bashDeclUsage(kw) }
     }
     // -a and -A both given (as -X, whatever +X follows) are refused without the usage line,
     // except by a query (bash 5.3: `declare -aA +a q` and `local -aA l` fail with status 2,
     // `declare -aAp q` prints).
     if (kw == "export" || kw == "readonly" || flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0) { return "" }
     var on = ""
-    var sign = "-"
+    sign = "-"
     for (i = 0; i < flags.length; i++) {
         var fc = flags.charAt(i)
         if (fc == "-" || fc == "+") { sign = fc } else if (sign == "-") { on = on + fc }
@@ -895,7 +907,9 @@ function bashSubNeedsX(t) {
 // array literal (...) under -a/-A), and so is NAME[SUB] for declare, typeset and local, which
 // never evaluate SUB. Answers {text, operands, bad: [the diagnostics, after "KW: ", of the
 // fields that are no operand, in order]}, or null: bash's "not a valid identifier", and -n's
-// refusal of a NAME[SUB] whose SUB the text spells 0, which names SUB as written.
+// refusal of a NAME[SUB] whose SUB the text spells 0, which names SUB as written. An option
+// field with a letter the builtin does not take answers {badOpt: bashDeclBadOpt's report}
+// instead: the builtin does nothing and fails with status 2.
 //
 // The builtin reads the SUB of a computed NAME[SUB]=VALUE as it stands, as an assignment
 // statement does (AsgIdx): an associative array's as a word, an indexed array's as
@@ -949,7 +963,12 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
         for (k = 0; k < fs.length; k++) {
             var f = fs[k]
             if (opts && f == "--") { opts = false; continue }
-            if (opts && f.length > 1 && (f.charAt(0) == "-" || (f.charAt(0) == "+" && !xr)) && bashDeclFlagText(f)) {
+            var optWord = opts && f.length > 1 && (f.charAt(0) == "-" || (f.charAt(0) == "+" && !xr))
+            if (optWord && !bashDeclFlagText(f)) {
+                var bo = bashDeclBadOpt(items[0].dkw, " " + f)
+                if (bo != "") { return {text: text, pre: "", operands: 0, bad: [], badOpt: bo} }
+            }
+            if (optWord && bashDeclFlagText(f)) {
                 text = text + " " + f
                 fopt = true
                 if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }

@@ -8948,6 +8948,22 @@ int rt_decl_opt(char *f, int at)
     return (at & 160) == 160 ? -1 : at;
 }
 
+/* The first letter of the option word f that is not among the letters ok, with
+ * the word's sign before it, as bash's "invalid option" names it (`+x=3` is
+ * "+="), or "" when f has none. Twin of bashDeclBadOpt in bash-deparse.js. */
+char *rt_opt_bad(char *f, char *ok)
+{
+    int i = 1;
+    int k;
+    while (f[i] != 0) {
+        k = 0;
+        while (ok[k] != 0 && ok[k] != f[i]) k = k + 1;
+        if (ok[k] == 0) return rt_strcat(rt_substr(f, 0, 1), rt_substr(f, i, 1));
+        i = i + 1;
+    }
+    return &empty[0];
+}
+
 /* `unset NAME` of a local of the call whose frame starts at depth d: the export
  * mark goes, unless the local is the call's own prefix binding, whose export
  * bash keeps (makunbound). Twin of keepX in bash-interpreter.abnf. */
@@ -10239,7 +10255,8 @@ int rt_sub_close(char *w, int j)
  * export's -a (who is empty) leaves a bare NAME a scalar. Answers 0, 1 for a
  * word that is no name (bash's "not a valid identifier"; export's and readonly's
  * NAME[SUB]=VALUE is reported here, as NAME[SUB], and answers 3), 2 for one that
- * starts with - or +: an option, which only the emitter could apply, 3 for a
+ * starts with - or + (export and readonly: -): an option, which only the
+ * emitter could apply, 3 for a
  * store refused and reported (an arithmetic error is left in arith_err, which
  * abandons the line). x > 0 exports the name, x < 0 takes the export attribute
  * away (rt_xmark). Twin of makeDeclDyn in bash-interpreter.abnf. */
@@ -10256,7 +10273,7 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
     int vl;
     char *nm;
     char *v;
-    if (w[0] == 45 || w[0] == 43) return 2;
+    if (w[0] == 45 || (w[0] == 43 && who[0] != 0 && rt_streq(who, "readonly") == 0)) return 2;
     if (i == 0) return 1;
     if (d == -2) {
         id = rt_varslot_new(rt_substr(w, 0, i));

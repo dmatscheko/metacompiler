@@ -294,10 +294,24 @@ DeclCommand <~~ push(makeDeclR(takeAll(), lnOf(up.start))) ~~>
             = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
 DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
-DeclFlag    <~~ push({dflag: up.in}) ~~> = DeclSign :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
-// -X gives an attribute, +X takes it away.
+DeclFlag    <~~ push({dflag: up.in}) ~~> = NotDashEnd DeclSign :whitespace() DeclFlagCh KwEnd :whitespace(Whitespace) ;
+// -X gives an attribute, +X takes it away. A leading word that starts with a sign is an
+// option word whatever follows (bash 5.3: `declare +x=3` is "+=: invalid option", status 2),
+// unless it is "--" or holds a quote or an expansion (a computed operand).
 DeclSign    = "-" | "+" ;
-DeclFlagCh  = "a"..."z" | "A"..."Z" ;
+DeclFlagCh  = !@+" \t\r\n;&|<>()[]{}*?'\"\\$`" ;
+// Fails on the word "--", which ends the options.
+NotDashEnd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 45 || c.peek(i + 1) !== 45) { return undefined }
+        cc = c.peek(i + 2)
+        if (cc === -1 || cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 59 || cc === 38 || cc === 124 || cc === 40 || cc === 41 || cc === 60 || cc === 62) { return abnf.newToken("\x01dash-end", 0) }
+        return undefined
+    })()
+~~) ;
 DeclItem    = DeclAssign | DeclArr | DeclName | DeclDyn ;
 DeclAssign  <~~ push(mkDeclItem(takeAll(), arSrc(up.start, up.pos))) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
@@ -3313,12 +3327,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var listOps = []
         for (i = 0; i < les.length; i++) { listOps.push({pre: makeDecl(les[i].pre, [], ln, true), late: makeDecl(les[i].late, [], ln, true), lbl: les[i].lbl}) }
         for (i = 1; i < items.length; i++) {
-            if (items[i].dflag != undefined) { opts = opts + items[i].dflag }
+            if (items[i].dflag != undefined) { opts = opts + " " + items[i].dflag }
             else if (items[i].dyn != undefined) { anyDyn = true }
         }
         if (opts != "") {
             var badOpt = bashDeclBadOpt(kw, opts)
-            if (badOpt != "") { return declListFirst(listOps, kw, declBadOpt(badOpt, redirs, ln)) }
+            if (badOpt != "") { return declListFirst(listOps, kw, declBadOpt(kw, badOpt, redirs, ln)) }
             if (opts.indexOf("I") >= 0) { fail(kw + " " + opts + " is not supported") }
         }
         // Option words after an operand that mark array literals (bashDeclLate): each name's
@@ -4036,6 +4050,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var errs = ""
             var k
             for (k = 0; k < dt.bad.length; k++) { errs = errs + diagPfx() + kw + ": " + dt.bad[k] + "\n" }
+            // An option field it does not take fails the builtin (declBadOpt).
+            var failSt = 1
+            if (dt.badOpt != undefined && kw == "local" && fnDepth == 0) { errs = diagPfx() + "local: can only be used in a function\n" }
+            else if (dt.badOpt != undefined) { errs = diagPfx() + dt.badOpt; failSt = 2 }
             var st = anytype
             st = 0
             if (operands > 0 || errs != "") {
@@ -4049,14 +4067,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pending.pop()
                 if (typeof st == "object") { return st }
             }
-            if (errs != "") { st = 1 }
+            if (errs != "") { st = failSt }
             setStatus(st)
             return st
         }
     }
-    // An option the builtin does not take (bashDeclBadOpt, diagnostic msg) fails it with
-    // status 2 before anything is done. Twin of the option check in makeDecl in
-    // bash-to-llvm-ir.abnf.
     // The first declaration of the list operand op (makeDecl's listOps), as the words expand:
     // made, it abandons the line ("NAME[SUB]: cannot assign list to array member"); refused,
     // too, except in a function's declare, typeset or local (kw). Answers the abort, or null.
@@ -4082,8 +4097,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return run()
         }
     }
-    function declBadOpt(msg, redirs, ln) {
-        var run = mkRedirected([function() { diagErr(msg); return 2 }].concat(redirs))
+    // An option the builtin kw does not take (bashDeclBadOpt, diagnostic msg) fails it with
+    // status 2 before anything is done; `local` outside every function fails first, as it
+    // does with any options. Twin of the option check in makeDecl in bash-to-llvm-ir.abnf.
+    function declBadOpt(kw, msg, redirs, ln) {
+        var run = mkRedirected([function() {
+            if (kw == "local" && fnDepth == 0) { diagErr("local: can only be used in a function\n"); return 1 }
+            diagErr(msg)
+            return 2
+        }].concat(redirs))
         return function() {
             vars["$LINENO"] = lnAt(ln)
             thisCmd = ""
@@ -9697,7 +9719,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var unset = ""
         for (i = 1; i < decl.length; i++) {
             if (decl[i].dflag == undefined) { continue }
-            if (decl[i].dflag.charAt(0) == "+") { unset = unset + decl[i].dflag } else { flags = flags + decl[i].dflag }
+            if (decl[i].dflag.charAt(0) == "+") { unset = unset + decl[i].dflag } else { flags = flags + " " + decl[i].dflag }
         }
         var kw = decl[0].dkw
         var query = flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0

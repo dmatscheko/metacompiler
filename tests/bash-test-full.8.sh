@@ -224,6 +224,25 @@ s159() {
   e=$( (s159z=(1 2 3); s159l s159z; s159z=5 eval 'declare -p s159z'; echo "h $?"; declare -p s159z) 2>&1)
   check chp2 "$(s159s "$e")" 's159z: readonly variable;declare -ar s159z=([0]="1" [1]="2" [2]="3");h 0;declare -ar s159z=([0]="1" [1]="2" [2]="3");'
 }
+# ===== SECTION 160: a declaration's option word with a letter it does not take =====
+# A leading word starting with - (declare, typeset and local: or +) is an option word
+# whatever follows the sign: its first letter the builtin does not take is reported with the
+# word's sign ("+=: invalid option" for +x=3, "--" for --x), the usage line follows, and the
+# builtin does nothing (status 2), written or computed alike. export's and readonly's +X=V is
+# an operand, which is no name. Every expected value is bash 5.3's.
+s160() {
+  local e
+  s160s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$( (export +x=3 s160a=1; echo "a $?"; declare -p s160a; declare +x=3 s160b=1; echo "b $?"; declare -p s160b) 2>&1)
+  check ivo1 "$(s160s "$e")" 'export: `+x=3'"'"': not a valid identifier;a 1;declare -x s160a="1";declare: +=: invalid option;declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...];b 2;declare: s160b: not found;'
+  e=$( (declare --x s160c; echo "c $?"; typeset -i5 s160c; echo "d $?"; readonly -r=1 s160c; echo "e $?"; declare -p s160c) 2>&1)
+  check ivo2 "$(s160s "$e")" 'declare: --: invalid option;declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...];c 2;typeset: -5: invalid option;typeset: usage: typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...];d 2;readonly: -r: invalid option;readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p;e 2;declare: s160c: not found;'
+  s160f() { local +i=2 s160d=1; echo "f $?"; local -p; }
+  e=$( (local -x=1; echo "g $?"; s160f) 2>&1)
+  check ivo3 "$(s160s "$e")" 'local: -=: invalid option;local: usage: local [option] name[=value] ...;g 2;local: +=: invalid option;local: usage: local [option] name[=value] ...;f 2;'
+  e=$( (v='+x=3'; declare $v s160e; echo "h $?"; export $v s160e=2; echo "i $?"; v='-y=3 s160g'; declare -x $v; echo "j $?"; declare '-%' s160h; echo "k $?"; declare -p s160e s160g s160h) 2>&1)
+  check ivo4 "$(s160s "$e")" 'declare: +=: invalid option;declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...];h 2;export: `+x=3'"'"': not a valid identifier;i 1;declare: -y: invalid option;declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...];j 2;declare: -%: invalid option;declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...];k 2;declare -x s160e="2";declare: s160g: not found;declare: s160h: not found;'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -232,5 +251,6 @@ s156  # SECTION-CALL 156
 s157  # SECTION-CALL 157
 s158  # SECTION-CALL 158
 s159  # SECTION-CALL 159
+s160  # SECTION-CALL 160
 echo "full: $checks checks, $fails failures"
 exit $fails

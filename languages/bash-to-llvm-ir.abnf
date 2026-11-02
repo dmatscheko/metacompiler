@@ -284,10 +284,24 @@ DeclCommand <~~ push(atLine(makeDeclR(takeAll()), up.start, tcAfter)) ~~>
             = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
 DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
-DeclFlag    <~~ push({dflag: up.in}) ~~> = DeclSign :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
-// -X gives an attribute, +X takes it away.
+DeclFlag    <~~ push({dflag: up.in}) ~~> = NotDashEnd DeclSign :whitespace() DeclFlagCh KwEnd :whitespace(Whitespace) ;
+// -X gives an attribute, +X takes it away. A leading word that starts with a sign is an
+// option word whatever follows; see DeclFlag in bash-interpreter.abnf.
 DeclSign    = "-" | "+" ;
-DeclFlagCh  = "a"..."z" | "A"..."Z" ;
+DeclFlagCh  = !@+" \t\r\n;&|<>()[]{}*?'\"\\$`" ;
+// Fails on the word "--", which ends the options. Twin of NotDashEnd in
+// bash-interpreter.abnf.
+NotDashEnd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 45 || c.peek(i + 1) !== 45) { return undefined }
+        cc = c.peek(i + 2)
+        if (cc === -1 || cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 59 || cc === 38 || cc === 124 || cc === 40 || cc === 41 || cc === 60 || cc === 62) { return abnf.newToken("\x01dash-end", 0) }
+        return undefined
+    })()
+~~) ;
 DeclItem    = DeclAssign | DeclArr | DeclName | DeclDyn ;
 DeclAssign  <~~ push(mkDeclItem(takeAll(), arSrc(up.start, up.pos))) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
@@ -2022,6 +2036,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtLocalP = rtDecl("rt_local_p", false, [1, 1, 0, 0, 0])
     // i32 rt_decl_opt(i8* f, i32 at): a computed option of a declaration (bash-rt.c).
     var rtDeclOpt = rtDecl("rt_decl_opt", false, [1, 0])
+    // i8* rt_opt_bad(i8* f, i8* ok): the letter of option word f that ok lacks, or "".
+    var rtOptBad = rtDecl("rt_opt_bad", true, [1, 1])
     // The ${v@A} / ${v@K} / ${v@k} / ${v@a} family, all measured against bash 5.3.15 -
     // see the block comment above rt_declasg in languages/lib/bash-rt.c.
     var rtIsset = rtDecl("rt_isset", false, [1])
@@ -4465,7 +4481,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var dashEnd = false
         for (i = 1; i < items.length; i++) {
             var it = items[i]
-            if (it.dflag != undefined) { opts = opts + it.dflag }
+            if (it.dflag != undefined) { opts = opts + " " + it.dflag }
             if (it.dflag != undefined && it.dflag.charAt(0) == "+") { plus = plus + it.dflag; continue }
             if (it.dflag != undefined) { flags = flags + it.dflag; continue }
             // `--` ends the options.
@@ -4493,12 +4509,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (kw != "export" && kw != "readonly" && flags.indexOf("n") >= 0) {
             for (i = 0; i < names.length; i++) { refAnywhere["$" + names[i]] = true }
         }
-        // An option the builtin does not take fails it with status 2 before anything is done.
-        // Twin of declBadOpt in bash-interpreter.abnf.
+        // An option the builtin does not take fails it (emitDeclBadOpt).
         if (opts != "") {
             var badOpt = bashDeclBadOpt(kw, opts)
             if (badOpt != "") {
-                var boBody = function(b) { emitDiag(b, gepStr(b, badOpt)); storeStatusI(b, 2); return b }
+                var boBody = function(b) { return emitDeclBadOpt(b, kw, badOpt) }
                 return declListFirst(listOps, kw, (redirs.length == 0) ? boBody : mkRedirected([boBody].concat(redirs)))
             }
             if (opts.indexOf("I") >= 0) { fail(kw + " " + opts + " is not supported") }
@@ -4615,6 +4630,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (leadOpt && optOk) { assocDyn = true }
         var optP = null
         var rtAtP = null
+        // Where a computed option the builtin does not take ends the declaration (status 2).
+        var optStop = null
         // The depth rt_decl_word makes a local at: the call's, or -2 for -g in a function
         // (the global binding, even where a local hides it), or -1 outside one.
         var declDepth = function(b, localize) {
@@ -5517,7 +5534,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 endB.NewStore(zero, optP)
                 endB.NewBr(nextB)
                 setB.NewStore(r, rtAtP)
-                if (optOk) { setB.NewCondBr(setB.NewICmp(llvm.enum.IPredSGE, r, zero), nextB, abB) } else { setB.NewBr(abB) }
+                var obad = setB.NewCall(rtOptBad, [fld, gepStr(setB, bashDeclOptSet(kw))])
+                var oBadB = curF.NewBlock(""), oKnownB = curF.NewBlock("")
+                setB.NewCondBr(setB.NewICmp(llvm.enum.IPredNE, setB.NewLoad(i8, obad), llvm.constant.NewInt(i8, 0)), oBadB, oKnownB)
+                emitDiag(oBadB, oBadB.NewCall(rtStrcat, [oBadB.NewCall(rtStrcat, [gepStr(oBadB, kw + ": "), obad]), gepStr(oBadB, bashDeclUsage(kw))]))
+                storeStatusI(oBadB, 2)
+                oBadB.NewBr(optStop)
+                if (optOk) { oKnownB.NewCondBr(oKnownB.NewICmp(llvm.enum.IPredSGE, r, zero), nextB, abB) } else { oKnownB.NewBr(abB) }
                 optAbort(abB, fld)
             }
             subB.NewStore(one, badP)
@@ -5707,6 +5730,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 rtAtP = slotOf(i32)
                 b.NewStore(one, optP)
                 b.NewStore(zero, rtAtP)
+                optStop = curF.NewBlock("")
             }
             var o
             for (o = 0; o < order.length; o++) {
@@ -5734,6 +5758,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (anyDyn) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, badP))) }
             if (refuseP != null) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, refuseP))) }
             if (anyIdx) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, subBadP))) }
+            if (optStop != null) { b.NewBr(optStop); b = optStop; optStop = null }
             roFail = false
             return b
         }
@@ -5796,11 +5821,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return fs
     }
+    // An option the builtin kw does not take (bashDeclBadOpt's report msg) fails it with
+    // status 2 before anything is done; `local` outside every function fails first, as it
+    // does with any options. Twin of declBadOpt in bash-interpreter.abnf.
+    function emitDeclBadOpt(b, kw, msg) {
+        var outside = kw == "local" && curFrame == null
+        emitDiag(b, gepStr(b, outside ? "local: can only be used in a function\n" : msg))
+        storeStatusI(b, outside ? 1 : 2)
+        return b
+    }
     // The declaration dt (bashDeclText) spells, its bad fields reported first, under the
     // redirections, after the literals of dt.pre. Twin of makeDeclDyn in bash-interpreter.abnf.
     function makeDeclSpelled(kw, dt, redirs) {
         var body = function(b) {
             var k
+            if (dt.badOpt != undefined) { return emitDeclBadOpt(b, kw, dt.badOpt) }
             for (k = 0; k < dt.bad.length; k++) { emitDiag(b, gepStr(b, kw + ": " + dt.bad[k] + "\n")) }
             if (dt.operands > 0) { b = compileSnippet(dt.text, 0)(b) }
             if (dt.bad.length > 0 || dt.operands == 0) { storeStatusI(b, (dt.bad.length > 0) ? 1 : 0) }
@@ -9259,7 +9294,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var unset = ""
         for (i = 1; i < decl.length; i++) {
             if (decl[i].dflag == undefined) { continue }
-            if (decl[i].dflag.charAt(0) == "+") { unset = unset + decl[i].dflag } else { flags = flags + decl[i].dflag }
+            if (decl[i].dflag.charAt(0) == "+") { unset = unset + decl[i].dflag } else { flags = flags + " " + decl[i].dflag }
         }
         var kw = decl[0].dkw
         var query = flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0
