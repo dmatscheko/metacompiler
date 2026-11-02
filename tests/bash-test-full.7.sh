@@ -146,11 +146,62 @@ s138() {
   local t=${s#*: line } u=${s%: line*} v=${s#*Z} w=${s%%Z*}
   check prm1 "${#s}/${#t}/${s##*: line }/${#u}/${s%%: *}/${s##*1: }/${#v}/${#w}" "5120/5113/1: /5110///5120/5120"
 }
+# ===== SECTION 139: reads through a nameref that is an array =====
+# A function's circular nameref given an array literal names no variable: a read of its
+# value is refused, which abandons the line with status 1, while its elements, their
+# count, its length and arithmetic read it as unset. bash names bytes of its array in
+# the message, which these checks leave out. Every expected value is bash 5.3's.
+s139() {
+  local e
+  s139s() { local l; while IFS= read -r l; do case $l in *circular*) ;; *"invalid variable name for name reference") printf 'inv;' ;; *) printf '%s;' "$l" ;; esac; done <<< "$1"; }
+  s139a() { local -n w=w; declare w=(x y) 2>/dev/null; echo "[$w]"; }
+  s139b() { local -n w=w; declare w=(x y) 2>/dev/null; echo "[${w:-q}]"; }
+  s139c() { local -n w=w; declare w=(x y) 2>/dev/null; local x=$w; echo "[$x]"; }
+  s139d() { local -n w=w; declare w=(x y) 2>/dev/null; echo "[${w[1]}|${w[@]}|${#w}|${#w[@]}|$(( w + 1 ))]"; }
+  s139e() { local -n w=w; declare w=(x y) 2>/dev/null; echo "[${w:?no}]"; }
+  s139g() { local -n w=w; declare w=(x y) 2>/dev/null; echo "[${w+set}]"; }
+  e=$( (s139a; echo "s=$?") 2>&1; echo "s=$?"; (s139b; echo "s=$?") 2>&1; echo "s=$?"; (s139c; echo "s=$?") 2>&1; echo "s=$?")
+  check nra1 "$(s139s "$e")" 'inv;s=1;inv;s=1;inv;s=1;'
+  e=$( (s139d; echo "s=$?") 2>&1; echo "s=$?"; (s139e; echo "s=$?") 2>&1; echo "s=$?"; (s139g; echo "s=$?") 2>&1; echo "s=$?")
+  check nra2 "$(s139s "$e")" '[||0|0|1];s=0;s=0;inv;s=1;inv;s=1;'
+}
+# ===== SECTION 140: array literals for a circular nameref, again =====
+# A function's circular nameref that an array literal made an array stays a nameref, and
+# the next literal declaration replaces its elements. Every expected value is bash 5.3's.
+s140() {
+  local e
+  s140f() { local -n w=w; local w=(q); local w=(z); declare -p w; }
+  s140g() { local -n w=w; declare -a w=(q r); local w+=(s); declare -p w; }
+  e=$(s140f 2>/dev/null; s140g 2>/dev/null)
+  check cna1 "$e" 'declare -an w=([0]="z")'$'\n''declare -an w=([0]="q" [1]="r" [2]="s")'
+}
+# ===== SECTION 141: NAME[SUB] declarations and array reads on a global nameref =====
+# Outside a function's locals, NAME[SUB]=VALUE of a nameref makes NAME itself the array,
+# warning that the nameref attribute goes; -g without a value acts on the target. read -a
+# and mapfile store through a nameref to its target or, when it has no value, to it, with
+# the same warning. Every expected value is bash 5.3's.
+s141() {
+  local e
+  s141s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$(declare -gn s141a=s141t; s141t=4; declare -g s141a[1]=5 2>&1; declare -p s141a s141t)
+  check nsd1 "$(s141s "$e")" 'warning: s141a: removing nameref attribute;declare -a s141a=([1]="5");declare -- s141t="4";'
+  e=$(declare -gn s141b; declare -ga s141b[1]=3 2>&1; declare -gn s141c=s141u; declare -g s141c[1]; declare -p s141b s141c s141u)
+  check nsd2 "$(s141s "$e")" 'warning: s141b: removing nameref attribute;declare -a s141b=([1]="3");declare -n s141c="s141u";declare -a s141u;'
+  e=$(declare -gn s141d=s141v; s141v=1; declare -g s141d[1]; declare -p s141d s141v)
+  check nsd3 "$(s141s "$e")" 'declare -n s141d="s141v";declare -a s141v=([0]="1");'
+  e=$(declare -gn s141e; read -a s141e <<< 'x y' 2>&1; declare -gn s141f=s141w; read -a s141f <<< 'p q'; declare -p s141e s141f s141w)
+  check nsd4 "$(s141s "$e")" 'warning: s141e: removing nameref attribute;declare -a s141e=([0]="x" [1]="y");declare -n s141f="s141w";declare -a s141w=([0]="p" [1]="q");'
+  e=$(declare -gn s141g; mapfile s141g <<< 'x' 2>&1; declare -p s141g)
+  check nsd5 "$(s141s "$e")" 'warning: s141g: removing nameref attribute;declare -a s141g=([0]=$'"'"'x\n'"'"');'
+}
 # ===== END SECTIONS =====
 
 s135  # SECTION-CALL 135
 s136  # SECTION-CALL 136
 s137  # SECTION-CALL 137
 s138  # SECTION-CALL 138
+s139  # SECTION-CALL 139
+s140  # SECTION-CALL 140
+s141  # SECTION-CALL 141
 echo "full: $checks checks, $fails failures"
 exit $fails

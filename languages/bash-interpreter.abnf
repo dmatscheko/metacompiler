@@ -2787,6 +2787,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = 0; i < items.length; i++) { its0.push(items[i]) }
             return function() {
                 if (!anyRef || noRef > 0 || !attrOn(refVars, pn)) { return plain() }
+                if (isArr(pn)) { return refArrRead(hasIdx || lenp, lenp) }
                 var rn = refTarget(pn)
                 if (rn == pn) { return plain() }
                 // A subscript applies to a variable named NAME[SUB] itself, which never
@@ -3397,6 +3398,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!global || localFrames.length == 0) { declOne(k, v); return }
             onGlobal(names[k], function() { declOne(k, v) })
         }
+        // Does the NAME[SUB] operand k, of a nameref, drop the nameref attribute (declOne)?
+        var refDrops = function(k) {
+            var aw = asgsWritten[k]
+            if (aw != null) { return aw.idxT != null && aw.isrc != "" && aw.lit == null && flags.split("-").join("").split("a").join("").split("g").join("") == "" }
+            return darrs[k] != null && flags == "" && refTarget(names[k]) != "" && !isSetVar(names[k])
+        }
         // The nameref a declaration was retargeted from, which bash names when it refuses
         // to convert or destroy an array or, with a value, to change a readonly variable.
         var declOwn = ""
@@ -3454,6 +3461,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         return
                     }
                 }
+            }
+            // NAME[SUB] of a nameref, outside a function's locals, makes NAME itself the array
+            // (bash 5.3): with a value under no option but -a or -g, warning that the nameref
+            // attribute goes; without one under no option, silently, when its chain ends on
+            // no set variable. Twin of declOne in bash-to-llvm-ir.abnf.
+            if (!isRef && anyRef && plus == "" && attrOn(refVars, names[k]) && !localizes() && refDrops(k)) {
+                if (aw != null) { diagErr("warning: " + names[k] + ": removing nameref attribute\n") }
+                refVars["$" + names[k]] = false
+                unsetVar(names[k])
             }
             // Without -n a declaration of a nameref acts on what it refers to: attributes,
             // value and a new local land on the target (bash 5.3: declare -n r=t; declare -r r
@@ -4970,7 +4986,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkArCmdSub(subT) { return function() { return arEval(wordJoin(subT())) } }
     function mkVarRef(name) {
         if (name == "*") { return function() { return starJoin(posParams) } }
-        return function() { return getVarVal(name) }
+        return function() {
+            if (anyRef && refIsArr(name)) { return refArrRead(false, false) }
+            return getVarVal(name)
+        }
     }
     function mkArith(intThunk) { return function() { return numToStr(intThunk()) } }
     // An arithmetic text that held an expansion: expand the word, then evaluate the string.
@@ -6711,6 +6730,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // line or fails the builtin that stored. A declaration's literal is the nameref's own.
     // bash names the bytes of its array's header instead of "". Twin of rt_nref_isarr.
     function refIsArr(name) { return anyRef && noRef == 0 && attrOn(refVars, name) && isArr(name) }
+    // A read of one: its elements, and their count or its length (whole), read as unset; its
+    // value names no variable, which abandons the line with status 1.
+    function refArrRead(whole, lenp) {
+        if (whole) { return lenp ? "0" : "" }
+        diagErr(": invalid variable name for name reference\n")
+        arithErr = true
+        abortSignal = {ret: 1, isExit: 1, soft: 1}
+        return ""
+    }
+    // The array read -a or mapfile stores through NAME: a nameref's target or, for one with
+    // no value, NAME itself, which then loses the nameref attribute with a warning (bash
+    // 5.3). Twin of rt_nref_arrstore.
+    function refArrStore(name) {
+        if (!anyRef || noRef > 0 || !attrOn(refVars, name)) { return name }
+        var t = refTarget(name)
+        if (t == "") { return name }
+        if (t != name) { return t }
+        diagErr("warning: " + name + ": removing nameref attribute\n")
+        refVars["$" + name] = false
+        unsetVar(name)
+        return name
+    }
     function refArrBad() {
         diagErr(arPfx + "`': not a valid identifier\n")
         arithErr = true
@@ -7622,6 +7663,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!isIdentText(nm)) { diagErr(who + ": `" + nm + "': not a valid identifier\n"); return 1 }
         if (roRefused(nm, "")) { return 1 }
         if (refIsArr(nm)) { diagErr(who + ": `': not a valid identifier\n"); return 1 }
+        nm = refArrStore(nm)
         if (assocFact(nm, false)) { diagErr(who + ": " + nm + ": not an indexed array\n"); return 1 }
         if (o.O == null) { unsetVar(nm); arrNew(nm, false) } else { arrAdopt(nm); arrEnsure(nm, false) }
         arrs[arrKey(nm)].lit = true
@@ -7735,6 +7777,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (badArr) { return 1 }
         if (arrName != null && roRefused(arrName, "")) { return 1 }
         if (arrName != null && refIsArr(arrName)) { diagErr("read: `': not a valid identifier\n"); return 1 }
+        if (arrName != null) { arrName = refArrStore(arrName) }
         if (arrName == null && names.length == 0 && roRefused("REPLY", "")) { return 2 }
         var st = rec.eof ? 1 : 0
         // -N splits nothing, as an empty IFS.

@@ -334,6 +334,10 @@ int rt_nref_gstore(char *n);
 int rt_nref_gset(char *n, char *v, int app, int at);
 int rt_nref_fstore(char *n, char *v);
 int rt_nref_isarr(char *n, int sub);
+int rt_nref_subdrop(char *nm, int v);
+char *rt_nref_arrstore(char *nm);
+int rt_arith_failed(void);
+char *rt_getvar_ref(char *n, int quiet);
 int rt_nref_void(char *n);
 int rt_nref_unglob(void);
 char *rt_nref_gread(void);
@@ -1108,11 +1112,12 @@ int rt_diag_pfx(void)
 
 /* ${v?word} / ${v:?word} on an unset (or, with the colon, empty) value: the word
  * - or bash's own text when it is empty - on the standard error channel, and the
- * abort flag, which ends the (sub)shell with status 1. */
+ * abort flag, which ends the (sub)shell with status 1. A read already refused
+ * (arith_err) has abandoned the line instead. */
 char *rt_pcheck(char *v, int bad, char *name, char *msg)
 {
     int saved;
-    if (bad != 0) {
+    if (bad != 0 && rt_arith_failed() == 0) {
         saved = sink_out;
         sink_out = sink_err;
         rt_diag_pfx();
@@ -1475,6 +1480,11 @@ int rt_suberr(int bad, int len)
  * the emitter's arLhsSet): bash abandons the whole expression.
  * Twin of arEval and its helpers in bash-interpreter.abnf. */
 int arith_err;
+
+int rt_arith_failed(void)
+{
+    return arith_err;
+}
 
 /* What an arithmetic error is reported for, stored by the emitter around (( )), let,
  * [[ ]], for (( )) and ${v:off} ("((: ", "let: ", "[[: ", "v: "). Twin of arPfx in
@@ -6343,6 +6353,7 @@ int rt_mf_begin(char *who, char *nm, char *dlm, char *cnt, char *org, char *skp,
         rt_berr(who, "`'", "not a valid identifier");
         return 1;
     }
+    nm = rt_nref_arrstore(nm);
     if (rt_isassoc(nm) != 0) {
         rt_berr(who, nm, "not an indexed array");
         return 1;
@@ -6767,10 +6778,17 @@ int rt_nref_void(char *n)
  * literal)? It names no variable bash can follow: a store to it changes
  * nothing, and an element store (sub 1) is refused as one to the name "" -
  * "not a valid identifier", arith_err and sub_bad; sub 2 reports it alone, as
- * arithmetic does. Twin of refIsArr and refArrBad in bash-interpreter.abnf. */
+ * arithmetic does. A read of its value (sub 3) is refused as naming no variable,
+ * with arith_err, which abandons the line. Twin of refIsArr, refArrBad and
+ * refArrRead in bash-interpreter.abnf. */
 int rt_nref_isarr(char *n, int sub)
 {
     if (nref_any == 0 || (rt_arr_marks(n) & 32) == 0 || rt_arr_any(n) == 0) return 0;
+    if (sub == 3) {
+        rt_berr("", "", "invalid variable name for name reference");
+        arith_err = 1;
+        return 1;
+    }
     if (sub != 0) rt_berr("", rt_strcat(ar_pfx(), "`'"), "not a valid identifier");
     if (sub == 1) {
         arith_err = 1;
@@ -6861,6 +6879,40 @@ int rt_nref_drop(char *nm)
     i = rt_varslot(nm);
     if (i >= 0 && gvars[i] != &unset_marker[0] && gvars[i][0] != 0) return 0;
     return rt_nmark(nm, 0);
+}
+
+/* NAME[SUB] declared on the nameref nm outside a function's locals makes nm itself
+ * the array: with a value (v 1) the nameref attribute and its value go, with bash's
+ * warning; without one they go silently when the chain ends on no set variable.
+ * Answers 1 when they went. Twin of refDrops in bash-interpreter.abnf. */
+int rt_nref_subdrop(char *nm, int v)
+{
+    int i;
+    if (nref_any == 0 || (rt_arr_marks(nm) & 32) == 0) return 0;
+    if (v == 0 && (rt_nref_end(nm) == 0 || rt_isset(rt_getvar_byname(nm)) != 0)) return 0;
+    if (v != 0) rt_berr("warning", nm, "removing nameref attribute");
+    i = rt_varslot(nm);
+    if (i >= 0) gvars[i] = &unset_marker[0];
+    rt_nmark(nm, 0);
+    return 1;
+}
+
+/* The array read -a or mapfile stores through nm: a nameref's target or, for one
+ * with no value, nm itself, which then loses the nameref mark with bash's warning.
+ * Twin of refArrStore in bash-interpreter.abnf. */
+char *rt_nref_arrstore(char *nm)
+{
+    char *t;
+    int i;
+    if (nref_any == 0 || (rt_arr_marks(nm) & 32) == 0) return nm;
+    t = rt_nref_end(nm);
+    if (t == 0) return nm;
+    if (rt_streq(t, nm) == 0) return t;
+    rt_berr("warning", nm, "removing nameref attribute");
+    i = rt_varslot(nm);
+    if (i >= 0) gvars[i] = &unset_marker[0];
+    rt_nmark(nm, 0);
+    return nm;
 }
 
 /* The variable a chain of namerefs from n ends at: n itself when it is no
@@ -8915,6 +8967,15 @@ char *rt_nref_gread(void)
     return v;
 }
 
+/* The value of the nameref n read by name ($n, ${n:-w}, ${#n}, ...): a nameref that
+ * is an array reads as unset, refused (rt_nref_isarr sub 3) unless quiet, for the
+ * length. */
+char *rt_getvar_ref(char *n, int quiet)
+{
+    if (rt_nref_isarr(n, quiet != 0 ? 0 : 3) != 0) return &unset_marker[0];
+    return rt_getvar_byname(n);
+}
+
 char *rt_getvar_byname(char *n)
 {
     char *sel;
@@ -9083,16 +9144,18 @@ char *rt_nref_base(char *n)
 }
 
 /* The array a subscripted read through the nameref n reads: the end of its
- * chain, or "" (never set) for an end NAME[SUB], which names no variable, and
- * for a circular chain, which bash warns about twice for an element or the
- * elements and once (once 1) for their count or keys. A circular chain that
+ * chain, or "" (never set) for an end NAME[SUB], which names no variable, for a
+ * nameref that is an array, and for a circular chain, which bash warns about
+ * twice for an element or the elements and once (once 1) for their count or keys. A circular chain that
  * rt_nref_glob resolves reads the global variable, put in effect until the
  * caller's rt_nref_unglob. Twin of the nameref arm of mkParamExp in
  * bash-interpreter.abnf. */
 char *rt_nref_elems(char *n, int once)
 {
-    char *t = rt_nref_end(n);
+    char *t;
     int i;
+    if (rt_nref_isarr(n, 0) != 0) return empty;
+    t = rt_nref_end(n);
     if (t == 0) {
         if (nref_quiet == 0 && once == 0) rt_berr("warning", n, "circular name reference");
         i = rt_nref_glob(n);

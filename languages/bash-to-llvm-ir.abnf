@@ -1728,6 +1728,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // i32 rt_inwords(i8* w, i8* list): 1 when w is one of the newline-separated words of list.
     var rtInWords = rtDecl("rt_inwords", false, [1, 1])
     var rtGetByName = rtDecl("rt_getvar_byname", true, [1])
+    var rtGetRef = rtDecl("rt_getvar_ref", true, [1, 0])
     var rtGetInd = rtDecl("rt_getvar_ind", true, [1])
     // i8* rt_indsub(i8* nm, i8* k, i32 kind) / i8* rt_indname(i8* nm, i8* sub, i8* v, i32 strict):
     // the variable an indirection lands on (bash-rt.c).
@@ -2000,6 +2001,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtDeclCirc = rtDecl("rt_decl_circ", false, [1, 1, 1, 0])
     var rtNrefNoArr = rtDecl("rt_nref_noarr", false, [1, 1, 0])
     var rtNrefDrop = rtDecl("rt_nref_drop", false, [1])
+    var rtNrefSubdrop = rtDecl("rt_nref_subdrop", false, [1, 0])
+    var rtNrefArrstore = rtDecl("rt_nref_arrstore", true, [1])
     var rtNrefSelfBad = rtDecl("rt_nref_self_bad", false, [1, 1])
     var rtNrefIsarr = rtDecl("rt_nref_isarr", false, [1, 0])
     var rtNrefVoid = rtDecl("rt_nref_void", false, [1])
@@ -2174,7 +2177,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (idx == 0) { return gepStr(b, c.file) }
             return b.NewCall(rtParam, llvm.constant.NewInt(i32, idx))
         }
-        if (attrOn(refVars, name)) { return b.NewCall(rtGetByName, gepStr(b, name)) }
+        if (attrOn(refVars, name)) { return b.NewCall(rtGetRef, [gepStr(b, name), zero]) }
         // an array name expands to its element 0, a scalar to its slot (rt_var)
         return b.NewCall(rtVar, [gepStr(b, name), loadVar(b, name)])
     }
@@ -2860,7 +2863,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pe == "len") {
             return {c: undefined, fn: function(b) {
                 // ${#v} counts CHARACTERS in bash (rt_strlen counts bytes).
-                return {b: b, v: i2s(b, b.NewCall(rtCharLen, varString(b, name)))}
+                var lv = attrOn(refVars, name) ? b.NewCall(rtGetRef, [gepStr(b, name), one]) : varString(b, name)
+                return {b: b, v: i2s(b, b.NewCall(rtCharLen, lv))}
             }}
         }
         // r='arr[@]' (or '@') makes the bare ${!r} a field list, hence f.
@@ -2884,6 +2888,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: null}
         }
         function valOf(b, tg) {
+            if (tg != null && !indirect) { return b.NewCall(rtGetRef, [tg, zero]) }
             if (tg != null) { return b.NewCall(rtGetByName, tg) }
             return varString(b, name)
         }
@@ -3490,7 +3495,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // A name's value is itself an expression (x=010 is 8, r=a reads a), so rt_arith reads it.
-    function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtArith, varString(b, name))} } }
+    // An arithmetic read: a nameref that is an array reads as unset, silently (bash 5.3).
+    function arString(b, name) {
+        if (attrOn(refVars, name)) { return b.NewCall(rtGetRef, [gepStr(b, name), one]) }
+        return varString(b, name)
+    }
+    function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtArith, arString(b, name))} } }
     // NAME[SUB]: items = [{lhs}, subscriptWord]. Twin of mkArLhs / mkArElem in
     // bash-interpreter.abnf.
     function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1], aq: items[2].aqa} }
@@ -3518,7 +3528,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Only an operator that stores back reads its target here (++, op=): through a nameref
     // the store then looks the name up once more (ar_rmw).
     function arLhsGet(b, name, rk) {
-        if (rk.k == null) { return b.NewCall(rtArith, varString(b, name)) }
+        if (rk.k == null) { return b.NewCall(rtArith, arString(b, name)) }
         if (rk.nm == null) { return b.NewCall(rtArith, b.NewCall(rtScGet, [gepStr(b, name), rk.k])) }
         var ev = b.NewCall(rtArNget, [rk.nm, rk.k])
         b.NewCall(rtArRmw, [rk.nm, rk.k])
@@ -4580,6 +4590,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nrefDone = false
         // Set while declOne runs again past the self-reference check it has emitted.
         var selfDone = false
+        // Set while declOne runs again past the NAME[SUB] nameref check it has emitted.
+        var subDropDone = false
         // export and readonly of a function's circular local nameref, its chain known here,
         // act on the global variable of the name, after bash's warnings. Twin of
         // declCircGlob in bash-interpreter.abnf, which has the cases.
@@ -4725,12 +4737,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         var isA0 = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, names[j])), zero)
                         storeVarRaw(b, names[j], b.NewSelect(isA0, loadVar(b, names[j]), unsetPtr(b)))
                     }
-                    // The store lands on the nameref itself; its target is unknown after it.
+                    // The store lands on the nameref itself; its target is unknown after it,
+                    // except that a literal leaves the chain circular for the next declaration.
+                    var circRef = refVars["$" + names[j]]
                     refVars["$" + names[j]] = false
                     b = declOneBody(b, j, (asgs[j] == null) ? null : v)
                     // Assigning the literal cleared the binding's marks; the nameref stays.
                     if (lit0) { b.NewCall(rtNmark, [gepStr(b, names[j]), one]) }
-                    refVars["$" + names[j]] = true
+                    refVars["$" + names[j]] = lit0 ? circRef : true
                     asgs[j] = a
                     if (cEnd == null) { return b }
                     b.NewBr(cEnd)
@@ -4742,6 +4756,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var msg = bashRefBad(kw, (a.valT != null) ? a.valT.c : "")
                 if (msg != "") { emitDiag(b, gepStr(b, msg)); roFail = true; return b }
                 refChk = false
+            }
+            // NAME[SUB] of a nameref, outside a function's locals, makes NAME itself the array
+            // when rt_nref_subdrop drops the nameref: with a value under no option but -a or -g,
+            // or without one under no option. Twin of refDrops in bash-interpreter.abnf.
+            var awd = asgsWritten[j]
+            var subV = awd != null && awd.idxT != null && awd.isrc != "" && awd.lit == null && flags.split("-").join("").split("a").join("").split("g").join("") == ""
+            if (!subDropDone && !isRef && plus == "" && attrOn(refVars, names[j]) && (subV || (awd == null && darrs[j] != null && flags == ""))
+                && !(!global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset"))) {
+                var sdRc = b.NewCall(rtNrefSubdrop, [gepStr(b, names[j]), subV ? one : zero])
+                var sdB = curF.NewBlock(""), skB = curF.NewBlock(""), seB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, sdRc, zero), sdB, skB)
+                var sdRef = refVars["$" + names[j]]
+                refVars["$" + names[j]] = false
+                sdB = declOne(sdB, j, v)
+                refVars["$" + names[j]] = sdRef
+                sdB.NewBr(seB)
+                subDropDone = true
+                skB = declOne(skB, j, v)
+                subDropDone = false
+                skB.NewBr(seB)
+                return seB
             }
             var fresh = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset") && !locOwn("$" + names[j])
             // Without -n a declaration of a nameref acts on its target, unless it is a
@@ -6672,12 +6707,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = raGo
         }
         if (arrName != null) {
-            b.NewCall(rtArrClear, gepStr(b, arrName))
-            b.NewCall(rtArrMark, gepStr(b, arrName))
+            // Through a nameref, its target or, with no value, itself (rt_nref_arrstore).
+            var an = attrOn(refVars, arrName) ? b.NewCall(rtNrefArrstore, gepStr(b, arrName)) : gepStr(b, arrName)
+            b.NewCall(rtArrClear, an)
+            b.NewCall(rtArrMark, an)
             // An element that is an -i arithmetic error abandons the line.
             var rat = elemAttrs(arrName)
             if ((rat & 1) != 0) { b.NewStore(gepStr(b, "read: "), gArPfx) }
-            b.NewCall(rtArrLitWords, [gepStr(b, arrName), b.NewCall(rtRdFields, [line, ifs, q, zero]), zero64,
+            b.NewCall(rtArrLitWords, [an, b.NewCall(rtRdFields, [line, ifs, q, zero]), zero64,
                                       llvm.constant.NewInt(i32, rat)])
             if ((rat & 1) != 0) {
                 b.NewStore(emptyPtr(b), gArPfx)
