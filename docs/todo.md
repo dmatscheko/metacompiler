@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-integer ranges, zero slice size, endless Float range slices · P3 · RB · OPEN [V]
+### T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-integer ranges, zero slice size, endless Float range slices · P3 · RB · IN PROGRESS (RB worker, round 60) [V]
 
 Found while working T-1135. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8.
 
