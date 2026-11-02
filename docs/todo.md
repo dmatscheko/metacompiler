@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1163 ruby: include into Object, implicit-self builtins in reopened classes, breaking accumulator blocks on endless enums, instance_eval, NaN identity · P3 · RB · OPEN [V]
+### T-1163 ruby: include into Object, implicit-self builtins in reopened classes, breaking accumulator blocks on endless enums, instance_eval, NaN identity · P3 · RB · IN PROGRESS (RB worker, round 66) [V]
 Found while closing T-1157 (partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
 - Interpreter: `module M; end; class Object; include M; end; p 1` aborts ("Cannot read property 'length' of undefined" in includeInto: builtin class objects have no `__mixins`); compiled engines print 1 like MRI.
 - Compiled engines: a bare implicit-self builtin call inside a reopened builtin class fails — `class Integer; def e; [frozen?, even?]; end; end; p 4.e` raises "undefined method `even?' for 4:Integer"; MRI `[true, true]`.
