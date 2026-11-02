@@ -4,6 +4,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -663,6 +664,10 @@ func init() {
 			rec.set("i", float64(phpHandles[rt]))
 			return w(rec)
 		}
+		// The wall clock in microseconds since the epoch, for llvm.Run, which
+		// cannot reach the gettimeofday a native build calls. Twin of
+		// emitClockMicros in php-to-llvm-ir.abnf.
+		m["js_phclock"] = func(a []uint64) uint64 { return rt.wrapNum(float64(time.Now().UnixMicro())) }
 		// An object's handle, or a closure literal's; any other Closure keeps none
 		// and answers 0. Twin of __mec_oid in php-interpreter.abnf.
 		m["js_phoidof"] = func(a []uint64) uint64 {

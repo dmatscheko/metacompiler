@@ -2193,6 +2193,26 @@ function s95() {
         && htmlspecialchars_decode("&NewLine;&apos;", ENT_QUOTES | ENT_HTML5) === "&NewLine;'");
 }
 
+// ===== SECTION 96: an undefined function's line; microtime =====
+// "Call to undefined function" stands at its call (ZEND_INIT_FCALL_BY_NAME),
+// whatever call ran before it. microtime() (ext/standard/microtime.c) is
+// "<usec / 10^6 to 8 places> <sec>", or with true one float.
+function s96noop() { return 0; }
+function s96undef() {
+    s96noop();
+    $GLOBALS["s96ul"] = __LINE__ + 1;
+    return nope96();
+}
+function s96() {
+    $l = 0;
+    try { s96undef(); } catch (Error $x) { $l = $x->getLine(); }
+    check("undef-fn-line", $l === $GLOBALS["s96ul"]);
+    $mt = microtime();
+    $sp = explode(" ", $mt);
+    $mf = microtime(true);
+    check("microtime", preg_match('/^0\.[0-9]{8} [0-9]+$/', $mt) === 1 && is_float($mf) && abs((float)$sp[1] + (float)$sp[0] - $mf) < 60);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2233,6 +2253,7 @@ function main() {
     s93(); // SECTION-CALL 93
     s94(); // SECTION-CALL 94
     s95(); // SECTION-CALL 95
+    s96(); // SECTION-CALL 96
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

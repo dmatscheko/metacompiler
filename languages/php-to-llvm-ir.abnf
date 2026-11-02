@@ -7438,7 +7438,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
             || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
             || name == "__mec_callable" || name == "__mec_ifaces" || name == "__mec_clsname" || name == "realpath"
-            || name == "__mec_here" || name == "__mec_cbns"
+            || name == "__mec_here" || name == "__mec_cbns" || name == "__mec_clock"
     }
     // The natives lib/php-stdlib.php is written on, each ONE extern taking its
     // arguments in order, an absent optional one as null (abnf/jsrtphpstr.go,
@@ -7471,6 +7471,27 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (ext == "js_phstrcmp" || ext == "js_phaptr" || ext == "js_phrefid") { return 2 }
         if (ext == "js_phbindwhy" || ext == "js_phcountrecs") { return 0 }
         return 1
+    }
+    // __mec_clock(): the wall clock in microseconds since the epoch, an int. A
+    // native build reads it with libc's gettimeofday (tv_usec is a 32 bit field
+    // on Darwin, so only the low half of its word is read); llvm.Run cannot call
+    // libc, so js_phclock reads the Go twin's clock. Twin of emitClockFunc in
+    // kotlin-to-llvm-ir.abnf and __mec_clock in php-interpreter.abnf.
+    var gtodF = null
+    function emitClockMicros(b) {
+        if (c.exePath == undefined || c.exePath == "") { return callExt(b, "js_phclock", []) }
+        var tvTy = llvm.types.NewArray(2, i64)
+        if (gtodF == null) {
+            gtodF = m.NewFunc("gettimeofday", llvm.types.I32,
+                              [llvm.ir.NewParam("", llvm.types.NewPointer(tvTy)), llvm.ir.NewParam("", llvm.types.I8Ptr)])
+        }
+        var tv = curF.Blocks[0].NewAlloca(tvTy)
+        b.NewCall(gtodF, [tv, llvm.constant.NewNull(llvm.types.I8Ptr)])
+        var i32z = llvm.constant.NewInt(llvm.types.I32, 0)
+        var secV = b.NewLoad(i64, b.NewGetElementPtr(tvTy, tv, [i32z, i32z]))
+        var usecW = b.NewLoad(i64, b.NewGetElementPtr(tvTy, tv, [i32z, llvm.constant.NewInt(llvm.types.I32, 1)]))
+        var usecV = b.NewSExt(b.NewTrunc(usecW, llvm.types.I32), i64)
+        return callExt(b, "js_num_i", [b.NewAdd(b.NewMul(secV, handle(1000000)), usecV)])
     }
     // The cast a one-argument call of name compiles to (zend_compile_func_cast),
     // "" for none. Twin of phpOpCast in php-interpreter.abnf.
@@ -7664,6 +7685,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             callExt(b, "js_phpush", [atV, diagLines ? b.NewSelect(noFile, emitNum(b, 0), callExt(b, "js_num_i", [b.NewAnd(hereV, handle(16777215))])) : emitNum(b, 0)])
             return {b: b, v: atV}
         }
+        if (name == "__mec_clock") { return {b: b, v: emitClockMicros(b)} }
         if (name == "__mec_ifaces") {
             var ia = phClsArg(b, vs[0])
             return {b: ia.b, v: callExt(ia.b, "js_phifaces", [ia.v])}
@@ -8137,6 +8159,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             // expression is a new Closure of the function (fccFresh), so there is
             // nothing to call here.
             var fk = anytype
+            // The lookup's "Call to undefined function" stands at this call
+            // (INIT_FCALL_BY_NAME), before any argument's call moves php.site.
+            if (!lowered && site != 0) { siteStore(b, site) }
             if (anyCase) {
                 fk = fnByKey(b, name)
                 b = fk.b

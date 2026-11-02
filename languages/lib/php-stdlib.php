@@ -6,14 +6,15 @@
 // all run this one text and agree by construction. It is written on the engine
 // natives - count, strlen, array_push, array_values, array_key_exists,
 // array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
-// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and ten
+// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and eleven
 // intrinsics: __mec_fmtfloat for sprintf's float conversions ("r" is the
 // shortest digits serialize_precision=-1 lays out), __mec_math for
 // the math library's double operations, __mec_aptr for the internal array
 // pointer, __mec_precision for the precision setting, __mec_oid for an
 // object's handle, __mec_callable for the TypeError of an invalid callback
 // argument, __mec_ifaces for the interfaces a class names, __mec_clsname for
-// the declared name of the class a name denotes (false for none) and __mec_pregc /
+// the declared name of the class a name denotes (false for none), __mec_clock
+// for the wall clock in microseconds and __mec_pregc /
 // __mec_pregx for preg_* (lib/php-preg.js). A native also gets a
 // wrapper here of the same name, which is what a string callable or f(...)
 // reaches: a direct call never does, since the call is lowered to the native
@@ -2884,6 +2885,15 @@ function log($num, $base = null) {
     return __mec_math("log", $x, 0.0) / __mec_math("log", $b, 0.0);
 }
 function pi() { return M_PI; }
+// microtime (ext/standard/microtime.c) on __mec_clock, the wall clock in
+// microseconds since the epoch: "<usec / 10^6 to 8 places> <sec>", or with
+// $as_float sec + usec / 10^6 as one float.
+function microtime(bool $as_float = false) {
+    $us = __mec_clock();
+    $sec = intdiv($us, 1000000);
+    $frac = ($us % 1000000) / 1000000.0;
+    return $as_float ? $sec + $frac : sprintf("%.8F %d", $frac, $sec);
+}
 function deg2rad($num) { return (__mec_num("deg2rad", 1, "num", $num, "float") / 180.0) * M_PI; }
 function rad2deg($num) { return (__mec_num("rad2deg", 1, "num", $num, "float") / M_PI) * 180.0; }
 function is_finite($num) { return !is_nan($num) && !is_infinite($num); }

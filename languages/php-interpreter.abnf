@@ -8294,6 +8294,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var k = findClass(phpStr(v))
             return k == null ? false : k.__name
         },
+        // The wall clock in microseconds since the epoch. Twin of __mec_clock in
+        // php-to-llvm-ir.abnf.
+        "__mec_clock": function() { return clockMicros() },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
         // preg_*'s compile and match (lib/php-preg.js). Twins of js_phpregc and
         // js_phpregx in abnf/jsrtphppreg.go and lib/php-rt.metajs.
