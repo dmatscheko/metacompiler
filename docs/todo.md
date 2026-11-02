@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1176 bash: computed `unset $v` (compiler), declaration builtins on a circular assoc nameref, `${e[0]:=v}` through a NAME[SUB] nameref · P3 · SH · OPEN [V]
+### T-1176 bash: computed `unset $v` (compiler), declaration builtins on a circular assoc nameref, `${e[0]:=v}` through a NAME[SUB] nameref · P3 · SH · IN PROGRESS (SH worker, round 56) [V]
 Found while closing T-1175; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Compiler only (run and native), `unset $v` computed from a word goes through `rt_unset_name`: `f(){ local x=1; v=x; unset $v; declare -p x; }` — oracle `declare -- x`, ours "x: not found"; with `local -n r=q; v=r; unset $v` the oracle keeps `declare -n r="q"`, ours prints `declare -- r="q"` (the nameref dropped).
 - Both engines (pre-existing on main), a circular nameref that is an associative array (`local -n w=w; declare -A w=x`): `export w=1`, `export w`, `readonly w=2`, `declare -g w=5` are no-ops with status 0 in the oracle; the interpreter reports "export: `1': not a valid identifier", status 1; the compiler turns `readonly w=2` into `declare -r w`. `readonly w` gives ": readonly variable" with status 0 in the oracle (deterministic over repeated runs).
