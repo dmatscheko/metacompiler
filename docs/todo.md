@@ -102,7 +102,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primitive asList cast · P3 · KT · OPEN [V]
+### T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primitive asList cast · P3 · KT · IN PROGRESS (KT worker, round 34) [V]
 
 Oracle: kotlinc 2.2.21.
 - subList must be a live view: `val ml = mutableListOf(1,2,3,4); ml.subList(0,2).clear(); println(ml)` prints `[3, 4]`; every engine prints `[1, 2, 3, 4]`. Reuse the `__lnk` view link from asList/asReversed, carrying an offset and length. A structural change to the parent invalidates the sublist (ConcurrentModificationException on its next use).
