@@ -533,6 +533,14 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 				return w(it)
 			}
 		}
+		// An endless String range has no length: its values are made one at a
+		// time ("s", the next one) until a break ends the loop.
+		if r, isRng := rubyIsRange(c); isRng && isUndefOrNull(r.props["end"]) {
+			if lo, isStr := r.props["begin"].(string); isStr {
+				it.set("s", lo)
+				return w(it)
+			}
+		}
 		if _, isArr := c.(*jsArray); !isArr {
 			it.set("n", u(pylen(a[:1])))
 		}
@@ -582,6 +590,10 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 			it.set("i", float64(i+1))
 			return w(arr.elems[i])
+		}
+		if s, open := it.props["s"].(string); open {
+			it.set("s", rubyStrSucc(s))
+			return w(s)
 		}
 		if float64(i) >= rubyToF(it.props["n"]) {
 			return jsHUndefined
@@ -4103,6 +4115,59 @@ func (rt *jsrt) rubyHidxWarn() {
 // lib/ruby-rt.metajs.
 func (rt *jsrt) rubyWarnWrite(s string) {
 	rt.rubyMethod(rt.rubyGlobals["stderr"], "write", []interface{}{&jsRStr{s: s}})
+}
+
+// rubyExcReport is MRI 2.6's uncaught-exception report (eval_error.c,
+// print_errinfo), written piece by piece through $stderr's #write as MRI does:
+// "prog.rb:2:in `<main>': boom (RuntimeError)". The site is what js_rraiseat or
+// js_rsite recorded; without one the report starts at the message. A message's
+// first line goes before the class and the rest after it, an empty message
+// reads "unhandled exception" for a RuntimeError and the bare class name
+// otherwise. Twins: excReport in ruby-interpreter.abnf and rbExcReport in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyExcReport(exc interface{}) {
+	o, isObj := exc.(*jsObject)
+	if !isObj {
+		rt.rubyWarnWrite("uncaught throw " + rt.rubyInspect(exc) + "\n")
+		return
+	}
+	msg := ""
+	if m, ok := rt.rubyExcMessage(o); ok {
+		msg = rt.rubyStr(m)
+	}
+	cname := "RuntimeError"
+	if c, has := o.props["__class"]; has {
+		if co, isCo := c.(*jsObject); isCo {
+			if n, isStr := co.props["__name"].(string); isStr {
+				cname = n
+			}
+		}
+	}
+	if where, isStr := o.props["__rwhere"].(string); isStr {
+		rt.rubyWarnWrite(where)
+		rt.rubyWarnWrite(": ")
+	}
+	if msg == "" {
+		if cname == "RuntimeError" {
+			cname = "unhandled exception"
+		}
+		rt.rubyWarnWrite(cname)
+		rt.rubyWarnWrite("\n")
+		return
+	}
+	tail := ""
+	if nl := strings.IndexByte(msg, '\n'); nl >= 0 {
+		msg, tail = msg[:nl], msg[nl+1:]
+	}
+	for _, s := range [...]string{msg, " (", cname, ")", "\n"} {
+		rt.rubyWarnWrite(s)
+	}
+	if tail != "" {
+		rt.rubyWarnWrite(tail)
+		if !strings.HasSuffix(tail, "\n") {
+			rt.rubyWarnWrite("\n")
+		}
+	}
 }
 
 // rubyWarn is Kernel#warn (js_rwarn): the messages as IO#puts would write them,

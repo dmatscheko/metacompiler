@@ -7059,12 +7059,12 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			_, ft := t.(jsFlo)
 			desc := "(" + rt.rubyInspect(t) + ".step" + rt.rubyAseqArgs(npos) + ")"
 			if lf, isFlo := lim.(jsFlo); isUndefOrNull(lim) || rubyToF(by) == 0 || (isFlo && math.IsInf(lf.f, 1) == (rubyToF(by) > 0) && math.IsInf(lf.f, 0)) {
-				se := rubyStepForever(x, rubyToF(by), fb || ft, desc)
+				se := rubyStepForever(t, by, fb || ft, desc)
 				if nblk == nil {
 					if !isFlo || fb || ft {
 						return rubyMkAseq(se, t, lim, by, false, desc), true
 					}
-					fe := rubyMkAseq(rubyStepForever(x, rubyToF(by), true, desc), t, lim, by, false, desc)
+					fe := rubyMkAseq(rubyStepForever(t, by, true, desc), t, lim, by, false, desc)
 					fe.props["aseq"].(*jsObject).set("ie", se)
 					return fe, true
 				}
@@ -7075,6 +7075,8 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 				for _, d := range rubyFloatStep(x, rubyToF(lim), rubyToF(by), false) {
 					nl.elems = append(nl.elems, jsFlo{f: d})
 				}
+			} else if rubyAnyBig(t, lim, by) {
+				nl = rt.rubyIntWalk(t, lim, by)
 			} else {
 				for v, lim, b := x, rubyToF(lim), rubyToF(by); (b > 0 && v <= lim) || (b < 0 && v >= lim); v += b {
 					nl.elems = append(nl.elems, v)
@@ -7084,14 +7086,31 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 				return rubyMkAseq(rubyEnumAt(rubyMkEnum(nl), t, name, npos), t, lim, by, false, desc), true
 			}
 		case "times":
+			// Twin of the times arm of bigMethod in ruby-interpreter.abnf.
+			if isBig {
+				se := rubyStepForever(float64(0), float64(1), false, "#<Enumerator: "+rt.rubyInspect(t)+":times>")
+				if nblk == nil {
+					return se, true
+				}
+				rt.rubyMethod(se, "each", []interface{}{rubyBlkWrap(nblk)})
+				return t, true
+			}
 			for i := 0.0; i < x; i++ {
 				nl.elems = append(nl.elems, i)
 			}
 		case "upto":
+			if rubyAnyBig(t, argAt(npos, 0), nil) {
+				nl = rt.rubyIntWalk(t, argAt(npos, 0), float64(1))
+				break
+			}
 			for i := x; i <= rubyToF(argAt(npos, 0)); i++ {
 				nl.elems = append(nl.elems, i)
 			}
 		default:
+			if rubyAnyBig(t, argAt(npos, 0), nil) {
+				nl = rt.rubyIntWalk(t, argAt(npos, 0), float64(-1))
+				break
+			}
 			for i := x; i >= rubyToF(argAt(npos, 0)); i-- {
 				nl.elems = append(nl.elems, i)
 			}
@@ -7665,6 +7684,20 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	strOpen = strOpen && isUndefOrNull(t.props["end"])
 	if name == "size" && len(pos) == 0 && blk == nil {
 		return rt.rubyRangeSize(t)
+	}
+	// range_min's #min(n) is #first(n), and #take(n) of a range without an end
+	// takes the same way. Twin of the arm in rangeMethod, which states the rule.
+	if name == "min" && blk != nil && isUndefOrNull(t.props["end"]) {
+		rt.rubyRaiseErr("min", "RangeError", "cannot get the minimum of endless range with custom comparison method")
+	}
+	if blk == nil && len(pos) > 0 && (name == "min" || (name == "take" && (strOpen || rubyRangeUnbounded(t)))) {
+		if name == "take" && rubyToF(pos[0]) < 0 {
+			rt.rubyRaiseErr("take", "ArgumentError", "attempt to take negative size")
+		}
+		name = "first"
+	}
+	if name == "first" && len(pos) > 0 && rubyToF(pos[0]) < 0 {
+		rt.rubyRaiseErr("first", "ArgumentError", "negative array size (or size too big)")
 	}
 	if strOpen && name == "each" && blk != nil {
 		for {
@@ -9670,35 +9703,6 @@ func (rt *jsrt) rubyIndexGet(o, k interface{}) interface{} {
 		rt.fail("indexing nil")
 	}
 	return rt.getMember(o, k)
-}
-
-// rubyExcTopLine is MRI's uncaught-exception line:
-// "prog.rb:2:in `<main>': boom (RuntimeError)". The site is what js_rraiseat
-// recorded; an exception raised by the RUNTIME rather than by a `raise' has none,
-// and then only "msg (Class)" is printed. Mirrors excTopLine of
-// ruby-interpreter.abnf and rbExcTopLine of lib/ruby-rt.metajs.
-func (rt *jsrt) rubyExcTopLine(exc interface{}) string {
-	o, isObj := exc.(*jsObject)
-	if !isObj {
-		return "uncaught throw " + rt.rubyInspect(exc)
-	}
-	msg := ""
-	if m, ok := rt.rubyExcMessage(o); ok {
-		msg = rt.rubyStr(m)
-	}
-	cname := "RuntimeError"
-	if c, has := o.props["__class"]; has {
-		if co, isCo := c.(*jsObject); isCo {
-			if n, isStr := co.props["__name"].(string); isStr {
-				cname = n
-			}
-		}
-	}
-	head := ""
-	if where, isStr := o.props["__rwhere"].(string); isStr {
-		head = where + ": "
-	}
-	return head + msg + " (" + cname + ")"
 }
 
 // rubyExcMessage is Exception#message / #to_s: the first constructor argument,
@@ -16257,11 +16261,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.setMember(o, "__rwhere", site)
 			return jsHUndefined
 		},
-		// THE TOP OF THE PROGRAM: an exception nobody rescued, printed with its
-		// message and class rather than by the generic uncaught-throw handler,
-		// on stderr as MRI writes it.
+		// THE TOP OF THE PROGRAM: an exception nobody rescued, reported with its
+		// message and class (rubyExcReport) rather than by the generic
+		// uncaught-throw handler.
 		"js_rtop": func(a []uint64) uint64 {
-			fmt.Fprintln(warnWriter, wtf8Clean(rt.rubyExcTopLine(u(a[0]))))
+			rt.rubyExcReport(u(a[0]))
 			os.Exit(1)
 			return 0
 		},

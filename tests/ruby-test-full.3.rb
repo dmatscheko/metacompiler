@@ -1,4 +1,4 @@
-# Full-syntax test: Ruby - part 3, SECTIONs 97 to 123. tests/ruby-test-full.rb
+# Full-syntax test: Ruby - part 3, SECTIONs 97 to 124. tests/ruby-test-full.rb
 # leaves the -frozen interpreter leg too little of the IR interpreter's step
 # brake (-max-steps, 100M per call) for them; see that file for the
 # conventions.
@@ -1012,6 +1012,51 @@ def s123
         (1..Float::INFINITY).last == Float::INFINITY)
 end
 
+# ===== SECTION 124: endless ranges, big Integer walks, top-level directives =====
+# take(n) of a range without an end takes like first(n), min(n) is first(n), and a
+# negative n raises each method's own ArgumentError. Integer#step / #upto /
+# #downto / #times and Range#step walk exact Integers past 2**53. `for` walks an
+# endless String range. At the top level main has no #alias_method. A `{` that
+# opens a line after a call with arguments starts a new statement. /usr/bin/ruby
+# 2.6 settles each.
+def s124
+  n = [2, 3, -1][0, 3]
+  m = []
+  [-> { (1..).take(n[2]) }, -> { (1..).first(n[2]) }, -> { ("a"..).first(n[2]) }].each do |l|
+    begin; l.call; rescue ArgumentError => x; m << x.message; end
+  end
+  begin; (1..).min { |a, c| c <=> a }; rescue RangeError => x; m << x.message; end
+  check("er124a", (1..).take(n[0]) == [1, 2] && ("a"..).take(n[1]) == ["a", "b", "c"] && (1...).take(0) == [] &&
+        (1..).min(n[0]) == [1, 2] && ("a"..).min(n[0]) == ["a", "b"] && (2**70..).take(1) == [2**70] &&
+        m == ["attempt to take negative size", "negative array size (or size too big)",
+              "negative array size (or size too big)",
+              "cannot get the minimum of endless range with custom comparison method"])
+  b = [2**70][0]
+  t = []
+  b.times { |i| t << i; break if i == 1 }
+  u = []
+  b.upto(b + 1) { |x| u << x }
+  check("bg124b", b.step(by: 3).first(2) == [b, b + 3] && b.step(b + 6, 3).to_a == [b, b + 3, b + 6] &&
+        3.step(by: b).first(2) == [3, b + 3] && b.downto(b - 2).to_a == [b, b - 1, b - 2] && u == [b, b + 1] &&
+        t == [0, 1] && b.times.first(2) == [0, 1] && (1..2 * b).step(b).to_a == [1, b + 1] &&
+        (1..).step(b).first(2) == [1, b + 1] && (2**53 - 1).upto(2**53 + 1).to_a == [2**53 - 1, 2**53, 2**53 + 1])
+  f = []
+  for s in ("y"..)
+    f << s
+    break if s == "aa"
+  end
+  check("fr124c", f == ["y", "z", "aa"] && s == "aa")
+  a = []
+  begin; alias_method :a124, :s124; rescue NoMethodError => x; a << x.message; end
+  check("tl124d", a == ["undefined method `alias_method' for main:Object"])
+  o = []
+  o.push 1
+  {2 => 3}.each { |k, v| o << k + v }
+  o.push(4)
+  {5 => 6}.each { |k, v| o << k * v }
+  check("nl124e", o == [1, 5, 4, 30])
+end
+
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1039,5 +1084,6 @@ s120() # SECTION-CALL 120
 s121() # SECTION-CALL 121
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
+s124() # SECTION-CALL 124
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

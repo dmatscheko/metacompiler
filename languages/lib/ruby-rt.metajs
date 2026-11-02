@@ -5128,6 +5128,18 @@ function rbRangeMethod(t, name, args) {
     // streams as an unbounded Integer range does. Twin of the arms in rangeMethod.
     var strOpen = typeof t["begin"] == "string" && rtIsNil(t["end"])
     if (name == "size" && npos == 0 && blk === null) { return rbRangeSize(t) }
+    // range_min's #min(n) is #first(n), and #take(n) of a range without an end
+    // takes the same way. Twin of the arm in rangeMethod, which states the rule.
+    if (name == "min" && blk !== null && rtIsNil(t["end"])) {
+        rbRaiseErr("min", "RangeError", "cannot get the minimum of endless range with custom comparison method")
+    }
+    if (blk === null && npos > 0 && (name == "min" || (name == "take" && (strOpen || rbRangeUnbounded(t))))) {
+        if (name == "take" && rbToF(args[0]) < 0) { rbRaiseErr("take", "ArgumentError", "attempt to take negative size") }
+        name = "first"
+    }
+    if (name == "first" && npos > 0 && rbToF(args[0]) < 0) {
+        rbRaiseErr("first", "ArgumentError", "negative array size (or size too big)")
+    }
     if (strOpen && name == "each" && blk !== null) {
         var sc = t["begin"]
         while (true) {
@@ -5288,7 +5300,7 @@ function rbRangeStep(t, m, args) {
     var desc = "((" + rbInspect(t) + ")." + m + rbInspectArgs(args, npos) + ")"
     var e = anytype
     if (u < 0) { e = rbMkEnum([]) }
-    else if (num && !flo && rbIsBig(lo) && (rtIsNil(hi) || rbRangeUnbounded(t))) { e = rbStepForeverBig(lo, u, desc) }
+    else if (num && !flo && (rbIsBig(lo) || rbIsBig(by)) && (rtIsNil(hi) || rbRangeUnbounded(t))) { e = rbStepForeverBig(lo, by, desc) }
     else if (num && (u == 0 || rtIsNil(hi) || rbRangeUnbounded(t))) { e = rbStepForever(rbToF(lo), u, flo, desc) }
     else if (typeof lo == "string" && rtIsNil(hi)) {
         e = rbLazyCopy(rbRangeLazy(t), {k: "step", f: null, n: Math.trunc(u)}, false, "#<Enumerator: " + rbInspect(t) + ":" + m + rbInspectArgs(args, npos) + ">")
@@ -5301,6 +5313,11 @@ function rbRangeStep(t, m, args) {
                 picked.push(rbMkFlo(fs[fi]))
                 fi = fi + 1
             }
+        } else if ((rbIsBig(lo) || rbIsBig(hi) || rbIsBig(by)) && (typeof lo == "number" || rbIsBig(lo)) && (typeof hi == "number" || rbIsBig(hi))) {
+            var whi = anytype
+            whi = hi
+            if (t["excl"] === true) { whi = rbBin("-", hi, 1) }
+            picked = rbIntWalk(lo, whi, by)
         } else {
             var src = rbRangeToArr(t)
             var si = 0
@@ -6251,6 +6268,13 @@ function rbNumMethod(t, name, args) {
     // different things, and these three arms read the raw argument list.
     if (name == "times") {
         var tblk = rbBlockOf(args)
+        // Twin of the times arm of bigMethod in ruby-interpreter.abnf.
+        if (!isInt) {
+            var te = rbStepForever(0, 1, false, "#<Enumerator: " + rbInspect(t) + ":times>")
+            if (tblk === null) { return te }
+            rbLazyMethod(te, "each", [js_rblkwrap(tblk)])
+            return t
+        }
         var i = 0
         if (tblk === null) {
             var tl = []
@@ -6285,7 +6309,9 @@ function rbNumMethod(t, name, args) {
         if (rbToF(sby) == 0 && sblk !== null) { rbRaiseErr(name, "ArgumentError", "step can't be 0") }
         var desc = "(" + rbInspect(t) + ".step" + rbAseqArgs(args, rbNPos(args)) + ")"
         if (rtIsNil(lim) || rbToF(sby) == 0 || (rbIsFlo(lim) && rbToF(lim) - rbToF(lim) != 0 && (rbToF(lim) > 0) == (rbToF(sby) > 0))) {
-            var se = rbStepForever(x, rbToF(sby), rbIsFlo(t) || rbIsFlo(sby), desc)
+            var se = anytype
+            if (!rbIsFlo(t) && !rbIsFlo(sby) && (rbIsBig(t) || rbIsBig(sby))) { se = rbStepForeverBig(t, sby, desc) }
+            else { se = rbStepForever(x, rbToF(sby), rbIsFlo(t) || rbIsFlo(sby), desc) }
             if (sblk === null) {
                 if (!rbIsFlo(lim) || rbIsFlo(t) || rbIsFlo(sby)) { return rbMkAseq(se, t, lim, sby, false, desc) }
                 var fe = rbMkAseq(rbStepForever(x, rbToF(sby), true, desc), t, lim, sby, false, desc)
@@ -6303,6 +6329,8 @@ function rbNumMethod(t, name, args) {
                 sl.push(rbMkFlo(sf[sfi]))
                 sfi = sfi + 1
             }
+        } else if (rbIsBig(t) || rbIsBig(lim) || rbIsBig(sby)) {
+            sl = rbIntWalk(t, lim, sby)
         } else {
             sl = rbnIntStep(x, rbToF(lim), rbToF(sby))
         }
@@ -6316,6 +6344,17 @@ function rbNumMethod(t, name, args) {
     }
     if ((name == "upto" || name == "downto") && rbNPos(args) == 0) {
         rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)")
+    }
+    if ((name == "upto" || name == "downto") && (rbIsBig(t) || rbIsBig(rbArgAt(args, 0)))) {
+        var wblk = rbBlockOf(args)
+        var wl = rbIntWalk(t, rbArgAt(args, 0), name == "upto" ? 1 : -1)
+        if (wblk === null) { return rbEnumAt(rbMkEnum(wl), t, name, args) }
+        var wi = 0
+        while (wi < wl.length) {
+            rbCall1(wblk, wl[wi])
+            wi = wi + 1
+        }
+        return t
     }
     if (name == "upto") {
         var ublk = rbBlockOf(args)
@@ -7189,11 +7228,23 @@ function rbStepForever(beg, by, flo, desc) {
     else { e["ops"].push({k: "map", f: function(i) { return beg + i * by }, n: 0}) }
     return e
 }
-// rbStepForever from a big Integer, in exact Integers.
+// rbStepForever from or by a big Integer, in exact Integers.
 function rbStepForeverBig(beg, by, desc) {
     var e = rbMkLazy("range", [], 0, null, false, false, desc)
     e["ops"].push({k: "map", f: function(i) { return rbBin("+", beg, rbBin("*", i, by)) }, n: 0})
     return e
+}
+// Twin of bigIntStep in ruby-interpreter.abnf, which states the rule.
+function rbIntWalk(from, limit, by) {
+    var out = []
+    var v = anytype
+    v = from
+    var up = rbToF(by) > 0
+    while (up ? rbCmp(v, limit) <= 0 : rbCmp(v, limit) >= 0) {
+        out.push(v)
+        v = rbBin("+", v, by)
+    }
+    return out
 }
 // "(a, b)" of the first n arguments' #inspect, "" for none.
 function rbInspectArgs(args, n) {
@@ -10949,7 +11000,7 @@ function js_rattrw(o, k, v, sk, mk) {
 // for VARS in COLL: open, step and close the loop. Twin of js_rforit in
 // abnf/jsrtruby.go, which states the rule.
 function js_rforit(c, whole) {
-    var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, e: null, res: null, run: null, whole: whole === true}
+    var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, e: null, res: null, run: null, whole: whole === true, s: null}
     if (rbUserObj(c) && !rbIsEnum(c)) { c = rbToEnum(c, []) }
     if (rbIsEnum(c) && rbRunnable(c)) {
         it["e"] = c
@@ -10970,6 +11021,10 @@ function js_rforit(c, whole) {
         c["__iter"] = lev + 1
         it["lev"] = lev
         it["h"] = true
+        return it
+    }
+    if (rbIsRange(c) && typeof c["begin"] == "string" && rtIsNil(c["end"])) {
+        it["s"] = c["begin"]
         return it
     }
     if (!rbIsArr(c)) { it["n"] = js_pylen(c) }
@@ -11005,6 +11060,11 @@ function js_rfornext(it, prev) {
         if (i >= c.length) { return undefined }
         it["i"] = i + 1
         return c[i]
+    }
+    if (it["s"] !== null) {
+        var sv = it["s"]
+        it["s"] = rbsSucc(sv)
+        return sv
     }
     if (i >= it["n"]) { return undefined }
     it["i"] = i + 1
@@ -12611,11 +12671,6 @@ function rbIntSqrt(v) {
     return x
 }
 
-// THE TOP OF THE PROGRAM: an exception nobody rescued. Without this the floor's
-// uncaught-throw handler would render it with the generic object toString
-// ("[object Object]"). This is MRI's own first line, on stderr as MRI writes it,
-// and rbExcTopLine is shared with the interpreter half's runProgram so all three
-// engines print the SAME text.
 // (exception, site): an exception the RUNTIME raised gets its first backtrace
 // frame where it is caught. Twin of js_rsite in abnf/jsrt.go, which states the
 // rule.
@@ -12633,27 +12688,54 @@ function js_rsite(exc, site) {
     return undefined
 }
 
+// THE TOP OF THE PROGRAM: an exception nobody rescued. Without this the floor's
+// uncaught-throw handler would render it with the generic object toString
+// ("[object Object]"). Twin of js_rtop in abnf/jsrt.go.
 function js_rtop(exc) {
-    eprintln(rbExcTopLine(exc))
+    rbExcReport(exc)
     exit(1)
     return undefined
 }
 
-// MRI's uncaught-exception line: "prog.rb:2:in `<main>': boom (RuntimeError)".
-// The site is what js_rraiseat recorded; an exception raised by the RUNTIME rather
-// than by a `raise' has none, and then only "msg (Class)" is printed. Mirrors
-// excTopLine of ruby-interpreter.abnf and rubyExcTopLine of abnf/jsrt.go.
-function rbExcTopLine(exc) {
-    if (!rbIsObj(exc)) { return "uncaught throw " + rbInspect(exc) }
+// MRI's uncaught-exception report, piece by piece through $stderr's #write.
+// Twin of rubyExcReport in abnf/jsrtruby.go, which states the rule.
+function rbExcReport(exc) {
+    if (!rbIsObj(exc)) {
+        rbWarnWrite("uncaught throw " + rbInspect(exc) + "\n")
+        return undefined
+    }
     var msg = rbExcMessage(exc)
     if (msg === undefined) { msg = "" }
     var cname = "RuntimeError"
     var cls = exc["__class"]
     if (rbIsObj(cls) && typeof cls["__name"] == "string") { cname = cls["__name"] }
     var where = exc["__rwhere"]
-    var head = ""
-    if (typeof where == "string") { head = where + ": " }
-    return head + msg + " (" + cname + ")"
+    if (typeof where == "string") {
+        rbWarnWrite(where)
+        rbWarnWrite(": ")
+    }
+    if (msg == "") {
+        if (cname == "RuntimeError") { cname = "unhandled exception" }
+        rbWarnWrite(cname)
+        rbWarnWrite("\n")
+        return undefined
+    }
+    var tail = ""
+    var nl = msg.indexOf("\n")
+    if (nl >= 0) {
+        tail = msg.slice(nl + 1)
+        msg = msg.slice(0, nl)
+    }
+    rbWarnWrite(msg)
+    rbWarnWrite(" (")
+    rbWarnWrite(cname)
+    rbWarnWrite(")")
+    rbWarnWrite("\n")
+    if (tail != "") {
+        rbWarnWrite(tail)
+        if (tail.charAt(tail.length - 1) != "\n") { rbWarnWrite("\n") }
+    }
+    return undefined
 }
 
 // Whether an argument was ABSENT (js_arg answers undefined for one that was not

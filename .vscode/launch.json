@@ -3601,7 +3601,7 @@
             "name": "Ruby abort probe, raise (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "expectError": "stderr fragment, tests/ruby-abort-test.rb:8:in `<main>': abort probe (RuntimeError)",
+            "expectError": "stderr fragment, [tests/ruby-abort-test.rb:16:in `<main>'][: ][abort][ (][RuntimeError][)][|][probe][|]",
             "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-abort-test.rb", "-q"]
         },
         {

@@ -5,5 +5,13 @@
 # without a newline must reach the stream before the abort text.
 puts "before the abort"
 $stderr.print "stderr fragment, "
-raise "abort probe"
+# MRI writes the uncaught-exception report through $stderr's #write, one piece
+# per call, the message's first line before the class and the rest after it.
+class PieceWriter
+  def write(*s)
+    STDERR.print "[", s.join.tr("\n", "|"), "]"
+  end
+end
+$stderr = PieceWriter.new
+raise "abort\nprobe"
 puts "never reached"

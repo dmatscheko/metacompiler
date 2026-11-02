@@ -404,7 +404,7 @@ CommandStmt = CommandForm ;
 // A command call may itself be the ONE argument (`p two 1, 2` is p(two(1, 2)));
 // MRI accepts it nowhere else in the list.
 CommandForm <~~ push(makeCall(dmCallItems(takeAll(), up.in))) ~~>
-            = BareName <~~ push(up.in) ~~> NotLocalCmd SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ Block ] ;
+            = BareName <~~ push(up.in) ~~> NotLocalCmd SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ SameLine Block ] ;
 // NotLocalCmd fails the command form when its name is a LOCAL VARIABLE. MRI reads
 // `x -1`, `x *2`, `x &m`, `x ?c` and `x [1]` with its local-variable table: for a local they
 // are the binary operator or the index, for a method the argument. A PEG has no such
@@ -960,7 +960,7 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // The place (a variable) the primary reads, when the primary IS one: see notePlace.
 PrimaryEnd  = :whitespace() "" <~~ push({phead: hasPlaceAt(up.pos) ? placeAt["p" + up.pos] : null}) ~~> :whitespace(Whitespace) ;
 CmdMethodSfx <~~ var cn = popName(); push({kind: "mcall", name: cn, args: dmArgs(cn, takeAll(), up.in)}) ~~>
-            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
+            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ SameLine Block ] ;
 MethodSfx   <~~ var mp = peekMPos(); var mn = popName(); push(sfxAt(methodSfx(mn, dmArgs(mn, takeAll(), up.in)), mp)) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in), mpos: up.pos}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
@@ -984,7 +984,7 @@ IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.lengt
 // `n.to_s` a `(` that OPENS the next line is a fresh statement, not this call's
 // arguments. (Ruby wants the `(` glued to the name; requiring only the same line keeps
 // the `foo (1)` spelling working, which Ruby warns about but accepts.)
-MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ] | Block ;
+MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ SameLine Block ] | SameLine Block ;
 
 // A call argument: an ordinary expression, a keyword argument (name: v), a splat /
 // double-splat (*a, **h) or a block pass (&blk, &:sym).
@@ -1238,7 +1238,7 @@ ForVar      = ForGroup | ForPathAhead Target <~~ push({ftgt: pop()}) ~~>
 // super forwards the arguments the current method received (Ruby), while super()
 // with an explicit list passes exactly that list - so `super` and `super()` differ.
 SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
-            = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] [ Block ] ;
+            = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] [ SameLine Block ] ;
 
 // yield / yield(args) / yield args: call the block the current method was given.
 YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
@@ -2031,8 +2031,8 @@ RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
 // the longest form comes first, so `x ? a : b` only reaches the ternary after the
 // call alternatives have failed and rolled back.
 Call        <~~ push(makeCall(dmCallItems(takeAll(), up.in))) ~~>
-            = BareName <~~ push(up.in) ~~> SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ]
-            | BareName <~~ push(up.in) ~~> Block
+            = BareName <~~ push(up.in) ~~> SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ SameLine Block ]
+            | BareName <~~ push(up.in) ~~> SameLine Block
             | PredName <~~ push(up.in) ~~> ;
 BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 // A bare predicate/bang call has to be told apart from `a != b` and from the ternary

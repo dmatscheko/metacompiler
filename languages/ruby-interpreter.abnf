@@ -366,7 +366,7 @@ CommandStmt = CommandForm ;
 // A command call may itself be the ONE argument (`p two 1, 2` is p(two(1, 2)));
 // MRI accepts it nowhere else in the list.
 CommandForm <~~ push(makeCall(takeAll())) ~~>
-            = BareName <~~ push(up.in) ~~> NotLocalCmd SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ Block ] ;
+            = BareName <~~ push(up.in) ~~> NotLocalCmd SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ SameLine Block ] ;
 // NotLocalCmd fails the command form when its name is a LOCAL VARIABLE. MRI reads
 // `x -1`, `x *2`, `x &m`, `x ?c` and `x [1]` with its local-variable table: for a local they
 // are the binary operator or the index, for a method the argument. A PEG has no such
@@ -921,7 +921,7 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // The place (a variable) the primary reads, when the primary IS one: see notePlace.
 PrimaryEnd  = :whitespace() "" <~~ push({phead: hasOwn(placeAt, "p" + up.pos) ? placeAt["p" + up.pos] : null}) ~~> :whitespace(Whitespace) ;
 CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
+            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ SameLine Block ] ;
 MethodSfx   <~~ var mp = peekMPos(); push(sfxAt(methodSfx(popName(), takeAll()), mp)) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in), mpos: up.pos}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
@@ -945,7 +945,7 @@ IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.lengt
 // `n.to_s` a `(` that OPENS the next line is a fresh statement, not this call's
 // arguments. (Ruby wants the `(` glued to the name; requiring only the same line keeps
 // the `foo (1)` spelling working, which Ruby warns about but accepts.)
-MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ] | Block ;
+MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ SameLine Block ] | SameLine Block ;
 
 // A call argument: an ordinary expression, a keyword argument (name: v), a splat /
 // double-splat (*a, **h) or a block pass (&blk, &:sym).
@@ -1207,7 +1207,7 @@ ForVar      = ForGroup | ForPathAhead Target <~~ push({ftgt: pop()}) ~~>
 // super forwards the arguments the current method received (Ruby), while super()
 // with an explicit list passes exactly that list - so `super` and `super()` differ.
 SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
-            = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] [ Block ] ;
+            = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] [ SameLine Block ] ;
 
 // yield / yield(args) / yield args: call the block the current method was given.
 YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
@@ -1995,8 +1995,8 @@ RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
 // the longest form comes first, so `x ? a : b` only reaches the ternary after the
 // call alternatives have failed and rolled back.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = BareName <~~ push(up.in) ~~> SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ]
-            | BareName <~~ push(up.in) ~~> Block
+            = BareName <~~ push(up.in) ~~> SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ SameLine Block ]
+            | BareName <~~ push(up.in) ~~> SameLine Block
             | PredName <~~ push(up.in) ~~> ;
 BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 // A bare predicate/bang call has to be told apart from `a != b` and from the ternary
@@ -3154,16 +3154,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Any other object is `coll.each { body }`: its own #each, run as its
             // to_enum Enumerator one yield at a time.
             if (isUserObj(coll)) { return forInRun(toEnum(coll, []), tgts, whole, body) }
-            // An unbounded Integer range has no Array: its values are made one at a
-            // time until a break ends the loop.
-            if (isRange(coll) && rangeUnbounded(coll)) {
+            // An unbounded Integer range or an endless String range has no Array:
+            // its values are made one at a time until a break ends the loop.
+            var strOpen = isRange(coll) && typeof coll.lo == "string" && (coll.hi === null || coll.hi === undefined)
+            if (strOpen || (isRange(coll) && rangeUnbounded(coll))) {
                 var fc = anytype
                 fc = coll.lo
                 while (true) {
                     var fst = forStep(tgts, whole, body, fc)
                     if (fst.sig != undefined) { return fst.sig }
                     if (fst.stop) { return fst.v }
-                    fc = numBin("+", fc, 1)
+                    if (strOpen) { fc = rbsSucc(fc) } else { fc = numBin("+", fc, 1) }
                 }
             }
             var seq = []
@@ -6051,6 +6052,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // An endless String range walks String#succ until a break ends it.
         var strOpen = typeof t.lo == "string" && (t.hi === null || t.hi === undefined)
         if (name == "size" && args.length == 0 && blk == null) { return rangeSize(t) }
+        // range_min: with a block an endless range cannot be compared, and without
+        // one #min(n) is #first(n). #take(n) of a range without an end takes the
+        // same way, after Enumerable#take's own negative check; range_first sizes
+        // its Array before walking, so a negative n fails for every range. Twins:
+        // rbRangeMethod, rubyRangeMethod.
+        if (name == "min" && blk != null && (t.hi === null || t.hi === undefined)) {
+            raiseErr("min", "RangeError", "cannot get the minimum of endless range with custom comparison method")
+        }
+        if (blk == null && args.length > 0 && (name == "min" || (name == "take" && (strOpen || rangeUnbounded(t))))) {
+            if (name == "take" && toF(args[0]) < 0) { raiseErr("take", "ArgumentError", "attempt to take negative size") }
+            name = "first"
+        }
+        if (name == "first" && args.length > 0 && toF(args[0]) < 0) {
+            raiseErr("first", "ArgumentError", "negative array size (or size too big)")
+        }
         if (strOpen && name == "each" && blk != null) {
             var sc = t.lo
             while (true) {
@@ -6210,6 +6226,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (flo) {
                 var fs = rbnFloatStep(toF(t.lo), toF(t.hi), u, t.excl === true)
                 for (var fi = 0; fi < fs.length; fi++) { picked.push(mkFlo(fs[fi])) }
+            } else if ((isBig(t.lo) || isBig(t.hi) || isBig(by)) && (typeof t.lo == "number" || isBig(t.lo)) && (typeof t.hi == "number" || isBig(t.hi))) {
+                picked = bigIntStep(t.lo, t.excl === true ? numBin("-", t.hi, 1) : t.hi, by)
             } else {
                 var src = anytype
                 src = rangeToA(t)
@@ -6269,6 +6287,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isFlo(sby) || isFlo(lim) || isFlo(t)) {
             var sf = rbnFloatStep(toF(t), toF(lim), toF(sby), false)
             for (var sfi = 0; sfi < sf.length; sfi++) { sl.push(mkFlo(sf[sfi])) }
+        } else if (isBig(t) || isBig(lim) || isBig(sby)) {
+            sl = bigIntStep(t, lim, sby)
         } else {
             sl = rbnIntStep(t, toF(lim), toF(sby))
         }
@@ -6347,9 +6367,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var u = toF(by)
         var e = mkLazy("range", [], 0, null, false, false, desc)
         if (flo) { e.ops.push({k: "map", f: function(i) { return mkFlo(i * u + b) }, n: 0}) }
-        else if (isBig(beg)) { e.ops.push({k: "map", f: function(i) { return numBin("+", beg, numBin("*", i, by)) }, n: 0}) }
+        else if (isBig(beg) || isBig(by)) { e.ops.push({k: "map", f: function(i) { return numBin("+", beg, numBin("*", i, by)) }, n: 0}) }
         else { e.ops.push({k: "map", f: function(i) { return b + i * u }, n: 0}) }
         return e
+    }
+    // Integer#step / #upto / #downto when the receiver, the limit or the step is
+    // past 2**53, where a double cannot count: exact Integers from from toward
+    // limit. Twins: rubyIntWalk in abnf/jsrtrubystr.go, rbIntWalk in
+    // lib/ruby-rt.metajs.
+    function bigIntStep(from, limit, by) {
+        var out = []
+        var v = anytype
+        v = from
+        var up = numCmp(by, 0) > 0
+        while (up ? numCmp(v, limit) <= 0 : numCmp(v, limit) >= 0) {
+            out.push(v)
+            v = numBin("+", v, by)
+        }
+        return out
     }
     // "(a, b)" of the arguments' #inspect, "" for none.
     function inspectArgs(args) {
@@ -9356,6 +9391,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "fdiv") { return mkFlo(intFdiv(t, args[0])) }
         if (name == "pow" && args.length < 2) { return binAs(name, "**", t, args[0]) }
+        if (name == "step") { return numStep(t, args, blk) }
+        // No Array holds 2**53 values, so #times streams them; a break ends it.
+        if (name == "times") {
+            var te = anytype
+            te = stepForever(0, 1, false, "#<Enumerator: " + bigStr(t) + ":times>")
+            if (blk == null) { return te }
+            mcall(te, "each", [], blk)
+            return t
+        }
+        if (name == "upto" || name == "downto") {
+            if (args.length == 0) { raiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)") }
+            var bl = bigIntStep(t, args[0], name == "upto" ? 1 : -1)
+            if (blk == null) { return enumAt(mkEnum(bl), t, name, args) }
+            for (var bk = 0; bk < bl.length; bk++) { blockCall(blk, [bl[bk]]) }
+            return t
+        }
         return numberMethod(t, name, args, blk)
     }
     // ----- Numeric#div / #divmod / #modulo / #rationalize -----
@@ -10107,8 +10158,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "times" || name == "upto" || name == "downto") {
                 var nl = []
                 if (name == "times") { for (var ni = 0; ni < target; ni++) { nl.push(ni) } }
-                if (name == "upto") { for (var ui = target; ui <= toF(args[0]); ui++) { nl.push(ui) } }
-                if (name == "downto") { for (var wi = target; wi >= toF(args[0]); wi--) { nl.push(wi) } }
+                if (name != "times" && isBig(args[0])) { nl = bigIntStep(target, args[0], name == "upto" ? 1 : -1) }
+                else if (name == "upto") { for (var ui = target; ui <= toF(args[0]); ui++) { nl.push(ui) } }
+                else if (name == "downto") { for (var wi = target; wi >= toF(args[0]); wi--) { nl.push(wi) } }
                 if (blk == null) { return enumAt(mkEnum(nl), target, name, args) }
                 for (var nk = 0; nk < nl.length; nk++) { blockCall(blk, [nl[nk]]) }
                 return target
@@ -13757,7 +13809,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         } catch (e) {
             if (excIsUser(e)) {
                 excSite(e.v)
-                eprintln(excTopLine(e.v))
+                excReport(e.v)
                 exit(1)
             }
             throw e
@@ -16132,20 +16184,43 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         rawSet(v, "__rwhere", site)
         return null
     }
-    // MRI's uncaught-exception line: "prog.rb:2:in `<main>': boom (RuntimeError)".
-    // An exception raised by the RUNTIME rather than by a `raise' carries no site,
-    // and then only "msg (Class)" is printed. Mirrors rbExcTopLine of
-    // lib/ruby-rt.metajs and rubyExcTopLine of abnf/jsrt.go.
-    function excTopLine(v) {
+    // MRI's uncaught-exception report, piece by piece through $stderr's #write.
+    // Twin of rubyExcReport in abnf/jsrtruby.go, which states the rule.
+    function excReport(v) {
         if (v === null || v === undefined || typeof v != "object") {
-            return "uncaught throw " + rinspect(v)
+            warnWrite("uncaught throw " + rinspect(v) + "\n")
+            return null
         }
         var cname = "RuntimeError"
         var cls = v.__class
         if (cls !== null && cls !== undefined && typeof cls.__name == "string") { cname = cls.__name }
-        var head = ""
-        if (typeof v.__rwhere == "string") { head = v.__rwhere + ": " }
-        return head + rstr(v) + " (" + cname + ")"
+        if (typeof v.__rwhere == "string") {
+            warnWrite(v.__rwhere)
+            warnWrite(": ")
+        }
+        var msg = rstr(v)
+        if (msg == "") {
+            if (cname == "RuntimeError") { cname = "unhandled exception" }
+            warnWrite(cname)
+            warnWrite("\n")
+            return null
+        }
+        var tail = ""
+        var nl = msg.indexOf("\n")
+        if (nl >= 0) {
+            tail = msg.slice(nl + 1)
+            msg = msg.slice(0, nl)
+        }
+        warnWrite(msg)
+        warnWrite(" (")
+        warnWrite(cname)
+        warnWrite(")")
+        warnWrite("\n")
+        if (tail != "") {
+            warnWrite(tail)
+            if (tail.charAt(tail.length - 1) != "\n") { warnWrite("\n") }
+        }
+        return null
     }
 
     // ----- The builtin class objects -----
@@ -16723,8 +16798,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return null
     }
-    hostGlobals["alias_method"] = function(nu, old) { doAlias(directiveClass(), rstr(nu), rstr(old)); return null }
-    hostGlobals["define_method"] = function(nm, blk) { return blockMethodDef(directiveClass(), false, [nm], blk) }
+    // At the top level there is no class to define in: main has no
+    // #alias_method, and its #define_method (an Object method) is not modelled,
+    // so both are the NoMethodError the compiled halves raise.
+    function moduleDirective(name) {
+        var c = directiveClass()
+        if (c === null || c === undefined) { noMethod(ivarSelf(), name) }
+        return c
+    }
+    hostGlobals["alias_method"] = function(nu, old) { doAlias(moduleDirective("alias_method"), rstr(nu), rstr(old)); return null }
+    hostGlobals["define_method"] = function(nm, blk) { return blockMethodDef(moduleDirective("define_method"), false, [nm], blk) }
     // private / protected / public: with no argument they switch the mode for the
     // defs that follow, with arguments they mark exactly those methods.
     function visDirective(mode, args) {

@@ -842,14 +842,15 @@ func rubySliceOp(name string) string {
 }
 
 // rubyStepForever is stepForever of ruby-interpreter.abnf, which states the rule.
-func rubyStepForever(begV interface{}, by float64, flo bool, desc string) *jsObject {
+func rubyStepForever(begV, byV interface{}, flo bool, desc string) *jsObject {
 	e := rubyMkLazy("range", &jsArray{}, 0, jsNull, false, false, desc)
-	beg := rubyToF(begV)
-	big, isBig := begV.(*jsBigInt)
+	beg, by := rubyToF(begV), rubyToF(byV)
+	_, bigBeg := begV.(*jsBigInt)
+	_, bigBy := byV.(*jsBigInt)
 	f := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
 		i := rubyToF(argAt(a, 0))
-		if isBig && !flo {
-			return rt.rubyBin("+", big, rt.rubyBin("*", i, by))
+		if (bigBeg || bigBy) && !flo {
+			return rt.rubyBin("+", begV, rt.rubyBin("*", i, byV))
 		}
 		// float64() keeps Go from fusing the product into an FMA the other
 		// engines do not make.
@@ -860,6 +861,27 @@ func rubyStepForever(begV interface{}, by float64, flo bool, desc string) *jsObj
 	}}
 	e.set("ops", &jsArray{elems: []interface{}{rubyLazyOpOf("map", f, 0)}})
 	return e
+}
+
+// rubyAnyBig: one of a, b, c is an Integer past 2**53.
+func rubyAnyBig(a, b, c interface{}) bool {
+	for _, v := range [3]interface{}{a, b, c} {
+		if _, isBig := v.(*jsBigInt); isBig {
+			return true
+		}
+	}
+	return false
+}
+
+// rubyIntWalk is bigIntStep of ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyIntWalk(from, limit, by interface{}) *jsArray {
+	out, up := &jsArray{}, rubyToF(by) > 0
+	for v := from; ; v = rt.rubyBin("+", v, by) {
+		if c, _ := rt.rubySpaceship(v, limit); (up && c > 0) || (!up && c < 0) {
+			return out
+		}
+		out.elems = append(out.elems, v)
+	}
 }
 
 // rubyRangeStep is rangeStep of ruby-interpreter.abnf, which states the rule.
@@ -890,7 +912,7 @@ func (rt *jsrt) rubyRangeStep(t *jsObject, m string, args []interface{}) interfa
 	case u < 0:
 		e = rubyMkEnum(&jsArray{})
 	case num && (u == 0 || isUndefOrNull(hi) || rubyRangeUnbounded(t)):
-		e = rubyStepForever(lo, u, flo, desc)
+		e = rubyStepForever(lo, by, flo, desc)
 	case strLo && isUndefOrNull(hi):
 		e = rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), rubyLazyOpOf("step", jsNull, int(math.Trunc(u))), false,
 			"#<Enumerator: "+rt.rubyInspect(t)+":"+m+rt.rubyInspectArgs(pos)+">")
@@ -900,6 +922,12 @@ func (rt *jsrt) rubyRangeStep(t *jsObject, m string, args []interface{}) interfa
 			for _, d := range rubyFloatStep(rubyToF(lo), rubyToF(hi), u, rt.truthy(t.props["excl"])) {
 				picked.elems = append(picked.elems, jsFlo{f: d})
 			}
+		} else if rubyAnyBig(lo, hi, by) && rubyIsIntV(lo) && rubyIsIntV(hi) {
+			last := hi
+			if rt.truthy(t.props["excl"]) {
+				last = rt.rubyBin("-", hi, float64(1))
+			}
+			picked = rt.rubyIntWalk(lo, last, by)
 		} else {
 			src := rt.rubyRangeToArr(t)
 			for i := 0; i < len(src.elems); i += int(math.Trunc(u)) {
