@@ -264,6 +264,35 @@ function rbEncStr(s, enc) {
     }
     return {__rbin: true, __s: s, __benc: enc}
 }
+// Twin of byteSlice in ruby-interpreter.abnf.
+function rbByteSlice(b, enc, args) {
+    var n = b.length
+    var lo = 0
+    var len = 1
+    var a0 = rbArgAt(args, 0)
+    if (rbIsRange(a0)) {
+        if (!rtIsNil(a0["begin"])) { lo = Math.trunc(rbToF(a0["begin"])) }
+        if (lo < 0) { lo = lo + n }
+        if (lo < 0 || lo > n) { return null }
+        var hi = n - 1
+        if (!rtIsNil(a0["end"])) {
+            hi = Math.trunc(rbToF(a0["end"]))
+            if (hi < 0) { hi = hi + n }
+            if (rbTruthy(a0["excl"])) { hi = hi - 1 }
+        }
+        len = hi - lo + 1
+        if (len < 0) { len = 0 }
+    } else {
+        lo = Math.trunc(rbToF(a0))
+        if (lo < 0) { lo = lo + n }
+        if (rbNPos(args) > 1) {
+            len = Math.trunc(rbToF(args[1]))
+            if (len < 0 || lo < 0 || lo > n) { return null }
+        } else if (lo < 0 || lo >= n) { return null }
+    }
+    if (lo + len > n) { len = n - lo }
+    return rbEncStr(b.substring(lo, lo + len), enc)
+}
 function rbStrBytes(v) {
     if (rbIsBox(v)) { return v["__s"] }
     return rbsBinOf(rbSV(v))
@@ -347,6 +376,7 @@ function rbBinMethod(t, name, args) {
         return t
     }
     if (name == "b") { return rbMkBin(b) }
+    if (name == "byteslice") { return rbByteSlice(b, enc, args) }
     if (name == "dup" || name == "clone" || (name == "+@" && t["__fz"] === true) || (name == "-@" && t["__fz"] !== true)) {
         var cp = rbEncStr(b, enc)
         cp["__fz"] = name == "-@" || (name == "clone" && t["__fz"] === true)
@@ -1006,8 +1036,8 @@ function rbABitsToNum(bits) {
 }
 
 // Ruby's |, &, ^, << and >> over two bigs. A NEGATIVE shift count is the
-// opposite shift in Ruby (`1 << -2` is 0, `4 >> -2` is 16); null is "no exact
-// form here", which only an absurd shift count reaches.
+// opposite shift in Ruby (`1 << -2` is 0, `4 >> -2` is 16). Twin of bigBitBin in
+// ruby-interpreter.abnf, which says what happens past the shift cap.
 function rbABigBits(op, x, y) {
     var an = x["neg"] && !rtABigIsZero(x)
     var bn = y["neg"] && !rtABigIsZero(y)
@@ -1017,7 +1047,9 @@ function rbABigBits(op, x, y) {
         var left = op == "<<"
         if (bn) { left = !left }
         var k = rbABitsToNum(b)
-        if (k > RB_SHIFT_MAX) { return null }
+        if (k > RB_SHIFT_MAX) {
+            if (!left) { k = RB_SHIFT_MAX + 1 } else if (rtABigIsZero(x)) { k = 0 } else { rbRaiseErr(op, "RangeError", "shift width too big") }
+        }
         if (left) { return rbABigFromBits(an, rtABitsShl(a, k)) }
         if (!an) { return rbABigFromBits(false, rtABitsShr(a, k)) }
         // floor(-a / 2^k) is -(((a-1) >> k) + 1): -5 >> 1 is -3.
@@ -1923,7 +1955,11 @@ function rbNumBin(op, l, r) {
     if (typeof l != "number") { rk = rbNumRank(l) }
     if (typeof r != "number") { rr = rbNumRank(r) }
     if (rk < 0 || rr < 0) { return rbNonNumBin(op, l, r) }
-    if (rr > rk) { rk = rr }
+    if (rr > rk) {
+        if (rk == 0 && rr <= 2 && (op == "<<" || op == ">>")) { return rbNumBin(op, l, rbTruncInt(r)) }
+        if (rk == 0 && (op == "&" || op == "|" || op == "^")) { rbRaiseErr(op, "TypeError", rbCmpName(r) + " can't be coerced into Integer") }
+        rk = rr
+    }
     if (rk == 3) { return rbCpxBin(op, l, r) }
     if (rk == 1) {
         var p = rbAsRat(l)
@@ -6540,6 +6576,8 @@ function rbNumMore(t, name, args) {
         var db = anytype
         db = 10
         if (n > 0) { db = a0 }
+        if (rbIsFlo(db) || rbIsRat(db)) { db = rbTruncInt(db) }
+        if (rbNumRank(db) != 0) { rbRaiseErr(name, "TypeError", "no implicit conversion of " + rbFmtConvName(db) + " into Integer") }
         if (rbNumCmp(db, 0) < 0) { rbRaiseErr(name, "ArgumentError", "negative radix") }
         if (rbNumCmp(db, 2) < 0) { rbRaiseErr(name, "ArgumentError", "invalid radix " + rbStr(db)) }
         if (rbNumCmp(t, 0) < 0) { rbRaiseErr(name, "Math::DomainError", "out of domain") }
@@ -7523,6 +7561,20 @@ function rbLazyMethod(t, name, args) {
         }
         if (name == "all?" || name == "none?") { return hit.length == 0 }
         return hit.length > 0
+    }
+    // Twin of the rbaLazyKeyed arm in ruby-interpreter.abnf.
+    if (rbaLazyKeyed(name) && blk !== null) {
+        var kv = []
+        var kk = []
+        rbaLazyFirst(t, -1, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, function(v, m) {
+            kv.push(v)
+            kk.push(rbLazyCall(blk, v, m))
+            return false
+        })
+        var ki = [0]
+        var kargs = rbPosArgs(args)
+        kargs.push(js_rblkwrap(function() { ki[0] = ki[0] + 1; return kk[ki[0] - 1] }))
+        return rbArrayMethod(kv, name, kargs)
     }
     if (rbaLazyEager(name)) { return rbArrayMethod(rbLazyFirst(t, -1), name, args) }
     if (name == "dup" || name == "clone") {
@@ -9793,6 +9845,7 @@ function rbMethod(target, name, args) {
         var svArgs = rbSVArgs(args)
         if (svArgs !== args) { return rbMethod(target, name, svArgs) }
         if (name == "b") { return rbMkBin(rbsBinOf(target)) }
+        if (name == "byteslice") { return rbByteSlice(rbsBinOf(target), "UTF-8", args) }
         if (name == "encoding") { return rbBuiltinClass("Encoding")["$c$UTF_8"] }
         if (name == "force_encoding") { return rbEncStr(rbsBinOf(target), rbEncArg(rbArgAt(args, 0))) }
         if (name == "unpack" || name == "unpack1") { return rbStrUnpack(rbsBinOf(target), name, args) }
@@ -10852,9 +10905,20 @@ function rbIvarNameOk(n) {
 }
 
 // Integer#[]. Twin of intBitAt in ruby-interpreter.abnf.
+// Twin of truncInt in ruby-interpreter.abnf.
+function rbTruncInt(r) {
+    if (rbIsRat(r)) { return rbRatDigitOp(r, "t", 0) }
+    var x = rbToF(r)
+    rbFloDomain(x)
+    return rbIntFromF(Math.trunc(x))
+}
+
 function rbIntBit(n, i) {
-    if (rbToF(i) < 0) { return 0 }
-    return rbBin("&", rbBin(">>", n, i), 1)
+    var k = anytype
+    k = i
+    if (rbIsFlo(i) || rbIsRat(i)) { k = rbTruncInt(i) }
+    if (rbToF(k) < 0) { return 0 }
+    return rbBin("&", rbBin(">>", n, k), 1)
 }
 
 function js_rget(o, k) {
@@ -11606,6 +11670,8 @@ function rbNumOperandErr(op, l, r) {
         if (!rbIsArr(l) || op == "/" || op == "%" || op == "**") { rbNoMethod(l, op) }
     }
     if ((op == "<<" || op == ">>") && rbNumRank(l) < 0) { rbNoMethod(l, op) }
+    if (rbNumRank(l) == 0 && (op == "&" || op == "|" || op == "^")) { rbRaiseErr(op, "TypeError", rbCmpName(r) + " can't be coerced into Integer") }
+    if (rbNumRank(l) == 0 && (op == "<<" || op == ">>")) { rbRaiseErr(op, "TypeError", "no implicit conversion of " + rbFmtConvName(r) + " into Integer") }
     fail("not a number in '" + op + "'")
 }
 

@@ -285,6 +285,16 @@ function rbaLazyEager(name) {
         || name == "one?"
 }
 
+// The rbaLazyEager methods that call their block once per value, in order, and
+// nothing else: they are run one value at a time, the block's answers kept and
+// handed back to the Array method in the same order, so a `break` in the block
+// ends an endless source as it does in MRI. Go twin: rubyLazyKeyed in
+// abnf/jsrtrubystr.go.
+function rbaLazyKeyed(name) {
+    return name == "count" || name == "sum" || name == "min_by" || name == "max_by" || name == "minmax_by"
+        || name == "sort_by" || name == "group_by" || name == "partition" || name == "to_h"
+}
+
 // find / detect / include? / member? / find_index / any? / all? / none? on a
 // Lazy: the run ends at the first value hit(v, m) accepts, so an endless source
 // still answers. [index, value] of that value, or [] when none was accepted.

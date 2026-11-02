@@ -2246,7 +2246,7 @@ var rubyRespondNames = map[string][]string{
 		"polar", "public_send", "quo", "rationalize", "real", "real?", "rect", "rectangular",
 		"send", "to_c", "to_f", "to_i", "to_int", "to_r", "zero?"},
 	"String": {"%", "*", "+", "+@", "<", "<<", "<=", "<=>", ">", ">=", "[]", "ascii_only?",
-		"b", "bytes", "bytesize", "capitalize", "casecmp", "casecmp?", "center", "chars", "chomp",
+		"b", "bytes", "bytesize", "byteslice", "capitalize", "casecmp", "casecmp?", "center", "chars", "chomp",
 		"chomp!", "chop", "chop!", "chr", "clear", "clone", "codepoints", "concat", "count",
 		"delete", "delete!", "delete_prefix", "delete_prefix!", "delete_suffix", "delete_suffix!",
 		"downcase", "dump", "dup", "each_byte", "each_char", "each_codepoint", "each_line",
@@ -2381,7 +2381,7 @@ var rubyArityNames = map[string][]string{
 	"Integer -1": {"chr", "digits", "pow", "inspect", "to_s"},
 	"Integer 1":  {">>", "[]", "allbits?", "anybits?", "gcd", "gcdlcm", "lcm", "modulo", "nobits?"},
 	"Float 1":    {"modulo"},
-	"String -1": {"capitalize", "center", "chomp", "chomp!", "concat", "delete", "delete!",
+	"String -1": {"byteslice", "capitalize", "center", "chomp", "chomp!", "concat", "delete", "delete!",
 		"downcase", "each_line", "encode", "end_with?", "index", "lines", "ljust", "prepend", "rindex",
 		"rjust", "scrub", "slice", "slice!", "split", "squeeze", "squeeze!", "start_with?", "swapcase",
 		"swapcase!", "to_i", "unicode_normalize", "unicode_normalized?", "upcase", "upto"},
@@ -2458,7 +2458,7 @@ var rubyOwnNames = map[string][]string{
 		"rationalize", "real", "real?", "rect", "rectangular", "to_c", "to_f", "to_i", "to_r",
 		"to_s"},
 	"String": {"%", "*", "+", "+@", "<<", "<=>", "==", "===", "[]", "ascii_only?", "b",
-		"bytes", "bytesize", "capitalize", "casecmp", "casecmp?", "center", "chars", "chomp",
+		"bytes", "bytesize", "byteslice", "capitalize", "casecmp", "casecmp?", "center", "chars", "chomp",
 		"chomp!", "chop", "chop!", "chr", "clear", "codepoints", "concat", "count", "delete",
 		"delete!", "delete_prefix", "delete_prefix!", "delete_suffix", "delete_suffix!",
 		"downcase", "dump", "each_byte", "each_char", "each_codepoint", "each_line", "empty?",
@@ -3548,10 +3548,35 @@ func rubyIvarNameOk(n string) bool {
 // rubyIntBit is Integer#[]: bit i of the infinite two's complement, 0 for a
 // negative i. Twin of intBitAt in ruby-interpreter.abnf.
 func (rt *jsrt) rubyIntBit(n, i interface{}) interface{} {
+	if r := rubyNumRank(i); r == 1 || r == 2 {
+		i = rt.rubyTruncInt(i)
+	}
 	if rubyToF(i) < 0 {
 		return 0.0
 	}
 	return rt.rubyBin("&", rt.rubyBin(">>", n, i), 1.0)
+}
+
+// rubyWalkOrList yields i to blk, or lists it when there is no block: times /
+// upto / downto walk their numbers, since the bound may be far beyond any list
+// (`1.upto(10**15) { break }`).
+func (rt *jsrt) rubyWalkOrList(nl *jsArray, blk interface{}, i float64) {
+	if blk == nil {
+		nl.elems = append(nl.elems, i)
+		return
+	}
+	rt.call(blk, jsUndef, []interface{}{i})
+}
+
+// rubyTruncInt is a Float or Rational shift width, bit index or radix taken through
+// #to_int, which truncates. Twin of truncInt in ruby-interpreter.abnf.
+func (rt *jsrt) rubyTruncInt(r interface{}) interface{} {
+	if q, ok := r.(jsRat); ok {
+		return rt.rubyRatDigitOp(q, 't', 0)
+	}
+	f := rubyToF(r)
+	rubyFloDomain(rt, f)
+	return rt.rubyIntFromF(math.Trunc(f))
 }
 
 func rubyExactInt(x float64) *big.Int {
@@ -3951,7 +3976,14 @@ func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (int
 	case "digits":
 		base := big.NewInt(10)
 		if len(pos) > 0 {
-			base, _ = rubyIntBig(a0)
+			b := a0
+			if r := rubyNumRank(b); r == 1 || r == 2 {
+				b = rt.rubyTruncInt(b)
+			}
+			var ok bool
+			if base, ok = rubyIntBig(b); !ok {
+				rt.rubyRaiseErr(name, "TypeError", "no implicit conversion of "+rubyFmtConvName(b)+" into Integer")
+			}
 		}
 		if base.Sign() < 0 {
 			rt.rubyRaiseErr(name, "ArgumentError", "negative radix")

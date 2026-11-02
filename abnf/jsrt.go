@@ -4898,7 +4898,7 @@ func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
 		}
 		return rt.rubyBigNarrow(new(big.Int).Exp(x, y, nil)), true
 	case "&", "|", "^", "<<", ">>":
-		out, oky := rubyBigBits(op, x, y)
+		out, oky := rt.rubyBigBits(op, x, y)
 		if !oky {
 			return nil, false
 		}
@@ -4944,8 +4944,9 @@ func (rt *jsrt) rubyBigPromote(op string, x, y float64) interface{} {
 // rubyBigBits is |, &, ^, << and >> at arbitrary precision. math/big's And/Or/Xor
 // ARE Ruby's infinite two's complement (they are defined on the signed value, not
 // on a fixed width), and a NEGATIVE shift count is the opposite shift in Ruby -
-// `1 << -2` is 0 and `4 >> -2` is 16 - rather than an error.
-func rubyBigBits(op string, x, y *big.Int) (*big.Int, bool) {
+// `1 << -2` is 0 and `4 >> -2` is 16 - rather than an error. Past the cap see
+// bigBitBin in ruby-interpreter.abnf.
+func (rt *jsrt) rubyBigBits(op string, x, y *big.Int) (*big.Int, bool) {
 	switch op {
 	case "&":
 		return new(big.Int).And(x, y), true
@@ -4954,16 +4955,18 @@ func rubyBigBits(op string, x, y *big.Int) (*big.Int, bool) {
 	case "^":
 		return new(big.Int).Xor(x, y), true
 	}
-	if !y.IsInt64() {
-		return nil, false
-	}
-	k := y.Int64()
 	left := op == "<<"
-	if k < 0 {
-		k, left = -k, !left
+	if y.Sign() < 0 {
+		left = !left
 	}
-	if k > 1048576 {
-		return nil, false
+	k := int64(1048577)
+	if a := new(big.Int).Abs(y); a.IsInt64() && a.Int64() <= 1048576 {
+		k = a.Int64()
+	} else if left {
+		if x.Sign() != 0 {
+			rt.rubyRaiseErr(op, "RangeError", "shift width too big")
+		}
+		k = 0
 	}
 	if left {
 		return new(big.Int).Lsh(x, uint(k)), true
@@ -6156,6 +6159,12 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		rt.rubyNumOperandErr(op, l, r)
 	}
 	if rr > rk {
+		if rk == 0 && rr <= 2 && (op == "<<" || op == ">>") {
+			return rt.rubyNumBin(op, l, rt.rubyTruncInt(r))
+		}
+		if rk == 0 && (op == "&" || op == "|" || op == "^") {
+			rt.rubyRaiseErr(op, "TypeError", rt.rubyCmpName(r)+" can't be coerced into Integer")
+		}
 		rk = rr
 	}
 	if rk == 3 {
@@ -6767,6 +6776,14 @@ func (rt *jsrt) rubyNumOperandErr(op string, l, r interface{}) {
 			rt.rubyNoMethod(l, op)
 		}
 	}
+	if rubyNumRank(l) == 0 {
+		switch op {
+		case "&", "|", "^":
+			rt.rubyRaiseErr(op, "TypeError", rt.rubyCmpName(r)+" can't be coerced into Integer")
+		case "<<", ">>":
+			rt.rubyRaiseErr(op, "TypeError", "no implicit conversion of "+rubyFmtConvName(r)+" into Integer")
+		}
+	}
 	rt.fail("not a number in '%s'", op)
 }
 
@@ -7101,21 +7118,21 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 				return t, true
 			}
 			for i := 0.0; i < x; i++ {
-				nl.elems = append(nl.elems, i)
+				rt.rubyWalkOrList(nl, nblk, i)
 			}
 		case "upto":
 			if rubyAnyBig(t, argAt(npos, 0), nil) {
 				return rt.rubyBigUpDown(t, name, npos, nblk), true
 			}
 			for i := x; i <= rubyToF(argAt(npos, 0)); i++ {
-				nl.elems = append(nl.elems, i)
+				rt.rubyWalkOrList(nl, nblk, i)
 			}
 		default:
 			if rubyAnyBig(t, argAt(npos, 0), nil) {
 				return rt.rubyBigUpDown(t, name, npos, nblk), true
 			}
 			for i := x; i >= rubyToF(argAt(npos, 0)); i-- {
-				nl.elems = append(nl.elems, i)
+				rt.rubyWalkOrList(nl, nblk, i)
 			}
 		}
 		if nblk == nil {
@@ -11407,6 +11424,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		switch name {
 		case "b":
 			return &jsRBin{b: s}
+		case "byteslice":
+			pos, _ := rubyBlockArgs(args)
+			return rubyByteSlice(s, "UTF-8", pos)
 		case "encoding":
 			return rt.rubyEncoding("UTF-8")
 		case "force_encoding":

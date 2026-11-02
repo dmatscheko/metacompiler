@@ -1171,7 +1171,7 @@ Primary     = ParenCmd | "(" Expression ")" | ParenBody | LambdaLit | SingletonD
             | NumLit | NegNumLit
             | SymLit
             | ArrayLit | HashLit
-            | True | False | Nil | Self | FileLit | LineLit | DirLit
+            | KwPredCall | True | False | Nil | Self | FileLit | LineLit | DirLit
             | ClassDecl | ModuleDecl | DefExpr
             | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | TopConst | ScopedConst | PutsCall | Call | VarRef ;
 // `def m ... end` is an expression whose value is the Symbol :m (Ruby 2.1). Defining
@@ -2041,6 +2041,30 @@ BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 // exactly that spacing rule to separate `foo?` from `foo ? a : b`).
 PredName    = PredOk NotKw Id :whitespace() PredSfx :whitespace(Whitespace) ;
 PredSfx     = "?" | "!" ;
+// `nil?` / `self!` are METHOD names, not a keyword followed by a `?x` character
+// literal: MRI's lexer folds a glued ?/! into the identifier before the keyword
+// lookup, so a bare `nil?` is a call on self.
+KwPredCall  <~~ push(makeCall(dmCallItems(takeAll(), up.in))) ~~>
+            = KwPredName <~~ push(up.in) ~~> ;
+KwPredName  = PredOk KwPredWord Id :whitespace() PredSfx :whitespace(Whitespace) ;
+KwPredWord  = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i) }
+        var ws = ["nil", "true", "false", "self"]
+        for (var k = 0; k < ws.length; k++) {
+            var w = ws[k]
+            var m = 0
+            while (m < w.length && c.peek(i + m) === w.charCodeAt(m)) { m = m + 1 }
+            if (m == w.length) {
+                var af = c.peek(i + m)
+                if (af === 63 || af === 33) { return undefined }
+            }
+        }
+        return abnf.newToken("\x01no", 0)
+    })()
+~~) ;
 
 VarRef      <~~ push(makeVarRef(up.in)); notePlace(up.pos, {var: up.in}) ~~>
             = Name ;
@@ -3194,9 +3218,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function emitIvarSelf(b) {
         return callExt(b, "js_scope_get", [curScopeV, emitStr(b, curHasSelf ? "self" : "$main")])
     }
+    // An instance variable of nil reads as nil (it has none and can have none). Only
+    // a method nil can run - one of NilClass, Object, BasicObject, a module, or a
+    // top-level def - pays the test.
     function makeIvarRef(name) {
         return function(b) {
-            return {b: b, v: callExt(b, "js_get", [emitIvarSelf(b), emitStr(b, name)])}
+            var selfV = emitIvarSelf(b)
+            var nilOk = curHasSelf && (curTopDef || curClsIsMod || curClsName == "NilClass"
+                                       || curClsName == "Object" || curClsName == "BasicObject")
+            if (!nilOk) { return {b: b, v: callExt(b, "js_get", [selfV, emitStr(b, name)])} }
+            var getB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, selfV, hNull), joinB, getB)
+            var gv = callExt(getB, "js_get", [selfV, emitStr(getB, name)])
+            getB.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, b), llvm.ir.NewIncoming(gv, getB)])}
         }
     }
 
@@ -5886,11 +5922,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // exists. Twin of selfCallNames in ruby-interpreter.abnf.
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
-                         "singleton_methods", "define_singleton_method", "define_method", "frozen?", "equal?",
+                         "singleton_methods", "define_singleton_method", "define_method", "frozen?", "nil?", "equal?",
                          "instance_variables", "to_enum", "enum_for"]
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-interpreter.abnf.
-    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?", "to_enum", "enum_for"]
+    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?", "nil?", "to_enum", "enum_for"]
     function isSelfCall(name) {
         return selfCallNames.indexOf(name) >= 0 && rubyAllMethods["$" + name] !== true && !knownLocal(name)
     }
@@ -7513,6 +7549,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // and the method's parameter names while it emits each method. A BARE super passes
     // the parameters the method received; super(...) passes exactly its own list.
     var curClsName = ""
+    // Whether curClsName is a module, whose methods any object - nil included - may
+    // run once the module is mixed into Object.
+    var curClsIsMod = false
     // The qualified name (M::N::C) of the class or module being emitted, which is
     // what Module#name answers for a class nested in it.
     var curClsPath = ""
@@ -8140,9 +8179,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             var loV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "lo")])
             var hiV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "hi")])
+            // min > max raises before self is compared at all.
+            var badB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_rgt", [loV, hiV])), badB, okB)
+            callExt(badB, "js_rraise", [callExt(badB, "js_rclass", [emitStr(badB, "ArgumentError")]),
+                                         emitStr(badB, "min argument must be smaller than max argument")])
+            badB.NewRet(hUndef)
             var lowB = curF.NewBlock("")
             var restB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_rlt", [selfV, loV])), lowB, restB)
+            okB.NewCondBr(truthy(okB, callExt(okB, "js_rlt", [selfV, loV])), lowB, restB)
             lowB.NewRet(loV)
             var highB = curF.NewBlock("")
             var inB = curF.NewBlock("")
@@ -8814,8 +8860,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitNameList(b, clsV, snames, "__snames")
             var savedCls = curClsName
             var savedPath = curClsPath
+            var savedIsMod = curClsIsMod
             curClsName = name
             curClsPath = qn
+            curClsIsMod = false
             // `class MyErr < StandardError; def initialize(m); super(m); end; end'.
             // The superclass is a BUILTIN, which carries no compiled `initialize'
             // for js_supercall to find.
@@ -8885,6 +8933,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var cb = emitClassBody(b, clsV, r)
             curClsName = savedCls
             curClsPath = savedPath
+            curClsIsMod = savedIsMod
             return cb
         }
         return function(b) {
@@ -9143,7 +9192,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var savedCls = curClsName
         var savedPath = curClsPath
+        var savedIsMod = curClsIsMod
         curClsName = name
+        curClsIsMod = false
         if (prev.qn != undefined) { curClsPath = prev.qn; lexNote(prev.qn, r) }
         var ownFrom = []
         var own = ownMethodList(newAnc, r, ownFrom)
@@ -9157,6 +9208,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var cb = emitClassBody(b, clsV, r)
         curClsName = savedCls
         curClsPath = savedPath
+        curClsIsMod = savedIsMod
         return cb
     }
 
@@ -9280,8 +9332,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitMixRecord(b, modV, modAnc, "$mix$", "__mixorder")
             var savedCls = curClsName
             var savedPath = curClsPath
+            var savedIsMod = curClsIsMod
             curClsName = name
             curClsPath = qn
+            curClsIsMod = true
             var savedModObj = curModObjBody
             curModObjBody = name
             b = emitMethods(b, modV, mixDefs, "", name, [])
@@ -9306,6 +9360,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitClassBody(b, modV, r).b
             curClsName = savedCls
             curClsPath = savedPath
+            curClsIsMod = savedIsMod
             return {b: b, v: hNull}
         }
     }

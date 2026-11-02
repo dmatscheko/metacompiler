@@ -610,6 +610,21 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		}
 		return ok
 	}
+	if rubyLazyKeyed(name) && blk != nil {
+		// Twin of the rbaLazyKeyed arm in ruby-interpreter.abnf.
+		kv, kk := &jsArray{}, []interface{}{}
+		rt.rubyLazyPull(t, -1, func(v interface{}, m bool) bool {
+			kv.elems = append(kv.elems, v)
+			kk = append(kk, rt.rubyLazyCall(blk, v, m))
+			return false
+		})
+		ki := 0
+		memo := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, _ []interface{}) interface{} {
+			ki++
+			return kk[ki-1]
+		}}
+		return rt.rubyArrayMethod(kv, name, append(append([]interface{}{}, pos...), rubyBlkWrap(memo)))
+	}
 	if rubyLazyEager(name) {
 		return rt.rubyArrayMethod(&jsArray{elems: rt.rubyLazyFirst(t, -1)}, name, args)
 	}
@@ -825,6 +840,16 @@ func rubyLazyEager(name string) bool {
 	switch name {
 	case "sum", "count", "min", "max", "minmax", "min_by", "max_by", "minmax_by", "sort", "sort_by",
 		"reduce", "inject", "group_by", "partition", "to_h", "one?":
+		return true
+	}
+	return false
+}
+
+// rubyLazyKeyed: name calls its block once per value, in order, so a Lazy runs
+// it one value at a time. Twin of rbaLazyKeyed in lib/ruby-arr.js.
+func rubyLazyKeyed(name string) bool {
+	switch name {
+	case "count", "sum", "min_by", "max_by", "minmax_by", "sort_by", "group_by", "partition", "to_h":
 		return true
 	}
 	return false
@@ -1887,6 +1912,55 @@ func rubyEncStr(b, enc string) interface{} {
 	return &jsRBin{b: b, enc: enc}
 }
 
+// rubyByteSlice is String#byteslice over the bytes b in encoding enc. Twin of
+// byteSlice in ruby-interpreter.abnf.
+func rubyByteSlice(b, enc string, pos []interface{}) interface{} {
+	n := len(b)
+	lo, ln := 0, 1
+	a0 := argAt(pos, 0)
+	if r, isRng := rubyIsRange(a0); isRng {
+		if v := r.props["begin"]; !isUndefOrNull(v) {
+			lo = int(math.Trunc(rubyToF(v)))
+		}
+		if lo < 0 {
+			lo += n
+		}
+		if lo < 0 || lo > n {
+			return jsNull
+		}
+		hi := n - 1
+		if v := r.props["end"]; !isUndefOrNull(v) {
+			hi = int(math.Trunc(rubyToF(v)))
+			if hi < 0 {
+				hi += n
+			}
+			if excl, _ := r.props["excl"].(bool); excl {
+				hi--
+			}
+		}
+		if ln = hi - lo + 1; ln < 0 {
+			ln = 0
+		}
+	} else {
+		lo = int(math.Trunc(rubyToF(a0)))
+		if lo < 0 {
+			lo += n
+		}
+		if len(pos) > 1 {
+			ln = int(math.Trunc(rubyToF(pos[1])))
+			if ln < 0 || lo < 0 || lo > n {
+				return jsNull
+			}
+		} else if lo < 0 || lo >= n {
+			return jsNull
+		}
+	}
+	if lo+ln > n {
+		ln = n - lo
+	}
+	return rubyEncStr(b[lo:lo+ln], enc)
+}
+
 // rubyStrBE is a String value's bytes and encoding, for the rules that mix
 // encodings; anything else converts through to_str (or raises TypeError).
 func (rt *jsrt) rubyStrBE(v interface{}) (string, string) {
@@ -2937,6 +3011,8 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		return t
 	case "b":
 		return &jsRBin{b: t.b}
+	case "byteslice":
+		return rubyByteSlice(t.b, enc, pos)
 	case "dup", "clone", "+@", "-@":
 		if (name == "+@" && !t.fz) || (name == "-@" && t.fz) {
 			return t

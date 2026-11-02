@@ -1134,7 +1134,7 @@ Primary     = ParenCmd | "(" Expression ")" | ParenBody | LambdaLit | SingletonD
             | NumLit | NegNumLit
             | SymLit
             | ArrayLit | HashLit
-            | True | False | Nil | Self | FileLit | LineLit | DirLit
+            | KwPredCall | True | False | Nil | Self | FileLit | LineLit | DirLit
             | ClassDecl | ModuleDecl | DefExpr
             | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | TopConst | ScopedConst | PutsCall | Call | VarRef ;
 // `def m ... end` is an expression whose value is the Symbol :m (Ruby 2.1). Defining
@@ -2005,6 +2005,30 @@ BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 // exactly that spacing rule to separate `foo?` from `foo ? a : b`).
 PredName    = PredOk NotKw Id :whitespace() PredSfx :whitespace(Whitespace) ;
 PredSfx     = "?" | "!" ;
+// `nil?` / `self!` are METHOD names, not a keyword followed by a `?x` character
+// literal: MRI's lexer folds a glued ?/! into the identifier before the keyword
+// lookup, so a bare `nil?` is a call on self.
+KwPredCall  <~~ push(makeCall(takeAll())) ~~>
+            = KwPredName <~~ push(up.in) ~~> ;
+KwPredName  = PredOk KwPredWord Id :whitespace() PredSfx :whitespace(Whitespace) ;
+KwPredWord  = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i) }
+        var ws = ["nil", "true", "false", "self"]
+        for (var k = 0; k < ws.length; k++) {
+            var w = ws[k]
+            var m = 0
+            while (m < w.length && c.peek(i + m) === w.charCodeAt(m)) { m = m + 1 }
+            if (m == w.length) {
+                var af = c.peek(i + m)
+                if (af === 63 || af === 33) { return undefined }
+            }
+        }
+        return abnf.newToken("\x01no", 0)
+    })()
+~~) ;
 
 VarRef      <~~ push(makeVarRef(up.in, up.start)); notePlace(up.pos, {var: up.in}) ~~>
             = Name ;
@@ -3666,7 +3690,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // Ruby's |, &, ^, << and >> over two boxed Integers. A NEGATIVE shift count is
     // the opposite shift in Ruby (`1 << -2` is 0, `4 >> -2` is 16), which is not
-    // Python's ValueError - hence the swap rather than a null.
+    // Python's ValueError - hence the swap. Twins: rubyBigBits in abnf/jsrt.go,
+    // rbABigBits in lib/ruby-rt.metajs.
     function bigBitBin(op, x, y) {
         var an = x.sign < 0 && !bigIsZero(x)
         var bn = y.sign < 0 && !bigIsZero(y)
@@ -3676,7 +3701,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var dir = op
             if (bn) { dir = (op == "<<") ? ">>" : "<<" }
             var k = bitsToNum(b)
-            if (k > bitShiftMax) { return null }
+            // Past the cap a right shift has shifted out every bit (0 or -1) and a
+            // left shift of a nonzero value is MRI's RangeError for a width it
+            // cannot allocate.
+            if (k > bitShiftMax) {
+                if (dir == ">>") { k = bitShiftMax + 1 } else if (bigIsZero(x)) { k = 0 } else { raiseErr(op, "RangeError", "shift width too big") }
+            }
             if (dir == "<<") { return bigFromBits(an ? -1 : 1, bitsShl(a, k)) }
             if (!an) { return bigFromBits(1, bitsShr(a, k)) }
             // floor(-a / 2^k) is -(((a-1) >> k) + 1): -5 >> 1 is -3.
@@ -3921,6 +3951,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return {__rbin: s, __benc: enc}
     }
+    // String#byteslice: the str[i] / str[i, len] / str[range] rules over the BYTES
+    // b. The slice keeps the encoding enc, so a cut through a UTF-8 character is a
+    // String of invalid bytes. Twins: rubyByteSlice in abnf/jsrtrubystr.go,
+    // rbByteSlice in lib/ruby-rt.metajs.
+    function byteSlice(b, enc, args) {
+        var n = b.length
+        var lo = 0
+        var len = 1
+        var a0 = anytype
+        a0 = args[0]
+        if (isRange(a0)) {
+            if (a0.lo !== null && a0.lo !== undefined) { lo = Math.trunc(toF(a0.lo)) }
+            if (lo < 0) { lo = lo + n }
+            if (lo < 0 || lo > n) { return null }
+            var hi = n - 1
+            if (a0.hi !== null && a0.hi !== undefined) {
+                hi = Math.trunc(toF(a0.hi))
+                if (hi < 0) { hi = hi + n }
+                if (a0.excl === true) { hi = hi - 1 }
+            }
+            len = hi - lo + 1
+            if (len < 0) { len = 0 }
+        } else {
+            lo = Math.trunc(toF(a0))
+            if (lo < 0) { lo = lo + n }
+            if (args.length > 1) {
+                len = Math.trunc(toF(args[1]))
+                if (len < 0 || lo < 0 || lo > n) { return null }
+            } else if (lo < 0 || lo >= n) { return null }
+        }
+        if (lo + len > n) { len = n - lo }
+        return encStr(b.substring(lo, lo + len), enc)
+    }
     // A String value's bytes and encoding, for the rules that mix encodings.
     function strBytes(v) { return isBin(v) ? v.__rbin : rbsBinOf(rsText(v)) }
     function strEnc(v) { return isBin(v) ? binEnc(v) : "UTF-8" }
@@ -3985,6 +4048,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return t
         }
         if (name == "b") { return mkBin(b) }
+        if (name == "byteslice") { return byteSlice(b, enc, args) }
         if (name == "dup" || name == "clone" || (name == "+@" && t.__fz === true)) {
             var cp = anytype
             cp = encStr(b, enc)
@@ -5095,6 +5159,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (x !== x) { raiseErr("", "FloatDomainError", "NaN") }
         if (x - x !== 0) { raiseErr("", "FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
     }
+    // A Float or Rational shift width, bit index or radix goes through #to_int, which
+    // truncates (`5 << 2.9` is 20, `5[-0.9]` is bit 0). Twins: rubyTruncInt in
+    // abnf/jsrtruby.go, rbTruncInt in lib/ruby-rt.metajs.
+    function truncInt(r) {
+        if (isRat(r)) { return ratDigitOp(r, "t", 0) }
+        floDomainGuard(r.f)
+        return intFromF(Math.trunc(r.f))
+    }
     function idiv(a, b) { if (b == 0) { raiseErr("/", "ZeroDivisionError", "divided by 0") } return Math.floor(a / b) }
     function imod(a, b) { if (b == 0) { raiseErr("%", "ZeroDivisionError", "divided by 0") } return fmaSub(a, Math.floor(a / b), b) }
     // A zero carrying x's sign. `x * 0` does NOT work in this dialect: the tag
@@ -5442,13 +5514,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (!Array.isArray(l) || op == "/" || op == "%" || op == "**") { noMethod(l, op) }
         }
         if ((op == "<<" || op == ">>") && numRank(l) < 0) { noMethod(l, op) }
+        // An Integer's bit operators: & | ^ coerce their operand, << >> take #to_int.
+        if (numRank(l) == 0 && (op == "&" || op == "|" || op == "^")) { raiseErr(op, "TypeError", cmpName(r) + " can't be coerced into Integer") }
+        if (numRank(l) == 0 && (op == "<<" || op == ">>")) { raiseErr(op, "TypeError", "no implicit conversion of " + fmtConvName(r) + " into Integer") }
         fail("not a number in '" + op + "'")
     }
     function numBin(op, l, r) {
         var rk = numRank(l)
         var rr = numRank(r)
         if (rk < 0 || rr < 0) { numOperandErr(op, l, r) }
-        if (rr > rk) { rk = rr }
+        if (rr > rk) {
+            if (rk == 0 && rr <= 2 && (op == "<<" || op == ">>")) { return numBin(op, l, truncInt(r)) }
+            if (rk == 0 && (op == "&" || op == "|" || op == "^")) { raiseErr(op, "TypeError", cmpName(r) + " can't be coerced into Integer") }
+            rk = rr
+        }
         if (rk == 3) { return cpxBin(op, l, r) }
         if (rk == 1) {
             var p = asRat(l)
@@ -8513,8 +8592,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // negative i is below bit 0 and answers 0. Twins: rubyIntBit in
     // abnf/jsrtruby.go, rbIntBit in lib/ruby-rt.metajs.
     function intBitAt(n, i) {
-        if (toF(i) < 0) { return 0 }
-        return numBin("&", numBin(">>", n, i), 1)
+        var k = anytype
+        k = i
+        if (isFlo(i) || isRat(i)) { k = truncInt(i) }
+        if (toF(k) < 0) { return 0 }
+        return numBin("&", numBin(">>", n, k), 1)
     }
     function rindex(o, i) {
         if (isRStr(o)) { return rindex(o.__rs, i) }
@@ -9887,6 +9969,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "digits") {
             var db = anytype
             db = args.length > 0 ? args[0] : 10
+            if (isFlo(db) || isRat(db)) { db = truncInt(db) }
+            if (numRank(db) != 0) { raiseErr(name, "TypeError", "no implicit conversion of " + fmtConvName(db) + " into Integer") }
             if (numCmp(db, 0) < 0) { raiseErr(name, "ArgumentError", "negative radix") }
             if (numCmp(db, 2) < 0) { raiseErr(name, "ArgumentError", "invalid radix " + intText(db)) }
             if (numCmp(t, 0) < 0) { raiseErr(name, "Math::DomainError", "out of domain") }
@@ -10289,13 +10373,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "times" || name == "upto" || name == "downto") {
                 if (name != "times" && isBig(args[0])) { return bigUpDown(target, name, args, blk) }
+                // With a block the numbers are walked, never listed: the bound may be
+                // far beyond any list (`1.upto(10**15) { break }`).
+                if (blk != null) {
+                    var wl = name == "times" ? target - 1 : toF(args[0])
+                    if (name == "downto") { for (var di = target; di >= wl; di--) { blockCall(blk, [di]) } }
+                    else { for (var wi2 = name == "times" ? 0 : target; wi2 <= wl; wi2++) { blockCall(blk, [wi2]) } }
+                    return target
+                }
                 var nl = []
                 if (name == "times") { for (var ni = 0; ni < target; ni++) { nl.push(ni) } }
                 else if (name == "upto") { for (var ui = target; ui <= toF(args[0]); ui++) { nl.push(ui) } }
                 else if (name == "downto") { for (var wi = target; wi >= toF(args[0]); wi--) { nl.push(wi) } }
-                if (blk == null) { return enumAt(mkEnum(nl), target, name, args) }
-                for (var nk = 0; nk < nl.length; nk++) { blockCall(blk, [nl[nk]]) }
-                return target
+                return enumAt(mkEnum(nl), target, name, args)
             }
             var im = anytype
             im = numMore(target, name, args)
@@ -10310,6 +10400,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // No String method keeps an argument, so a box argument is read as its text.
             for (var ai = 0; ai < args.length; ai++) { if (isRStr(args[ai]) || isBin(args[ai])) { args = rsTextList(args); break } }
             if (name == "b") { return mkBin(rbsBinOf(target)) }
+            if (name == "byteslice") { return byteSlice(rbsBinOf(target), "UTF-8", args) }
             if (name == "encoding") { return hostGlobals["Encoding"]["$c$UTF_8"] }
             if (name == "force_encoding") { return encStr(rbsBinOf(target), encArgName(args[0])) }
             if (name == "unpack" || name == "unpack1") { return strUnpack(rbsBinOf(target), name, args) }
@@ -10483,6 +10574,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (userIsA(target, hostGlobals["Comparable"])) {
                     if (name == "between?") { return rcmp(target, args[0]) >= 0 && rcmp(target, args[1]) <= 0 }
                     if (name == "clamp") {
+                        if (rcmp(args[0], args[1]) > 0) { raiseErr("clamp", "ArgumentError", "min argument must be smaller than max argument") }
                         if (rcmp(target, args[0]) < 0) { return args[0] }
                         if (rcmp(target, args[1]) > 0) { return args[1] }
                         return target
@@ -11552,6 +11644,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "find_index") { return hit.length > 0 ? hit[0] : null }
             if (name == "all?" || name == "none?") { return hit.length == 0 }
             return hit.length > 0
+        }
+        if (rbaLazyKeyed(name) && blk != null) {
+            var kv = []
+            var kk = []
+            rbaLazyFirst(t, -1, lazyCall, rtest, valEql, lazyDrive, function(v, m) {
+                kv.push(v)
+                kk.push(lazyCall(blk, v, m))
+                return false
+            })
+            var ki = [0]
+            return arrayMethod(kv, name, args, function() { ki[0] = ki[0] + 1; return kk[ki[0] - 1] })
         }
         if (rbaLazyEager(name)) { return arrayMethod(lazyFirst(t, -1), name, args, blk) }
         if (name == "dup" || name == "clone") {
@@ -13764,11 +13867,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // local of the name exists. Twin of selfCallNames in ruby-to-llvm-ir.abnf.
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
-                         "singleton_methods", "define_singleton_method", "define_method", "frozen?", "equal?",
+                         "singleton_methods", "define_singleton_method", "define_method", "frozen?", "nil?", "equal?",
                          "instance_variables", "to_enum", "enum_for"]
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-to-llvm-ir.abnf.
-    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?", "to_enum", "enum_for"]
+    var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?", "nil?", "to_enum", "enum_for"]
     // A receiver-less send(:name, ...) reaches a top-level def or a Kernel function,
     // both private Object methods in MRI, unless self has its own method of the name.
     // Twin of js_rselfsend in abnf/jsrtruby.go.

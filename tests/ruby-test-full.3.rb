@@ -1192,6 +1192,82 @@ def s184
         x.sample(c[1]) == [] && x.max(c[0]) == [4, 3])
 end
 
+# ===== SECTION 185: Float shift counts, byteslice, bare nil?, nil's ivars, stream breaks =====
+# A Float or Rational shift width, bit index or digits radix goes through #to_int,
+# which truncates; & | ^ refuse it with a coerce TypeError, and a non-number
+# count is "no implicit conversion". String#byteslice indexes BYTES and keeps the
+# encoding, so a cut through a character is an invalid String. A bare `nil?` is
+# the method, not nil and a `?;` character literal. nil reads every instance
+# variable as nil. A user Comparable's clamp checks min <= max first. upto with
+# a block walks its numbers however far the bound, and count / sum / min_by ...
+# with a block on an endless Enumerator end at a break. /usr/bin/ruby 2.6
+# settles each.
+class NilClass
+  def s185iv; @s185z; end
+end
+class Object
+  def s185ov; @s185q; end
+  def s185np; nil? ? :nil : :obj; end
+  def s185np2; [nil?, 1]; end
+end
+class S185V
+  include Comparable
+  attr_reader :v
+  def initialize(v); @v = v; end
+  def <=>(o); v <=> o.v; end
+end
+def s185err
+  yield
+rescue => e
+  "#{e.class} #{e.message}"
+end
+def s185
+  f = [2.9, 2.0, 0.5, -1.5, -0.9, 64.2, 1e30, Float::NAN, Rational(5, 2), 12.9, 16.5, nil, "a"]
+  check("sh185a", (5 << f[0]) == 20 && (5 >> f[0]) == 1 && (5 << f[2]) == 5 && (5 << f[3]) == 2 && (5 >> f[3]) == 10 &&
+        (-5 >> f[0]) == -2 && (5 << f[5]) == 92233720368547758080 && (5 >> f[5]) == 0 && (-5 >> f[5]) == -1 &&
+        (2**70 >> f[0]) == 295147905179352825856 && (5 << f[8]) == 20 && 5[f[0]] == 1 && 5[f[3]] == 0 && 5[f[4]] == 1 &&
+        -5[f[4]] == 1 && 5[f[6]] == 0 && -5[f[6]] == 1 && 5[f[8]] == 1 && (5 >> f[6]) == 0 &&
+        s185err { 5 << f[6] } == "RangeError shift width too big" && s185err { 5 << f[7] } == "FloatDomainError NaN" &&
+        s185err { 5 & f[0] } == "TypeError 2.9 can't be coerced into Integer" &&
+        s185err { 5 | f[8] } == "TypeError Rational can't be coerced into Integer" &&
+        s185err { 5 ^ f[11] } == "TypeError nil can't be coerced into Integer" &&
+        s185err { 5 << f[11] } == "TypeError no implicit conversion of nil into Integer" &&
+        s185err { 5 >> f[12] } == "TypeError no implicit conversion of String into Integer" &&
+        (0 << 2**70) == 0 && (-5 >> 2**70) == -1 && s185err { 1 << 2**70 } == "RangeError shift width too big")
+  check("dg185b", 5.digits(f[9]) == [5] && 255.digits(f[10]) == [15, 15] && 1000.digits(f[9]) == [4, 11, 6] &&
+        5.digits(f[1]) == [1, 0, 1] && 5.digits(f[8]) == [1, 0, 1] && (2**70).digits(f[10]).last == 4 &&
+        s185err { 5.digits(f[2]) } == "ArgumentError invalid radix 0" &&
+        s185err { 5.digits(f[11]) } == "TypeError no implicit conversion of nil into Integer")
+  s = ["héllo", "hello", "a€b"]
+  check("bs185c", s[0].byteslice(1, 2) == "é" && s[1].byteslice(1) == "e" && s[1].byteslice(1..3) == "ell" &&
+        s[1].byteslice(-3, 2) == "ll" && s[1].byteslice(5).nil? && s[1].byteslice(5, 2) == "" && s[1].byteslice(1, -1).nil? &&
+        s[1].byteslice(6, 1).nil? && s[1].byteslice(2..) == "llo" && s[1].byteslice(3..1) == "" &&
+        !s[0].byteslice(1, 1).valid_encoding? && s[0].byteslice(1, 1).bytesize == 1 &&
+        s[0].byteslice(1, 1).encoding.to_s == "UTF-8" && s[2].byteslice(1, 3) == "€" &&
+        s[2].byteslice(2, 5).bytes == [130, 172, 98] && "abc".b.byteslice(1, 2).encoding.to_s == "ASCII-8BIT" &&
+        s[1].respond_to?(:byteslice))
+  check("np185d", nil.s185np == :nil && 3.s185np == :obj && 3.s185np2 == [false, 1] && nil.s185np2 == [true, 1])
+  check("ns185e", nil.s185iv.nil? && nil.s185ov.nil? && 5.s185ov.nil? && false.s185ov.nil?)
+  check("cl185f", s185err { S185V.new(5).clamp(S185V.new(9), S185V.new(1)) } == "ArgumentError min argument must be smaller than max argument" &&
+        S185V.new(5).clamp(S185V.new(1), S185V.new(3)).v == 3 && S185V.new(5).clamp(S185V.new(5), S185V.new(5)).v == 5)
+  n = [10**15, 5]
+  c = 0
+  1.upto(n[0]) { |i| c += 1; break if i > 5 }
+  d = 0
+  r = n[0].downto(1) { |i| d += 1; break i if d > 3 }
+  t = 0
+  n[0].times { |i| t += i; break if i == n[1] }
+  check("ut185g", c == 6 && r == n[0] - 3 && t == 15 && 2.upto(n[1]).to_a == [2, 3, 4, 5] && n[1].times.to_a == [0, 1, 2, 3, 4])
+  e = (1..Float::INFINITY).each
+  check("lz185h", e.count { |x| break 42 if x > 3; true } == 42 && 1.step.count { |x| break x if x > 5; true } == 6 &&
+        [1, 2].cycle.count { |x| break :c if x > 1; true } == :c && e.sum { |x| break x if x > 3; x } == 4 &&
+        e.min_by { |x| break x if x > 2; -x } == 3 && e.sort_by { |x| break :sb if x > 2; x } == :sb &&
+        e.group_by { |x| break :gb if x > 2; x } == :gb && e.partition { |x| break :pt if x > 2; x } == :pt &&
+        e.max_by { |x| break :mb if x > 2; x } == :mb && e.minmax_by { |x| break :mm if x > 2; x } == :mm &&
+        e.to_h { |x| break :th if x > 2; [x, x] } == :th && e.lazy.map { |x| x * 2 }.count { |x| break x if x > 6; true } == 8 &&
+        (1..4).each.count(&:even?) == 2 && (1..4).each.sum { |x| x * 2 } == 20 && [3, 1, 2].each.sort_by { |x| -x } == [3, 2, 1])
+end
+
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1223,5 +1299,6 @@ s124() # SECTION-CALL 124
 s125() # SECTION-CALL 125
 s126() # SECTION-CALL 126
 s184() # SECTION-CALL 184
+s185() # SECTION-CALL 185
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
