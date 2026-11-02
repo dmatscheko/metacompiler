@@ -105,7 +105,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1144 kotlin: compiled named arguments evaluated in parameter order, not source order; qualified-object member references; same-named stdlib parameter order · P2 · KT · OPEN [V]
+### T-1144 kotlin: compiled named arguments evaluated in parameter order, not source order; qualified-object member references; same-named stdlib parameter order · P2 · KT · IN PROGRESS (KT worker, round 44) [V]
 
 Found while working T-1142. The oracle is kotlinc 2.2.21 (stdlib only). Item 1 is a correctness bug that silently reorders side effects, hence P2.
 
