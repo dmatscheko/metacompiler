@@ -2830,7 +2830,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var rn = refTarget(pn)
                 if (rn == pn) { return plain() }
                 // A subscript applies to a variable named NAME[SUB] itself, which never
-                // exists (bash 5.3: declare -n e=a[1]; ${e[0]} is empty): "", never set.
+                // exists (bash 5.3: declare -n e=a[1]; ${e[0]} is empty): "", never set,
+                // unless it is a hidden local.
                 // Through a circular chain bash warns a second time, except for the count or
                 // the keys (${#REF[@]}, ${!REF[@]}). Twin of rt_nref_elems.
                 // @a and @A look the chain up twice more, and warn each time (bash 5.3: three
@@ -2840,7 +2841,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     diagErr("warning: " + pn + ": circular name reference\n")
                 }
                 var rcirc = (rn == "") ? pn : ""
-                if (hasIdx && rn.indexOf("[") > 0) { rn = "" }
+                if (hasIdx && rn.indexOf("[") > 0 && !hidLocal(rn)) { rn = "" }
                 else if (hasIdx && rn == "" && !lenp && !indp && !refQuiet) { diagErr("warning: " + pn + ": circular name reference\n") }
                 var gn = (rn == "") ? refGlobal(pn) : ""
                 if (gn != "") { rn = gn }
@@ -3586,22 +3587,44 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // name is a new variable instead. Twin of declOne in bash-to-llvm-ir.abnf.
             if (!isRef && anyRef && plus.indexOf("n") < 0 && attrOn(refVars, names[k]) && !(localizes() && !localHere(names[k]))) {
                 var tg = refTarget(names[k])
-                // A function's declaration of its own nameref to an element with -i, -u, -l, -r
-                // and -x alone (or none) and a plain value makes the hidden local NAME[SUB], and
-                // stores the value through the nameref; with anything else it does nothing.
+                // A function's declaration of its own nameref to an element with -i, -u, -l, -r,
+                // -x, -a and -A alone (or none) and a plain value (or an array literal under -a
+                // or -A) makes the hidden local NAME[SUB], and stores the value through the
+                // nameref; with anything else it does nothing.
                 // Twin of the rt_nref_hidnew arm of declOne in bash-to-llvm-ir.abnf.
                 if (tg.indexOf("[") > 0 && localizes()) {
                     var hfl = flags.split("-").join("")
                     var hi
-                    for (hi = 0; hi < hfl.length; hi++) { if ("iulrx".indexOf(hfl.charAt(hi)) < 0) { return } }
-                    if (plus != "" || (asgs[k] != null && (asgs[k].lit != null || asgs[k].idxT != null))) { return }
+                    for (hi = 0; hi < hfl.length; hi++) { if ("iulrxaA".indexOf(hfl.charAt(hi)) < 0) { return } }
+                    // Under -a or -A a plain value is element 0's.
+                    var hw = asgsWritten[k]
+                    if (plus != "" || (hw != null && ((hw.lit != null && !bareArr) || hw.idxT != null))) { return }
                     hidNew(tg)
+                    // One that is an array of the other kind already is refused (a literal
+                    // reported first after thisCmd). Twin of rt_nref_hidconv.
+                    if (bareArr && isArr(tg) && arrs[arrKey(tg)].assoc != assoc) {
+                        var hcm = names[k] + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n"
+                        if (hw != null && hw.lit != null) { diagErr(tcWho() + hcm) }
+                        diagErr(kw + ": " + hcm)
+                        roFail = true
+                        return
+                    }
+                    // -a or -A make it an array: a scalar one an empty one, set when the
+                    // scalar was.
+                    if (bareArr && !isArr(tg)) {
+                        var hset = varsHas["$" + tg] == true
+                        unsetVar(tg)
+                        var ha = arrNew(tg, assoc)
+                        if (hset) { ha.lit = true } else { ha.decl = true }
+                    }
                     if (integer) { intVars["$" + tg] = true }
                     if (hfl.indexOf("u") >= 0 || hfl.indexOf("l") >= 0) {
                         upVars["$" + tg] = hfl.indexOf("u") >= 0
                         loVars["$" + tg] = hfl.indexOf("l") >= 0
                     }
-                    if (asgs[k] != null) { runAssignV(asgs[k], false, v, true) }
+                    if (asgs[k] != null && asgs[k].lit != null) { runAssign(asgs[k], assoc, true) }
+                    else if (asgs[k] != null && bareArr) { elemSet(tg, "0", (hw.op == "+=") ? arrGet(tg, "0") : null, v) }
+                    else if (asgs[k] != null) { runAssignV(asgs[k], false, v, true) }
                     if (setRo) { roVars["$" + tg] = true }
                     if (hfl.indexOf("x") >= 0) { exVars["$" + tg] = true }
                     return
@@ -4654,8 +4677,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (rn == "") { arithErr = true; return null }
         if (rn == a.name) { return a }
-        // An element or literal store needs a variable, and NAME[SUB] names none.
-        if ((a.idxT != null || a.lit != null) && rn.indexOf("[") > 0) {
+        // An element or literal store needs a variable, and NAME[SUB] names none, unless it
+        // is a hidden local.
+        if ((a.idxT != null || a.lit != null) && rn.indexOf("[") > 0 && !hidLocal(rn)) {
             diagErr("`" + rn + "': not a valid identifier\n")
             arithErr = true
             return null
@@ -8739,7 +8763,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     unHid = ut != sp.name && hidLocal(ut)
                     if (ut == "") { unRef = true; refTarget(sp.name) } else if (unHid) { sp = {name: ut, key: null} } else { sp = splitSubscript(ut) }
                 }
-                else if (anyRef && !un) { sp = {name: splitSubscript(refTarget(sp.name)).name, key: sp.key} }
+                else if (anyRef && !un) {
+                    var ue = refTarget(sp.name)
+                    sp = {name: (ue != sp.name && hidLocal(ue)) ? ue : splitSubscript(ue).name, key: sp.key}
+                }
                 if (!uv && sp.key == null && isFunc(sp.name) && !isSetVar(sp.name) && !isArr(sp.name) && !attrOn(dclVars, sp.name)) {
                     setFunc(sp.name, null, null, null)
                     continue

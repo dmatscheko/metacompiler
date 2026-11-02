@@ -268,6 +268,22 @@ s161() {
   e=$( (s161y=(a b c); s161h 's161y[1]'; echo "${s161y[*]}"; s161f 's161y[2]' s161i; echo "${s161y[*]}") 2>&1)
   check cnr3 "$(s161s "$e")" 'i: 5;i2: 72;h: 72 a b c;a b c;i: c;i2: 72;a b 72;'
 }
+# ===== SECTION 162: hidden NAME[SUB] array locals through a nameref =====
+s162() {
+  local e
+  s162s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s162f() { local -n w=$1; declare -a w; w[2]=x; declare -p 's162a[1]'; w=5; declare -p 's162a[1]'; echo "[${w[2]}] [$w ${w[*]}] [${w[0]}] [${#w[@]}] [${!w[@]}]"; w+=(y); unset 'w[0]'; declare -p 's162a[1]'; }
+  e=$( (s162a=(a b c); s162f 's162a[1]'; declare -p s162a) 2>&1)
+  check hna1 "$(s162s "$e")" 'declare -a s162a[1]=([2]="x");declare -a s162a[1]=([0]="5" [2]="x");[x] [5 5 x] [5] [2] [0 2];declare -a s162a[1]=([2]="x" [3]="y");declare -a s162a=([0]="a" [1]="b" [2]="c");'
+  s162g() { local -n w=$1; declare -A w=([k]=v [j]=u); echo "${w[k]} ${#w[@]}"; local -a w; echo "st=$?"; declare -ai w=2+3; echo "st=$?"; declare -p 's162a[1]'; }
+  s162h() { local -n w=$1; declare -ai w=2+3; declare -a w+=4; declare -ar w; declare -p "s162a[1]"; s162i; echo "st=$?"; declare -p 's162a[1]'; }
+  s162i() { w[3]=q; echo "i ${w[*]}"; }
+  e=$( (s162a=(a b c); s162g 's162a[1]'; s162h 's162a[1]'; declare -p s162a) 2>&1)
+  check hna2 "$(s162s "$e")" 'v 2;local: w: cannot convert associative to indexed array;st=1;declare: w: cannot convert associative to indexed array;st=1;declare -A s162a[1]=([k]="v" [j]="u" );declare -air s162a[1]=([0]="9");w: readonly variable;'
+  s162j() { local -n w=$1; declare -ax w=(1 2); local -a w; w+=(m); declare -p 's162a[1]'; for e in "${w[@]}"; do echo "e=$e"; done; unset w; echo "[${w[1]}]"; }
+  e=$( (s162a=(a b c); s162j 's162a[1]'; declare -p s162a) 2>&1)
+  check hna3 "$(s162s "$e")" 'declare -ax s162a[1]=([0]="1" [1]="2" [2]="m");e=1;e=2;e=m;[];declare -a s162a=([0]="a" [1]="b" [2]="c");'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -278,5 +294,6 @@ s158  # SECTION-CALL 158
 s159  # SECTION-CALL 159
 s160  # SECTION-CALL 160
 s161  # SECTION-CALL 161
+s162  # SECTION-CALL 162
 echo "full: $checks checks, $fails failures"
 exit $fails

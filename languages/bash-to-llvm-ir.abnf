@@ -2065,6 +2065,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtTakeSubbad = rtDecl("rt_take_subbad", false, [])
     var rtArrAmark = rtDecl("rt_arr_amark", false, [1])
     var rtArrConv = rtDecl("rt_arr_conv", false, [1, 1, 1, 0])
+    var rtNrefHidconv = rtDecl("rt_nref_hidconv", false, [1, 1, 0, 0, 1])
     var rtArrConvLit = rtDecl("rt_arr_convlit", false, [1, 1, 1, 0, 1, 0])
     var rtBerr = rtDecl("rt_berr", false, [1, 1, 1])
     var rtArrEmpty = rtDecl("rt_arr_empty", false, [1, 0])
@@ -5062,7 +5063,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 } else { return circArm(b, v) }
             }
             // A chain known only when it runs (a computed target) is tested then (rt_nref_loops).
-            if (!nrefDone && !circDone && !isRef && localHereJ && plus.indexOf("n") < 0 && circOk && attrOn(refVars, names[j]) === true) {
+            // So is -a or -A of a plain value, which is element 0's.
+            var awE = asgsWritten[j]
+            var arrPlain = bareArr && awE != null && awE.idxT == null && awE.lit == null
+            if (!nrefDone && !circDone && !isRef && localHereJ && plus.indexOf("n") < 0 && (circOk || arrPlain) && attrOn(refVars, names[j]) === true) {
                 var lk = "$" + names[j]
                 var preAt = caseAtBits(names[j])
                 var preRo = attrOn(roVars, names[j])
@@ -5099,7 +5103,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // Through a chain that ends at NAME[SUB], the same makes the hidden local
                 // NAME[SUB] (rt_nref_hidnew); with any other option or value, nothing.
                 var elB = curF.NewBlock("")
-                if ((tAt != 0 || flags == "") && plainA) {
+                // -a or -A (with -i, -u, -l, -r, -x) make it a declared array, which an array
+                // literal fills, or a plain value as element 0; one of the other kind already
+                // is refused (rt_nref_hidconv).
+                var awH = asgsWritten[j]
+                var hArr = bareArr && refuseP != null && (awH == null || awH.idxT == null) && flags.charAt(0) == "-"
+                    && flags.split("-").join("").split("a").join("").split("A").join("").split("i").join("").split("u").join("").split("l").join("").split("r").join("").split("x").join("") == ""
+                if (hArr) {
+                    var haB = curF.NewBlock(""), hcB = curF.NewBlock(""), cvB = curF.NewBlock("")
+                    var haAt = caseAtFlags(flags) + 64 + (assoc ? 128 : 0)
+                    var hr = noB.NewCall(rtNrefHidnew, [gepStr(noB, names[j]), llvm.constant.NewInt(i32, haAt), noB.NewLoad(i32, curFrame.depth)])
+                    noB.NewCondBr(noB.NewICmp(llvm.enum.IPredEQ, hr, llvm.constant.NewInt(i32, 2)), cvB, hcB)
+                    hcB.NewCondBr(hcB.NewICmp(llvm.enum.IPredNE, hr, zero), haB, elB)
+                    cvB.NewCall(rtNrefHidconv, [gepStr(cvB, kw), gepStr(cvB, names[j]), assoc ? one : zero, (a != null && a.lit != null) ? one : zero, tcWho(cvB)])
+                    cvB.NewStore(one, refuseP)
+                    cvB.NewBr(lpEnd)
+                    if (a != null && a.lit != null) { haB = emitArrayLit(haB, names[j], a.lit, a.op == "+=", assoc ? 1 : 0) }
+                    else if (a != null) { haB = emitAssign(haB, {name: names[j], op: a.op, idxT: a.idxT, lit: null, valT: a.valT, isrc: a.isrc}, assoc, null) }
+                    if (setRo || xCode > 0) { haB.NewCall(rtNrefDpost, [gepStr(haB, names[j]), llvm.constant.NewInt(i32, setRo ? 8 : 0), (xCode > 0) ? one : zero]) }
+                    haB.NewBr(lpEnd)
+                } else if ((tAt != 0 || flags == "") && plainA) {
                     var hdB = curF.NewBlock("")
                     noB.NewCondBr(noB.NewICmp(llvm.enum.IPredNE, noB.NewCall(rtNrefHidnew, [gepStr(noB, names[j]), llvm.constant.NewInt(i32, tAt & 7), noB.NewLoad(i32, curFrame.depth)]), zero), hdB, elB)
                     if (a != null) { hdB = refDeclStore(hdB, names[j], tv, a.op == "+=", lpEnd, kw) }
@@ -5723,7 +5746,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         if (darrs[j] != null) {
                             var hpB = curF.NewBlock(""), apB = curF.NewBlock(""), jpB = curF.NewBlock("")
                             b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, b.NewCall(rtNrefHid, gepStr(b, darrs[j])), zero), hpB, apB)
-                            var hrp = hpB.NewCall(rtDeclp, [gepStr(hpB, darrs[j]), emptyPtr(hpB), zero, dwho])
+                            var hrp = hpB.NewCall(rtDeclp, [gepStr(hpB, darrs[j]), emptyPtr(hpB), hpB.NewCall(rtIsAssoc, gepStr(hpB, darrs[j])), dwho])
                             hpB.NewBr(jpB)
                             var arp = apB.NewCall(rtDeclp, [gepStr(apB, names[j]), lt, apB.NewCall(rtIsAssoc, gepStr(apB, names[j])), dwho])
                             apB.NewBr(jpB)

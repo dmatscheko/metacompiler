@@ -7109,12 +7109,14 @@ int rt_nref_el(char *t, char *n)
 
 /* A function's localizing declaration through the nameref n whose chain ends
  * at NAME[SUB], in the call whose save stack starts at d: that hidden local,
- * made unless it is one of the call's, marked with the attributes at
- * (rt_atmark's); 1, or 0 for any other chain. */
+ * made unless it is one of the call's, marked with the attributes at & 7
+ * (rt_atmark's), a declared array with at & 64 and an associative one with
+ * at & 128; 1, or 0 for any other chain. An array of the other kind already is
+ * left as it is: 2. */
 int rt_nref_hidnew(char *n, int at, int d)
 {
     char *t;
-    int id;
+    int id, r;
     if (rt_nref_void(n) != 0) return 0;
     nref_quiet = nref_quiet + 1;
     t = rt_nref_end(n);
@@ -7122,9 +7124,31 @@ int rt_nref_hidnew(char *n, int at, int d)
     if (t == 0 || rt_indbr(t) <= 0) return 0;
     id = rt_varslot(t);
     if (id < 0) id = rt_varslot_add(t);
+    if (id < 0) return 0;
     if (rt_local_here(id, d) == 0) rt_local_new(id, d);
     nref_hid = 1;
-    rt_atmark(varnames[id], at);
+    r = rt_ar_find(t);
+    if ((at & 64) != 0 && r >= 0 && (ar_n[r] != 0 || (ar_mk[r] & 4099) != 0)
+        && ((ar_mk[r] & 4096) != 0) != ((at & 128) != 0)) return 2;
+    rt_atmark(varnames[id], at & 7);
+    /* A scalar one becomes an empty array, set when the scalar was. */
+    if ((at & 64) != 0 && rt_arr_any(t) == 0) {
+        if (gvars[id] != &unset_marker[0]) rt_arr_mark(t);
+        gvars[id] = &unset_marker[0];
+    }
+    if ((at & 64) != 0) rt_arr_dmark(t);
+    if ((at & 128) != 0) rt_arr_amark(t);
+    return 1;
+}
+
+/* rt_nref_hidnew's refusal, by kw, of the nameref n's hidden local, an array
+ * of the other kind than as asks for: "n: cannot convert ...", for a literal
+ * (lit) reported first after fn, bash's this_command_name. */
+int rt_nref_hidconv(char *kw, char *n, int as, int lit, char *fn)
+{
+    char *m = as != 0 ? "cannot convert indexed to associative array" : "cannot convert associative to indexed array";
+    if (lit != 0) rt_berr(fn, n, m);
+    rt_berr(kw, n, m);
     return 1;
 }
 
@@ -7381,11 +7405,23 @@ int rt_sc_count(char *nm) {
     return v != &unset_marker[0] ? 1 : 0;
 }
 
+/* The scalar value of nm, an array name: the slot of a hidden local named
+ * NAME[SUB] (rt_nref_hid) while there is one, which a nameref's subscripted
+ * read reaches, else nm's value by name. */
+char *rt_sc_var(char *nm) {
+    int i;
+    if (nref_hid != 0 && rt_indbr(nm) > 0) {
+        i = rt_nref_hid(nm);
+        if (i >= 0) return gvars[i];
+    }
+    return rt_getvar_byname(nm);
+}
+
 char *rt_sc_get(char *nm, char *k) {
     char *v;
     if (rt_isposnm(nm) != 0) return rt_param(rt_str2int(k));
     if (rt_arr_any(nm) != 0) return rt_arr_get(nm, k);
-    v = rt_getvar_byname(nm);
+    v = rt_sc_var(nm);
     if (v != &unset_marker[0] && rt_streq(k, "0") != 0) return v;
     return &empty[0];
 }
@@ -7399,7 +7435,7 @@ int rt_sc_has(char *nm, char *k) {
         return 0;
     }
     if (rt_arr_any(nm) != 0) return rt_arr_has(nm, k);
-    v = rt_getvar_byname(nm);
+    v = rt_sc_var(nm);
     if (v != &unset_marker[0] && rt_streq(k, "0") != 0) return 1;
     return 0;
 }
@@ -7411,7 +7447,7 @@ char *rt_sc_list(char *nm, char *sep, int star, int keys) {
     char *v;
     if (rt_isposnm(nm) != 0) return rt_params(sep, star);
     if (rt_arr_any(nm) != 0) return rt_arr_list(nm, sep, star, keys);
-    v = rt_getvar_byname(nm);
+    v = rt_sc_var(nm);
     if (v == &unset_marker[0]) return star != 0 ? &empty[0] : &list_nil[0];
     if (keys != 0) v = "0";
     if (star != 0) return v;
@@ -9374,6 +9410,7 @@ char *rt_getvar_byname(char *n)
         if (n == 0) return rt_nref_gread();
         if (n != n0 && nref_hid != 0 && rt_indbr(n) > 0) {
             i = rt_nref_hid(n);
+            if (i >= 0 && gvars[i] == &unset_marker[0] && rt_arr_any(n) != 0) return rt_arr_get(n, "0");
             if (i >= 0) return gvars[i];
         }
     }
