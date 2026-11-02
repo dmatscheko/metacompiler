@@ -1980,6 +1980,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrPlus = rtDecl("rt_arr_plus", false, [1, 1, 1, 0, 0])
     var rtNrefBad = rtDecl("rt_nref_bad", false, [1, 1])
     var rtDeclNref = rtDecl("rt_decl_nref", false, [1, 1, 1, 0])
+    // i32 rt_decl_circ(i8* kw, i8* name, i8* value, i32 has): a declaration of a circular
+    // local nameref; 1 when the value names no variable.
+    var rtDeclCirc = rtDecl("rt_decl_circ", false, [1, 1, 1, 0])
     var rtNrefNoArr = rtDecl("rt_nref_noarr", false, [1, 1, 0])
     var rtNrefDrop = rtDecl("rt_nref_drop", false, [1])
     var rtNrefSelfBad = rtDecl("rt_nref_self_bad", false, [1, 1])
@@ -4510,10 +4513,67 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var declOwn = ""
         // Set while declOne runs again past the -n checks it has emitted.
         var nrefDone = false
+        // The value of assignment a, expanded now unless v already holds it.
+        var declValue = function(b, a, v) {
+            if (v != null) { return {b: b, v: v} }
+            if (a.valT == null) { return {b: b, v: emptyPtr(b)} }
+            var r = a.valT.fn(b)
+            var rv = (a.valT.f == true) ? wordJoin(r.b, r.v) : r.v
+            if (a.valT.c == undefined && a.valT.done != true) { return {b: emitAbortCheck(r.b), v: rv} }
+            return {b: r.b, v: rv}
+        }
         var declOne = function(b, j, v) {
             // -n with -i fails, silently. Twin of declOne in bash-interpreter.abnf.
             if (isRef && integer) { roFail = true; return b }
             var a = asgs[j]
+            var localHereJ = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset") && locOwn("$" + names[j])
+            // -n with a value that is NAME itself: refused outside a function, where nothing
+            // is declared (a computed value: selfRef in declOneBody); inside one a warning,
+            // before any other check (bash 5.3). Twin of selfV in declOne in
+            // bash-interpreter.abnf.
+            if (isRef && !nrefDone && a != null && a.lit == null && a.idxT == null && a.valT != null) {
+                if (v == null && a.valT.c != undefined) {
+                    if (a.valT.c == names[j] && curFrame == null) {
+                        emitDiag(b, gepStr(b, kw + ": " + names[j] + ": nameref variable self references not allowed\n"))
+                        roFail = true
+                        return b
+                    }
+                    if (a.valT.c == names[j]) { emitDiag(b, gepStr(b, kw + ": warning: " + names[j] + ": circular name reference\n")) }
+                } else if (curFrame != null) {
+                    var sr = declValue(b, a, v)
+                    b = sr.b
+                    v = sr.v
+                    var swB = curF.NewBlock(""), sgB = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [v, gepStr(b, names[j])]), zero), swB, sgB)
+                    emitDiag(swB, gepStr(swB, kw + ": warning: " + names[j] + ": circular name reference\n"))
+                    swB.NewBr(sgB)
+                    b = sgB
+                }
+            }
+            // A function's own nameref whose chain, known here, is circular is looked up
+            // twice, each a warning. Without -n and attributes, a value then goes to the
+            // nameref itself, as the name it refers to (rt_decl_circ). Twin of the same arm
+            // of declOne in bash-interpreter.abnf.
+            var plainV = a == null || (a.lit == null && a.idxT == null && a.op != "+=")
+            if (!nrefDone && localHereJ && plus.indexOf("n") < 0 && plainV && (isRef || flags == "") && refLoops(names[j])) {
+                if (isRef || a == null) {
+                    b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero])
+                    if (!isRef) { return b }
+                } else {
+                    var cr = declValue(b, a, v)
+                    b = cr.b
+                    v = cr.v
+                    var cbad = b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), v, one])
+                    var cBadB = curF.NewBlock(""), cOkB = curF.NewBlock(""), cEnd = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, cbad, zero), cBadB, cOkB)
+                    cBadB.NewStore(one, refuseP)
+                    cBadB.NewBr(cEnd)
+                    storeVarRaw(cOkB, names[j], v)
+                    cOkB.NewBr(cEnd)
+                    refVars["$" + names[j]] = true
+                    return cEnd
+                }
+            }
             var refChk = isRef && a != null && a.lit == null && a.idxT == null
             if (refChk && v == null && (a.valT == null || a.valT.c != undefined)) {
                 var msg = bashRefBad(kw, (a.valT != null) ? a.valT.c : "")
@@ -4611,20 +4671,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // return) unless -g is given; `export` and `readonly` always act on the global.
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
             var fresh = localize && curFrame != null && !locOwn("$" + names[j])
-            // A nameref to itself is refused outside a function, and nothing is declared: a
-            // literal value here, a computed one when it is stored (selfRef). Inside one it is
-            // declared with two warnings (bash 5.3). Twin of the same check in makeDecl in
-            // bash-interpreter.abnf.
+            // A computed value that makes a nameref refer to itself outside a function is
+            // refused when it is stored, and nothing is declared (a literal one: declOne).
             var selfMsg = kw + ": " + names[j] + ": nameref variable self references not allowed\n"
-            var selfRef = isRef && curFrame == null && asgs[j] != null
-            if (selfRef && v == null && asgs[j].valT != null && asgs[j].valT.c != undefined) {
-                selfRef = false
-                if (asgs[j].valT.c == names[j]) {
-                    emitDiag(b, gepStr(b, selfMsg))
-                    roFail = true
-                    return b
-                }
-            }
+            var selfRef = isRef && curFrame == null && asgs[j] != null && !(v == null && asgs[j].valT != null && asgs[j].valT.c != undefined)
             var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
             if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0) && attrOn(roVars, names[j])) {
                 emitDiag(b, gepStr(b, roWho + ((asgs[j] != null && roWho != "" && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n"))
@@ -4689,14 +4739,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var refJoin = null
             var ra0 = asgs[j]
             if (ra0 != null && !isRef && attrOn(refVars, names[j]) && !attrOn(intVars, names[j]) && ra0.lit == null && ra0.idxT == null) {
-                var rv = v
-                if (rv == null && ra0.valT == null) { rv = emptyPtr(b) }
-                else if (rv == null) {
-                    var rr = ra0.valT.fn(b)
-                    b = rr.b
-                    rv = (ra0.valT.f == true) ? wordJoin(b, rr.v) : rr.v
-                    if (ra0.valT.c == undefined && ra0.valT.done != true) { b = emitAbortCheck(b) }
-                }
+                var rr = declValue(b, ra0, v)
+                b = rr.b
+                var rv = rr.v
                 v = rv
                 var mode = localize ? one : ((kw == "export") ? llvm.constant.NewInt(i32, 2) : zero)
                 var rbad = b.NewCall(rtDeclNref, [gepStr(b, kw), gepStr(b, names[j]), rv, mode])
@@ -4751,10 +4796,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     okB.NewBr(joinB)
                     b = joinB
                 }
+                // Storing a value that is NAME itself warns once more.
                 if (isRef && curFrame != null) {
                     var warnB = curF.NewBlock(""), goB = curF.NewBlock("")
                     b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [loadVar(b, names[j]), gepStr(b, names[j])]), zero), warnB, goB)
-                    emitDiag(warnB, gepStr(warnB, kw + ": warning: " + names[j] + ": circular name reference\n"))
                     emitDiag(warnB, gepStr(warnB, "warning: " + names[j] + ": circular name reference\n"))
                     warnB.NewBr(goB)
                     b = goB
@@ -5075,6 +5120,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             t = n
         }
         return attrOn(refVars, t) ? null : t
+    }
+    // Whether the chain of namerefs from NAME, every target known here, comes back to a name
+    // on it.
+    function refLoops(name) {
+        var seen = {}
+        var t = name
+        while (attrOn(refVars, t)) {
+            if (hasOwn(seen, "$" + t)) { return true }
+            seen["$" + t] = true
+            var n = anytype // A known target's name, else true.
+            n = attrOn(refVars, t)
+            if (typeof n != "string") { return false }
+            t = n
+        }
+        return false
     }
     // An assignment statement through the nameref NAME to a readonly variable, which is
     // known when it runs (refAttrs), says so naming that variable and abandons the line.

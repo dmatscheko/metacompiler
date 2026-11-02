@@ -6549,6 +6549,22 @@ int rt_decl_nref(char *kw, char *n, char *v, int mode)
     return 1;
 }
 
+/* A declaration (keyword kw) of n, a nameref local to the running function whose
+ * chain is circular: bash looks the chain up twice, each a warning. Without -n a
+ * value v (has) then goes to n itself, as the name it refers to; one that names
+ * no variable fails the declaration, and 1. Twin of the circular arm of declOne
+ * in bash-interpreter.abnf. */
+int rt_decl_circ(char *kw, char *n, char *v, int has)
+{
+    if (nref_quiet == 0) {
+        rt_berr("warning", n, "circular name reference");
+        rt_berr("warning", n, "circular name reference");
+    }
+    if (has == 0 || rt_isasgref(v) != 0) return 0;
+    rt_berr(kw, rt_strcat(rt_strcat("`", v), "'"), "invalid variable name for name reference");
+    return 1;
+}
+
 /* `declare -n NAME` (keyword kw) meeting NAME: an array, even an empty one, is
  * refused with bash's "reference variable cannot be an array"; so, when chk (no
  * value given), is a set value that names no variable. 1, else 0. Twin of the -n

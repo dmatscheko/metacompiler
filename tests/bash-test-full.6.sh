@@ -89,9 +89,26 @@ s130() {
   e=$({ test -n -a -z; echo $?; test x -a '(' '' ')'; echo $?; test ! '(' ! '' ')'; echo $?; test -t -a -n x; echo $?; test -n x -a -q; echo $?; test -a / -a '(' -n x ')'; echo $?; } 2>&1)
   check tse3 "$e" $'0\n0\n1\n1\n0\n0'
 }
+
+# ===== SECTION 131: declarations of a nameref to itself =====
+# `local -n NAME=NAME` warns before any other check, a readonly NAME's refusal included. A
+# declaration without -n of a function's own nameref whose chain is circular looks it up
+# twice, each a warning, and then gives the value to the nameref itself, which must name a
+# variable. Every expected value is bash 5.3's.
+s131() {
+  local e
+  s131s() { local l; while IFS= read -r l; do l=${l#*: line }; printf '%s;' "${l#*: }"; done <<< "$1"; }
+  e=$(declare -gi s131w=1; s131m() { local -n s131w=s131w; declare s131w=9+1; echo "s=$?"; }; s131m 2>&1; echo "w=$s131w")
+  check nrc1 "$(s131s "$e")" "local: warning: s131w: circular name reference;warning: s131w: circular name reference;warning: s131w: circular name reference;warning: s131w: circular name reference;declare: \`9+1': invalid variable name for name reference;s=1;w=1;"
+  e=$(s131p() { local -n s131v=s131v; declare s131v; declare s131v=s131x; echo "s=$?"; declare -p s131v; }; s131p 2>&1)
+  check nrc2 "$(s131s "$e")" 'local: warning: s131v: circular name reference;warning: s131v: circular name reference;warning: s131v: circular name reference;warning: s131v: circular name reference;warning: s131v: circular name reference;warning: s131v: circular name reference;s=0;declare -n s131v="s131x";'
+  e=$(declare -gr s131r=1; s131f() { local -n s131r=s131r; echo "s=$?"; }; s131f 2>&1; s131g() { local s131y=s131y; local -n s131y; echo "s=$?"; }; s131g 2>&1)
+  check nrc3 "$(s131s "$e")" 'local: warning: s131r: circular name reference;local: s131r: readonly variable;s=1;s=0;'
+}
 # ===== END SECTIONS =====
 
 s129  # SECTION-CALL 129
 s130  # SECTION-CALL 130
+s131  # SECTION-CALL 131
 echo "full: $checks checks, $fails failures"
 exit $fails

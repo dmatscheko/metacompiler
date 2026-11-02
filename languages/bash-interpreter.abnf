@@ -3324,6 +3324,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A nameref cannot be an integer: -n with -i fails, silently, and declares
             // nothing (bash 5.3). Twin of declOne in bash-to-llvm-ir.abnf.
             if (isRef && integer) { roFail = true; return }
+            // -n with a value that is NAME itself: refused outside a function, where nothing
+            // is declared; inside one a warning, before any other check (bash 5.3). Twin of
+            // the same check in declOne in bash-to-llvm-ir.abnf.
+            var selfV = isRef && asgs[k] != null && asgs[k].lit == null && asgs[k].idxT == null && v == names[k]
+            if (selfV && localFrames.length == 0) {
+                diagErr(kw + ": " + names[k] + ": nameref variable self references not allowed\n")
+                roFail = true
+                return
+            }
+            if (selfV) { diagErr(kw + ": warning: " + names[k] + ": circular name reference\n") }
+            var plainV = asgs[k] == null || (asgs[k].lit == null && asgs[k].idxT == null && asgs[k].op != "+=")
+            // A function's own nameref whose chain is circular is looked up twice, each a
+            // warning. Without -n and attributes, a value then goes to the nameref itself, as
+            // the name it refers to (bash 5.3). Twin of rt_decl_circ in bash-rt.c.
+            if (anyRef && plus.indexOf("n") < 0 && attrOn(refVars, names[k]) && localizes() && localHere(names[k]) && plainV && (isRef || flags == "")) {
+                if (refTarget(names[k]) == "") {
+                    if (!refQuiet) { diagErr("warning: " + names[k] + ": circular name reference\n") }
+                    if (!isRef) {
+                        if (asgs[k] == null) { return }
+                        if (!bashIsRef(v)) { diagErr(kw + ": `" + v + "': invalid variable name for name reference\n"); roFail = true; return }
+                        noRef = noRef + 1
+                        declOneN(k, v)
+                        noRef = noRef - 1
+                        return
+                    }
+                }
+            }
             // Without -n a declaration of a nameref acts on what it refers to: attributes,
             // value and a new local land on the target (bash 5.3: declare -n r=t; declare -r r
             // makes t readonly; r='a[1]' takes the array a). A function's first local of the
@@ -3341,10 +3368,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return
                 }
             }
-            // -n declares the reference itself, whatever it referred to before. A nameref
-            // to itself is refused outside a function and nothing is declared; inside one it
-            // is declared with two warnings (bash 5.3). Twin of the same check in makeDecl in
-            // bash-to-llvm-ir.abnf.
+            // -n declares the reference itself, whatever it referred to before.
             var nk = "$" + names[k]
             // -a or -A of a nameref that refers to nothing makes it a plain array.
             if (!isRef && bareArr && attrOn(refVars, names[k])) { refVars[nk] = false }
@@ -3385,20 +3409,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A value that names no variable is refused, and nothing is declared (bashRefBad).
             var refBad = (isRef && asgs[k] != null && asgs[k].lit == null && asgs[k].idxT == null) ? bashRefBad(kw, v) : ""
             if (refBad != "") { diagErr(refBad); roFail = true; return }
-            var sv = {v: hasOwn(vars, nk) ? vars[nk] : null, h: hasOwn(varsHas, nk) ? varsHas[nk] : null}
             if (isRef) { noRef = noRef + 1 }
             declOneN(k, v)
-            if (isRef && localFrames.length == 0 && varsHas[nk] && vars[nk] == names[k]) {
-                noRef = noRef - 1
-                if (sv.v == null) { vars[nk] = ""; varsHas[nk] = false } else { vars[nk] = sv.v; varsHas[nk] = sv.h }
-                diagErr(kw + ": " + names[k] + ": nameref variable self references not allowed\n")
-                roFail = true
-                return
-            }
-            if (isRef && varsHas[nk] && vars[nk] == names[k]) {
-                diagErr(kw + ": warning: " + names[k] + ": circular name reference\n")
-                diagErr("warning: " + names[k] + ": circular name reference\n")
-            }
+            // Storing a value that is NAME itself warns once more.
+            if (selfV && varsHas[nk] && vars[nk] == names[k]) { diagErr("warning: " + names[k] + ": circular name reference\n") }
             if (isRef) {
                 noRef = noRef - 1
                 refVars["$" + names[k]] = true
