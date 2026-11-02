@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#method, tally/Symbol#name not in 2.6, interp Integer#+ Method#call, Range freeze · P3 · RB · OPEN [V]
+### T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#method, tally/Symbol#name not in 2.6, interp Integer#+ Method#call, Range freeze · P3 · RB · IN PROGRESS (RB worker, round 58) [V]
 
 Found while working T-1128. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected unless noted.
 
