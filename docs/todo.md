@@ -135,7 +135,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1156 bash: run-time readonly through namerefs, element-nameref declarations, eval refusals · P3 · SH · OPEN [V]
+### T-1156 bash: run-time readonly through namerefs, element-nameref declarations, eval refusals · P3 · SH · IN PROGRESS (SH worker, round 49) [V]
 Found while closing T-1152; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Compiler: `f1() { local -n w=$1; readonly w; }; s1=4; f1 s1; s1=5; echo "a $? $s1"` — oracle refuses (`s1: readonly variable`, the rest of the line is abandoned); run/native print `a 0 5`. `declare -p` shows the run-time mark 32768, but a later by-name store does not consult it (the lexical-limit trade-off; find a cost-neutral way, e.g. only for names a computed nameref could reach).
 - Compiler: `w=q declare -p w` through a circular nameref prints one warning too few and shows `declare -nx w="q"`; oracle: two warnings then `declare -x w="q"`.
