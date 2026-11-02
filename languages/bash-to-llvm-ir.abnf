@@ -2138,6 +2138,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtPushLocal = rtDecl("rt_push_local", false, [0])
     var rtPopLocals = rtDecl("rt_pop_locals", false, [0])
     var rtLocalHere = rtDecl("rt_local_here", false, [0, 0])
+    var rtRoBind = rtDecl("rt_ro_bind", false, [0])
+    var rtRoNow = rtDecl("rt_ro_now", false, [0, 0])
     var rtPushTmp = rtDecl("rt_push_tmp", false, [0])
     var rtFnEnter = rtDecl("rt_fn_enter", false, [0])
     var rtLocalNew = rtDecl("rt_local_new", false, [0, 0])
@@ -5179,7 +5181,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (isRef) { refVars["$" + names[j]] = false }
             if (setRo) { roVars["$" + names[j]] = true }
             // readonly of a name the function has a local of makes that local readonly, not the global.
-            if (setRo && !localize && (global || !locOwn("$" + names[j]))) { b.NewStore(one, roFlag(names[j])) }
+            // Without -g, in a function, it is a caller's local when one is in effect
+            // (rt_ro_bind).
+            if (setRo && !localize && (global || !locOwn("$" + names[j]))) {
+                var roG = (global || curFrame == null) ? one : b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtRoBind, llvm.constant.NewInt(i32, getVarId(names[j]))), zero), i32)
+                b.NewStore(b.NewOr(b.NewLoad(i32, roFlag(names[j])), roG), roFlag(names[j]))
+                fnRoNote(names[j], global)
+            }
             // A name with an attribute has a slot, where refAttrs looks for it.
             if (integer || cl != "" || setRo) { getVarId(names[j]) }
             // A value that names no variable, for a nameref itself, fails the declaration
@@ -5648,6 +5656,53 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(roFlags, "$" + name)) { roFlags["$" + name] = m.NewGlobalDef("ro_" + roNames.indexOf(name), zero) }
         return roFlags["$" + name]
     }
+    // A global a function body makes readonly is readonly here inside the body and, after
+    // it, from each call of the function emitted later (fnRoCall), not from its definition:
+    // a function that never runs, or runs in a subshell, leaves the name as it was. Without
+    // -g the readonly lands on whatever binding is in effect, so a call in a function body
+    // makes the caller's local readonly too (bash's dynamic scope); with -g it is the
+    // global's. fnRo lists each function's names, {n, g}; curFrame.ro the body's so far.
+    var fnRo = {}
+    function fnRoNote(nm, g) {
+        if (curFrame == null || subDepth > curFrame.sub) { return }
+        var k
+        for (k = 0; k < curFrame.ro.length; k++) {
+            if (curFrame.ro[k].n == nm) { curFrame.ro[k].g = curFrame.ro[k].g && g; return }
+        }
+        curFrame.ro.push({n: nm, g: g})
+    }
+    function roSnap() {
+        var s = {}
+        var k
+        for (k = 0; k < roNames.length; k++) { s["$" + roNames[k]] = attrOn(roVars, roNames[k]) == true }
+        return s
+    }
+    // At the end of fname's body (fr its frame, was roSnap's answer before it).
+    function fnRoTake(fname, fr, was) {
+        var key = "$" + fname
+        if (!hasOwn(fnRo, key)) { fnRo[key] = [] }
+        var l = fnRo[key]
+        var k, i
+        for (k = 0; k < fr.ro.length; k++) {
+            var e = fr.ro[k]
+            roVars["$" + e.n] = was["$" + e.n]
+            for (i = 0; i < l.length && l[i].n != e.n; i++) { }
+            if (i == l.length) { l.push({n: e.n, g: e.g}) } else { l[i].g = l[i].g && e.g }
+        }
+    }
+    function fnRoCall(fname) {
+        if (!hasOwn(fnRo, "$" + fname)) { return }
+        var l = fnRo["$" + fname]
+        var k
+        for (k = 0; k < l.length; k++) {
+            var nm = l[k].n
+            var own = curFrame != null && locOwn("$" + nm)
+            if (!own) { fnRoNote(nm, l[k].g) }
+            if ((l[k].g && own) || attrOn(roVars, nm)) { continue }
+            if (subDepth > ((curFrame != null) ? curFrame.sub : 0)) { attrPushUndo(nm) }
+            roVars["$" + nm] = true
+        }
+    }
     // `declare -n` / `local -n`: a NAMEREF, lexical like the others. A read (varString), an
     // assignment (storeVar, emitAssign) and an unset of the name act on the variable its value
     // names, through rt_getvar_byname / rt_setvar_byname; declare -p, ${!REF} (the name),
@@ -5735,11 +5790,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {ro: ro, ok: ok}
     }
     // Is NAME, made readonly somewhere (roAnywhere), readonly when this runs? A global is
-    // when its roFlag is set; a name this function's code made a local of, when that
+    // when its roFlag is set; in a function, a local in effect when a callee made it
+    // readonly (rt_ro_now); a name this function's code made a local of, also when that
     // `local` met a readonly global and made none (noLocal).
     function roRtCond(b, name) {
-        var p = locOwn("$" + name) ? noLocal(name) : roFlag(name)
-        return b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, p), zero)
+        var r = b.NewLoad(i32, roFlag(name))
+        if (curFrame != null) { r = b.NewCall(rtRoNow, [llvm.constant.NewInt(i32, getVarId(name)), r]) }
+        if (locOwn("$" + name)) { r = b.NewOr(r, b.NewLoad(i32, noLocal(name))) }
+        return b.NewICmp(llvm.enum.IPredNE, r, zero)
     }
     // The i32 slot that says this call's `local NAME` was refused, 0 at the call's entry.
     function noLocal(name) {
@@ -7821,6 +7879,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(b.NewSub(b.NewLoad(i32, gArgvTop), base), gFrameN)
         if (tdp != null) { b.NewStore(b.NewAdd(b.NewLoad(i32, tdp), one), gLsTb) }
         b = emitFnCall(b, name)
+        fnRoCall(name)
         b.NewStore(b.NewLoad(i32, savedBase), gFrameBase)
         b.NewStore(b.NewLoad(i32, savedN), gFrameN)
         b.NewStore(b.NewLoad(i32, savedTop), gArgvTop)
@@ -9176,12 +9235,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             entry.NewStore(llvm.constant.NewInt(i32, tcFn), tcSlot)
             // Every attribute the body declares is function-local, exactly like the value.
             var undoBase = attrUndo.length
-            curFrame = {depth: dslot, locs: {}, undo: undoBase, noLoc: {}}
+            var roWas = roSnap()
+            curFrame = {depth: dslot, locs: {}, undo: undoBase, noLoc: {}, sub: subDepth, ro: []}
             storeVarRaw(entry, "FUNCNAME", gepStr(entry, fname))
             emitFnRet(curExit, curExit.NewLoad(i32, gStatus))
             var endb = bodyT(entry)
             emitFnRet(endb, endb.NewLoad(i32, gStatus))
             attrUnwind(undoBase)
+            fnRoTake(fname, curFrame, roWas)
             curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops; fnTouch = savedTouch
             curExitRd = savedExitRd; redirStack = savedRedirs; retInSub = savedRetSub; tcSlot = savedTc
             return b

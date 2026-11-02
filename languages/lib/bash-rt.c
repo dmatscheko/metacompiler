@@ -308,6 +308,8 @@ int rt_ss_save(int u);
 int rt_ss_restore(int u);
 int rt_push_local(int id);
 int rt_pop_locals(int d);
+int rt_ro_bind(int id);
+int rt_ro_now(int id, int g);
 int rt_glob_swap(int id);
 int rt_unset_up(int id, int d, int fn);
 int rt_ls_drop(int id, int low, int from, int to);
@@ -6753,7 +6755,7 @@ int rt_xmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 7975;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 8039;
     return 0;
 }
 
@@ -6773,7 +6775,7 @@ int rt_nmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 7959;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 8023;
     return 0;
 }
 
@@ -8457,7 +8459,7 @@ int rt_ls_restore(int t, int rows)
     }
     arr_rows = arr_rows - ar_n[r] + cnt;
     ar_n[r] = cnt;
-    ar_mk[r] = ls_amark[t] & 7991;
+    ar_mk[r] = ls_amark[t] & 8055;
     ar_srt[r] = (ls_amark[t] & 8) != 0 ? 0 : 1;
     rt_ar_khdrop(r);
     return 0;
@@ -8539,6 +8541,33 @@ int rt_local_here(int id, int d)
         t = t + 1;
     }
     return 0;
+}
+
+/* READONLY OF A LOCAL is mark 64. A readonly without -g that a function's code
+ * makes of a name it has no local of lands on the binding in effect, which is a
+ * caller's local when the name is on the local save stack: that binding takes
+ * the mark, and it goes with the binding when the caller returns (the save
+ * stack carries the marks). Answers 0 when no local is in effect, for the
+ * global variable, whose readonly the emitter keeps itself (its ro_ flag). */
+int rt_ro_bind(int id)
+{
+    int t = ls_top - 1;
+    int r;
+    while (t >= 0 && ls_id[t] != id) t = t - 1;
+    if (t < 0) return 0;
+    r = rt_ar_rec(varnames[id]);
+    ar_mk[r] = ar_mk[r] | 64;
+    return 1;
+}
+
+/* Is the binding of gvars[id] in effect readonly: a local's mark 64, else g,
+ * the global variable's ro_ flag. */
+int rt_ro_now(int id, int g)
+{
+    int t = ls_top - 1;
+    while (t >= 0 && ls_id[t] != id) t = t - 1;
+    if (t < 0) return g;
+    return (rt_arr_marks(varnames[id]) & 64) != 0 ? 1 : 0;
 }
 
 /* Is entry t of the frame starting at depth d one of the call's locals, as

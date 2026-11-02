@@ -366,6 +366,43 @@ s150h); check fln3 "${e//$'\n'/,}" "$((l+6)),$((l+7)),$((l+9))"
   l=$LINENO; e=$(s150k() { readonly s150r=1; s150r=2; echo no; }
 s150k 2>&1); check fln4 "${e#*: line }" "$((l+4)): s150r: readonly variable"
 }
+# ===== SECTION 151: readonly made by a function body =====
+# A function's readonly of a global holds from the moment the function runs, not from its
+# definition: one never called, or called only in a subshell, leaves the name as it was.
+# Without -g it lands on the binding in effect, which may be a caller's local, and goes with
+# that local when the caller returns; with -g it is the global's. Every expected value is
+# bash 5.3's.
+s151() {
+  local e
+  s151s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s151f() { readonly s151a=1; }
+  s151g() { readonly s151b; }
+  e=$(s151a=2; echo "a $s151a"; declare -p s151a; (s151f; echo "b $s151a"); s151a=3; echo "c $s151a"; declare -p s151a)
+  check rfb1 "${e//$'\n'/;}" 'a 2;declare -- s151a="2";b 1;c 3;declare -- s151a="3"'
+  e=$({ d=$(s151g; declare -p s151b); echo "$d"; s151b=4; echo "d $s151b"; s151g; (s151b=5; echo no); echo "e $s151b"; } 2>&1)
+  check rfb2 "$(s151s "$e")" 'declare -r s151b;d 4;s151b: readonly variable;e 4;'
+  e=$({
+    s151h() { readonly s151c=5; echo "f $s151c"; }
+    s151k() { local s151c=1; s151h; (s151c=2; echo no); echo "g $s151c"; }
+    (s151k); s151k; s151c=3; echo "h $s151c"; declare -p s151c
+  } 2>&1)
+  check rfb3 "$(s151s "$e")" 'f 5;s151c: readonly variable;g 5;f 5;s151c: readonly variable;g 5;h 3;declare -- s151c="3";'
+  e=$({
+    s151m() { local s151d=1; s151n; (s151d=2; echo no); echo "i $s151d"; declare -p s151d; }
+    s151n() { readonly s151d; }
+    s151p() { local s151e=2; s151q; s151e=3; echo "j $s151e"; declare -p s151e; }
+    s151q() { declare -gr s151e=1; }
+    s151m; s151d=4; echo "k $s151d"; s151p; (s151e=4; echo no); echo "l $s151e"; declare -p s151e
+  } 2>&1)
+  check rfb4 "$(s151s "$e")" 's151d: readonly variable;i 1;declare -r s151d="1";k 4;j 3;declare -- s151e="3";s151e: readonly variable;l 1;declare -r s151e="1";'
+  e=$({
+    s151r() { local s151g=1; s151t; (s151g=2; echo no); echo "m $s151g"; }
+    s151t() { s151u; (s151g=9; echo no); echo "n $s151g"; }
+    s151u() { readonly s151g; }
+    s151r; s151g=5; echo "o $s151g"
+  } 2>&1)
+  check rfb5 "$(s151s "$e")" 's151g: readonly variable;n 1;s151g: readonly variable;m 1;o 5;'
+}
 # ===== END SECTIONS =====
 
 s135  # SECTION-CALL 135
@@ -384,5 +421,6 @@ s147  # SECTION-CALL 147
 s148  # SECTION-CALL 148
 s149  # SECTION-CALL 149
 s150  # SECTION-CALL 150
+s151  # SECTION-CALL 151
 echo "full: $checks checks, $fails failures"
 exit $fails
