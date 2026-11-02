@@ -2603,6 +2603,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // makeTry in the block turns into the block's ret.
     var curBlkCtl = false
     var blkNextName = "$blknext"
+    // curBlkSite  - the hidden home-token name of the call emitBlkBreakCall is
+    //               emitting, beside emitBlkArg; a block emitted then takes it as
+    // curBlkHome  - the token name a `break' of the block being emitted reads, null
+    //               when no call catches it (`proc { }'): the break then raises.
+    // curBlkLocal - the function is a lambda's or a define_method body's, whose
+    //               `break' ends only its own run. nextBlkLocal asks emitFunc to set
+    //               it for the next function it opens.
+    var curBlkSite = null
+    var curBlkHome = null
+    var curBlkLocal = false
+    var nextBlkLocal = false
     var blkBrkName = "__blkbrk"
     // `return' inside a block returns from the ENCLOSING METHOD, not from the block
     // (that is `next'), and it does so through the block, the iterating call and any
@@ -2662,29 +2673,52 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Emit `mk' (a call that was given a literal block) inside a js_try that turns the
     // block's `break v' marker back into the value of the call, and re-raises anything
     // else unchanged.
+    //
+    // A break ends the call its block was WRITTEN for, not the innermost one running a
+    // block (`def b; [1].each { yield }; end; b { break 5 }' is 5), so each evaluation
+    // of the call makes a home token, an empty array, under a hidden name of this
+    // site ($bhN). The try closure's own scope keeps a copy, which is what the block
+    // (created inside it) reads when it breaks; the marker carries the token, and the
+    // catch claims only its own. The call ending in any way pushes onto the token,
+    // after which a break of that block is a LocalJumpError (makeBreak). Twin of
+    // catchBlkBreak in ruby-interpreter.abnf.
     function emitBlkBreakCall(b, mk) {
         // Only the method's OWN frame turns a `return' marker back into a ret; the
         // same wrapper around a call written inside a block re-raises it, so the
         // marker reaches the method rather than ending the inner iteration.
         var myTag = curMethodTag
         var catchRet = myTag != 0 && curMethodFrame
+        hidCount++
+        var homeName = "$bh" + hidCount
+        var homeV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, homeName), homeV])
         // emitBlkArg is raised INSIDE the try closure's body, not around emitFunc:
         // emitFunc consumes and clears the flag for the function it opens, so raising
         // it outside would leave the closure's own arguments - the literal block among
         // them - emitted with it already cleared.
         var tryIdx = emitFunc([], function(bb) {
+            var hn = emitStr(bb, homeName)
+            callExt(bb, "js_scope_decl", [curScopeV, hn, callExt(bb, "js_scope_get", [curScopeV, hn])])
             var savedArg = emitBlkArg
+            var savedSite = curBlkSite
             emitBlkArg = true
+            curBlkSite = homeName
             var rmk = mk(bb)
             emitBlkArg = savedArg
+            curBlkSite = savedSite
             return rmk
         }, false)
         var tryClo = callExt(b, "js_closure", [handle(tryIdx), curScopeV])
         var catchIdx = emitFunc(["$brk"], function(bb) {
             var ev = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$brk")])
+            var hv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, homeName)])
+            callExt(bb, "js_arr_push", [hv, hTrue])
+            var brkB = curF.NewBlock("")
             var mineB = curF.NewBlock("")
             var otherB = curF.NewBlock("")
-            bb.NewCondBr(truthy(bb, callExt(bb, "js_is_type", [ev, emitStr(bb, blkBrkName)])), mineB, otherB)
+            bb.NewCondBr(truthy(bb, callExt(bb, "js_is_type", [ev, emitStr(bb, blkBrkName)])), brkB, otherB)
+            var bArgs = callExt(brkB, "js_get", [ev, emitStr(brkB, "args")])
+            brkB.NewCondBr(truthy(brkB, callExt(brkB, "js_seq", [callExt(brkB, "js_rget", [bArgs, emitNum(brkB, 1)]), hv])), mineB, otherB)
             if (catchRet) {
                 // A `return' marker of THIS method: hand the marker itself back, and
                 // the call site below turns it into a ret. Anything else re-raises.
@@ -2708,6 +2742,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }, false)
         var catchClo = callExt(b, "js_closure", [handle(catchIdx), curScopeV])
         var tv = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+        callExt(b, "js_arr_push", [homeV, hTrue])
         if (!catchRet) { return {b: b, v: tv} }
         var doRetB = curF.NewBlock("")
         var contB = curF.NewBlock("")
@@ -2884,11 +2919,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function(b) {
             var v = hNull
             if (t != null) { var r = t(b); b = r.b; v = r.v }
+            // A lambda's or a define_method body's `break' ends that call only:
+            // like `next' in a block, like `return' in a `->' or a method body.
+            if (loopStack.length == 0 && curBlkLocal) {
+                if (curIsBlockFn || curBlkCtl) { return emitBlkNext(b, v) }
+                return {b: emitRubyRet(b, v), v: hNull}
+            }
             if (loopStack.length == 0 && (curIsBlockFn || curBlkCtl)) {
-                var margs = callExt(b, "js_arr_new", [])
-                callExt(b, "js_arr_push", [margs, v])
-                callExt(b, "js_throw", [callExt(b, "js_pyexc", [emitStr(b, blkBrkName), margs])])
-                b.NewRet(hUndef) // never reached: js_throw unwinds on the host side
+                // The marker carries the home token, live (still empty) only while
+                // the home call runs; past it MRI raises LocalJumpError.
+                var lje = curF.NewBlock("")
+                if (curBlkHome !== null) {
+                    var homeV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, curBlkHome)])
+                    var thrB = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, callExt(b, "js_rget", [homeV, emitNum(b, 0)])), lje, thrB)
+                    var margs = callExt(thrB, "js_arr_new", [])
+                    callExt(thrB, "js_arr_push", [margs, v])
+                    callExt(thrB, "js_arr_push", [margs, homeV])
+                    callExt(thrB, "js_throw", [callExt(thrB, "js_pyexc", [emitStr(thrB, blkBrkName), margs])])
+                    thrB.NewRet(hUndef) // never reached: js_throw unwinds on the host side
+                } else {
+                    b.NewBr(lje)
+                }
+                var ljMsg = callExt(lje, "js_arr_new", [])
+                callExt(lje, "js_arr_push", [ljMsg, emitStr(lje, "break from proc-closure")])
+                var ljE = callExt(lje, "js_rnew", [callExt(lje, "js_rclass", [emitStr(lje, "LocalJumpError")]), ljMsg])
+                callExt(lje, "js_rraise", [ljE, hUndef])
+                lje.NewRet(hUndef)
                 return {b: deadBlock(), v: hNull}
             }
             // A branch to the enclosing loop, or a control signal out of a begin body.
@@ -2921,17 +2978,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function(b) {
             var v = hNull
             if (t != null) { var r = t(b); b = r.b; v = r.v }
-            // `next v' directly in a block ends THIS block run with v: an ordinary ret.
-            if (loopStack.length == 0 && curIsBlockFn) {
-                b.NewRet(v)
-                return {b: deadBlock(), v: hNull}
-            }
-            if (loopStack.length == 0 && curBlkCtl) { callExt(b, "js_scope_set", [curScopeV, emitStr(b, blkNextName), v]) }
-            var nlp = loopStack.length > 0 ? loopStack[loopStack.length - 1] : null
-            if (nlp !== null && nlp.nv !== undefined) { callExt(b, "js_scope_set", [curScopeV, emitStr(b, nlp.nv), v]) }
-            emitContinue(b)
+            return emitBlkNext(b, v)
+        }
+    }
+    function emitBlkNext(b, v) {
+        // `next v' directly in a block ends THIS block run with v: an ordinary ret.
+        if (loopStack.length == 0 && curIsBlockFn) {
+            b.NewRet(v)
             return {b: deadBlock(), v: hNull}
         }
+        if (loopStack.length == 0 && curBlkCtl) { callExt(b, "js_scope_set", [curScopeV, emitStr(b, blkNextName), v]) }
+        var nlp = loopStack.length > 0 ? loopStack[loopStack.length - 1] : null
+        if (nlp !== null && nlp.nv !== undefined) { callExt(b, "js_scope_set", [curScopeV, emitStr(b, nlp.nv), v]) }
+        emitContinue(b)
+        return {b: deadBlock(), v: hNull}
     }
 
     // if / unless: the branch value travels through a hidden result variable in the
@@ -3556,7 +3616,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 pObj = null
                 if (s.kind == "mcall") {
-                    if (s.name == "new") {
+                    if (s.name == "new" && !hasBlockArg(s.args)) {
                         var rn = emitNew(b, cur, unwrapArgs(s.args))
                         b = rn.b
                         cur = rn.v
@@ -3571,6 +3631,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         var margsT = unwrapArgs(s.args)
                         var rw = emitBlkBreakCall(b, function(bb) {
                             var recvV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, recvName)])
+                            if (mname == "new") { return emitNew(bb, recvV, margsT) }
                             var ia = emitArgs(bb, margsT)
                             return {b: ia.b, v: callExt(ia.b, "js_rxmcall", [recvV, emitMKey(ia.b, recvV, mname, false), ia.v])}
                         })
@@ -3958,6 +4019,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var bodyStmt = blockBodyOf(items)
         return function(b) {
             curBlkDepth++
+            nextBlkLocal = true
             var idx = emitFunc(params, bodyStmt, false, false, false, false, -1)
             curBlkDepth--
             var lamV = callExt(b, "js_rlambda", [emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)])
@@ -5509,7 +5571,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     var savedBA = emitBlkArg
                     var savedPR = curProcRet
                     emitBlkArg = false
-                    if (isLam) { curProcRet = false }
+                    if (isLam) { curProcRet = false; nextBlkLocal = true }
                     var r = blkT(b)
                     emitBlkArg = savedBA
                     curProcRet = savedPR
@@ -6069,6 +6131,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedBlkNL = curBlkNonlocal
         var savedProcRet = curProcRet
         var savedBlkArg = emitBlkArg
+        var savedBlkHome = curBlkHome
+        var savedBlkLocal = curBlkLocal
+        if (isBlock === true) {
+            curBlkHome = savedBlkArg === true ? curBlkSite : null
+            curBlkLocal = isMethod === true || nextBlkLocal
+        } else if (isCtl !== true) {
+            curBlkHome = null
+            curBlkLocal = nextBlkLocal
+        }
+        nextBlkLocal = false
         var savedHasSelf = curHasSelf
         if (isMethod) { curHasSelf = true }
         var savedSelfIsCls = curSelfIsCls
@@ -6188,6 +6260,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curBlkNonlocal = savedBlkNL
         curProcRet = savedProcRet
         emitBlkArg = savedBlkArg
+        curBlkHome = savedBlkHome
+        curBlkLocal = savedBlkLocal
         curHasSelf = savedHasSelf
         curSelfIsCls = savedSelfIsCls
         curDefLocals = savedDefLocals
@@ -6267,6 +6341,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curTopDef = false
         var savedPs = curMethPs
         curMethPs = m.params
+        nextBlkLocal = m.dm === true
         var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
         curTopDef = savedTop
         curMethName = savedMeth
@@ -8064,7 +8139,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 continue
             }
             if (it.defm != undefined) {
-                r.methods.push({name: it.defm, params: it.defmparams, body: it.defmbody})
+                r.methods.push({name: it.defm, params: it.defmparams, body: it.defmbody, dm: true})
                 if (maOn()) { r.cstmts.push({t: hookStmt("self", "method_added", it.defm), name: ""}) }
                 continue
             }
@@ -8244,6 +8319,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // where it is written (lexPath, stamped by makeModuleStmt).
             var pathAround = curClsPath
             if (m.lexPath != undefined) { curClsPath = m.lexPath }
+            nextBlkLocal = m.dm === true
             var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
             curClsPath = pathAround
             // A method closure enters the arity registry the way a block and a lambda

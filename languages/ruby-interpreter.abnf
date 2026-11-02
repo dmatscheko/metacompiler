@@ -11848,8 +11848,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var sp = splitBlock(s.args)
         var argv = evalArgList(sp.args)
         if (sp.blk == null) { return mcall(recv, s.name, argv, null) }
-        var bf = sp.blk()
-        return catchBlkBreak(function() { return mcall(recv, s.name, argv, bf) })
+        var home = blkHome()
+        var bf = sp.blk(home)
+        return catchBlkBreak(function() { return mcall(recv, s.name, argv, bf) }, home)
     }
 
     // The places a chain's primary can READ - a local, an @ivar, a $global - by the
@@ -12264,8 +12265,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (!star && npos > posParams.length) { argCountErr(npos, posParams, false) }
     }
     // Kernel#lambda's block, made local-returning: the block itself still throws the
-    // __blkret signal makeBlock builds, and this is the frame that stops it.
-    function lambdaWrap(blk) {
+    // __blkret signal makeBlock builds, and this is the frame that stops it. A literal
+    // block's home record (never ended) makes its `break' local as well; `lambda(&pr)'
+    // passes null and pr keeps its proc break.
+    function lambdaWrap(blk, home) {
         if (typeof blk != "function") { return blk }
         return wrapNote(function() {
             var args = []
@@ -12273,7 +12276,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             try {
                 return blk.apply(undefined, args)
             } catch (e) {
-                if (e !== null && e !== undefined && e.__blkret === true) { return e.v }
+                if (e !== null && e !== undefined && (e.__blkret === true || (e.__blkbrk === true && e.home === home))) { return e.v }
                 throw e
             }
         }, blk)
@@ -12366,7 +12369,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // blkParams travels beside the block so that Kernel#lambda can arity-check
         // it (makeCall below). The arity REGISTRY cannot carry it: it is armed only
         // when the program names `arity', and behaviour must not depend on that.
-        return {blkParams: params, blkT: function() {
+        // home is the record of the call the literal was written for (blkHome), which
+        // a `break' ends; null where the block is built for no such call.
+        return {blkParams: params, blkT: function(home) {
             var captured = scopes.slice(0)
             var f = function() {
                 var args = []
@@ -12403,7 +12408,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 rbSitePos = site
                 scopes = saved
                 if (isSig(r)) {
-                    if (r.brk === true) { throw {__blkbrk: true, v: r.v} }
+                    // `break' ends the block's home call, which catchBlkBreak claims
+                    // by that record; a define_method body returns instead, like a
+                    // lambda. Once the home call has returned there is nothing left
+                    // to end: MRI raises LocalJumpError.
+                    if (r.brk === true) {
+                        if (dm) { return r.v }
+                        if (home == null || home == undefined || home.live !== true) {
+                            raiseErr("", "LocalJumpError", "break from proc-closure")
+                        }
+                        throw {__blkbrk: true, v: r.v, home: home}
+                    }
                     if (r.redo === true) { throw {__blkredo: true} }
                     // `return' leaves the method the block was WRITTEN in, which is
                     // not always the innermost one running: `def a(&b); c(&b); end'
@@ -12506,14 +12521,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     // A call that was given a block catches the non-local break: the CALL yields the
-    // break value (`[1, 2, 3].each { |v| break v * 10 if v == 2 }` is 20).
-    function catchBlkBreak(f) {
+    // break value (`[1, 2, 3].each { |v| break v * 10 if v == 2 }` is 20). Only the
+    // break of a block written for THIS call is its own: in `def b; [1].each { yield };
+    // end' a break in b's block passes the each and ends `b { }'. home is that call's
+    // record, live while the call runs. Twin of emitBlkBreakCall in
+    // ruby-to-llvm-ir.abnf.
+    function blkHome() { return {live: true} }
+    function catchBlkBreak(f, home) {
+        var r = anytype
         try {
-            return f()
+            r = f()
         } catch (e) {
-            if (e !== null && e !== undefined && e.__blkbrk === true) { return e.v }
+            home.live = false
+            if (e !== null && e !== undefined && e.__blkbrk === true && e.home === home) { return e.v }
             throw e
         }
+        home.live = false
+        return r
     }
     function makeRedo(pos) { return function() { return {redo: true} } }
     // &expr as an argument: a Proc passes straight through, a symbol becomes the
@@ -13020,12 +13044,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // nothing in Ruby can observe the difference, a block literal not being
             // a value there at all.
             if (name == "lambda" && blkT != null && lamParams != null) {
-                var lb0 = blkT()
-                return markLambda(copyArity(lamArityWrap(lambdaWrap(lb0), lamParams), lb0))
+                var lh = blkHome()
+                var lb0 = blkT(lh)
+                return markLambda(copyArity(lamArityWrap(lambdaWrap(lb0, lh), lamParams), lb0))
             }
             var argv = evalArgList(args)
             var bf = null
-            if (blkT != null) { bf = blkT() }
+            var home = null
+            if (blkT != null) { home = blkHome(); bf = blkT(home) }
             var f = anytype
             f = undefined
             for (var si = scopes.length - 1; si >= 1 && f == undefined; si--) {
@@ -13033,7 +13059,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (f == undefined && typeof selfMethod(name) == "function") {
                 if (bf == null) { return boxOut(findSelf(), mcall(findSelf(), name, argv, null)) }
-                return boxOut(findSelf(), catchBlkBreak(function() { return mcall(findSelf(), name, argv, bf) }))
+                return boxOut(findSelf(), catchBlkBreak(function() { return mcall(findSelf(), name, argv, bf) }, home))
             }
             if (f == undefined && (name == "send" || name == "__send__") && !hasVar(name)) {
                 var sdf = anytype
@@ -13043,7 +13069,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // An Object method a bare call reaches on the implicit self.
             if (f == undefined && selfCallNames.indexOf(name) >= 0 && rubyMethods["$" + name] !== true && !hasVar(name)) {
                 if (bf == null) { return boxOut(ivarSelf(), mcall(ivarSelf(), name, argv, null)) }
-                return boxOut(ivarSelf(), catchBlkBreak(function() { return mcall(ivarSelf(), name, argv, bf) }))
+                return boxOut(ivarSelf(), catchBlkBreak(function() { return mcall(ivarSelf(), name, argv, bf) }, home))
             }
             if ((f == undefined || typeof f != "function") && rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
                 f = getVar("$d$" + name)
@@ -13051,7 +13077,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Where self is a class, a bare `new' is Class#new on it.
             if (f == undefined && name == "new" && isClassObj(ivarSelf())) {
                 if (bf == null) { return mcall(ivarSelf(), "new", argv, null) }
-                return catchBlkBreak(function() { return mcall(ivarSelf(), "new", argv, bf) })
+                return catchBlkBreak(function() { return mcall(ivarSelf(), "new", argv, bf) }, home)
             }
             // A call of a name nothing defines: NoMethodError on the implicit self.
             // Twin of js_rfn in languages/lib/ruby-rt.metajs and abnf/jsrtruby.go.
@@ -13066,7 +13092,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (f != undefined && f != null && f.__isclass === true) {
                 if (bf == null) { return mcall(f, "new", argv, null) }
-                return catchBlkBreak(function() { return mcall(f, "new", argv, bf) })
+                return catchBlkBreak(function() { return mcall(f, "new", argv, bf) }, home)
             }
             if (typeof f != "function") { fail("call of a non function: " + name) }
             if (bf == null) { return f.apply(undefined, argv) }
@@ -13078,7 +13104,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var bv = anytype
             bv = hasOwn(hostGlobals, name) && f === hostGlobals[name] ? bf : mkBlkArg(bf)
             var r = anytype
-            r = catchBlkBreak(function() { return f.apply(undefined, concat2impl(argv, [bv])) })
+            r = catchBlkBreak(function() { return f.apply(undefined, concat2impl(argv, [bv])) }, home)
             blockStack.pop()
             return r
         }
@@ -16170,7 +16196,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // it, so Proc#lambda? can tell the two apart. A lambda's `return' is LOCAL, so
     // Kernel#lambda wraps the block in a closure that swallows the block's own
     // __blkret signal, so `lambda { |x| return x }.call(1)' leaves only the lambda.
-    hostGlobals["lambda"] = function(blk) { return markLambda(copyArity(lambdaWrap(blk), blk)) }
+    hostGlobals["lambda"] = function(blk) { return markLambda(copyArity(lambdaWrap(blk, null), blk)) }
     hostGlobals["proc"] = function(blk) { return blk }
     // Kernel#method(:name): a method AS A VALUE. Ruby has no bare method reference -
     // `double' on its own CALLS double - so this is the only spelling there is. The

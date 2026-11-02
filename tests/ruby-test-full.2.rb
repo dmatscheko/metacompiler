@@ -2243,6 +2243,38 @@ def s170
   check("enu170c", b == [[7, 8], 7, :top, [5, 10], :two, nil])
 end
 
+# ===== SECTION 171: break ends the call its block was written for =====
+# A block's `break' ends the call the block LITERAL was given to, not the
+# innermost call running a block: through a yield in another method's block,
+# through a block passed on by &b, out of a recursion. Once that call has
+# returned, a break of the block (a stored proc) raises LocalJumpError. In a
+# lambda, a `->' and a define_method body, break ends that call only, like
+# return. /usr/bin/ruby 2.6 settles each.
+def s171b; [1].each { yield }; :b_end; end
+def s171c; r = [1, 2].map { |v| yield v }; [:c, r]; end
+def s171pass(&b); [1, 2].each(&b); :pass_end; end
+def s171rec(n, &b); return yield(n) if n == 0; [n].each { |m| s171rec(m - 1, &b) }; :rec_end; end
+def s171keep(&b); b; end
+class S171D
+  define_method(:dm) { break 6; 7 }
+  def initialize; @v = block_given? ? yield : 0; end
+  attr_reader :v
+end
+def s171
+  check("brk171a", s171b { break 5 } == 5 && s171c { |v| break v * 7 } == 7 &&
+        s171pass { |v| break [:p, v] if v == 2 } == [:p, 2] && s171rec(2) { |z| break [:z, z] } == [:z, 0])
+  check("brk171b", [1, 2, 3].each { |v| [4].each { break }; break v if v == 2 } == 2 &&
+        S171D.new { break 8 } == 8 && s171b { [1, 2].each { |v| break v }; :inner } == :b_end)
+  st = s171keep { break 1 }
+  e1 = begin; st.call; rescue LocalJumpError => e; [e.class, e.message]; end
+  e2 = begin; [1].each { proc { break 2 }.call }; rescue LocalJumpError => e; e.message; end
+  check("brk171c", e1 == [LocalJumpError, "break from proc-closure"] && e2 == "break from proc-closure")
+  l = lambda { |x| break x * 3; 0 }
+  m = ->(x) { break x * 2; 0 }
+  check("brk171d", l.call(2) == 6 && m.call(4) == 8 && S171D.new.dm == 6 &&
+        [1].map { lambda { break 9 }.call } == [9])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -2292,5 +2324,6 @@ s167() # SECTION-CALL 167
 s168() # SECTION-CALL 168
 s169() # SECTION-CALL 169
 s170() # SECTION-CALL 170
+s171() # SECTION-CALL 171
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
