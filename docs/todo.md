@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1175 bash: nameref refusals naming the target, readonly through a callee's nameref, array assignment to a circular assoc nameref · P3 · SH · OPEN [V]
+### T-1175 bash: nameref refusals naming the target, readonly through a callee's nameref, array assignment to a circular assoc nameref · P3 · SH · IN PROGRESS (SH worker, round 55) [V]
 Found while closing T-1172; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Interpreter only, stderr: when a nameref's target is a local of the same function, refusals name the target instead of the nameref — `f(){ local -A g=([k]=v); local -n w=g; declare -a w=x; }`: oracle and compiler "declare: w: cannot convert associative to indexed array", interp "g: ..."; same for `declare +a w` ("cannot destroy array variables") and `local -a w=(x)`.
 - Both engines: `f(){ local -r g1=1; local -n w=g1; declare w=2; }` — oracle "declare: w: readonly variable", ours names "g1".
