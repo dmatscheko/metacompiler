@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1155 kotlin: Char/Boolean array element types, sum() result type, emptyList and ::f identity · P3 · KT · OPEN [V]
+### T-1155 kotlin: Char/Boolean array element types, sum() result type, emptyList and ::f identity · P3 · KT · IN PROGRESS (KT worker, round 49) [V]
 Found while closing T-1154; oracle kotlinc 2.2.21.
 - `charArrayOf('x')[0].javaClass.name` gives `java.lang.Character` (kotlinc `char`); `booleanArrayOf(true)[0]` gives `java.lang.Boolean` (kotlinc `boolean`). All engines; adding them to `ktIndexTy` alone did not fix it.
 - `fun fs(vararg xs: Short) = xs; fs(1, 2).sum().javaClass.name` gives `java.lang.Integer` (kotlinc `int`): the static type of `.sum()` on a call result is unknown. All engines.
