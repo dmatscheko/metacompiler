@@ -109,7 +109,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1151 kotlin: array == / === compare contents instead of identity; vararg member references; local-fun ::name; inherited/inner static result types · P2 · KT · OPEN [V]
+### T-1151 kotlin: array == / === compare contents instead of identity; vararg member references; local-fun ::name; inherited/inner static result types · P2 · KT · IN PROGRESS (KT worker, round 47) [V]
 
 Found while working T-1149. The oracle is kotlinc 2.2.21 (stdlib only). Item 1 silently changes program results, hence P2.
 
