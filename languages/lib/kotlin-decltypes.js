@@ -35,8 +35,8 @@ function ktSplitTArgs(s) {
     var from = 0
     for (var i = 0; i < s.length; i++) {
         var c = s.charAt(i)
-        if (c == "<") { depth++ }
-        else if (c == ">") { depth-- }
+        if (c == "<" || c == "(") { depth++ }
+        else if (c == ")" || (c == ">" && (i == 0 || s.charAt(i - 1) != "-"))) { depth-- }
         else if (c == "," && depth == 0) { out.push(s.substring(from, i)); from = i + 1 }
     }
     out.push(s.substring(from))
@@ -62,8 +62,10 @@ var ktTwoArgColl = {"$Map": 1, "$MutableMap": 1, "$HashMap": 1, "$LinkedHashMap"
 
 // {k, v}: the key and element (value) types a collection type fixes - a Pair's
 // first and second - or null when it fixes none. Each is a numeric type, or a
-// collection type that itself fixes numeric elements (List<List<Long>>), "" else.
-function ktElemTypes(ty) {
+// collection type that itself fixes numeric elements (List<List<Long>>), "" else;
+// with fns also a plain function type, which a callable reference or a lambda
+// element adopts (List<(Int) -> Int>).
+function ktElemTypes(ty, fns) {
     var t = (ty.length > 0 && ty.charAt(ty.length - 1) == "?") ? ty.substring(0, ty.length - 1) : ty
     var prim = ktPrimArrElem["$" + t]
     if (prim != undefined) { return {k: "", v: prim} }
@@ -73,28 +75,32 @@ function ktElemTypes(ty) {
     var targs = ktSplitTArgs(t.substring(lt + 1, t.length - 1))
     var k = ""
     var v = ""
-    if (ktOneArgColl["$" + base] != undefined && targs.length == 1) { v = ktElemTy(targs[0]) }
-    else if (ktTwoArgColl["$" + base] != undefined && targs.length == 2) { k = ktElemTy(targs[0]); v = ktElemTy(targs[1]) }
+    if (ktOneArgColl["$" + base] != undefined && targs.length == 1) { v = ktElemTy(targs[0], fns) }
+    else if (ktTwoArgColl["$" + base] != undefined && targs.length == 2) { k = ktElemTy(targs[0], fns); v = ktElemTy(targs[1], fns) }
     if (k == "" && v == "") { return null }
     return {k: k, v: v}
 }
-function ktElemTy(t) {
+function ktElemTy(t, fns) {
     var n = ktNumTy(t)
     if (n != "") { return n }
-    return ktLitElems(t) != null ? t : ""
+    if (fns && ktFnTyArity(t) >= 0) { return t }
+    return ktLitElemsOf(t, fns) != null ? t : ""
 }
-function ktTyElems(ty) { return ty == "" ? null : ktElemTypes(ty) }
-// The element types a collection's integer literals are retyped to, or null: a
-// numeric type, or a nested collection type whose own elements are retyped.
-function ktLitElems(ty) {
-    var el = ktTyElems(ty)
+// fns: also function element types (ktElemTypes).
+function ktTyElems(ty, fns) { return ty == "" ? null : ktElemTypes(ty, fns == true) }
+// The element types a collection's integer literals, callable references and
+// lambdas are retyped to, or null: a numeric type, a function type, or a nested
+// collection type whose own elements are retyped.
+function ktLitElems(ty) { return ktLitElemsOf(ty, true) }
+function ktLitElemsOf(ty, fns) {
+    var el = ty == "" ? null : ktElemTypes(ty, fns)
     if (el == null) { return null }
     var k = ktLitElTy(el.k)
     var v = ktLitElTy(el.v)
     if (k == "" && v == "") { return null }
     return {k: k, v: v}
 }
-function ktLitElTy(t) { return t.indexOf("<") >= 0 ? t : ktLitTy(t) }
+function ktLitElTy(t) { return t.indexOf("<") >= 0 || ktFnTyArity(t) >= 0 ? t : ktLitTy(t) }
 
 // The type a FUNCTION type's result adopts - `() -> Long`, `(Int) -> Long`, the
 // nullable `(() -> Long)?` - or "" for any other type, for a result that retypes
@@ -207,11 +213,15 @@ for (var ktJsti = 0; ktJsti < ktJstn.length; ktJsti++) {
     ktJavaStaticTab["$" + ktJstn[ktJsti].substring(0, ktJstc)] = ktJstn[ktJsti].charCodeAt(ktJstc + 1) - 48
 }
 function ktJavaStaticArity(base, name) {
-    var jl = base.substring(0, 10) == "java.lang."
-    var b = jl ? base.substring(10) : base
-    var h = b == "Math" ? "M" : (b == "Integer" || (jl && b == "Long")) ? "I" : b == "System" ? "S" : ""
+    var h = ktJavaStaticCls(base)
     var n = h == "" ? undefined : ktJavaStaticTab["$" + h + "." + name]
     return n == undefined ? -1 : n
+}
+// The ktJavaStaticTab letter of a java.lang class reference base, "" for none.
+function ktJavaStaticCls(base) {
+    var jl = base.substring(0, 10) == "java.lang."
+    var b = jl ? base.substring(10) : base
+    return b == "Math" ? "M" : (b == "Integer" || (jl && b == "Long")) ? "I" : b == "System" ? "S" : ""
 }
 // What arity spec `spec` gives a receiver of member-table row `kind`. Twin of
 // ktSpecArity in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.

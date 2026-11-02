@@ -1248,25 +1248,7 @@ func init() {
 		// answers through a wrapper of arity n that retypes each result (ty, ""
 		// for none). Twin of kAdoptPlan in kotlin-interpreter.abnf.
 		m["js_ktfnadopt"] = func(a []uint64) uint64 {
-			f := u(a[0])
-			n := int(rt.toNumber(u(a[1])))
-			if _, isRef := ktRefOf(f); isRef {
-				jsvFnMetaSet(f, "", n)
-				return a[0]
-			}
-			ty := rt.toString(u(a[2]))
-			if ty == "" || !isCallable(f) {
-				return a[0]
-			}
-			wf := jsHostFunc("lambda", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				res := rt.call(f, jsUndef, args)
-				if n := rt.ktAdoptTy(res, ty); n != nil {
-					return n
-				}
-				return res
-			})
-			jsvFnMetaSet(wf, "", n)
-			return w(wf)
+			return w(rt.ktFnAdopt(u(a[0]), int(rt.toNumber(u(a[1]))), rt.toString(u(a[2]))))
 		}
 		// A conversion method - toInt(), toLong(), toUInt(): (value, bits, unsigned).
 		m["js_ktconv"] = func(a []uint64) uint64 {
@@ -10438,17 +10420,108 @@ func ktFieldTy(o *jsObject, name string) string {
 	return ""
 }
 
+// ktFnAdopt is js_ktfnadopt: f as a value of a function type of n parameters
+// whose result adopts ty ("" for none).
+func (rt *jsrt) ktFnAdopt(f interface{}, n int, ty string) interface{} {
+	if _, isRef := ktRefOf(f); isRef {
+		jsvFnMetaSet(f, "", n)
+		return f
+	}
+	if ty == "" || !isCallable(f) {
+		return f
+	}
+	wf := jsHostFunc("lambda", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		res := rt.call(f, jsUndef, args)
+		if n := rt.ktAdoptTy(res, ty); n != nil {
+			return n
+		}
+		return res
+	})
+	jsvFnMetaSet(wf, "", n)
+	return wf
+}
+
+// ktFnElem is the parameter count and adopted result type ("" for none) of a
+// plain function type `(A, B) -> R` (nullable or suspend), ok false for any other
+// type. Twin of ktFnTyArity / ktFnRetTy in languages/lib/kotlin-decltypes.js.
+func ktFnElem(ty string) (int, string, bool) {
+	t := strings.TrimSuffix(ty, "?")
+	if len(t) > 1 && t[0] == '(' && ktParenEnd(t) == len(t)-1 {
+		t = t[1 : len(t)-1]
+	}
+	t = strings.TrimPrefix(t, "suspend")
+	if t == "" || t[0] != '(' {
+		return 0, "", false
+	}
+	e := ktParenEnd(t)
+	if e < 0 || !strings.HasPrefix(t[e+1:], "->") {
+		return 0, "", false
+	}
+	n, depth := 1, 0
+	if e == 1 {
+		n = 0
+	}
+	for j := 1; j < e; j++ {
+		switch t[j] {
+		case '(', '<':
+			depth++
+		case ')':
+			depth--
+		case '>':
+			if t[j-1] != '-' {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				n++
+			}
+		}
+	}
+	return n, ktLitWidth(t[e+3:]), true
+}
+
+// ktParenEnd is the index of the `)` closing t's leading `(`, or -1.
+func ktParenEnd(t string) int {
+	depth := 0
+	for i := 0; i < len(t); i++ {
+		switch t[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// ktLitWidth is s when it is a width an integer literal is retyped to, "" else:
+// ktLitTy of lib/kotlin-decltypes.js.
+func ktLitWidth(s string) string {
+	switch strings.TrimSuffix(s, "?") {
+	case "Long", "Short", "Byte", "UInt", "ULong", "UShort", "UByte":
+		return s
+	}
+	return ""
+}
+
 // ktAdoptEl retypes a collection's contents IN PLACE by the element types a type
 // argument fixes - `listOf<Long>(1, 2)`, `val m: Map<Long, Int> = mapOf(1 to 2)`,
 // `Pair<Long, Int>(1, 2)`: vty for a list's, array's or set's elements and a map's
 // values, kty for a map's keys; a Pair takes kty for first and vty for second. ""
 // leaves that side alone; a collection type (List<Long>) retypes a nested
-// collection the same way. An integer literal is the only Int a legal program can
+// collection the same way, and a function type gives a callable reference its
+// arity (ktFnAdopt). An integer literal is the only Int a legal program can
 // put where a Long is expected, so the retyping changes nothing else. The twins
 // are kAdoptEl in kotlin-interpreter.abnf and js_ktadoptel in
 // languages/lib/kotlin-rt.metajs.
 func (rt *jsrt) ktAdoptEl(v interface{}, vty, kty string) {
 	one := func(x interface{}, ty string) interface{} {
+		if n, rty, isFn := ktFnElem(ty); isFn {
+			return rt.ktFnAdopt(x, n, rty)
+		}
 		if strings.IndexByte(ty, '<') >= 0 {
 			k, v := ktNestedElems(ty)
 			rt.ktAdoptEl(x, v, k)
@@ -10496,10 +10569,14 @@ func ktNestedElems(ty string) (string, string) {
 	depth, from := 0, lt+1
 	for i := lt + 1; i < len(t)-1; i++ {
 		switch t[i] {
-		case '<':
+		case '<', '(':
 			depth++
-		case '>':
+		case ')':
 			depth--
+		case '>':
+			if t[i-1] != '-' {
+				depth--
+			}
 		case ',':
 			if depth == 0 {
 				targs = append(targs, t[from:i])
@@ -10509,14 +10586,10 @@ func ktNestedElems(ty string) (string, string) {
 	}
 	targs = append(targs, t[from:len(t)-1])
 	elTy := func(s string) string {
-		if strings.IndexByte(s, '<') >= 0 {
+		if _, _, isFn := ktFnElem(s); isFn || strings.IndexByte(s, '<') >= 0 {
 			return s
 		}
-		switch strings.TrimSuffix(s, "?") {
-		case "Long", "Short", "Byte", "UInt", "ULong", "UShort", "UByte":
-			return s
-		}
-		return ""
+		return ktLitWidth(s)
 	}
 	if len(targs) == 2 {
 		return elTy(targs[0]), elTy(targs[1])

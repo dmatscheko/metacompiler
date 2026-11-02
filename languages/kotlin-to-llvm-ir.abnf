@@ -7309,7 +7309,7 @@ KwContract  = "contract" KwEnd ;
         if (el != null && ktIsMapTy(ty) && typeof s.idx == "function") { s.idx = ktAdoptThunk(s.idx, ktLitTy(el.k)) }
     }
     function ktAdoptMArgs(s, ty) {
-        var el = ktTyElems(ty)
+        var el = ktTyElems(ty, true)
         if (el == null) { return s }
         var as = s.args
         for (var i = 0; i < as.length; i++) { if (as[i].aname != undefined || as[i].spread == true) { return s } }
@@ -8731,8 +8731,10 @@ KwContract  = "contract" KwEnd ;
         if (name == "class" && isReifiedHere(baseName)) {
             return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, reifiedKSlot(baseName))])} }
         }
-        // The base is read as a value (`System::nanoTime`), so a builtin it names is declared.
-        if (name != "class") { ktVarSeen["$" + baseName.split(".")[0]] = true }
+        // The base is read as a value (`System::nanoTime`), so a builtin it names is
+        // declared; `java.lang.System` is read as System.
+        var jcls = name == "class" ? "" : ktJavaStaticCls(baseName)
+        if (name != "class") { ktVarSeen["$" + (jcls == "S" ? "System" : baseName.split(".")[0])] = true }
         return function(b) {
             // `Array<Dog>::class` is the java array class its element type fixes
             // ([LDog;), handed to js_ktclasslit as a type name. Twin of makePropRef
@@ -8781,12 +8783,16 @@ KwContract  = "contract" KwEnd ;
             // first segment (`E.X::run`, `C.Companion::f`, `Outer.Obj::f`), so the
             // reference is bound to it; js_ktbref binds even a companion, which is the
             // class descriptor itself. Twin of kQualValue in kotlin-interpreter.abnf.
+            // A java.lang static (`java.lang.Long::signum`) is bound to the class
+            // object the `java` package handle reads, never unbound on the kotlin
+            // type of the last segment; System is a program-scope binding instead.
             var dsegs = baseName.split(".")
             var dlast = dsegs[dsegs.length - 1]
-            if (dsegs.length > 1 && ktTypeNameSet["$" + dsegs[0]] != true && dsegs[0] != "kotlin" && dsegs[0] != "java" &&
-                classNames["$" + dlast] != 1 && interfaceNames["$" + dlast] != true) {
-                var dv = b.NewCall(rtRefBase(), [curScopeV, emitStr(b, dsegs[0])])
-                for (var dk = 1; dk < dsegs.length; dk++) { dv = callExt(b, "js_ktfget", [dv, emitStr(b, dsegs[dk])]) }
+            var jst = dsegs[0] == "java" && jcls != ""
+            if (jst || (dsegs.length > 1 && ktTypeNameSet["$" + dsegs[0]] != true && dsegs[0] != "kotlin" && dsegs[0] != "java" &&
+                classNames["$" + dlast] != 1 && interfaceNames["$" + dlast] != true)) {
+                var dv = jst ? b.NewCall(rtKtGet(), [curScopeV, emitStr(b, jcls == "S" ? "System" : "java")]) : b.NewCall(rtRefBase(), [curScopeV, emitStr(b, dsegs[0])])
+                for (var dk = jcls == "S" ? dsegs.length : 1; dk < dsegs.length; dk++) { dv = callExt(b, "js_ktfget", [dv, emitStr(b, dsegs[dk])]) }
                 var dref = callExt(b, "js_ktbref", [dv, emitStr(b, name), hUndef])
                 return {b: b, v: emitRefArity(b, dref, ktRefParams(memberArity["$" + name], name), ktBuiltinArity(name))}
             }

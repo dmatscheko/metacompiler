@@ -8822,6 +8822,8 @@ function k4bAdoptTy(v, ty) {
 // element types a type argument fixes. Twin of ktAdoptEl in abnf/jsrtkotlin.go.
 function k4bAdoptOne(x, ty) {
     if (ty == "") { return x }
+    var fe = k4bFnElem(ty)
+    if (fe !== null) { return js_ktfnadopt(x, fe[0], fe[1]) }
     if (ty.indexOf("<") >= 0) {
         var ne = k4bNestedElems(ty)
         return js_ktadoptel(x, ne[1], ne[0])
@@ -8842,8 +8844,8 @@ function k4bNestedElems(ty) {
     var i = lt + 1
     while (i < t.length - 1) {
         var ch = t.charAt(i)
-        if (ch == "<") { depth = depth + 1 }
-        if (ch == ">") { depth = depth - 1 }
+        if (ch == "<" || ch == "(") { depth = depth + 1 }
+        if (ch == ")" || (ch == ">" && t.charAt(i - 1) != "-")) { depth = depth - 1 }
         if (ch == "," && depth == 0) {
             targs.push(t.substring(from, i))
             from = i + 1
@@ -8855,11 +8857,53 @@ function k4bNestedElems(ty) {
     return ["", k4bNestedElTy(targs[0])]
 }
 function k4bNestedElTy(s) {
-    if (s.indexOf("<") >= 0) { return s }
+    if (s.indexOf("<") >= 0 || k4bFnElem(s) !== null) { return s }
+    return k4bLitWidth(s)
+}
+// Go: ktLitWidth.
+function k4bLitWidth(s) {
     var b = s
     if (b.charAt(b.length - 1) == "?") { b = b.substring(0, b.length - 1) }
     if (b == "Long" || b == "Short" || b == "Byte" || b == "UInt" || b == "ULong" || b == "UShort" || b == "UByte") { return s }
     return ""
+}
+// Go: ktFnElem. [parameter count, adopted result type] of a plain function
+// type, or null.
+function k4bFnElem(ty) {
+    var t = ty
+    if (t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+    if (t.length > 1 && t.charAt(0) == "(" && k4bParenEnd(t) == t.length - 1) { t = t.substring(1, t.length - 1) }
+    if (t.substring(0, 7) == "suspend") { t = t.substring(7) }
+    if (t.length == 0 || t.charAt(0) != "(") { return null }
+    var e = k4bParenEnd(t)
+    if (e < 0 || t.substring(e + 1, e + 3) != "->") { return null }
+    var n = 1
+    if (e == 1) { n = 0 }
+    var depth = 0
+    var j = 1
+    while (j < e) {
+        var c = t.charAt(j)
+        if (c == "(" || c == "<") { depth = depth + 1 }
+        if (c == ")" || (c == ">" && t.charAt(j - 1) != "-")) { depth = depth - 1 }
+        if (c == "," && depth == 0) { n = n + 1 }
+        j = j + 1
+    }
+    return [n, k4bLitWidth(t.substring(e + 3))]
+}
+// Go: ktParenEnd.
+function k4bParenEnd(t) {
+    var depth = 0
+    var i = 0
+    while (i < t.length) {
+        var c = t.charAt(i)
+        if (c == "(") { depth = depth + 1 }
+        if (c == ")") {
+            depth = depth - 1
+            if (depth == 0) { return i }
+        }
+        i = i + 1
+    }
+    return 0 - 1
 }
 function k4bAdoptAll(arr, ty) {
     if (ty == "") { return }

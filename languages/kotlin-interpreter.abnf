@@ -3120,7 +3120,7 @@ NotMemberKw = :script(~~ "pure";
     // ktMResType (ktRes, applied by foldCallMember). Twin of ktAdoptMArgs in
     // kotlin-to-llvm-ir.abnf.
     function kAdoptMArgs(s, ty) {
-        var el = ktTyElems(ty)
+        var el = ktTyElems(ty, true)
         if (el == null) { return s }
         var as = s.args
         for (var i = 0; i < as.length; i++) { if (typeof as[i] != "function") { return s } }
@@ -6233,7 +6233,7 @@ NotMemberKw = :script(~~ "pure";
     function kScopeMethod(target, name, rawArgs) {
         if (!kIsScopeFnName(name)) { return null }
         // b.let(::println) - a callable reference is a lambda here too.
-        var args = kNormArgs(rawArgs)
+        var args = kNormArgs(rawArgs, name)
         if (args.length != 1 || typeof args[0] != "function") { return null }
         if (target !== null && target !== undefined && typeof target == "object" &&
             target.__class != undefined && target.__class != null) {
@@ -7406,7 +7406,7 @@ NotMemberKw = :script(~~ "pure";
         }
         // A callable reference passed where a lambda is expected - list.map(Box::v),
         // forEach(::println) - is the closure it stands for at every BUILTIN member.
-        var args = kNormArgs(rawArgs)
+        var args = kNormArgs(rawArgs, name)
         var f = args.length > 0 ? args[0] : null
         var i
         var out
@@ -8312,7 +8312,7 @@ NotMemberKw = :script(~~ "pure";
         return r
     }
     function kMapMethod(m, name, rawArgs) {
-        var args = kNormArgs(rawArgs)
+        var args = kNormArgs(rawArgs, name)
         var f = anytype
         f = kKeyArg(m, name, args)
         var i
@@ -8497,7 +8497,7 @@ NotMemberKw = :script(~~ "pure";
     // sorted / reversed / joinToString / take / ... on Iterable and they all answer a
     // LIST even for a Set receiver. The twin is ktSetMethod in abnf/jsrtkotlin.go.
     function kSetMethod(s, name, rawArgs) {
-        var args = kNormArgs(rawArgs)
+        var args = kNormArgs(rawArgs, name)
         if (s.__jc === "java.util.PriorityQueue") {
             var pr = kPqMethod(s, name, args)
             if (pr != null) { return pr }
@@ -8977,7 +8977,7 @@ NotMemberKw = :script(~~ "pure";
         // LAMBDA is expected - list.map(Box::v) - so it becomes the closure it stands
         // for. A user method keeps the reference itself, which is what lets it read
         // .name or call .get(x).
-        if (target.__class == undefined) { args = kNormArgs(args) }
+        if (target.__class == undefined) { args = kNormArgs(args, name) }
         // A range answers contains without materialising, and every other list method
         // (map/filter/sumOf/forEach/count/any/...) on its element sequence.
         // A MAP: the shared {__dict, keys, vals} handle mapOf/groupBy/associate build.
@@ -13056,9 +13056,16 @@ NotMemberKw = :script(~~ "pure";
     }
     // The argument list of a BUILTIN member, with every callable reference turned into
     // the closure it stands for. Only the builtins go through this: a user class's own
-    // method keeps the reference itself. The array is rebuilt only when there is
+    // method keeps the reference itself, and so does a member that stores or compares
+    // its argument as an element (kElemArgMembers), so `fs.add(Math::abs)` keeps the
+    // reference's identity and arity. The array is rebuilt only when there is
     // something to rebuild, so the ordinary call is one scan.
-    function kNormArgs(args) {
+    var kElemArgMembers = {"$add": true, "$set": true, "$put": true, "$contains": true, "$indexOf": true,
+                           "$lastIndexOf": true, "$remove": true, "$addFirst": true, "$addLast": true,
+                           "$offer": true, "$push": true, "$containsValue": true, "$getOrDefault": true,
+                           "$fill": true}
+    function kNormArgs(args, name) {
+        if (kElemArgMembers["$" + name] === true) { return args }
         var any = false
         var i
         for (i = 0; i < args.length; i++) {

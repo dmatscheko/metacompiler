@@ -8496,6 +8496,36 @@ fun s190() {
         sq1(9.0) == 3.0 && cmp(1, 2) < 0)
 }
 
+// ===== SECTION 191: java.lang-qualified references, function element types =====
+// `java.lang.Long::signum` is the java static, not an unbound member of kotlin's
+// Long. A collection's declared element type is the expected type of each element,
+// so a callable reference stored in a List<(Int) -> Int> is a Function1.
+fun s191() {
+    val sg = java.lang.Long::signum
+    val ab: (Int) -> Int = java.lang.Math::abs
+    val cp = java.lang.Integer::compare
+    val nt = java.lang.System::nanoTime
+    check("jlqual191a", sg(-5L) == -1 && sg(7L) == 1 && ab(-3) == 3 && cp(2, 1) > 0 && nt() > 0L &&
+        sg is Function1<*, *> && cp is Function2<*, *, *> && nt is Function0<*>)
+    val fs: List<(Int) -> Int> = listOf(Math::abs)
+    val ms: Map<String, (Int, Int) -> Int> = mapOf("mx" to Math::max)
+    val nf: List<List<(Int) -> Int>> = listOf(listOf(Math::abs))
+    val pr: Pair<(Int) -> Int, (Int, Int) -> Int> = Pair(Math::abs, Math::min)
+    val ls: List<() -> Long> = listOf({ 1 })
+    check("fnelem191b", fs[0] is Function1<*, *> && fs[0](-7) == 7 && ms["mx"] is Function2<*, *, *> &&
+        ms.getValue("mx")(3, 4) == 4 && nf[0][0] is Function1<*, *> && pr.first is Function1<*, *> &&
+        pr.second is Function2<*, *, *> && ls[0]() * 3000000000 == 3000000000L)
+    val ml: MutableList<(String) -> Int> = mutableListOf()
+    ml.add(Integer::parseInt)
+    val mm: MutableMap<String, (Int) -> Int> = mutableMapOf()
+    mm["a"] = Math::abs
+    val r: (Int) -> Int = Math::abs
+    val rl = mutableListOf<(Int) -> Int>()
+    rl.add(r)
+    check("fnelem191c", ml[0] is Function1<*, *> && ml[0]("12") == 12 && mm["a"] is Function1<*, *> &&
+        rl[0] === r && rl.contains(r) && rl.indexOf(r) == 0)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8684,6 +8714,7 @@ fun main() {
     s188() // SECTION-CALL 188
     s189() // SECTION-CALL 189
     s190() // SECTION-CALL 190
+    s191() // SECTION-CALL 191
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
