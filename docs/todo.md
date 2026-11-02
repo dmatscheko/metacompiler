@@ -136,7 +136,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1162 bash: hidden NAME[SUB] locals through a nameref, `w=k export w=7`, hidePrefix before eval · P3 · SH · OPEN [V]
+### T-1162 bash: hidden NAME[SUB] locals through a nameref, `w=k export w=7`, hidePrefix before eval · P3 · SH · IN PROGRESS (SH worker, round 51) [V]
 Carried over from T-1159 (closed partial); oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Both engines: after `local -n w=$1; declare -r w` (or `declare w`, `declare -i w`) with $1=`arr[2]`, bash makes a local literally named `arr[2]` that every later lookup through a nameref ending there finds instead of the element (reads, writes, `+=`, arithmetic, `unset`, `local -p`, callees via dynamic scope). Oracle: `declare w; w=5` leaves `arr[2]=c` and `local -p` shows `declare -- arr[2]="5"`; `declare -i w; w=2*3` reads back 6; after `declare -r w`, `export w=5` / `w=9` give `arr[2]: readonly variable`, status 1. Emulating it is a new variable kind across the interpreter, compiler and bash-rt.c (~30 nameref-resolution sites); currently a recorded limit at the declaration site in bash-to-llvm-ir.abnf. The engines also disagree with each other here (callee through caller's nameref after `declare w`: oracle `6 []`, interp `6 [7]` + arr[2]=z, compiler `6 [arr[2]]` + arr[2]=7) — at minimum make the two engines agree.
 - Both engines: `w=k export w=7` (or `readonly w=7`) inside a function through a prefix nameref — bash stores x=7 without the attribute (`declare -- x="7"`); ours prints `declare -x x="7"`.
