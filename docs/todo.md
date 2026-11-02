@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1136** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1137** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -107,20 +107,16 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level lateinit isInitialized, ::f for a lambda-holding val · P3 · KT · IN PROGRESS (KT worker, round 39) [V]
+### T-1136 kotlin: uninitialized top-level lateinit read, lambda `is FunctionN`, lambda javaClass.name, array ::class · P3 · KT · OPEN [V]
 
-Found while working T-1129. The oracle is kotlinc 2.2.21 (stdlib only).
+Found while working T-1133. The oracle is kotlinc 2.2.21 (stdlib only).
 
-1. Mixed element classes: Kotlin infers the common supertype. `arrayOf(Dog(), Animal())` is `[LAnimal;`. `arrayOf(S1(), S2())`, where both implement only Shape, is `[LShape;`. `arrayOf(M1(), C1())` is `[LBase;`. All engines give `[Ljava.lang.Object;`. When the only common supertype is an intersection (Base + Shape + Named), the oracle also gives Object, which we already match.
-2. Non-java.lang element classes. All engines give `[Ljava.lang.Object;` where the oracle gives:
-   - `[Lkotlin.jvm.functions.Function0;` for `arrayOf({1})`
-   - `[Lkotlin.Unit;` for `arrayOf(Unit)`
-   - `[Lkotlin.Pair;` for `arrayOf(1 to 2)`
-   - `[LP6Kt$main$2;` (anonymous object class) for `arrayOf(object : Shape {})`
-3. `lateinit var late: String` at top level, then `::late.isInitialized`, prints `false`, then `true` after assignment, in the oracle. The interpreter is right. The compiled half fails with "js runtime error: unknown name: this", because `makeIsInit` in kotlin-to-llvm-ir.abnf always reads `this`.
-4. Check these against the oracle first:
-   - a top-level `val f = { .. }`, where `::f` should be a KProperty0 printing `property f (Kotlin reflection is not available)`; ours hands back the lambda;
-   - an unbound `Box::name` when Box has both a member property `name` and an extension function `name`.
+1. Reading an uninitialized top-level `lateinit var` prints `null` in all engines. kotlinc throws UninitializedPropertyAccessException with the message `lateinit property late has not been initialized`. Repro: `lateinit var late: String; fun main() { try { println(late) } catch (e: UninitializedPropertyAccessException) { println(e.message) } }`. Check the class-member lateinit case too.
+2. `{1} is Function0<*>` and `{x: Int -> x} is Function1<*, *>` are false in all engines; kotlinc says true. Lambdas now record their arity (fnMetaSet / js_jsfnmeta), which makes this feasible. Check `!is` and `when` arms too.
+3. `{ 1 }.javaClass.name` fails: the interpreter with "property .name of null", llvm.Run with "member 'name' of undefined". kotlinc prints an unreproducible lambda class name, so assert a relation instead (it is non-empty, and it agrees with toString's prefix before `@`).
+4. `a::class.java.name` and `a::class` on an array print `Array` and `class Array` in all engines. kotlinc prints `[LDog;` and `class [LDog; (Kotlin reflection is not available)`. `.javaClass` is already right.
+
+Known static-typing residues (not fixable at run time, do not work on them): `arrayOf(1, 2L)` is Long and `arrayOf(listOf(1))` is List in the oracle.
 
 Verify with `tests/probe.sh kotlin` on all four legs.
 
@@ -1203,6 +1199,7 @@ T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each
 T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::topVal reference, Array<ProgramClass> JVM name, extension-function references — merged 3bd224e6: super toString/hashCode/equals reaching kotlin.Any (js_ktsuperany, also no-superclass and builtin-exception supers), ::top property refs (get/set/invoke/name), Array<ProgramClass> binary names incl. nested/late-declared, extension-function refs; plus newline-before-:: statement boundary via OpSameLine (continues inside brackets); 4-leg probes match kotlinc 2.2.21 after two review rounds; kotlin gates green; bench -0.02%
 T-1131 bash: readonly/export on NAME[SUB], declare -g -x through circular nameref, scalar store to circular array nameref, compiled readonly-nameref assignment, test -nt/-ot/-ef — merged d006faf6: readonly/export NAME[SUB] not a valid identifier, readonly -n ignores -n, declare -g -x keeps export in interp, scalar store to circular array nameref dropped, compiled stores through readonly namerefs reach the target, test -nt/-ot/-ef over the file model (two existing different files answer false by design: no mtimes), quoted-subscript message; 4-leg probe + stderr match bash 5.3; matrix 605/605; bench +0.02%
 T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#method, tally/Symbol#name not in 2.6, interp Integer#+ Method#call, Range freeze — merged 524ac88f: blockless take_while/drop_while consumers stop on nil like MRI, String-range nil sizes, Float-range lazy sizes, Proc/Method#method via send, tally/Symbol#name removed (not in 2.6), interp Integer Method#call, Range freeze flag, chunk_while/slice_* nil sizes, exclusive Float-end ranges fixed; 4-leg probe matches ruby 2.6; matrix 605/605; bench 0.00%
+T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level lateinit isInitialized, ::f for a lambda-holding val — merged da2fe104: array class = least common supertype of the elements (class/interface/enum/exception/library graphs), kotlin.* and lambda FunctionN element classes, compiled top-level lateinit isInitialized, ::f for a lambda-holding val is a property ref, Box::name prints property, array simpleName; static-typing residues documented; 4-leg probe matches kotlinc 2.2.21; kotlin gates green; bench +0.03% (under the 1.05% noise floor)
 
 # Settled — do not re-open
 
