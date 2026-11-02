@@ -153,7 +153,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1146 bash: declaration message ordering and redirects, local -r/-a merges, readonly of circular nameref, warning counts, valueless -g nameref subscript, compiler lexical-readonly limits · P3 · SH · OPEN [V]
+### T-1146 bash: declaration message ordering and redirects, local -r/-a merges, readonly of circular nameref, warning counts, valueless -g nameref subscript, compiler lexical-readonly limits · P3 · SH · IN PROGRESS (SH worker, round 46) [V]
 
 Found while working T-1143. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
