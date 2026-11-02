@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1135** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1136** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,20 +69,15 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#method, tally/Symbol#name not in 2.6, interp Integer#+ Method#call, Range freeze · P3 · RB · IN PROGRESS (RB worker, round 58) [V]
+### T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index, Float-range eager enumerator sizes, endless Range#size · P3 · RB · OPEN [V]
 
-Found while working T-1128. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected unless noted.
+Found while working T-1132. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected.
 
-1. Blockless `take_while` used through first/next: `[1,2,3].take_while.first(3)` is `[1]` in MRI, and `.take_while.next` raises StopIteration, because the internal block of first/next returns nil. Ours give `[1, 2, 3]` and `[1, 2]`.
-2. String ranges: `("a".."c").lazy.size` and `("a".."e").each_slice(2).size` are nil in MRI. Ours give 3.
-3. Float ranges: `(1.0..3.0).lazy.size` is 3 and `.lazy.take(2).size` is 2 in MRI. Ours raise TypeError "can't iterate from Float".
-4. `proc {}.method(:call)` and `1.method(:+).method(:call)` return a Method in MRI. Ours raise NoMethodError.
-5. The respond_to? rows list methods that MRI 2.6 lacks: `tally` (Array, Hash, Range, Enumerator, ArithmeticSequence) and `Symbol#name`. `x.method(:tally)` succeeds in ours, where MRI raises NameError. Check that the calls themselves also raise NoMethodError, as in 2.6.
-6. Interpreter only: `1.method(:+).call(2)` raises NoMethodError "undefined method `+' for 1:Integer". llvm.Run and native give 3.
-7. `(1..3).freeze.frozen?` is true in MRI, and so is `.clone.frozen?` of a frozen range (`.dup` of it is false). An unfrozen literal's `(1..3).frozen?` is false in 2.6. Ours always say false.
-8. Smaller gaps: `[1,2].chunk_while { true }.size` is nil in MRI, ours 1. `(1..3).index` and `[1].cycle(2).index` raise NoMethodError in MRI; ours answer an Enumerator.
-
-Not a defect: MRI makes one object per constant range literal at each source site (`def mk; 1..2; end; mk.equal?(mk)` is true). That is a compiler artefact, not a language rule.
+1. `5.send(:-@)`, `5.send(:+@)`, `5.send(:~)` and `5.5.send(:-@)` give -5, 5, -6 and -5.5 in MRI. Ours raise NoMethodError, so `5.method(:-@).call` fails too. The Integer respond row lists `-@` and `+@`, but they do not dispatch by name.
+2. `5.respond_to?(:<<)`, `(:>>)` and `(:~)` are true in MRI; ours give false. As a result `5.method(:<<)` raises NameError, while MRI's `5.method(:<<).call(1)` is 10. `5.send(:<<, 1)` itself already works.
+3. `{a: 1}.index(1)` returns `:a` in MRI 2.6 and writes `warning: Hash#index is deprecated; use Hash#key` to stderr (check the exact prefix with the oracle). Ours raise NoMethodError.
+4. Non-lazy Enumerators over a Float range raise TypeError when they are created. MRI gives `(1.0..3.0).each.size` 3, `.map.size` 3 and `.each_slice(2).size` 2, and raises only when the enumerator is iterated.
+5. `(1.0..).size` and `(1..).size` abort the program with "cannot take the length of an endless range", a fatal error that cannot be rescued. MRI gives Infinity. This is related to the documented deliberate divergence in ruby-rt.metajs, where Range#size on a non-numeric range returns the count because the `.size` lowering and the for-in trip count depend on it. Reconsider whether `.size` can be separated from the internal trip count, so that `("a".."c").size` can be nil as in MRI.
 
 Verify with `tests/probe.sh ruby` on all four legs; new sections go in tests/ruby-test-full.2.rb or .3.rb.
 
@@ -1207,6 +1202,7 @@ T-1130 bash: compiled test with run-time operators, test -o/-R, -n on subscripte
 T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each), lazy no-block ArgumentError, lazy.take size, AS#last arity, Range#equal? — merged 463872a5: blockless find/find_index/take_while/each_entry stream enumerators (nil size), lazy no-block ArgumentError, send(:each), Range#with_index NoMethodError + infinite find, Lazy size carries counts, builtin Method#arity table (+ curry), Range dup/equal? identity; 4-leg probe matches ruby 2.6; ruby gates + go test green after rebase (worker: full matrix 605/605); bench -0.04%
 T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::topVal reference, Array<ProgramClass> JVM name, extension-function references — merged 3bd224e6: super toString/hashCode/equals reaching kotlin.Any (js_ktsuperany, also no-superclass and builtin-exception supers), ::top property refs (get/set/invoke/name), Array<ProgramClass> binary names incl. nested/late-declared, extension-function refs; plus newline-before-:: statement boundary via OpSameLine (continues inside brackets); 4-leg probes match kotlinc 2.2.21 after two review rounds; kotlin gates green; bench -0.02%
 T-1131 bash: readonly/export on NAME[SUB], declare -g -x through circular nameref, scalar store to circular array nameref, compiled readonly-nameref assignment, test -nt/-ot/-ef — merged d006faf6: readonly/export NAME[SUB] not a valid identifier, readonly -n ignores -n, declare -g -x keeps export in interp, scalar store to circular array nameref dropped, compiled stores through readonly namerefs reach the target, test -nt/-ot/-ef over the file model (two existing different files answer false by design: no mtimes), quoted-subscript message; 4-leg probe + stderr match bash 5.3; matrix 605/605; bench +0.02%
+T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#method, tally/Symbol#name not in 2.6, interp Integer#+ Method#call, Range freeze — merged 524ac88f: blockless take_while/drop_while consumers stop on nil like MRI, String-range nil sizes, Float-range lazy sizes, Proc/Method#method via send, tally/Symbol#name removed (not in 2.6), interp Integer Method#call, Range freeze flag, chunk_while/slice_* nil sizes, exclusive Float-end ranges fixed; 4-leg probe matches ruby 2.6; matrix 605/605; bench 0.00%
 
 # Settled — do not re-open
 
