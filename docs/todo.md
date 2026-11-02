@@ -134,7 +134,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1170 bash: parameter operators on arrays, missing element 0, set -u, circular array namerefs · P3 · SH · OPEN [V]
+### T-1170 bash: parameter operators on arrays, missing element 0, set -u, circular array namerefs · P3 · SH · IN PROGRESS (SH worker, round 53) [V]
 Found while closing T-1166; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Interpreter: `${x:-d}`, `${x-e}`, `${x:+f}`, `${x+g}`, `${x?i}` treat an array name as unset (isSetVar ignores arrays at the param-op site, ~line 3229 of bash-interpreter.abnf). `x=(p q)` gives "d e"; oracle "p p f g". Same through namerefs (`${w:-dflt}` gives "dflt", oracle "xv").
 - Compiler: for an array with no element 0 (`y=([1]=a)`), `${y-e}` is empty and `${y+g}` gives "g"; oracle "e" and "" (rt_var returns empty when element 0 is missing).
