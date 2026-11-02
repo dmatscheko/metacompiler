@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1134** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1135** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -154,16 +154,19 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1131 bash: readonly/export on NAME[SUB], declare -g -x through circular nameref, scalar store to circular array nameref, compiled readonly-nameref assignment, test -nt/-ot/-ef · P3 · SH · IN PROGRESS (SH worker, round 42) [V]
+### T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, other stores to circular array nameref, valueless readonly nameref stores, nested brackets in computed decl operands · P3 · SH · OPEN [V]
 
-Found while working T-1130. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+Found while working T-1131. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
-1. `readonly a[1]=b`, `readonly -a b[1]=c` and `export -n b[1]=c` must print ``readonly: `a[1]': not a valid identifier`` (or `export:`), return status 1, and declare nothing. All engines accept them. Also, `readonly -n b4=x` must leave `declare -- b4="x"` (not readonly); ours gives `-nr`.
-2. `declare -g -x w=q` inside a function where w is a circular local nameref (`local -n w=w`): bash creates the global as `declare -x w="q"`. All engines leave `declare -- w="q"`, without the export.
-3. Assigning `w=z` to a circular local nameref that is an array (after `declare w=(x y)`, or `local -a v=(x y)` plus a circular -n): bash silently leaves the array unchanged. All engines set element 0 to z.
-4. Compiled only: an assignment through a readonly nameref is refused. `declare -nr r=x; r=y` must set x=y; the same holds for `local -nr` and after `declare -r w=x` on a circular nameref. The compiled legs print `r: readonly variable` and abandon the line, because the compile-time roVars entry is on the nameref name.
-5. `test` / `[` / `[[` `-nt`, `-ot` and `-ef` are unsupported. The interpreter fails, the compiler refuses a literal one, and the run-time rt_test path answers false. Note that two SHOULD FAIL rows in .vscode/launch.json rely on `[ a -nt b ]` being unsupported; give them another unsupported construct if you implement these. With no external files available in probes, use files the script itself creates.
-6. Minor: a quoted valueless operand whose subscript has a blank (`declare -n 'c3[x y]'`) prints `c3[0]` in the "reference variable cannot be an array" message, where bash prints `c3[x y]`.
+1. `NAME[SUB]=(list)`, in all engines. Bash prints `e[1]: cannot assign list to array member` and abandons the line. As a plain assignment it declares nothing. Under declare, local, export or readonly, NAME is left as `declare -a e`. We assign element 0 = x and continue.
+2. export/readonly through a function's circular local nameref, as in `f(){ local -n w9=w9; export w9=q; }`. Bash prints a "circular" warning, `maximum nameref depth (8) exceeded`, another "circular" warning, and then creates a global `declare -x w9="q"`. readonly gives `-r` the same way. A bare `export w12` gives the global `-x` after two "circular" warnings. Our interpreter abandons the line, so the function's later output is lost. Our compiler puts `-x` on the local nameref (`declare -nx`) instead of on the global.
+3. Other stores to a circular array nameref (`local -n w=w; declare w=(x y)`). Bash leaves the array unchanged for `(( w = 5 ))`, `w[1]=q` and `w+=(p)`. All our engines change it. `${w:=dd}` changes it in the interpreter only.
+4. Valueless readonly nameref, in all engines.
+   - `declare -nr r6; r6=5`: bash says ``r6: `5': not a valid identifier``; we say `r6: readonly variable`. Check the exact text with the oracle.
+   - `(( r10 = 3 ))`: bash says ``((: `3': not a valid identifier`` with status 0; we say readonly, with status 1.
+5. Nested brackets in a computed declaration operand (interpreter, and rt_decl_word in bash-rt.c). `k='c6[x y]'; declare -n c10["$k"]` gives `c10[c6[x y]]: reference variable cannot be an array` in bash; the interpreter reports "not a valid identifier". `declare 'c10[a[1]]=x'` is refused as well. The cause is that bashDeclOperand and rt_decl_word stop at the first `]`.
+
+Note: `test -nt/-ot/-ef` between two *existing different* files answers false by design, because there is no file-time model.
 
 Verify with `tests/probe.sh bash` on all four legs, and diff the `.err` files.
 
@@ -1203,6 +1206,7 @@ T-1127 bash: test arity errors, declare through circular -i nameref, readonly ci
 T-1130 bash: compiled test with run-time operators, test -o/-R, -n on subscripted names, circular nameref declarations with attributes — merged 4fd1c782: compiled test/[ falls back to a run-time C parser (rt_test) when operators/field lists only exist at run time; test -o/-R in test/[/[[; -n on NAME[SUB] error; circular local nameref declarations with attributes/+=/literals; computed self-ref checked first; 4-leg probe + stderr match bash 5.3; bash gates green; bench -1.23%
 T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each), lazy no-block ArgumentError, lazy.take size, AS#last arity, Range#equal? — merged 463872a5: blockless find/find_index/take_while/each_entry stream enumerators (nil size), lazy no-block ArgumentError, send(:each), Range#with_index NoMethodError + infinite find, Lazy size carries counts, builtin Method#arity table (+ curry), Range dup/equal? identity; 4-leg probe matches ruby 2.6; ruby gates + go test green after rebase (worker: full matrix 605/605); bench -0.04%
 T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::topVal reference, Array<ProgramClass> JVM name, extension-function references — merged 3bd224e6: super toString/hashCode/equals reaching kotlin.Any (js_ktsuperany, also no-superclass and builtin-exception supers), ::top property refs (get/set/invoke/name), Array<ProgramClass> binary names incl. nested/late-declared, extension-function refs; plus newline-before-:: statement boundary via OpSameLine (continues inside brackets); 4-leg probes match kotlinc 2.2.21 after two review rounds; kotlin gates green; bench -0.02%
+T-1131 bash: readonly/export on NAME[SUB], declare -g -x through circular nameref, scalar store to circular array nameref, compiled readonly-nameref assignment, test -nt/-ot/-ef — merged d006faf6: readonly/export NAME[SUB] not a valid identifier, readonly -n ignores -n, declare -g -x keeps export in interp, scalar store to circular array nameref dropped, compiled stores through readonly namerefs reach the target, test -nt/-ot/-ef over the file model (two existing different files answer false by design: no mtimes), quoted-subscript message; 4-leg probe + stderr match bash 5.3; matrix 605/605; bench +0.02%
 
 # Settled — do not re-open
 
