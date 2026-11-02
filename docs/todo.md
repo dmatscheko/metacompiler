@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1145** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1146** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,19 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer endless ranges · P3 · RB · IN PROGRESS (RB worker, round 61) [V]
+### T-1145 ruby: uncaught-exception report via $stderr, (1..).take, big Integer#step, compiled for over endless String range, define_method rescue-modifier crash, `{` after a command call parse, warn uplevel limits · P3 · RB · OPEN [V]
 
-Found while working T-1137. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8.
+Found while working T-1141. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected unless noted.
 
-1. Kernel#warn is missing in all three engines. `warn "hi"` raises NoMethodError "undefined method `warn' for main:Object"; MRI writes `hi` and a newline to `$stderr`. Cover several arguments, arrays (one line per element), `warn` with no arguments (prints nothing), and the return value nil. Check `uplevel:` too, which MRI 2.6 supports.
-2. Assigning an object with #write to `$stderr` does not capture output in any engine. MRI routes rb_warn and Kernel#warn through `$stderr.write`, so a custom object receives the warning text. The oracle's `W` equals the warning text plus "hi\n". Also check `$stderr.puts` and a StringIO-like object, if StringIO is supported.
-3. Not probed: a big-Integer begin with a nil or Infinity end, such as `(2**70..).each` / `.first(2)` / `.size` and `(2**70..Float::INFINITY).first(2)`. `rangeUnbounded` only accepts a plain-number begin.
+1. The uncaught-exception report bypasses `$stderr`. MRI writes it through `$stderr.write`; ours prints to fd 2. Repro: `$stderr = obj_with_write; raise "x"`. MRI prints nothing and exits 1. The fix touches js_rtop in the shared abnf/jsrt.go, so run the full matrix.
+2. `(1..).take(2)` raises RangeError "cannot convert endless range to an array". MRI gives `[1, 2]`. Check take_while, first and min(n) on endless ranges too.
+3. `(2**70).step(by: 3).first(2)`: the interpreter raises NoMethodError and the Go twin answers `[b, b]` (imprecise). MRI gives `[b, b+3]`. Check Integer#step / #upto / #downto / #times with big receivers.
+4. Compiled legs only: `for s in ("a"..)` with a break aborts with "cannot take the length of an endless range". The interpreter and MRI walk it.
+5. Interpreter only: top-level `define_method(:dm) { … } rescue p $!` crashes with an engine TypeError ("Value is not an object: null").
+6. Parse: a line starting with `{` right after a command call with arguments (`$stdout.puts "x"` then `{1 => 2}.key(2)` on the next line) is taken as a block, giving "undefined method `key' for nil:NilClass". MRI treats it as a new statement.
+7. Known limits of Kernel#warn `uplevel:`:
+   - `uplevel: 2` or more inside a method or block raises NotImplementedError. Supporting it needs per-call site tracking, so only do it if that can be made cost-neutral.
+   - `uplevel: 1` written inside a rescue clause names the frame's entry line. MRI names the line that raised, because a rescue clause is its own frame.
 
 Verify with `tests/probe.sh ruby` on all four legs, and diff the `.err` files.
 
@@ -1209,6 +1215,7 @@ T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-int
 T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) — merged 82430d9c: builtin method reference arity from one kotlinc-measured table in kotlin-decltypes.js (140 names x 30 receiver types; bound refs pass the spec to js_ktrefarity, unbound get it at compile time), expr::name records arity, inherited equals arity 1; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench 0.00%
 T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list assignment parse, quoted compound values, reads through circular array nameref, path-length-dependent frozen step cost — merged a35d7084: list-to-member declaration failures, nameref array conversions (-g target, removing nameref attribute, read -a/mapfile), prefix list assignments, quoted compound values (+ compiler keeps -i/-u/-l on runtime (...)), reads through circular array namerefs, readonly :=  status 2, linear ${v#*L}/${v%L*} for literal L (part 6 frozen steps 70M -> 27M); 4-leg probe matches bash 5.3 (stdout + stderr; \001 byte by design); bash gates green; bench 0.00%
 T-1142 kotlin: per-class program-method arity, interpreter named args on builtins shadowed by a class method name — merged 013812e4: per-class reference arity for disputed method names (run-time from the receiver's class chain via recorded closure arity), stdlib named-argument order chosen by receiver (interp lookupMethod, compiler namesCover fallback); 4-leg probe matches kotlinc 2.2.21 except the pre-existing compiled named-arg evaluation order (filed P2); kotlin gates green; bench -0.02%
+T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer endless ranges — merged 081928f9 (partial by design: warn uplevel >= 2 inside a method raises NotImplementedError, carried to follow-up): Kernel#warn (IO#puts semantics, options errors, uplevel 0/1 with no per-call cost), warnings + warn through $stderr.write with TypeError on non-writable assignment, big-Integer endless ranges exact (each/for/first/step/lazy/next), endless #last RangeError; 4-leg probe matches ruby 2.6 stdout + stderr; matrix 605/605; bench -0.04%
 
 # Settled — do not re-open
 
