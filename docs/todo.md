@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1118** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1119** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,12 +69,17 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (interp); endless Range#each hangs · P3 · RB · IN PROGRESS (RB worker, round 52) [V]
+### T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for step · P3 · RB · OPEN [V]
 
-Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
-- `begin; proc { break 1 }.call; rescue LocalJumpError => e; p e.reason, e.exit_value; end` prints `:break` and `1`. Every engine raises NoMethodError. Add accessors next to StopIteration#result (abnf/jsrt.go, lib/ruby-rt.metajs).
-- `super` with a literal block drops the block in the interpreter: makeSuper passes only the plain arguments. This was seen in the code and has not been probed yet; probe it first.
-- `p((1..Float::INFINITY).each { |i| break i if i * i > 50 })` prints 8. Ours hangs in every leg, and was already hanging before the r51 break rework. Check `(1..)` (2.6 endless range) and `1.step` too.
+Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8. Every engine says "cannot convert an endless range to an array" for these:
+- `(2.5..).each {}` must raise TypeError "can't iterate from Float".
+- `("a"..).each { |v| break v if v.size > 1 }` gives "aa": an endless String range iterates with String#succ.
+- `(1..nil).each_entry { |s| break s if s > 2 }` gives 3.
+
+ArithmeticSequence:
+- `1.step(10, 3)` without a block, and `(1..10).step(3)`, return an ArithmeticSequence. `p` shows `(1.step(10, 3))` / `((1..10).step(3))`; ours shows `#<Enumerator: 1:step(10, 3)>`.
+- `1.step(10, 0)` without a block returns `(1.step(10, 0))` instead of raising "step can't be 0".
+- Check which ArithmeticSequence methods 2.6 has (begin/end/step/exclude_end?/first/last/size/to_a/==) and model the class name and inspect output.
 
 # JS — JavaScript and TypeScript
 
@@ -1164,6 +1169,7 @@ T-1111 kotlin: MutableMap putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll v
 T-1114 php: return-type TypeError location; type-string order for callable/iterable/static; arrow-fn return deprecations — DONE r50 (98fb26a4): return-type TypeError at the return statement (closing brace when none), zend_type_to_string order (classes first; iterable=Traversable|array; static resolved), arrow-fn/by-ref return deprecations; master-probed
 T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReversed live view; buildList subList writes — DONE r33 (bc89fc12): Map compute/computeIfPresent/replace per java.util.Map, asList (Arrays$ArrayList, primitive asList classes) and asReversed as live two-way views, buildList subList stays sealed; master-probed incl. views of views
 T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-word bad substitution; circular-nameref ${#r[@]} warnings — DONE r36 (4746419a): declare -c/-t, linear star-led prefix/suffix strip in bash-rt.c (full.5 temp-dir steps 84M->59M), case/[[ ]] expansion errors abandon the command, circular-nameref warning counts; master-probed (174-line strip matrix vs bash 5.3)
+T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (interp); endless Range#each hangs — DONE r52 (78148037): LocalJumpError#reason/#exit_value, super with a literal block / &nil / implicit block in both engines, endless Integer ranges and Numeric#step (nil/INF limit, to:/by:) via lazy one-value enumerators; master-probed vs ruby 2.6
 
 # Settled — do not re-open
 
