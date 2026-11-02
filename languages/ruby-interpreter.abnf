@@ -4774,7 +4774,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "hex") { return {ok: true, v: strToInum(s, 16, false).v} }
         if (name == "oct") { return {ok: true, v: strToInum(s, 0 - 8, false).v} }
         if (name == "clear") { return {ok: true, v: ""} }
-        if (name == "scrub" || name == "unicode_normalize" || name == "encode") {
+        // The bang forms answer the receiver: strMutate stores this text back.
+        if (name == "scrub" || name == "unicode_normalize" || name == "encode"
+            || name == "scrub!" || name == "unicode_normalize!" || name == "encode!") {
             return {ok: true, v: s}
         }
         if (name == "unicode_normalized?" || name == "valid_encoding?") { return {ok: true, v: true} }
@@ -10313,7 +10315,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isNumV(target) && typeof target != "number") { return numberMethod(target, name, args, blk) }
         if (isSym(target)) {
             if (name == "to_s" || name == "id2name") { return target.s }
-            if (name == "to_sym") { return target }
+            if (name == "to_sym" || name == "intern") { return target }
             if (name == "inspect") { return symInspect(target.s) }
             if (name == "length" || name == "size") { return charCount(target.s) }
             // Symbol's case and successor methods are the String ones on its name.
@@ -10321,6 +10323,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 || name == "succ" || name == "next") { return mkSym(rstr(mcall(target.s, name, args, null))) }
             if (name == "empty?") { return target.s == "" }
             if (name == "to_proc") { return symProc(target) }
+            // casecmp / casecmp? compare the names and answer nil for a non-Symbol;
+            // match / match? / slice are the String ones on the name, and the
+            // name's encoding is US-ASCII when it is all ASCII. Twins: the jsSym arm
+            // of rubyMethod in abnf/jsrt.go, rbMethod in lib/ruby-rt.metajs.
+            if (name == "casecmp" || name == "casecmp?") { return isSym(args[0]) ? mcall(target.s, name, [args[0].s], null) : null }
+            if (name == "match" || name == "match?" || name == "slice") { return mcall(target.s, name, args, blk) }
+            if (name == "encoding") { return encObj(rbsAsciiOnly(target.s) ? "US-ASCII" : "UTF-8") }
             noMethod(target, name)
         }
         if (isRange(target)) { return rangeMethod(target, name, args, blk) }
@@ -10546,6 +10555,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_a") { return [] }
             if (name == "to_i") { return 0 }
             if (name == "to_f") { return mkFlo(0) }
+            if (name == "to_h") { return {__dict: true, keys: [], vals: []} }
+            if (name == "to_r" || name == "rationalize") { return mkRat(0, 1) }
+            if (name == "to_c") { return mkCpx(0, 0) }
             noMethod(target, name)
         }
         if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
@@ -10955,6 +10967,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "dup" || name == "clone") { return hashCopyId(target) }
         // Hash#to_h with a block maps each pair through it, as Array#to_h does.
         if (name == "to_h") { return blk == null ? target : arrayMethod(hashPairs(target), name, args, blk) }
+        if (name == "to_hash") { return target }
         if (name == "delete") {
             var xi = dictFind(target, args[0])
             if (xi < 0) { return blk != null ? blockCall(blk, [args[0]]) : null }
@@ -10970,13 +10983,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return xv
         }
         if (name == "clear") { arrReplace(target.keys, []); arrReplace(target.vals, []); return target }
-        // Hash#compact: a new Hash without the nil values.
-        if (name == "compact") {
+        // Hash#compact: a new Hash without the nil values; compact! drops them in
+        // place and answers nil when there were none.
+        if (name == "compact" || name == "compact!") {
             var hc = {__dict: true, keys: [], vals: []}
             for (var hci = 0; hci < target.keys.length; hci++) {
                 if (target.vals[hci] !== null && target.vals[hci] !== undefined) { dictSet(hc, target.keys[hci], target.vals[hci]) }
             }
-            return hc
+            if (name == "compact") { return hc }
+            return hc.keys.length == target.keys.length ? null : arrReplaceDict(target, hc)
         }
         if (name == "each_key") {
             for (var ek = 0; ek < target.keys.length; ek++) { blockCall(blk, [keyOut(target.keys[ek])]) }
@@ -10996,6 +11011,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return va
         }
+        // Hash#slice: a new Hash of the given keys that are present, in argument
+        // order. Twins: rubyHashMethod in abnf/jsrt.go, rbHashMethod in
+        // lib/ruby-rt.metajs.
+        if (name == "slice") {
+            var hsl = {__dict: true, keys: [], vals: []}
+            for (var si = 0; si < args.length; si++) {
+                var sf = dictFind(target, args[si])
+                if (sf >= 0) { dictSet(hsl, target.keys[sf], target.vals[sf]) }
+            }
+            return hsl
+        }
+        // Hash#flatten(depth = 1) is its pairs flattened that deep.
+        if (name == "flatten") { return arrayMethod(hashPairs(target), name, args.length > 0 ? args : [1], null) }
         // dig: self[k], then the rest of the path is dug out of that value by
         // its own #dig; nil stops the walk. Twin of Hash#dig in abnf/jsrt.go
         // and lib/ruby-rt.metajs.
@@ -11018,6 +11046,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "index" && rbSitePos >= 0) { warnWrite(c.file + ":" + c.lineOf(rbSitePos) + ": warning: Hash#index is deprecated; use Hash#key\n") }
             for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return keyOut(target.keys[ky]) } }
             return null
+        }
+        if (name == "value?" || name == "has_value?") {
+            for (var hv = 0; hv < target.vals.length; hv++) { if (rubyEq(target.vals[hv], args[0])) { return true } }
+            return false
         }
         if (name == "transform_values") {
             var tv = hashCopy(target)
@@ -11263,37 +11295,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // index-ascending, permutation is the depth-first walk that takes each unused
     // index in turn. Mirrored by rbCombIdx / rbPermIdx in lib/ruby-rt.metajs and
     // rubyCombIdx / rubyPermIdx in abnf/jsrt.go.
-    function combRec(n, k, start, cur, out) {
+    // With rep an index may be taken again (repeated_combination /
+    // repeated_permutation).
+    function combRec(n, k, start, cur, out, rep) {
         if (cur.length == k) { out.push(cur.slice(0)); return }
         for (var i = start; i < n; i++) {
             cur.push(i)
-            combRec(n, k, i + 1, cur, out)
+            combRec(n, k, rep ? i : i + 1, cur, out, rep)
             cur.pop()
         }
     }
-    function combIdx(n, k) {
+    function combIdx(n, k, rep) {
         var out = []
-        if (k < 0 || k > n) { return out }
-        combRec(n, k, 0, [], out)
+        if (k < 0 || (k > n && !rep)) { return out }
+        combRec(n, k, 0, [], out, rep)
         return out
     }
-    function permRec(n, k, used, cur, out) {
+    function permRec(n, k, used, cur, out, rep) {
         if (cur.length == k) { out.push(cur.slice(0)); return }
         for (var i = 0; i < n; i++) {
-            if (used[i]) { continue }
+            if (used[i] && !rep) { continue }
             used[i] = true
             cur.push(i)
-            permRec(n, k, used, cur, out)
+            permRec(n, k, used, cur, out, rep)
             cur.pop()
             used[i] = false
         }
     }
-    function permIdx(n, k) {
+    function permIdx(n, k, rep) {
         var out = []
-        if (k < 0 || k > n) { return out }
+        if (k < 0 || (k > n && !rep)) { return out }
         var used = []
         for (var i = 0; i < n; i++) { used.push(false) }
-        permRec(n, k, used, [], out)
+        permRec(n, k, used, [], out, rep)
         return out
     }
     // ----- Enumerator -----
@@ -11356,7 +11390,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
             || n == "find_all" || n == "cycle" || n == "chunk_while" || n == "lazy"
             || n == "grep" || n == "grep_v" || n == "minmax_by" || n == "slice_before"
-            || n == "slice_after" || n == "chunk" || n == "chain"
+            || n == "slice_after" || n == "chunk" || n == "chain" || n == "rassoc"
+            || n == "reverse_each" || n == "slice_when"
     }
     // The Array/Enumerable names that REQUIRE a block; called without one MRI hands
     // back an Enumerator over the receiver. Names that are legal blockless (sort,
@@ -12293,10 +12328,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // combination(n) / permutation(n): the subsets and the ordered arrangements, in
         // MRI's own order (combination is index-ascending, permutation is
-        // lexicographic by index). With a block they yield each one and answer SELF.
-        if (name == "combination" || name == "permutation") {
+        // lexicographic by index); the repeated_ forms may take an element again.
+        // With a block they yield each one and answer SELF.
+        if (name == "combination" || name == "permutation" || name == "repeated_combination" || name == "repeated_permutation") {
             var pk = args.length > 0 ? Math.trunc(toF(args[0])) : t.length
-            var picks = name == "combination" ? combIdx(t.length, pk) : permIdx(t.length, pk)
+            var prep = name.length > 11
+            var picks = name == "combination" || name == "repeated_combination" ? combIdx(t.length, pk, prep) : permIdx(t.length, pk, prep)
             var res = []
             for (i = 0; i < picks.length; i++) {
                 var row2 = []
@@ -12418,6 +12455,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return [yes, no]
         }
+        if (name == "rotate!") { return arrReplace(t, arrayMethod(t, "rotate", args, null)) }
         if (name == "rotate") {
             if (t.length == 0) { return [] }
             var rn = args.length == 0 ? 1 : Math.trunc(toF(args[0]))
@@ -12576,27 +12614,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return sk
         }
         // bsearch: find-minimum mode (the block answers true / false / nil) and
-        // find-any mode (it answers a number, 0 meaning found).
-        if (name == "bsearch") {
+        // find-any mode (it answers a number, 0 meaning found); bsearch_index
+        // answers the index instead of the element.
+        if (name == "bsearch" || name == "bsearch_index") {
             var blo = 0
             var bhi = t.length
-            var bfound = anytype
-            bfound = null
+            var bfound = -1
             while (blo < bhi) {
                 var bmid = Math.floor((blo + bhi) / 2)
                 var bv = anytype
                 bv = blockCall(blk, [t[bmid]])
                 if (typeof bv == "number" || isFlo(bv)) {
-                    if (toF(bv) == 0) { return t[bmid] }
+                    if (toF(bv) == 0) { bfound = bmid; break }
                     if (toF(bv) < 0) { bhi = bmid } else { blo = bmid + 1 }
                 } else if (rtest(bv)) {
-                    bfound = t[bmid]
+                    bfound = bmid
                     bhi = bmid
                 } else {
                     blo = bmid + 1
                 }
             }
-            return bfound
+            if (bfound < 0) { return null }
+            return name == "bsearch" ? t[bfound] : bfound
         }
         if (name == "chunk_while" || name == "slice_when") {
             var ckeep = []
@@ -12656,6 +12695,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return null
         }
+        if (name == "rassoc") {
+            for (i = 0; i < t.length; i++) {
+                if (Array.isArray(t[i]) && t[i].length > 1 && rubyEq(t[i][1], args[0])) { return t[i] }
+            }
+            return null
+        }
+        // union / difference: | and - over every argument in turn.
+        if (name == "union" || name == "difference") {
+            var sacc = name == "union" ? arrOr(t, []) : t.slice(0)
+            for (i = 0; i < args.length; i++) {
+                var sop = arrOperand(name, args[i])
+                sacc = name == "union" ? arrOr(sacc, sop) : arrDiff(sacc, sop)
+            }
+            return sacc
+        }
+        if (name == "replace") { return arrReplace(t, arrOperand(name, args[0])) }
         if (name == "product") {
             var prod = []
             for (i = 0; i < t.length; i++) { prod.push([t[i]]) }
@@ -12678,8 +12733,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < t.length; i++) { blockCall(blk, [i]) }
             return t
         }
-        if (name == "dup" || name == "clone" || name == "freeze" || name == "itself" || name == "entries") {
-            return name == "freeze" || name == "itself" ? t : t.slice(0)
+        if (name == "dup" || name == "clone" || name == "freeze" || name == "itself" || name == "entries" || name == "to_ary") {
+            return name == "dup" || name == "clone" || name == "entries" ? t.slice(0) : t
         }
         // Array#fetch: a missing index is the default, the block's answer, or an
         // IndexError naming the bounds -n...n. Twins: rubyArrayMethod in

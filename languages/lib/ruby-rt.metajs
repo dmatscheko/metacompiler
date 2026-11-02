@@ -7104,32 +7104,33 @@ function rbRand(v) {
 // combination / permutation, as INDEX lists so one pair of helpers serves both the
 // Array methods and (through them) an Enumerator. MRI's orders: combination is
 // index-ascending, permutation is the depth-first walk that takes each unused index
-// in turn. Mirrors combIdx / permIdx of ruby-interpreter.abnf.
-function rbCombRec(n, k, start, cur, out) {
+// in turn; with rep an index may be taken again (the repeated_ forms). Mirrors
+// combIdx / permIdx of ruby-interpreter.abnf.
+function rbCombRec(n, k, start, cur, out, rep) {
     if (cur.length == k) { out.push(rtCopyArr(cur)); return undefined }
     var i = start
     while (i < n) {
         cur.push(i)
-        rbCombRec(n, k, i + 1, cur, out)
+        rbCombRec(n, k, rep ? i : i + 1, cur, out, rep)
         cur.pop()
         i = i + 1
     }
     return undefined
 }
-function rbCombIdx(n, k) {
+function rbCombIdx(n, k, rep) {
     var out = []
-    if (k < 0 || k > n) { return out }
-    rbCombRec(n, k, 0, [], out)
+    if (k < 0 || (k > n && !rep)) { return out }
+    rbCombRec(n, k, 0, [], out, rep)
     return out
 }
-function rbPermRec(n, k, used, cur, out) {
+function rbPermRec(n, k, used, cur, out, rep) {
     if (cur.length == k) { out.push(rtCopyArr(cur)); return undefined }
     var i = 0
     while (i < n) {
-        if (!used[i]) {
+        if (rep || !used[i]) {
             used[i] = true
             cur.push(i)
-            rbPermRec(n, k, used, cur, out)
+            rbPermRec(n, k, used, cur, out, rep)
             cur.pop()
             used[i] = false
         }
@@ -7137,13 +7138,13 @@ function rbPermRec(n, k, used, cur, out) {
     }
     return undefined
 }
-function rbPermIdx(n, k) {
+function rbPermIdx(n, k, rep) {
     var out = []
-    if (k < 0 || k > n) { return out }
+    if (k < 0 || (k > n && !rep)) { return out }
     var used = []
     var i = 0
     while (i < n) { used.push(false); i = i + 1 }
-    rbPermRec(n, k, used, [], out)
+    rbPermRec(n, k, used, [], out, rep)
     return out
 }
 // An EAGER Enumerator: the materialized element list, a cursor for #next, and the
@@ -7983,7 +7984,8 @@ function rbHashEnumName(n) {
         || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
         || n == "find_all" || n == "cycle" || n == "chunk_while" || n == "lazy"
         || n == "grep" || n == "grep_v" || n == "minmax_by" || n == "slice_before"
-        || n == "slice_after" || n == "chunk" || n == "chain"
+        || n == "slice_after" || n == "chunk" || n == "chain" || n == "rassoc"
+        || n == "reverse_each" || n == "slice_when"
 }
 
 function rbHashMethod(o, keys, vals, name, args) {
@@ -8018,6 +8020,7 @@ function rbHashMethod(o, keys, vals, name, args) {
         if (blk === null) { return o }
         return rbArrayMethod(rbHashPairs(keys, vals), name, args)
     }
+    if (name == "to_hash") { return o }
     if (name == "delete") {
         var di = rbDictFind(keys, rbArgAt(args, 0))
         if (di < 0) {
@@ -8047,14 +8050,19 @@ function rbHashMethod(o, keys, vals, name, args) {
         rbHashEach(keys, vals, blk)
         return o
     }
-    // Hash#compact: a new Hash without the nil values.
-    if (name == "compact") {
+    // Hash#compact: a new Hash without the nil values; compact! drops them in
+    // place and answers nil when there were none.
+    if (name == "compact" || name == "compact!") {
         var hc = js_dict_new()
         while (i < keys.length) {
             if (!rtIsNil(vals[i])) { rbDictSet(hc, keys[i], vals[i]) }
             i = i + 1
         }
-        return hc
+        if (name == "compact") { return hc }
+        if (hc["keys"].length == keys.length) { return null }
+        rbArrReplace(keys, hc["keys"])
+        rbArrReplace(vals, hc["vals"])
+        return o
     }
     if (name == "each_key") {
         while (i < keys.length) {
@@ -8081,6 +8089,22 @@ function rbHashMethod(o, keys, vals, name, args) {
         }
         return va
     }
+    // Hash#slice: a new Hash of the given keys that are present, in argument
+    // order. Twin of hashMethod in ruby-interpreter.abnf.
+    if (name == "slice") {
+        var hsl = js_dict_new()
+        while (i < nPos) {
+            var sf = rbDictFind(keys, args[i])
+            if (sf >= 0) { rbDictSet(hsl, keys[sf], vals[sf]) }
+            i = i + 1
+        }
+        return hsl
+    }
+    // Hash#flatten(depth = 1) is its pairs flattened that deep.
+    if (name == "flatten") {
+        if (nPos == 0) { return rbArrayMethod(rbHashPairs(keys, vals), name, [1]) }
+        return rbArrayMethod(rbHashPairs(keys, vals), name, args)
+    }
     // dig: self[k], then the rest of the path is dug out of that value by its own
     // #dig; nil stops the walk. Twin of Hash#dig in ruby-interpreter.abnf and
     // abnf/jsrt.go.
@@ -8106,6 +8130,13 @@ function rbHashMethod(o, keys, vals, name, args) {
             i = i + 1
         }
         return null
+    }
+    if (name == "value?" || name == "has_value?") {
+        while (i < vals.length) {
+            if (vals[i] === rbArgAt(args, 0) || rbEq(vals[i], rbArgAt(args, 0))) { return true }
+            i = i + 1
+        }
+        return false
     }
     if (name == "transform_values") {
         var tv = rbHashCopy(o)
@@ -8729,11 +8760,13 @@ function rbArrayMethod(t, name, args) {
         return null
     }
     // combination(n) / permutation(n): the subsets and the ordered arrangements, in
-    // MRI's own order. With a block they yield each one and answer SELF.
-    if (name == "combination" || name == "permutation") {
+    // MRI's own order; the repeated_ forms may take an element again. With a
+    // block they yield each one and answer SELF.
+    if (name == "combination" || name == "permutation" || name == "repeated_combination" || name == "repeated_permutation") {
         var pk = t.length
         if (nPos > 0) { pk = Math.trunc(rbToF(rbPosAt(args, nPos, 0))) }
-        var picks = name == "combination" ? rbCombIdx(t.length, pk) : rbPermIdx(t.length, pk)
+        var prep = name.length > 11
+        var picks = name == "combination" || name == "repeated_combination" ? rbCombIdx(t.length, pk, prep) : rbPermIdx(t.length, pk, prep)
         var res = []
         var pi = 0
         while (pi < picks.length) {
@@ -8906,6 +8939,7 @@ function rbArrayMethod(t, name, args) {
         }
         return [yes, no]
     }
+    if (name == "rotate!") { return rbArrReplace(t, rbArrayMethod(t, "rotate", args)) }
     if (name == "rotate") {
         if (t.length == 0) { return [] }
         var rn = nPos == 0 ? 1 : Math.trunc(rbToF(args[0]))
@@ -9116,26 +9150,30 @@ function rbArrayMethod(t, name, args) {
         rbArrReplace(t, kept)
         return sk
     }
-    // bsearch: find-minimum (true / false / nil) and find-any (a number) modes.
-    if (name == "bsearch") {
+    // bsearch: find-minimum (true / false / nil) and find-any (a number) modes;
+    // bsearch_index answers the index instead of the element.
+    if (name == "bsearch" || name == "bsearch_index") {
         var blo = 0
         var bhi = t.length
-        var bfound = anytype
-        bfound = null
+        var bfound = 0 - 1
         while (blo < bhi) {
             var bmid = Math.floor((blo + bhi) / 2)
             var bv = anytype
             bv = rbCall1(blk, t[bmid])
             if (typeof bv == "number" || rbIsFlo(bv)) {
-                if (rbToF(bv) == 0) { return t[bmid] }
-                if (rbToF(bv) < 0) { bhi = bmid } else { blo = bmid + 1 }
+                if (rbToF(bv) == 0) {
+                    bfound = bmid
+                    blo = bhi
+                } else if (rbToF(bv) < 0) { bhi = bmid } else { blo = bmid + 1 }
             } else if (rbTruthy(bv)) {
-                bfound = t[bmid]
+                bfound = bmid
                 bhi = bmid
             } else {
                 blo = bmid + 1
             }
         }
+        if (bfound < 0) { return null }
+        if (name == "bsearch") { return t[bfound] }
         return bfound
     }
     if (name == "chunk_while" || name == "slice_when") {
@@ -9219,6 +9257,27 @@ function rbArrayMethod(t, name, args) {
         }
         return null
     }
+    if (name == "rassoc") {
+        var ra2 = 0
+        while (ra2 < t.length) {
+            if (rbIsArr(t[ra2]) && t[ra2].length > 1 && (t[ra2][1] === rbPosAt(args, nPos, 0) || rbEq(t[ra2][1], rbPosAt(args, nPos, 0)))) { return t[ra2] }
+            ra2 = ra2 + 1
+        }
+        return null
+    }
+    // union / difference: | and - over every argument in turn.
+    if (name == "union" || name == "difference") {
+        var sacc = anytype
+        sacc = name == "union" ? rbArrOr(t, []) : rtCopyArr(t)
+        var sa2 = 0
+        while (sa2 < nPos) {
+            var sop = rbArrOperand(name, args[sa2])
+            sacc = name == "union" ? rbArrOr(sacc, sop) : rbBin("-", sacc, sop)
+            sa2 = sa2 + 1
+        }
+        return sacc
+    }
+    if (name == "replace") { return rbArrReplace(t, rbArrOperand(name, rbPosAt(args, nPos, 0))) }
     if (name == "product") {
         var prod = []
         var qj = 0
@@ -9249,7 +9308,7 @@ function rbArrayMethod(t, name, args) {
         return prod
     }
     if (name == "dup" || name == "clone" || name == "entries") { return rtCopyArr(t) }
-    if (name == "freeze" || name == "itself") { return t }
+    if (name == "freeze" || name == "itself" || name == "to_ary") { return t }
     // Array#fetch. Twin of arrayMethod in ruby-interpreter.abnf.
     if (name == "fetch") {
         var fx = rbLongArg(name, rbArgAt(args, 0))
@@ -9901,6 +9960,9 @@ function rbMethod(target, name, args) {
         if (name == "to_a") { return [] }
         if (name == "to_i") { return 0 }
         if (name == "to_f") { return rbMkFlo(0) }
+        if (name == "to_h") { return js_dict_new() }
+        if (name == "to_r" || name == "rationalize") { return rbMkRat(0, 1) }
+        if (name == "to_c") { return rbMkCpx(0, 0) }
     }
     if (rbIsNum(target)) {
         var nv = rbNumMethod(target, name, args)
@@ -9909,7 +9971,7 @@ function rbMethod(target, name, args) {
     if (rbIsSym(target)) {
         var sn = target["s"]
         if (name == "to_s" || name == "id2name") { return sn }
-        if (name == "to_sym") { return target }
+        if (name == "to_sym" || name == "intern") { return target }
         if (name == "length" || name == "size") { return rbCharCount(sn) }
         if (name == "inspect") { return rbSymInspect(sn) }
         // Symbol's case and successor methods are the String ones on its name.
@@ -9917,6 +9979,19 @@ function rbMethod(target, name, args) {
             || name == "succ" || name == "next") { return rbSym(rbStr(rbMethod(sn, name, args))) }
         if (name == "empty?") { return sn == "" }
         if (name == "to_proc") { return js_rsymproc(target) }
+        // Twin of the Symbol arm of mcall in ruby-interpreter.abnf.
+        if (name == "casecmp" || name == "casecmp?") {
+            if (rbIsSym(rbArgAt(args, 0))) { return rbMethod(sn, name, [rbArgAt(args, 0)["s"]]) }
+            return null
+        }
+        if (name == "match" || name == "match?" || name == "slice") {
+            // A pattern argument is the regexp half's, as for a String receiver.
+            var sr = anytype
+            sr = rbRxMethod(sn, name, args)
+            if (sr === undefined) { sr = rbMethod(sn, name, args) }
+            return sr
+        }
+        if (name == "encoding") { return rbEncObj(rbsAsciiOnly(sn) ? "US-ASCII" : "UTF-8") }
         rbNoMethod(target, name)
     }
     if (typeof target == "string") {
@@ -12745,7 +12820,9 @@ function smMethod(s, name, sargs, nargs) {
     if (name == "hex") { return {ok: true, v: rbStrToInum(s, 16, false)["v"]} }
     if (name == "oct") { return {ok: true, v: rbStrToInum(s, 0 - 8, false)["v"]} }
     if (name == "clear") { return {ok: true, v: ""} }
-    if (name == "scrub" || name == "unicode_normalize" || name == "encode") {
+    // The bang forms answer the receiver: the box mutator stores this text back.
+    if (name == "scrub" || name == "unicode_normalize" || name == "encode"
+        || name == "scrub!" || name == "unicode_normalize!" || name == "encode!") {
         return {ok: true, v: s}
     }
     if (name == "unicode_normalized?" || name == "valid_encoding?") { return {ok: true, v: true} }

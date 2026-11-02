@@ -9605,7 +9605,8 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		return rt.rubyBigNarrow(n), true
 	case "clear":
 		return "", true
-	case "scrub", "unicode_normalize", "encode":
+	// The bang forms answer the receiver: the box mutator stores this text back.
+	case "scrub", "unicode_normalize", "encode", "scrub!", "unicode_normalize!", "encode!":
 		return o, true
 	case "unicode_normalized?", "valid_encoding?":
 		return true, true
@@ -11872,6 +11873,12 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return float64(0)
 		case "to_f":
 			return &jsFlo{f: 0}
+		case "to_h":
+			return rubyNewDict()
+		case "to_r", "rationalize":
+			return rubyMkRat(0, 1)
+		case "to_c":
+			return jsCpx{re: float64(0), im: float64(0)}
 		}
 	}
 	if rubyIsNum(target) {
@@ -11884,7 +11891,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		switch name {
 		case "to_s", "id2name":
 			return o.s
-		case "to_sym":
+		case "to_sym", "intern":
 			return o
 		case "length", "size":
 			return float64(rubyCharCount(o.s))
@@ -11897,6 +11904,23 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return o.s == ""
 		case "to_proc":
 			return rt.rubySymProc(o.s)
+		// Twin of the Symbol arm of mcall in ruby-interpreter.abnf.
+		case "casecmp", "casecmp?":
+			if a, isSym := argAt(args, 0).(jsSym); isSym {
+				return rt.rubyMethod(o.s, name, []interface{}{a.s})
+			}
+			return jsNull
+		case "match", "match?", "slice":
+			// A pattern argument is the regexp half's, as for a String receiver.
+			if v, ok := rt.rxRegexMethod(o.s, name, args); ok {
+				return v
+			}
+			return rt.rubyMethod(o.s, name, args)
+		case "encoding":
+			if rubyAsciiOnly(o.s) {
+				return rt.rubyEncoding("US-ASCII")
+			}
+			return rt.rubyEncoding("UTF-8")
 		}
 		rt.rubyNoMethod(target, name)
 	case string:
@@ -13153,7 +13177,8 @@ func rubyHashEnumName(n string) bool {
 		"drop_while", "each_slice", "each_cons", "empty?", "zip",
 		"each_entry", "assoc", "uniq", "reverse", "freeze", "itself",
 		"find_all", "cycle", "chunk_while", "lazy", "grep", "grep_v", "minmax_by",
-		"slice_before", "slice_after", "chunk", "chain":
+		"slice_before", "slice_after", "chunk", "chain", "rassoc", "reverse_each",
+		"slice_when":
 		return true
 	}
 	return false
@@ -13206,6 +13231,8 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			return o, true
 		}
 		return rt.rubyArrayMethod(rt.rubyHashPairs(keys, vals), name, args), true
+	case "to_hash":
+		return o, true
 	case "delete":
 		i := rt.rubyDictFind(keys, argAt(pos, 0))
 		if i < 0 {
@@ -13230,8 +13257,9 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		}
 		rt.rubyHashEach(keys, vals, blk)
 		return o, true
-	// Hash#compact: a new Hash without the nil values.
-	case "compact":
+	// Hash#compact: a new Hash without the nil values; compact! drops them in
+	// place and answers nil when there were none.
+	case "compact", "compact!":
 		hk, hv := &jsArray{}, &jsArray{}
 		for i, k := range keys.elems {
 			if isUndefOrNull(vals.elems[i]) != true {
@@ -13239,7 +13267,15 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 				hv.elems = append(hv.elems, vals.elems[i])
 			}
 		}
-		return &jsObject{props: map[string]interface{}{"__dict": true, "keys": hk, "vals": hv}}, true
+		if name == "compact" {
+			return &jsObject{props: map[string]interface{}{"__dict": true, "keys": hk, "vals": hv}}, true
+		}
+		if len(hk.elems) == len(keys.elems) {
+			return jsNull, true
+		}
+		rubyArrReplace(keys, hk.elems)
+		rubyArrReplace(vals, hv.elems)
+		return o, true
 	case "each_key":
 		for _, k := range append([]interface{}{}, keys.elems...) {
 			rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(k)})
@@ -13262,6 +13298,23 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			}
 		}
 		return out, true
+	// Hash#slice: a new Hash of the given keys that are present, in argument
+	// order. Twin of hashMethod in ruby-interpreter.abnf.
+	case "slice":
+		hk, hv := &jsArray{}, &jsArray{}
+		for _, k := range pos {
+			if i := rt.rubyDictFind(keys, k); i >= 0 && rt.rubyDictFind(hk, keys.elems[i]) < 0 {
+				hk.elems = append(hk.elems, keys.elems[i])
+				hv.elems = append(hv.elems, vals.elems[i])
+			}
+		}
+		return &jsObject{props: map[string]interface{}{"__dict": true, "keys": hk, "vals": hv}}, true
+	// Hash#flatten(depth = 1) is its pairs flattened that deep.
+	case "flatten":
+		if len(pos) == 0 {
+			args = []interface{}{float64(1)}
+		}
+		return rt.rubyArrayMethod(rt.rubyHashPairs(keys, vals), name, args), true
 	case "dig":
 		// self[k], then the rest of the path is dug out of that value by its own
 		// #dig; nil stops the walk. Twin of Hash#dig in ruby-interpreter.abnf and
@@ -13304,6 +13357,13 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			}
 		}
 		return jsNull, true
+	case "value?", "has_value?":
+		for _, v := range vals.elems {
+			if rt.rubyEqual(v, argAt(pos, 0)) {
+				return true, true
+			}
+		}
+		return false, true
 	case "transform_values":
 		out := rubyHashCopy(o)
 		_, ovals, _ := dictParts(out)
@@ -13451,9 +13511,11 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 // MRI's orders: combination is index-ascending, permutation is the depth-first walk
 // that takes each unused index in turn. Mirrors combIdx / permIdx of
 // ruby-interpreter.abnf and rbCombIdx / rbPermIdx of lib/ruby-rt.metajs.
-func rubyCombIdx(n, k int) [][]int {
+// With rep an index may be taken again (repeated_combination /
+// repeated_permutation).
+func rubyCombIdx(n, k int, rep bool) [][]int {
 	out := [][]int{}
-	if k < 0 || k > n {
+	if k < 0 || (k > n && !rep) {
 		return out
 	}
 	var rec func(start int, cur []int)
@@ -13463,16 +13525,20 @@ func rubyCombIdx(n, k int) [][]int {
 			return
 		}
 		for i := start; i < n; i++ {
-			rec(i+1, append(cur, i))
+			if rep {
+				rec(i, append(cur, i))
+			} else {
+				rec(i+1, append(cur, i))
+			}
 		}
 	}
 	rec(0, []int{})
 	return out
 }
 
-func rubyPermIdx(n, k int) [][]int {
+func rubyPermIdx(n, k int, rep bool) [][]int {
 	out := [][]int{}
-	if k < 0 || k > n {
+	if k < 0 || (k > n && !rep) {
 		return out
 	}
 	used := make([]bool, n)
@@ -13483,7 +13549,7 @@ func rubyPermIdx(n, k int) [][]int {
 			return
 		}
 		for i := 0; i < n; i++ {
-			if used[i] {
+			if used[i] && !rep {
 				continue
 			}
 			used[i] = true
@@ -14430,17 +14496,19 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		return jsNull
 	// combination(n) / permutation(n): the subsets and the ordered arrangements, in
-	// MRI's own order. With a block they yield each one and answer SELF.
-	case "combination", "permutation":
+	// MRI's own order; the repeated_ forms may take an element again. With a
+	// block they yield each one and answer SELF.
+	case "combination", "permutation", "repeated_combination", "repeated_permutation":
 		k := len(t.elems)
 		if len(pos) > 0 {
 			k = int(math.Trunc(rubyToF(pos[0])))
 		}
+		rep := len(name) > 11
 		var picks [][]int
-		if name == "combination" {
-			picks = rubyCombIdx(len(t.elems), k)
+		if name == "combination" || name == "repeated_combination" {
+			picks = rubyCombIdx(len(t.elems), k, rep)
 		} else {
-			picks = rubyPermIdx(len(t.elems), k)
+			picks = rubyPermIdx(len(t.elems), k, rep)
 		}
 		res := rubyPick(t, picks)
 		if blk == nil {
@@ -14589,6 +14657,8 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		return &jsArray{elems: []interface{}{yes, no}}
+	case "rotate!":
+		return rubyArrReplace(t, rt.rubyArrayMethod(t, "rotate", args).(*jsArray).elems)
 	case "rotate":
 		if len(t.elems) == 0 {
 			return &jsArray{}
@@ -14867,10 +14937,10 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		rubyArrReplace(t, kept)
 		return cut
-	// bsearch: find-minimum (true / false / nil) and find-any (a number) modes.
-	case "bsearch":
-		lo, hi := 0, len(t.elems)
-		var found interface{} = jsNull
+	// bsearch: find-minimum (true / false / nil) and find-any (a number) modes;
+	// bsearch_index answers the index instead of the element.
+	case "bsearch", "bsearch_index":
+		lo, hi, found := 0, len(t.elems), -1
 		for lo < hi {
 			mid := (lo + hi) / 2
 			v := rt.call(blk, jsUndef, []interface{}{t.elems[mid]})
@@ -14878,9 +14948,8 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			case float64, *jsFlo:
 				f := rubyToF(v)
 				if f == 0 {
-					return t.elems[mid]
-				}
-				if f < 0 {
+					found, lo = mid, hi
+				} else if f < 0 {
 					hi = mid
 				} else {
 					lo = mid + 1
@@ -14888,12 +14957,18 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 				continue
 			}
 			if rubyTruthy(v) {
-				found, hi = t.elems[mid], mid
+				found, hi = mid, mid
 			} else {
 				lo = mid + 1
 			}
 		}
-		return found
+		if found < 0 {
+			return jsNull
+		}
+		if name == "bsearch" {
+			return t.elems[found]
+		}
+		return float64(found)
 	case "chunk_while", "slice_when":
 		out := &jsArray{}
 		for i, e := range t.elems {
@@ -14911,6 +14986,28 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		return jsNull
+	case "rassoc":
+		for _, e := range t.elems {
+			if row, isArr := e.(*jsArray); isArr && len(row.elems) > 1 && rt.rubyEqual(row.elems[1], argAt(pos, 0)) {
+				return row
+			}
+		}
+		return jsNull
+	// union / difference: | and - over every argument in turn.
+	case "union":
+		acc := rt.rubyArrOr(t, &jsArray{})
+		for _, a := range pos {
+			acc = rt.rubyArrOr(acc, rt.rubyArrOperand(name, a))
+		}
+		return acc
+	case "difference":
+		var acc interface{} = &jsArray{elems: append([]interface{}{}, t.elems...)}
+		for _, a := range pos {
+			acc = rt.rubyBin("-", acc, rt.rubyArrOperand(name, a))
+		}
+		return acc
+	case "replace":
+		return rubyArrReplace(t, rt.rubyArrOperand(name, argAt(pos, 0)).elems)
 	case "product":
 		prod := &jsArray{}
 		for _, e := range t.elems {
@@ -14933,7 +15030,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return prod
 	case "dup", "clone", "entries":
 		return &jsArray{elems: append([]interface{}{}, t.elems...)}
-	case "freeze", "itself":
+	case "freeze", "itself", "to_ary":
 		return t
 	// Array#fetch. Twin of arrayMethod in ruby-interpreter.abnf.
 	case "fetch":

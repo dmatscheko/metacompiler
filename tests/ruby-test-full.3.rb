@@ -1423,6 +1423,47 @@ def s189
   n.zip(n) { |q| zp << q; break if zp.size == 2 }
   check("eg189d", sl == [[1, 2], [3, 4]] && co == [[1, 2, 3], [2, 3, 4]] && zp == [[1, 1], [2, 2]])
 end
+# ===== SECTION 190: Array, Hash, Symbol, nil and String builtins =====
+# Array#bsearch_index / difference / union / rassoc / repeated_combination /
+# repeated_permutation / replace / rotate! / to_ary, Hash#compact! / flatten /
+# value? / rassoc / reverse_each / slice / slice_when / to_hash, the Symbol
+# methods that are the String ones on its name, nil's to_h / to_r / to_c and the
+# String bang forms of scrub / encode / unicode_normalize. /usr/bin/ruby 2.6
+# settles each.
+def s190
+  a = [1, 2, 3]
+  b = a
+  a.replace([4, 5])
+  r = [1, 2, 3]
+  check("ab190a", [1, 3, 5, 7].bsearch_index { |x| x >= 4 } == 2 && [1, 3].bsearch_index { |x| x > 9 }.nil? &&
+        [1, 3, 5].bsearch_index { |x| 3 <=> x } == 1 && [1, 2, 3, 1].difference([1], [3]) == [2] &&
+        [1, 2].union([2, 3], [4]) == [1, 2, 3, 4] && [1, 1, 2].union == [1, 2] && [1, 2.0].union([2]) == [1, 2.0, 2] &&
+        [[1, :a], [2, :b]].rassoc(:b) == [2, :b] && [[1], [2, 3]].rassoc(9).nil? &&
+        b == [4, 5] && a.replace([6]).equal?(a) && r.rotate!.equal?(r) && r == [2, 3, 1] && r.rotate!(-1) == [1, 2, 3] &&
+        a.to_ary.equal?(a))
+  check("ab190b", [1, 2].repeated_combination(2).to_a == [[1, 1], [1, 2], [2, 2]] &&
+        [1, 2].repeated_permutation(2).to_a == [[1, 1], [1, 2], [2, 1], [2, 2]] &&
+        [1, 2].repeated_combination(3).to_a.size == 4 && [1, 2].repeated_combination(0).to_a == [[]] &&
+        [1, 2].repeated_permutation(-1).to_a == [] && [1, 2, 3].repeated_combination(2).count == 6)
+  h = {a: 1, b: nil}
+  k = {a: 1}
+  rv = []
+  check("hb190c", h.compact!.equal?(h) && h == {a: 1} && k.compact!.nil? && {a: [1, 2], b: 3}.flatten == [:a, [1, 2], :b, 3] &&
+        {a: [1, [2]], b: 3}.flatten(2) == [:a, 1, [2], :b, 3] && {a: [1]}.flatten(0) == [[:a, [1]]] &&
+        {a: 1}.has_value?(1) && !{a: 1}.value?(2) && {a: 1}.value?(1.0) && {a: nil}.has_value?(nil) &&
+        {a: 1, b: 2}.rassoc(2) == [:b, 2] && {a: 1}.rassoc(5).nil? &&
+        k.reverse_each { |kk, _| rv << kk }.equal?(k) && rv == [:a] &&
+        {a: 1, b: 2, c: 3}.slice(:a, :c, :z) == {a: 1, c: 3} && {"a" => 1, "b" => 2}.slice("b") == {"b" => 2} &&
+        {a: 1, b: 2, c: 4}.slice_when { |x, y| y[1] != x[1] + 1 }.to_a == [[[:a, 1], [:b, 2]], [[:c, 4]]] &&
+        k.to_hash.equal?(k))
+  check("sn190d", :abc.casecmp(:ABC) == 0 && :abc.casecmp?(:ABC) && :abc.casecmp("abc").nil? && :abc.casecmp(:abd) == -1 &&
+        :abc.encoding == Encoding::US_ASCII && :"hé".encoding == Encoding::UTF_8 && :abc.intern.equal?(:abc) &&
+        :abc.match(/b/).to_s == "b" && :abc.match(/z/).nil? && :abc.match?(/b/) && :abc.slice(1, 2) == "bc" &&
+        :abc.slice(/b./) == "bc" && nil.to_h == {} && nil.to_r == Rational(0, 1) && nil.to_c == Complex(0, 0) &&
+        nil.rationalize == 0 && nil.to_c.class == Complex && (nil.to_r + 1) == 1)
+  x = +"ab"
+  check("sb190e", x.scrub!.equal?(x) && x.encode!("UTF-8").equal?(x) && x.unicode_normalize!.equal?(x) && x == "ab")
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1459,5 +1500,6 @@ s186() # SECTION-CALL 186
 s187() # SECTION-CALL 187
 s188() # SECTION-CALL 188
 s189() # SECTION-CALL 189
+s190() # SECTION-CALL 190
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
