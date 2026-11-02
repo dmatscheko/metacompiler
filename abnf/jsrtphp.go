@@ -4322,11 +4322,12 @@ func init() {
 				") must be of type "+phpTypeText(typ)+", "+rt.phpValueName(v)+" given"+where)
 			return 0
 		}
-		// js_phretfit(v, typ, self, lsb, who, scope): v, what a function declaring
-		// return type typ returns (undefined: it ended without a return
+		// js_phretfit(v, typ, self, lsb, who, scope, refused): v, what a function
+		// declaring return type typ returns (undefined: it ended without a return
 		// statement), as that type takes it, or zend_verify_return_error's
-		// TypeError. Twin of js_phretfit in languages/lib/php-rt.metajs and
-		// phpRetCheck in php-interpreter.abnf.
+		// TypeError, at once when refused (the emitted callable test refused v).
+		// Twin of js_phretfit in languages/lib/php-rt.metajs and phpRetCheck in
+		// php-interpreter.abnf.
 		m["js_phretfit"] = func(a []uint64) uint64 {
 			name := rt.phpFnShown(u(a[4]), u(a[5]))
 			raw := rt.phpStr(u(a[1]))
@@ -4337,7 +4338,7 @@ func init() {
 			given := "none"
 			if v != jsUndef {
 				typ, self := rt.phpSigType(u(a[1]), u(a[2]), u(a[3]))
-				if r, ok := rt.phpTypeFit(typ, v, self); ok {
+				if r, ok := rt.phpTypeFit(typ, v, self); ok && a[6] != jsHTrue {
 					return w(r)
 				}
 				given = rt.phpValueName(v)

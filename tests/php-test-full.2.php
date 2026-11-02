@@ -2213,6 +2213,68 @@ function s96() {
     check("microtime", preg_match('/^0\.[0-9]{8} [0-9]+$/', $mt) === 1 && is_float($mf) && abs((float)$sp[1] + (float)$sp[0] - $mf) < 60);
 }
 
+// ===== SECTION 97: argument errors stand at the declaration; callable alternatives =====
+// An argument's TypeError, and a missing argument's ArgumentCountError, are
+// raised by the callee's ZEND_RECV, so they stand at the function's line, and
+// the trace holds the callee with its arguments: those already received as
+// their types took them, the rest as passed (zend_verify_arg_error,
+// zend_missing_arg_error); a generator function's too, though no generator
+// exists yet. A TypeError or ArgumentCountError whose message names the caller
+// (", called in ") adds " and defined" in its string form
+// (Exception::__toString). A type with a callable alternative takes a string or
+// an array as it is when another alternative does, else when zend_is_callable
+// accepts it in the callee's frame, else as the other alternatives coerce it
+// (zend_check_type_slow) - for a parameter, each variadic argument, and a
+// return value.
+function s97two(int $a, int $b) { return $a + $b; } function s97twoLine() { return __LINE__; }
+function s97gen(int $x) { yield $x; } function s97genLine() { return __LINE__; }
+class S97K {
+    private function p() { return 1; }
+    public function take(callable|int $c) { return $c; }
+    public function mine(): callable { return [$this, "p"]; }
+    public static function sm() { return 2; }
+}
+function s97ci(int|callable $c) { return $c; }
+function s97cs(callable|string $c) { return $c; }
+function s97cb(callable|bool $c) { return $c; }
+function s97r($x): callable|int { return $x; }
+function s97v(callable ...$cs) { return count($cs); }
+function s97vu(callable|int ...$a) { return $a; }
+function s97try($f) {
+    try { return $f(); } catch (TypeError $e) {
+        $m = $e->getMessage();
+        $at = strpos($m, ", called in");
+        return "TE " . ($at === false ? $m : substr($m, 0, $at));
+    }
+}
+function s97() {
+    $e = null;
+    try { s97two("5", []); } catch (TypeError $x) { $e = $x; }
+    $s = (string)$e;
+    check("argerr-line", $e->getLine() === s97twoLine() && $e->getFile() === __FILE__ && $e->getTrace()[0]["args"] === [5, []]
+        && substr($s, 0, strpos($s, "\n")) === "TypeError: " . $e->getMessage() . " and defined in " . __FILE__ . ":" . s97twoLine());
+    try { s97two(1); } catch (ArgumentCountError $x) { $e = $x; }
+    check("argcount-line", $e->getLine() === s97twoLine() && $e->getTrace()[0]["args"] === [1]);
+    try { s97gen([]); } catch (TypeError $x) { $e = $x; }
+    check("argerr-gen", $e->getLine() === s97genLine() && $e->getTrace()[0]["function"] === "s97gen" && $e->getTrace()[0]["args"] === [[]]);
+    $t = (string) new TypeError("x, called in y");
+    $a = (string) new ArgumentCountError("x, called in y");
+    $r = (string) new ValueError("x, called in y");
+    check("argerr-defined", strpos($t, "x, called in y and defined in ") === 11 && strpos($a, "x, called in y and defined in ") === 20
+        && strpos($r, "x, called in y in ") === 12);
+    $k = new S97K;
+    check("cb-union", s97ci("strlen") === "strlen" && s97ci("5") === 5 && s97cs("nope") === "nope" && s97cb("nope") === true
+        && s97cb("strlen") === "strlen" && $k->take([$k, "p"]) === [$k, "p"]
+        && s97try(fn() => s97ci("nope")) === "TE s97ci(): Argument #1 (\$c) must be of type callable|int, string given"
+        && s97try(fn() => s97ci([$k, "p"])) === "TE s97ci(): Argument #1 (\$c) must be of type callable|int, array given"
+        && s97try(fn() => s97cs(["S97K", "nope"])) === "TE s97cs(): Argument #1 (\$c) must be of type callable|string, array given");
+    check("cb-return", s97r("S97K::sm") === "S97K::sm" && s97r("7") === 7 && $k->mine() === [$k, "p"]
+        && s97try(fn() => s97r("nope")) === "TE s97r(): Return value must be of type callable|int, string returned");
+    check("cb-variadic", s97v("strlen", fn() => 1) === 2 && s97v() === 0 && s97vu("strlen", "7", 3) === ["strlen", 7, 3]
+        && s97try(fn() => s97v("strlen", "nope")) === "TE s97v(): Argument #2 (\$cs) must be of type callable, string given"
+        && s97try(fn() => s97vu(1, [1])) === "TE s97vu(): Argument #2 (\$a) must be of type callable|int, array given");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2254,6 +2316,7 @@ function main() {
     s94(); // SECTION-CALL 94
     s95(); // SECTION-CALL 95
     s96(); // SECTION-CALL 96
+    s97(); // SECTION-CALL 97
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

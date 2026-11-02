@@ -220,7 +220,7 @@ TypeHint    = [ "?" ] TypeAtom { ( "|" | "&" ) [ "?" ] TypeAtom } ;
 // return, property).
 TypeAtom    = KwArray | TypeParen | [ "\\" ] Id { "\\" Id } ;
 TypeParen   = "(" TypeHint ")" ;
-ReturnType  <~~ push({rtype: propTypeText(up.in.substring(1))}) ~~> = ":" TypeHint ;
+ReturnType  <~~ push({rtype: retNote(propTypeText(up.in.substring(1)))}) ~~> = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -560,7 +560,7 @@ ForeachV2T  <~~ push({v2: pop()}) ~~>
 // value.
 FeRef       <~~ noteRef(); push({feref: true}) ~~> = "&" ;
 
-Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in))) ~~>
+Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in), retDepr(up.pos))) ~~>
             = KwReturn [ Expression ] Semi ;
 // 'break 2' / 'continue 2' leave that many enclosing loops (and switches). The level
 // is a literal integer in PHP - it has to be known where the jump is emitted - so it
@@ -3031,7 +3031,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     function makeConstStmt() { return function(b) { return b } }
-    function makeReturn(items, rv, rt) {
+    // d is the site a callable return type's deprecations stand at (retDepr).
+    function makeReturn(items, rv, rt, d) {
         var t = items.length > 0 ? items[0] : null
         return function(b) {
             var v = hNull
@@ -3044,7 +3045,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 cellV = tc.v
                 v = callExt(b, "js_get", [cellV, emitStr(b, "v")])
             } else if (t != null) { var r = t(b); b = r.b; v = r.v }
-            if (curRet != null) { v = emitRetFit(b, v) }
+            if (curRet != null) {
+                var fit = emitRetFit(b, v, d)
+                b = fit.b
+                v = fit.v
+            }
             // In a function returning by reference: the variable's cell, or null for a
             // value that is no variable, is left in the globals frame's \x00refret for
             // a caller that writes through the result (memoRefV).
@@ -5673,6 +5678,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var sc = cloScopes.pop()
         sc.live = varsSince(sc.vm, ["$this"])
         return sc
+    }
+    // The return type of the function being declared, noted by ReturnType for its
+    // return statements. Twin of retNote in php-interpreter.abnf.
+    function retNote(t) {
+        if (cloScopes.length > 0) { cloScopes[cloScopes.length - 1].rty = t }
+        return t
+    }
+    // The site a return statement at pos raises a callable return type's
+    // deprecations at (emitRetFit), or null. Twin of retDepr in
+    // php-interpreter.abnf.
+    function retDepr(pos) {
+        var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
+        if (top == null || top.rty == undefined || phpCallableRest(top.rty) == null) { return null }
+        return diagSite("__mec_cbdepr", pos)
     }
     // A static closure written where a $this is in reach (cloEnter's hide) sees
     // none: its frame declares $this undefined, as a static method's has none.
@@ -8497,7 +8516,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (!lib && req == 0 && !typed) { return null }
         if (lib && req == 0 && max < 0 && !typed) { return null }
         return {req: req, max: max, rest: fn.rest, who: who, sig: sigText(fn.params, fn.rest), clo: false, lib: lib,
-                tys: tys, rty: rty, names: fn.params, zpps: fn.zpps, cbs: fn.cbs}
+                tys: tys, rty: rty, names: fn.params, zpps: fn.zpps, cbs: fn.cbs, at: fn.at == undefined ? 0 : fn.at}
     }
     function zppAny(zpps) {
         if (zpps == undefined) { return false }
@@ -8567,58 +8586,130 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function chkScopeV(b, chk) { return chk.clo ? scopeProbe(b, emitStr(b, frameClsName("self")), hNull) : hNull }
     // Typed parameter i's argument argV as its type takes it (js_phfit), the
     // variadic one element by element, or the TypeError js_phargerr words, naming
-    // the caller's site. An argument not passed is left to the count check. Twin
-    // of phpArgFit in php-interpreter.abnf.
-    function emitArgFit(b, chk, i, argV) {
+    // the caller's site and standing at the declaration (chk.at, its ZEND_RECV's
+    // line); the frame's trace shows parameter i on as passed (args from off). A
+    // type with a callable alternative takes a string or an array as emitCbFit
+    // says, the variadic's elements each in turn. An argument not passed is left
+    // to the count check. Twin of phpArgFit in php-interpreter.abnf.
+    function emitArgFit(b, chk, i, argV, off) {
         var typ = chk.tys[i]
-        var restV = emitNum(b, i == chk.rest ? 1 : 0)
+        var rest = i == chk.rest
         var selfV = typeSelfV(b, typ, "self")
         var fitB = curF.NewBlock("")
-        var failB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, argV, hUndef), joinB, fitB)
-        var r = callExt(fitB, "js_phfit", [argV, emitStr(fitB, typ), selfV, hUndef, restV])
-        var cb = chk.cbs == undefined ? null : chk.cbs[i]
-        var fitEnd = null
-        if (cb == null) {
-            fitB.NewCondBr(fitB.NewICmp(llvm.enum.IPredEQ, r, hUndef), failB, joinB)
-        } else {
-            // A callable parameter's string or array is checked as is_callable
-            // checks it, in this (the callee's) frame, its deprecations first; the
-            // library calls the check makes leave php.site as the call stored it.
-            var cbB = curF.NewBlock("")
-            var isB = curF.NewBlock("")
-            fitB.NewCondBr(fitB.NewICmp(llvm.enum.IPredEQ, r, hUndef), failB, isB)
-            var strOrArr = isB.NewOr(isB.NewICmp(llvm.enum.IPredEQ, callExt(isB, "js_phis", [emitStr(isB, "string"), argV]), hTrue),
-                                     isB.NewICmp(llvm.enum.IPredEQ, callExt(isB, "js_phis", [emitStr(isB, "array"), argV]), hTrue))
-            isB.NewCondBr(strOrArr, cbB, joinB)
-            var keepV = cbB.NewLoad(i64, siteGlobal())
-            var okR = makeIsCallable({pos: function(ab) { return {b: ab, v: argV} }}, cb.d)(cbB)
-            okR.b.NewStore(keepV, siteGlobal())
-            okR.b.NewCondBr(truthy(okR.b, okR.v), joinB, failB)
-            fitB = isB
-            fitEnd = okR.b
+        var fail = function(fb, xV, nV, restV) {
+            var whereV = siteText(fb)
+            if (curRec != null && curRecF === curF) {
+                for (var j = i; j < chk.names.length && j != chk.rest; j++) {
+                    callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, chk.names[j]), callExt(fb, "js_arg", [curF.Params[1], handle(j + off)])])
+                }
+            }
+            if (chk.at != 0) { siteStore(fb, chk.at) }
+            callExt(fb, "js_phargerr", [xV, emitStr(fb, typ), selfV, nV, emitStr(fb, chk.names[i]),
+                                        emitStr(fb, chk.who), chkScopeV(fb, chk), whereV, restV])
         }
-        callExt(failB, "js_phargerr", [argV, emitStr(failB, typ), selfV, emitNum(failB, i + 1), emitStr(failB, chk.names[i]),
-                                       emitStr(failB, chk.who), chkScopeV(failB, chk), siteText(failB), restV])
-        failB.NewBr(joinB) // never taken: js_phargerr raises
-        var ins = [llvm.ir.NewIncoming(argV, b), llvm.ir.NewIncoming(r, fitB), llvm.ir.NewIncoming(argV, failB)]
-        if (fitEnd != null) { ins.push(llvm.ir.NewIncoming(r, fitEnd)) }
-        return {b: joinB, v: joinB.NewPhi(ins)}
+        var cb = chk.cbs == undefined ? null : chk.cbs[i]
+        if (cb == null) {
+            var failB = curF.NewBlock("")
+            var r = callExt(fitB, "js_phfit", [argV, emitStr(fitB, typ), selfV, hUndef, emitNum(fitB, rest ? 1 : 0)])
+            fitB.NewCondBr(fitB.NewICmp(llvm.enum.IPredEQ, r, hUndef), failB, joinB)
+            fail(failB, argV, emitNum(failB, i + 1), emitNum(failB, rest ? 1 : 0))
+            failB.NewBr(joinB) // never taken: js_phargerr raises
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(argV, b), llvm.ir.NewIncoming(r, fitB), llvm.ir.NewIncoming(argV, failB)])}
+        }
+        if (!rest) {
+            var one = emitCbFit(fitB, typ, cb, selfV, hUndef, argV, function(fb) { fail(fb, argV, emitNum(fb, i + 1), emitNum(fb, 0)) })
+            one.b.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(argV, b), llvm.ir.NewIncoming(one.v, one.b)])}
+        }
+        // The variadic array's k-th element, argument i + 1 + k, written back
+        // when it is coerced.
+        var kP = curF.Blocks[0].NewAlloca(i64)
+        fitB.NewStore(handle(0), kP)
+        var nV = callExt(fitB, "js_range_len", [argV])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        fitB.NewBr(headB)
+        var kH = callExt(headB, "js_num_i", [headB.NewLoad(i64, kP)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [kH, nV])), bodyB, joinB)
+        var el = phDeref(bodyB, callExt(bodyB, "js_range_val", [argV, kH]))
+        var each = emitCbFit(el.b, typ, cb, selfV, hUndef, el.v, function(fb) {
+            fail(fb, el.v, callExt(fb, "js_num_i", [fb.NewAdd(fb.NewLoad(i64, kP), handle(i + 1))]), emitNum(fb, 0))
+        })
+        var setB = curF.NewBlock("")
+        var nextB = curF.NewBlock("")
+        each.b.NewCondBr(each.b.NewICmp(llvm.enum.IPredEQ, each.v, el.v), nextB, setB)
+        callExt(setB, "js_phset", [argV, callExt(setB, "js_range_key", [argV, kH]), each.v])
+        setB.NewBr(nextB)
+        nextB.NewStore(nextB.NewAdd(nextB.NewLoad(i64, kP), handle(1)), kP)
+        nextB.NewBr(headB)
+        return {b: joinB, v: argV}
+    }
+    // xV as a type typ with a callable alternative takes it (cb: paramList's
+    // cbs record; selfV and lsbV: js_phfit's), else fail(b) raises its TypeError. A string or an array is
+    // taken as it is when another alternative takes it so (cb.str, cb.arr) or
+    // when it is valid as is_callable checks it in this frame, its deprecations
+    // first (the library calls the check makes leave php.site as it was), else
+    // as the other alternatives coerce it (js_phfit of cb.rest); anything else as
+    // js_phfit of typ takes it. Twin of phpCbFit in php-interpreter.abnf.
+    function emitCbFit(b, typ, cb, selfV, lsbV, xV, fail) {
+        var shapeB = curF.NewBlock("")
+        var saB = curF.NewBlock("")
+        var cbB = curF.NewBlock("")
+        var failB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        var isS = b.NewICmp(llvm.enum.IPredEQ, callExt(b, "js_phis", [emitStr(b, "string"), xV]), hTrue)
+        var isA = b.NewICmp(llvm.enum.IPredEQ, callExt(b, "js_phis", [emitStr(b, "array"), xV]), hTrue)
+        b.NewCondBr(b.NewOr(isS, isA), saB, shapeB)
+        var r = callExt(shapeB, "js_phfit", [xV, emitStr(shapeB, typ), selfV, lsbV, emitNum(shapeB, 0)])
+        shapeB.NewCondBr(shapeB.NewICmp(llvm.enum.IPredEQ, r, hUndef), failB, okB)
+        var ins = [llvm.ir.NewIncoming(r, shapeB)]
+        if (cb.str && cb.arr) { saB.NewBr(okB) }
+        else if (cb.str || cb.arr) { saB.NewCondBr(cb.str ? isS : isA, okB, cbB) }
+        else { saB.NewBr(cbB) }
+        if (cb.str || cb.arr) { ins.push(llvm.ir.NewIncoming(xV, saB)) }
+        var keepV = cbB.NewLoad(i64, siteGlobal())
+        var okR = makeIsCallable({pos: function(ab) { return {b: ab, v: xV} }}, cb.d)(cbB)
+        okR.b.NewStore(keepV, siteGlobal())
+        var coB = curF.NewBlock("")
+        okR.b.NewCondBr(truthy(okR.b, okR.v), okB, coB)
+        ins.push(llvm.ir.NewIncoming(xV, okR.b))
+        if (cb.rest == "") { coB.NewBr(failB) }
+        else {
+            var r2 = callExt(coB, "js_phfit", [xV, emitStr(coB, cb.rest), selfV, lsbV, emitNum(coB, 0)])
+            coB.NewCondBr(coB.NewICmp(llvm.enum.IPredEQ, r2, hUndef), failB, okB)
+            ins.push(llvm.ir.NewIncoming(r2, coB))
+        }
+        fail(failB)
+        failB.NewBr(okB) // never taken: fail raises
+        ins.push(llvm.ir.NewIncoming(xV, failB))
+        return {b: okB, v: okB.NewPhi(ins)}
     }
     // v, what a function declaring return type rty returns (hUndef: it ended
     // without a return statement), as that type takes it, or js_phretfit's
-    // TypeError. Twin of phpRetCheck in php-interpreter.abnf.
+    // TypeError. A type with a callable alternative takes a string or an array
+    // as emitCbFit says, its deprecations raised at site d (the return
+    // statement's, or null). Twin of phpRetCheck in php-interpreter.abnf.
     var curRet = null
-    function emitRetFit(b, v) {
+    function emitRetFit(b, v, d) {
         var typ = curRet.rty
-        return callExt(b, "js_phretfit", [v, emitStr(b, typ), typeSelfV(b, typ, "self"), typeSelfV(b, typ, "static"),
-                                          emitStr(b, curRet.who), chkScopeV(b, curRet)])
+        var selfV = typeSelfV(b, typ, "self")
+        var lsbV = typeSelfV(b, typ, "static")
+        var cr = phpCallableRest(typ)
+        if (cr == null) {
+            return {b: b, v: callExt(b, "js_phretfit", [v, emitStr(b, typ), selfV, lsbV, emitStr(b, curRet.who), chkScopeV(b, curRet), hFalse])}
+        }
+        var cb = {d: d, rest: cr.rest, str: cr.str, arr: cr.arr}
+        return emitCbFit(b, typ, cb, selfV, lsbV, v, function(fb) {
+            callExt(fb, "js_phretfit", [v, emitStr(fb, typ), selfV, lsbV, emitStr(fb, curRet.who), chkScopeV(fb, curRet), hTrue])
+        })
     }
     // The entry's check: a required parameter whose slot is empty, or for a library
     // method a slot past max that is filled, fails into js_phargmiss (a user
-    // function: the missing-argument error) or js_pharity (a library method: the
-    // internal count error), which word it from the slots. Twin of bindParams /
+    // function: the missing-argument error, standing at the declaration chk.at) or
+    // js_pharity (a library method: the internal count error), which word it from
+    // the slots. Twin of bindParams /
     // phpLibArgCheck in php-interpreter.abnf.
     function emitArgCheck(b, chk, argVs, off, bodyB) {
         var argsV = curF.Params[1]
@@ -8646,8 +8737,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                                           emitNum(failB, chk.req), emitNum(failB, chk.max), errV])
         } else {
             var scopeV = chk.clo ? scopeProbe(failB, emitStr(failB, frameClsName("self")), hNull) : hNull
+            var whereV = siteText(failB)
+            if (chk.at != 0) { siteStore(failB, chk.at) }
             callExt(failB, "js_phargmiss", [argsV, emitNum(failB, off), emitStr(failB, chk.who), scopeV, emitStr(failB, chk.sig),
-                                            emitNum(failB, chk.req), siteText(failB), errV])
+                                            emitNum(failB, chk.req), whereV, errV])
         }
         failB.NewBr(bodyB) // never taken: both raise
     }
@@ -8696,15 +8789,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var savedRecF = curRecF
         var savedGenBody = curGenBody
         var savedGenRec = curGenRec
+        var recD = null
         if (!isCtl) {
             curGenBody = frm != undefined && frm != null && frm.gen === true
             curRec = null
             if (frm != undefined && frm != null && frm.fname != undefined) {
                 var rest = frm.rest == undefined ? -1 : frm.rest
-                curRec = emitFramePush(b, {name: frm.fname, cls: frm.fcls == undefined ? "" : frm.fcls,
-                                           kind: isMethod ? (isStatic === true ? 1 : 2) : (frm.clo === true ? 3 : 0),
-                                           lib: frm.lib === true, names: rest >= 0 ? params.slice(0, rest) : params,
-                                           rest: rest, off: isMethod ? 1 : 0})
+                recD = {name: frm.fname, cls: frm.fcls == undefined ? "" : frm.fcls,
+                        kind: isMethod ? (isStatic === true ? 1 : 2) : (frm.clo === true ? 3 : 0),
+                        lib: frm.lib === true, names: rest >= 0 ? params.slice(0, rest) : params,
+                        rest: rest, off: isMethod ? 1 : 0}
+                curRec = emitFramePush(b, recD)
                 curRecF = f
             }
             curGenRec = curGenBody && curRec != null
@@ -8756,7 +8851,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 argVs.push(argV)
             }
             if (i < tys.length && tys[i] != "") {
-                var fit = emitArgFit(b, chk, i, argV)
+                var fit = emitArgFit(b, chk, i, argV, off)
                 b = fit.b
                 argV = fit.v
             } else if (chk != undefined && chk != null && chk.zpps != undefined && i < chk.zpps.length && chk.zpps[i] != "") {
@@ -8782,9 +8877,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curThisSure = savedSure
         if (!isCtl) { emitFrameLeave(endB, hNull) }
         if (!isCtl && curRet != null) {
-            var fitV = emitRetFit(endB, hUndef)
-            emitFramePop(endB)
-            endB.NewRet(fitV)
+            var fitR = emitRetFit(endB, hUndef, null)
+            emitFramePop(fitR.b)
+            fitR.b.NewRet(fitR.v)
         } else {
             if (!isCtl) { emitFramePop(endB) }
             endB.NewRet(hNull)
@@ -8805,42 +8900,60 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
-        if (genChk) { genEntries["$" + idx] = emitGenEntry(idx, chk, params.length, off) }
+        if (genChk) { genEntries["$" + idx] = emitGenEntry(idx, chk, params.length, off, recD) }
         return idx
     }
     // A generator function's arguments are counted at the CALL, before the generator
     // exists (php-src emits the ZEND_RECV ops ahead of ZEND_GENERATOR_CREATE). Its
     // closure is therefore an entry function over the same frame that checks, then
-    // hands the arguments on to a generator over the body (closureV). Twin of
-    // genArgCheck in php-interpreter.abnf.
+    // hands the arguments on to a generator over the body (closureV). The check runs
+    // under the function's record recD (null: none), over a scope holding the
+    // arguments as passed, which the trace shows. Twin of genArgCheck in
+    // php-interpreter.abnf.
     var genEntries = {}
-    function emitGenEntry(idx, chk, n, off) {
+    function emitGenEntry(idx, chk, n, off, recD) {
         funcCount++
         var f = m.NewFunc("jsf_" + funcCount, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var savedF = curF
         var savedScope = curScopeV
+        var savedRec = curRec
+        var savedRecF = curRecF
         curF = f
         curScopeV = f.Params[0]
         var b = f.NewBlock("entry")
         var bodyB = f.NewBlock("")
+        curRec = null
+        if (recD != null) {
+            curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+            for (var j = 0; j < recD.names.length; j++) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, recD.names[j]), callExt(b, "js_arg", [f.Params[1], handle(j + off)])])
+            }
+            curRec = emitFramePush(b, recD)
+            curRecF = f
+        }
         var argVs = []
         for (var i = 0; i < n; i++) {
             var argV = callExt(b, "js_arg", [f.Params[1], handle(i + off)])
             argVs.push(argV)
-            if (chk.tys != undefined && i < chk.tys.length && chk.tys[i] != "") { b = emitArgFit(b, chk, i, argV).b }
+            if (chk.tys != undefined && i < chk.tys.length && chk.tys[i] != "") { b = emitArgFit(b, chk, i, argV, off).b }
         }
         emitArgCheck(b, chk, argVs, off, bodyB)
+        emitFramePop(bodyB)
         var genV = callExt(bodyB, "js_genfn", [callExt(bodyB, "js_closure", [handle(idx), f.Params[0]])])
         bodyB.NewRet(callExt(bodyB, "js_call", [genV, hUndef, f.Params[1]]))
         curF = savedF
         curScopeV = savedScope
+        curRec = savedRec
+        curRecF = savedRecF
         return funcCount
     }
     // The parameter list of a function, closure or arrow function, reduced to the
     // names, the defaults, the BY-REFERENCE positions (a call site has to hand a cell
-    // over for those) and the variadic tail, if any. cbs holds, for a parameter
-    // declaring callable alone (phpCallableOnly), {d: the site raising its
-    // deprecations at the declaration at pos, or null}, else null (emitArgFit).
+    // over for those) and the variadic tail, if any; at is the declaration's site
+    // (callSite), where an argument's TypeError stands. cbs holds, for a parameter
+    // whose type has a callable alternative, phpCallableRest's record with d, the
+    // site raising its deprecations at the declaration at pos, or null; else null
+    // (emitArgFit).
     // Twin of phpCbParam in php-interpreter.abnf.
     function paramList(items, pos) {
         var params = []
@@ -8881,15 +8994,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         for (var z = 0; z < zpps.length; z++) { zpps[z] = zppType(zpps[z], false) }
         for (var q = 0; q < tys.length; q++) {
-            if (q != rest && phpLibDepth == 0 && phpCallableOnly(tys[q])) {
+            var cr = phpLibDepth == 0 ? phpCallableRest(tys[q]) : null
+            if (cr != null) {
                 phpLibRef("__mec_cbcompound", true)
                 nsUsed = true
-                cbs[q] = {d: diagSite("__mec_cbdepr", pos)}
+                cbs[q] = {d: diagSite("__mec_cbdepr", pos), rest: cr.rest, str: cr.str, arr: cr.arr}
             }
         }
         if (rest >= 0) { dynPlaceVariadic = true }
         if (defs.length < params.length - (rest >= 0 ? 1 : 0)) { phpLibArgErr() }
-        return {params: params, defs: defs, byref: byref, rest: rest, tys: tys, rty: phpLibDepth > 0 ? "" : rty, zpps: zpps, cbs: cbs}
+        return {params: params, defs: defs, byref: byref, rest: rest, tys: tys, rty: phpLibDepth > 0 ? "" : rty, zpps: zpps, cbs: cbs,
+                at: callSite(pos)}
     }
     // 'function f(...$rest)': the variadic parameter arrives as one argument holding
     // the collected PHP array (emitPhArgs packs the tail), so no prologue is needed -
@@ -8967,7 +9082,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             inner = makeBody(stmts)
         }
         return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt, live: sc.live, gen: isGen,
-                tys: pl.tys, rty: retTypeOf(pl.rty, isGen), zpps: pl.zpps, cbs: pl.cbs,
+                tys: pl.tys, rty: retTypeOf(pl.rty, isGen), zpps: pl.zpps, cbs: pl.cbs, at: pl.at,
                 lib: phpLibDepth > 0 && name.substring(0, 5) != "__mec",
                 fname: phpLibDepth > 0 && name.substring(0, 5) == "__mec" ? undefined : name,
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}

@@ -3658,7 +3658,9 @@ function __mec_jhex4($s, $i, $n) {
 // ----- exceptions ------------------------------------------------------------
 // Exception::__toString (Zend/zend_exceptions.c), which Error's aliases: $e and
 // then each previous one, as "Class: message in file:line\nStack trace:\n" and the
-// trace, without ": message" when the message is empty. Each link goes in front
+// trace, without ": message" when the message is empty; a TypeError's or an
+// ArgumentCountError's message naming its caller (", called in ") gets " and
+// defined" before " in file:line". Each link goes in front
 // of the text so far, joined by "\n\nNext ", so the innermost prints first; a
 // link the walk already met ends it.
 function __mec_excstr($e) {
@@ -3667,7 +3669,11 @@ function __mec_excstr($e) {
     while ($e instanceof Throwable && !in_array($e, $seen, true)) {
         $seen[] = $e;
         $message = (string) $e->getMessage();
-        $str = get_class($e) . ($message === "" ? "" : ": " . $message) . " in " . $e->getFile() . ":" . $e->getLine()
+        $k = get_class($e);
+        if (($k === "TypeError" || $k === "ArgumentCountError") && strpos($message, ", called in ") !== false) {
+            $message .= " and defined";
+        }
+        $str = $k . ($message === "" ? "" : ": " . $message) . " in " . $e->getFile() . ":" . $e->getLine()
              . "\nStack trace:\n" . $e->getTraceAsString() . ($str === "" ? "" : "\n\nNext " . $str);
         $e = $e->getPrevious();
     }

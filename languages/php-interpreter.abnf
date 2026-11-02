@@ -213,7 +213,7 @@ TypeHint    = [ "?" ] TypeAtom { ( "|" | "&" ) [ "?" ] TypeAtom } ;
 // return, property).
 TypeAtom    = KwArray | TypeParen | [ "\\" ] Id { "\\" Id } ;
 TypeParen   = "(" TypeHint ")" ;
-ReturnType  <~~ push({rtype: propTypeText(up.in.substring(1))}) ~~> = ":" TypeHint ;
+ReturnType  <~~ push({rtype: retNote(propTypeText(up.in.substring(1)))}) ~~> = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -533,7 +533,7 @@ ForeachV2T  <~~ push({v2: pop()}) ~~>
 // 'as &$v' aliases the array ELEMENT, so writing $v writes back into the array.
 FeRef       <~~ push({byref: true}) ~~> = "&" ;
 
-Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in))) ~~>
+Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in), refRetTarget(up.in), retDepr(up.pos))) ~~>
             = KwReturn [ Expression ] Semi ;
 Break       <~~ push(makeBreak(takeAll())) ~~>
             = KwBreak [ JumpLevel ] Semi ;
@@ -1785,8 +1785,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     rest = i
                     break
                 }
+                // A parameter its ZEND_RECV has not bound yet still holds the
+                // argument as passed.
+                if (!hasOwn(r.fr, r.params[i].name)) { break }
                 var cv = anytype
-                cv = hasOwn(r.fr, r.params[i].name) ? deref(r.fr[r.params[i].name]) : null
+                cv = deref(r.fr[r.params[i].name])
                 arrPush(cur, cv === undefined ? null : cv)
             }
             arrPush(item, cur)
@@ -1967,7 +1970,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // fills a later parameter by name gets "not passed" (zend_handle_undef_args),
     // any other the count (zend_missing_arg_error), where passed counts up to the
     // last parameter filled and a default before a required parameter is not one
-    // (zend_compile_params). Twin of emitArgCheck in php-to-llvm-ir.abnf.
+    // (zend_compile_params). It stands at the function's declaration, as
+    // phpArgFit's TypeError. Twin of emitArgCheck in php-to-llvm-ir.abnf.
     var CLO_SCOPE = {}
     function phpMissArg(params, at, argset, who, cls) {
         var name = phpFnShown(who, cls)
@@ -1979,6 +1983,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (params[i].def == null) { req = i + 1 }
             if (argset.named != null && hasOwn(argset.named, params[i].name) && passed < i + 1) { passed = i + 1 }
         }
+        if (params[at].at != "") { phpSite = params[at].at }
         if (passed > at) { phpRaise("ArgumentCountError", phsNotPassedMsg(name, at + 1, params[at].name)) }
         var where = argset.site == undefined ? "" : argset.site
         phpRaise("ArgumentCountError", phsMissArgMsg(name, passed, req, req == fixed, where))
@@ -2024,24 +2029,36 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // Argument n (1-based) v of the parameter p as its declared type takes it, or
     // zend_verify_arg_error's TypeError, which names the caller's site when the
-    // program made the call. The coercions are a typed property's (phpTypeFit), the
+    // program made the call and stands at the function's declaration (p.at, its
+    // ZEND_RECV's line). The coercions are a typed property's (phpTypeFit), the
     // caller's strict_types deciding them. Twin of js_phfit / js_phargerr in
     // abnf/jsrtphp.go and lib/php-rt.metajs.
     function phpArgFit(p, n, v, argset, who, cls) {
         var r = anytype
-        r = phpTypeFit(p.rel ? phpTypeResolve(p.typ, true) : p.typ, v, ctxSelf())
-        if (r !== phpTypeBad && (p.cb == undefined || p.cb == null || phpCallableArg(p.cb.d, r))) { return r }
+        if (p.cb != undefined && p.cb != null && (typeof v == "string" || isArr(v))) { r = phpCbFit(p.cb, v, p.rel) }
+        else { r = phpTypeFit(p.rel ? phpTypeResolve(p.typ, true) : p.typ, v, ctxSelf()) }
+        if (r !== phpTypeBad) { return r }
         var where = argset.site == undefined || argset.site == "" ? "" : ", called" + argset.site
+        if (p.at != "") { phpSite = p.at }
         phpRaise("TypeError", phpFnShown(who, cls) + "(): Argument #" + n + " (" + p.name + ") must be of type "
             + phsTypeText(p.rel ? phpTypeResolve(p.typ, false) : p.typ) + ", " + phpValueName(v) + " given" + where)
     }
-    // Is v, which a callable parameter's shape test admitted, a valid callback in
-    // the callee's frame (zend_check_type_slow's zend_is_callable)? A string or an
-    // array is checked, its deprecations raised first at site d (null: none); the
-    // library calls the check makes leave phpSite as the call left it. Twin of
-    // emitArgFit in php-to-llvm-ir.abnf.
+    // A string or an array v as a type with a callable alternative takes it
+    // (phpCallableRest's cb, whose rest spells self or parent when rel), or
+    // phpTypeBad: as it is when another alternative takes it so or it is a valid
+    // callback in this frame, else as the rest coerces it. Twin of emitCbFit in
+    // php-to-llvm-ir.abnf.
+    function phpCbFit(cb, v, rel) {
+        if (typeof v == "string" ? cb.str : cb.arr) { return v }
+        if (phpCallableArg(cb.d, v)) { return v }
+        if (cb.rest == "") { return phpTypeBad }
+        return phpTypeFit(rel ? phpTypeResolve(cb.rest, true) : cb.rest, v, ctxSelf())
+    }
+    // Is the string or array v a valid callback in the callee's frame
+    // (zend_check_type_slow's zend_is_callable)? Its deprecations are raised
+    // first at site d (null: none); the library calls the check makes leave
+    // phpSite as the call left it.
     function phpCallableArg(d, v) {
-        if (typeof v != "string" && !isArr(v)) { return true }
         var keep = phpSite
         cbDepr(d, v)
         var ok = phpIsCallable(v)
@@ -2050,12 +2067,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // The body of a function declaring return type rtype, checking what it returns
     // (zend_verify_return_type): a generator's and a void function's are not; a
-    // function that ends without a return statement returns none. Twin of
-    // js_phretfit in abnf/jsrtphp.go and lib/php-rt.metajs.
+    // function that ends without a return statement returns none. A string or
+    // array returned to a type with a callable alternative is judged as phpCbFit
+    // judges an argument, its deprecations raised at the return statement (the
+    // signal's d). Twin of js_phretfit in abnf/jsrtphp.go and lib/php-rt.metajs,
+    // and of emitRetFit in php-to-llvm-ir.abnf.
     function phpRetCheck(body, rtype, isGen, who) {
         var lc = phsCase(rtype, false)
         if (rtype == "" || isGen || lc == "void" || phpLibDepth > 0) { return body }
         var rel = phpTypeRel(rtype)
+        var cb = phpCallableRest(rtype)
+        if (cb != null) { phpLibRef("__mec_cbcompound", true) }
         return function() {
             var r = anytype
             r = body()
@@ -2065,7 +2087,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var v = anytype
             v = ret ? r.v : null
             var fit = anytype
-            fit = ret ? phpTypeFit(rel ? phpTypeResolve(rtype, true) : rtype, v, ctxSelf()) : phpTypeBad
+            if (!ret) { fit = phpTypeBad }
+            else if (cb != null && (typeof v == "string" || isArr(v))) {
+                fit = phpCbFit({d: r.d == undefined ? null : r.d, rest: cb.rest, str: cb.str, arr: cb.arr}, v, rel)
+            }
+            else { fit = phpTypeFit(rel ? phpTypeResolve(rtype, true) : rtype, v, ctxSelf()) }
             if (fit === phpTypeBad) {
                 phpRaise("TypeError", name + "(): Return value must be of type " + phsTypeText(rel ? phpTypeResolve(rtype, false) : rtype)
                     + ", " + (ret ? phpValueName(v) : "none") + " returned")
@@ -2122,8 +2148,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // A generator function's arguments are checked at the CALL, before the generator
     // exists (named ones as they are sent, the count by the ZEND_RECV ops php-src
     // emits ahead of ZEND_GENERATOR_CREATE); the binding itself waits for the body.
-    // The tests are bindParams'. Twin of emitGenEntry in php-to-llvm-ir.abnf.
-    function genArgCheck(params, argset, who, cls) {
+    // The tests are bindParams', run under the generator's record rec (null: none).
+    // Twin of emitGenEntry in php-to-llvm-ir.abnf.
+    function genArgCheck(params, argset, who, cls, rec) {
+        if (rec != null) { phpTop = rec }
         var named = argset.named
         if (named != null) { checkNamedArgs(params, argset) }
         for (var i = 0; i < params.length && params[i].variadic !== true; i++) {
@@ -2144,6 +2172,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             phpRestFit(params[vi], vi, tail, argset, who, cls)
         }
+        if (rec != null) { phpTop = rec.prev }
     }
     // Does one of the first n parameters take the named argument nk?
     function phpNamedTaken(params, n, nk) {
@@ -2590,8 +2619,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return 1
     }
     function makeConstStmt() { return function() { return null } }
-    function makeReturn(items, rv, rt) {
+    // d is the site a callable return type's deprecations stand at (retDepr),
+    // which the signal carries to phpRetCheck.
+    function makeReturn(items, rv, rt, d) {
         var t = items.length > 0 ? items[0] : null
+        if (d != null && rt == null && rv == null) { return function() { return {ret: true, v: t != null ? t() : null, d: d} } }
         if (rt != null) {
             // An element or property returned by reference is fetched for writing,
             // created if missing, and its cell is what the caller binds.
@@ -5714,9 +5746,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var k = anytype
                 k = ctxSelf()
                 scopes = saved
-                genArgCheck(params, argset, who, k)
-                return newGen(runClosureRun(params, body, captured, env, argset, who, null, true),
-                              fi == null ? null : frameRec(fi, fi.cls, 3, fi.lib, {}, argset))
+                var crec = anytype
+                crec = fi == null ? null : frameRec(fi, fi.cls, 3, fi.lib, {}, argset)
+                genArgCheck(params, argset, who, k, crec)
+                return newGen(runClosureRun(params, body, captured, env, argset, who, null, true), crec)
             }
             return runClosureRun(params, body, captured, env, argset, who, fi, false)()
         }, "closure", 0)
@@ -7285,17 +7318,39 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (promote && ptyp != "") { typedNames[nm] = true }
         if (dnull) { typ = phpTypeOrNull(typ) }
         return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, pnull: dnull, rel: phpTypeRel(typ), hooks: hooks, zpp: zpp,
-                cb: phpCbParam(typ, variadic)}
+                cb: phpCbParam(typ), at: phpDeclSite()}
     }
-    // A parameter declaring callable alone (phpCallableOnly) is checked in the
-    // callee's frame as zend_is_callable_ex checks it (phpCallableArg), its
-    // deprecations raised at the function's line: {d: that site, or null}; null
-    // for any other parameter. Twin of paramList's cbs in php-to-llvm-ir.abnf.
-    function phpCbParam(typ, variadic) {
-        if (phpLibDepth > 0 || variadic || !phpCallableOnly(typ)) { return null }
+    // The site of the function being declared (callSite's text), "" for a hook or
+    // in the library.
+    function phpDeclSite() {
+        var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
+        return top == null ? "" : callSite(top.pos)
+    }
+    // A parameter whose type has a callable alternative (phpCallableRest) is
+    // checked in the callee's frame as zend_check_type checks it (phpCbFit), its
+    // deprecations raised at the function's line: that record with d, the site,
+    // or null; null for any other parameter. Twin of paramList's cbs in
+    // php-to-llvm-ir.abnf.
+    function phpCbParam(typ) {
+        var cr = phpLibDepth > 0 ? null : phpCallableRest(typ)
+        if (cr == null) { return null }
         phpLibRef("__mec_cbcompound", true)
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
-        return {d: diagSite("__mec_cbdepr", top == null ? undefined : top.pos)}
+        return {d: diagSite("__mec_cbdepr", top == null ? undefined : top.pos), rest: cr.rest, str: cr.str, arr: cr.arr}
+    }
+    // The return type of the function being declared, noted by ReturnType for its
+    // return statements. Twin of retNote in php-to-llvm-ir.abnf.
+    function retNote(t) {
+        if (cloScopes.length > 0) { cloScopes[cloScopes.length - 1].rty = t }
+        return t
+    }
+    // The site a return statement at pos raises a callable return type's
+    // deprecations at (phpRetCheck), or null. Twin of retDepr in
+    // php-to-llvm-ir.abnf.
+    function retDepr(pos) {
+        var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
+        if (top == null || top.rty == undefined || phpCallableRest(top.rty) == null) { return null }
+        return diagSite("__mec_cbdepr", pos)
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
@@ -7492,9 +7547,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makeFunClosure(fn) {
         return function(argset) {
             if (fn.isGen === true) {
-                genArgCheck(fn.params, argset, fn.name, null)
-                return newGen(function() { return invokePhp(fn, null, argset) },
-                              fn.hid === true ? null : frameRec(fn, "", 0, fn.lib === true, {}, argset))
+                var grec = anytype
+                grec = fn.hid === true ? null : frameRec(fn, "", 0, fn.lib === true, {}, argset)
+                genArgCheck(fn.params, argset, fn.name, null, grec)
+                return newGen(function() { return invokePhp(fn, null, argset) }, grec)
             }
             return invokePhp(fn, null, argset)
         }
@@ -7521,9 +7577,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             me = stat ? null : self
             if (fn.isGen === true) {
                 var gst = st
-                genArgCheck(fn.params, argset, fn.name, defCls)
-                return newGen(function() { return invokePhpCls(fn, me, argset, defCls, gst) },
-                              fn.hid === true ? null : frameRec(fn, defCls.__name, stat ? 1 : 2, fn.lib === true, {}, argset))
+                var mrec = anytype
+                mrec = fn.hid === true ? null : frameRec(fn, defCls.__name, stat ? 1 : 2, fn.lib === true, {}, argset)
+                genArgCheck(fn.params, argset, fn.name, defCls, mrec)
+                return newGen(function() { return invokePhpCls(fn, me, argset, defCls, gst) }, mrec)
             }
             return invokePhpCls(fn, me, argset, defCls, st)
         }, "m:" + (mRecs.length - 1), 0)

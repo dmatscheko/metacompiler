@@ -326,6 +326,23 @@ class WarnCbC extends WarnCbA {
     }
 }
 (new WarnCbC)->go();
+// A type with another alternative checks a string or an array the same way
+// unless that alternative takes it as it is (zend_check_type), a variadic
+// parameter each element, and a callable return type at the return statement
+// (its ZEND_VERIFY_RETURN_TYPE opcode).
+class WarnCbD extends WarnCbA {
+    const U = __LINE__; public function u(callable|int $c) { return "u"; }
+    public function s(callable|string $c) { return "s"; }
+    const V = __LINE__; public function v(int $n, callable ...$cs) { return count($cs); }
+    public function r($c): callable { $GLOBALS["warnRet"] = __LINE__; return $c; }
+    public function go() {
+        $v = $this->u("parent::m"); check("cb-union-parent", [$v, lastErr()], ["u", want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', self::U)]);
+        $v = $this->s("parent::m"); check("cb-union-string", [$v, lastErr()], ["s", null]);
+        $v = $this->v(1, "strlen", "parent::m"); check("cb-variadic-parent", [$v, lastErr()], [2, want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', self::V)]);
+        $v = $this->r("parent::m"); check("cb-return-parent", [$v, lastErr()], ["parent::m", want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', $GLOBALS["warnRet"])]);
+    }
+}
+(new WarnCbD)->go();
 $v = is_callable([new WarnCbA, "parent::m"]); check("cb-compound-no-parent", [$v, lastErr()], [false, null]);
 try { call_user_func([new WarnCbA, "parent::m"]); $v = "none"; } catch (TypeError $e) { $v = $e->getMessage(); }
 check("cb-compound-no-parent-error", $v, 'call_user_func(): Argument #1 ($callback) must be a valid callback, cannot access "parent" when current class scope has no parent');

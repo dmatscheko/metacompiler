@@ -2789,15 +2789,15 @@ function js_phargerr(v, typ, self, n, pname, who, scope, where, rest) {
 }
 // v, what a function declaring return type typ returns (undefined: it ended
 // without a return statement), as that type takes it, or
-// zend_verify_return_error's TypeError. Twin of m["js_phretfit"] in
-// abnf/jsrtphp.go.
-function js_phretfit(v, typ, self, lsb, who, scope) {
+// zend_verify_return_error's TypeError, at once when refused (the emitted
+// callable test refused v). Twin of m["js_phretfit"] in abnf/jsrtphp.go.
+function js_phretfit(v, typ, self, lsb, who, scope, refused) {
     var name = phFnShown(who, scope)
     if (phsCase(phStr(typ), false) == "never") { phRaise("TypeError", name + "(): never-returning function must not implicitly return") }
     var given = "none"
     if (v !== undefined) {
         var r = phTypeFit(phSigType(typ, self, lsb), v, self)
-        if (r !== phTypeBad) { return r }
+        if (r !== phTypeBad && refused !== true) { return r }
         given = phValueName(v)
     }
     phRaise("TypeError", name + "(): Return value must be of type " + phsTypeText(phSigType(typ, self, undefined)) + ", " + given + " returned")

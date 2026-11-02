@@ -374,16 +374,25 @@ function phpLibZppNative(name) {
     return ",strlen,intdiv,substr,strpos,strrpos,strcmp,ord,chr,strtolower,strtoupper,".indexOf("," + name + ",") >= 0
 }
 
-// Is declared type typ callable alone, or nullable? A parameter of that type is
-// checked as zend_is_callable_ex checks a callback; in a union with other types
-// the callable alternative is judged by its shape only.
-function phpCallableOnly(typ) {
+// For a declared type typ with a callable alternative, the type its other
+// alternatives make (rest, "" for none), and whether one of them takes a string
+// (str) or an array (arr) as it is; null for any other type. zend_check_type
+// takes a string or an array as it is when its own type is in the mask, else
+// when zend_is_callable accepts it, else as the scalar alternatives coerce it.
+function phpCallableRest(typ) {
     var alts = phsTypeAlts(typ)
     var cb = false
+    var rest = ""
+    var str = false
+    var arr = false
     for (var i = 0; i < alts.length; i++) {
         var lc = phsCase(alts[i], false)
         if (lc == "callable") { cb = true }
-        else if (lc != "null") { return false }
+        else {
+            rest = rest == "" ? alts[i] : rest + "|" + alts[i]
+            if (lc == "string" || lc == "mixed") { str = true }
+            if (lc == "array" || lc == "iterable" || lc == "mixed") { arr = true }
+        }
     }
-    return cb
+    return cb ? {rest: rest, str: str, arr: arr} : null
 }
