@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (interp); endless Range#each hangs · P3 · RB · OPEN [V]
+### T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (interp); endless Range#each hangs · P3 · RB · IN PROGRESS (RB worker, round 52) [V]
 
 Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
 - `begin; proc { break 1 }.call; rescue LocalJumpError => e; p e.reason, e.exit_value; end` prints `:break` and `1`. Every engine raises NoMethodError. Add accessors next to StopIteration#result (abnf/jsrt.go, lib/ruby-rt.metajs).
