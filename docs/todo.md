@@ -132,7 +132,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local nameref (compiler), `export +x` · P3 · SH · OPEN [V]
+### T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local nameref (compiler), `export +x` · P3 · SH · IN PROGRESS (SH worker, round 52) [V]
 Carried over from T-1162 (closed partial); oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Both engines: `declare -a w` (a hidden array local) through a nameref chain ending at NAME[SUB] is not emulated; the engines agree with each other but not with the oracle.
 - Compiler, pre-existing: a callee using a caller's local nameref is unsupported even for plain assignments (`f(){ local -n w=x; g; }; g(){ w=8; }; x=1; f; echo $x` — oracle 8, compiler 1), so a callee also cannot reach a hidden NAME[SUB] local that way. The compiler tracks namerefs statically; needs a run-time nameref check on the callee's by-name stores/reads where a caller could have made the name a nameref, kept cost-neutral (emit only when some function declares a local nameref of that name).
