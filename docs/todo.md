@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1126** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1127** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-step map/each_with_object, last → FloatDomainError · P3 · RB · IN PROGRESS (RB worker, round 55) [V]
+### T-1126 ruby: Hash Array keys use eql? (not ==); endless Range blockless enumerators; Infinity #size of endless streams; method(:x).owner · P3 · RB · OPEN [V]
 
 Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
-- The halves disagree: `a = 1.step(10,3); p [a.respond_to?(:first), a.respond_to?(:begin), a.respond_to?(:each)]` gives [true, true, true] in MRI, [false, false, false] in the interpreter and [true, false, true] in llvm.Run/native. Add an "Enumerator::ArithmeticSequence" row to lib/ruby-respond.js / rubyRespondNames, and map the class the same way in both halves.
-- `h = {1.step(10,3) => :a}; p h[1.step(10,3)]` prints :a; ours prints nil. Add an ArithmeticSequence arm to keyEq / keyId, consistent with #hash and #==.
-- With `e = 1.step(Float::INFINITY, 2)`, `e.map.first(1)` gives [1.0] and `e.each_with_object([]).first(1)` gives [[1, []]]; both raise NoMethodError in every engine. The interpreter names the class Enumerator::ArithmeticSequence, the compiled half names it Enumerator.
-- `1.step(Float::INFINITY, 2).last` raises FloatDomainError "Infinity"; ours raises RangeError "cannot get the last element of endless arithmetic sequence" (that is MRI's message for `(1..).step(2).last`).
+- The correctness item: `{[1] => 1}[[1.0]]` is nil in MRI. Array (and nested) keys compare with eql?, so 1 and 1.0 differ. All our engines return 1. Check `{1 => :a}[1.0]` (nil), `{[1, [2]] => :a}[[1, [2.0]]]` (nil) and `{1.0 => :a}[1]` (nil) too, plus Hash#key?, #delete, #fetch and Array#uniq / #- / #& / #|, which also use hash+eql?. Keep the fast path cost-neutral (bench --paired).
+- Endless Range without a block: `(1..).map.first(2)` is [1, 2], and `(1..).each_with_object([]).first(1)`, `.each_with_index.first(2)` and `.select.first(1)` all work in MRI. Ours raises RangeError "cannot convert endless range to an array". Also `1.step(Float::INFINITY,2).to_enum.first(2)` gives [1.0, 3.0]; ours raises NoMethodError.
+- `#size` of endless stream enumerators is Infinity: `[1,2].cycle.size`, `1.step.with_index.size`, `(1..).each_slice(2).size`, `1.step.map.size`. Ours gives 2 or 0.
+- `1.step(10,3).method(:begin).owner` is Enumerator::ArithmeticSequence, and `.public_methods(false)` returns a list; both raise NoMethodError here.
 
 # JS — JavaScript and TypeScript
 
@@ -1176,6 +1176,7 @@ T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.u
 T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endless-range enumerators without a block; Range#%; ArithmeticSequence#hash — DONE r54 (1570c52a, 20b5d84f): catchable RangeError for endless to_a/splat, streaming endless String step and blockless each/each_entry, Range#% (tested only after % finds a non-number: paired bench +0.01%), ArithmeticSequence#hash, Float values toward Float::INFINITY; master-probed vs ruby 2.6
 T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local -n drops -i; compiled declare -f listing — DONE r38 (d8fa8690): circular local nameref element/literal stores and warning counts, ${v~}/${v~~}, -n drops -i/-u/-l/-c, lazy compiled declare -f/-ft, arith element store on a scalar; paired bench +0.05%; master-probed vs bash 5.3 (stdout+stderr)
 T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/SingletonList); emptyArray class — DONE r36 (7a6b2a15, c4b42938): Unit is never null (casts, is, ?., ?:, !!, *NotNull, Pair holding Unit) in all engines, Any() as java.lang.Object, EmptyList/Singleton*/ArrayList result classes by size, explicit-type Array class; also fixed the interpreter's anonymous function swallowing the statement's ';'; master-probed vs kotlinc 2.2.21
+T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-step map/each_with_object, last → FloatDomainError — DONE r55 (fcfc144c): ArithmeticSequence respond_to?/own methods in both halves, Hash key via eql? parts, blockless map/with_object/each_with_object on endless streams, #last per MRI (FloatDomainError/ZeroDivisionError/RangeError); paired bench 0.00%; master-probed vs ruby 2.6
 
 # Settled — do not re-open
 
