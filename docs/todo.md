@@ -147,7 +147,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1152 bash: circular/computed nameref stores, readonly and attribute leftovers · P3 · SH · OPEN [V]
+### T-1152 bash: circular/computed nameref stores, readonly and attribute leftovers · P3 · SH · IN PROGRESS (SH worker, round 48) [V]
 Found while closing T-1150; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Both engines' compiler leg: `t() { local -n v=v; (( v = 3 )); echo "in $v"; }; readonly v=9; t` — oracle and interpreter print `local: warning: v: circular name reference`, `local: v: readonly variable`, `v: readonly variable`, `in 9`; run/native miss the arithmetic-store refusal and print `in 3` (pre-existing on main).
 - Compiler: readonly through a circular or computed nameref is not refused for the prefix assignment `w=q echo`, `read -a`, `mapfile`, `for w in`, or `eval 'w=q'`.
