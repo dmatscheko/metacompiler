@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each), lazy no-block ArgumentError, lazy.take size, AS#last arity, Range#equal? · P3 · RB · OPEN [V]
+### T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each), lazy no-block ArgumentError, lazy.take size, AS#last arity, Range#equal? · P3 · RB · IN PROGRESS (RB worker, round 57) [V]
 
 Found while working T-1126. Each item lists MRI 2.6's answer (`/usr/bin/ruby`, LC_ALL=en_US.UTF-8) first, then ours. All three engines are affected unless noted.
 
