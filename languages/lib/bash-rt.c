@@ -314,6 +314,7 @@ int rt_ls_drop(int id, int low, int from, int to);
 int rt_unset_env(int id, int d);
 int rt_env_end(int d, int n);
 int rt_fskind(char *p);
+int rt_test_fcmp(char *l, char *r, int op);
 char *rt_getvar_byname(char *n);
 char *rt_getvar_ind(char *n);
 int rt_varslot(char *n);
@@ -1304,8 +1305,7 @@ int ts_binary(void)
         if (op[0] == 62) return c > 0 ? 1 : 0;
         return (op[0] == 33) == (c != 0) ? 1 : 0;
     }
-    /* -nt, -ot and -ef: the file model has no times and no inodes, so false. */
-    if (op[1] == 111 || (op[1] == 110 && op[2] == 116) || (op[1] == 101 && op[2] == 102)) return 0;
+    if (op[1] == 111 || (op[1] == 110 && op[2] == 116) || (op[1] == 101 && op[2] == 102)) return rt_test_fcmp(l, r, (int)op[1]);
     il = rt_test_int(l, ts_who);
     ir = rt_test_int(r, ts_who);
     if (op[1] == 101) return il == ir ? 1 : 0;
@@ -8958,6 +8958,10 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
     char *old;
     at = at & 7;
     if (nref_any != 0) {
+        /* A nameref that is an array (a function's circular one given an array
+         * literal) names no variable bash can follow: the store changes nothing.
+         * Twin of runAssignV in bash-interpreter.abnf. */
+        if ((rt_arr_marks(n) & 32) != 0 && rt_arr_any(n) != 0) return 0;
         if (rt_nref_gstore(n) != 0) return rt_nref_gset(n, v, app, at | bi | ro);
         n = rt_nref_end(n);
         if (n == 0) {
@@ -9604,7 +9608,8 @@ int rt_decl_lit(char *nm, int id, char *v, int app, int at, int as)
  * A readonly name refuses a value or a fresh local ("WHO: NAME: readonly
  * variable"). An array literal NAME=(...) under -a is stored by rt_decl_lit.
  * export's -a (who is empty) leaves a bare NAME a scalar. Answers 0, 1 for a
- * word that is no name (bash's "not a valid identifier"), 2 for one that
+ * word that is no name (bash's "not a valid identifier"; export's and readonly's
+ * NAME[SUB]=VALUE is reported here, as NAME[SUB], and answers 3), 2 for one that
  * starts with - or +: an option, which only the emitter could apply, 3 for a
  * store refused and reported (an arithmetic error is left in arith_err, which
  * abandons the line). x > 0 exports the name, x < 0 takes the export attribute
@@ -9638,6 +9643,10 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
         if (w[j] == 0) return 1;
         j = j + 1;
         if (w[j] == 0 && (j == i + 2 || who[0] == 0 || rt_streq(who, "readonly") != 0)) return 1;
+        if (who[0] == 0 || rt_streq(who, "readonly") != 0) {
+            rt_berr(who[0] == 0 ? "export" : who, rt_strcat(rt_strcat("`", rt_substr(w, 0, j)), "'"), "not a valid identifier");
+            return 3;
+        }
         if (w[j] == 0) arr = 1;
         sub = 1;
     }
@@ -9896,6 +9905,18 @@ int rt_fskind(char *p)
     k = rt_streq(p, "/bin") != 0 ? 2 : k;
     k = rt_streq(p, "/usr/bin") != 0 ? 2 : k;
     return k;
+}
+
+/* test's -nt (op 'n'), -ot ('o') and -ef ('e') over the file model; 1 when true.
+ * Twin of testFileCmp in languages/bash-interpreter.abnf, which says why. */
+int rt_test_fcmp(char *l, char *r, int op)
+{
+    int kl, kr;
+    kl = rt_fskind(l);
+    kr = rt_fskind(r);
+    if (op == 110) return kl != 0 && kr == 0 ? 1 : 0;
+    if (op == 111) return kl == 0 && kr != 0 ? 1 : 0;
+    return kl != 0 && rt_streq(l, r) != 0 ? 1 : 0;
 }
 
 

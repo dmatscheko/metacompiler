@@ -143,6 +143,34 @@ s133() {
   e=$(s133f() { local -n s133w=s133w; declare s133w=(x y); echo "s=$?"; declare -p s133w; local -n s133v=s133v; declare -r s133v=9; echo "s=$?"; declare -p s133v; }; s133f 2>&1)
   check nrs3 "$(s133s "$e")" 'local: warning: s133w: circular name reference;warning: s133w: circular name reference;warning: s133w: circular name reference;warning: s133w: circular name reference;warning: s133w: circular name reference;warning: s133w: circular name reference;s=0;declare -an s133w=([0]="x" [1]="y");local: warning: s133v: circular name reference;warning: s133v: circular name reference;warning: s133v: circular name reference;warning: s133v: circular name reference;declare: `9'"'"': invalid variable name for name reference;s=1;declare -n s133v="s133v";'
 }
+# ===== SECTION 134: readonly and export of NAME[SUB], stores through namerefs, test -nt -ot -ef =====
+# export and readonly take no NAME[SUB], with a value or without, and readonly's -n takes
+# its attribute away as export's does. declare -g gives -x to the global a local or a
+# circular nameref hides. A scalar store to a circular nameref that holds an array changes
+# nothing; a store through a readonly nameref lands on its target. -nt, -ot and -ef compare
+# files, here ones that exist against ones that do not. Every expected value is bash 5.3's.
+s134() {
+  local e o p
+  s134s() { local l; while IFS= read -r l; do l=${l#*: line }; printf '%s;' "${l#*: }"; done <<< "$1"; }
+  e=$({ readonly s134a[1]=b; echo "s=$?"; readonly -a s134b[1]=c; echo "s=$?"; export -n s134b[1]=c; echo "s=$?"; export s134c=1 's134d[k]=v'; echo "s=$?"; declare -p s134a s134b s134c s134d; } 2>&1)
+  check rox1 "$(s134s "$e")" 'readonly: `s134a[1]'"'"': not a valid identifier;s=1;readonly: `s134b[1]'"'"': not a valid identifier;s=1;export: `s134b[1]'"'"': not a valid identifier;s=1;export: `s134d[k]'"'"': not a valid identifier;s=1;declare: s134a: not found;declare: s134b: not found;declare -x s134c="1";declare: s134d: not found;'
+  e=$(readonly -n s134e=x; readonly -n s134f; declare -p s134e s134f 2>&1; s134e=y; echo "$s134e")
+  check rox2 "$(s134s "$e")" 'declare -- s134e="x";declare: s134f: not found;y;'
+  e=$(s134g() { local -n s134w=s134w; declare -g -x s134w=q; local s134v=1; declare -g -x s134v=r; }; s134g 2>/dev/null; declare -p s134w s134v)
+  check rox3 "$e" $'declare -x s134w="q"\ndeclare -x s134v="r"'
+  e=$(s134g() { local -n s134w=s134w; declare s134w=(x y); s134w=z; s134w+=r; declare -p s134w; }; s134g 2>/dev/null)
+  check rox4 "$e" 'declare -an s134w=([0]="x" [1]="y")'
+  e=$(declare -nr s134r=s134x; s134r=y; echo -n "$s134x "; s134g() { local -nr s134q=s134y; s134q=z; (( s134q += 1 )); echo -n "$s134y "; local -n s134w=s134w; declare -r s134w=s134z; s134w=v; echo -n "$s134z"; }; s134g 2>/dev/null)
+  check rox5 "$e" 'y 1 v'
+  e=$(s134g() { local -n s134w=s134w; declare -g -r s134w=1; s134w=2; echo no; }; s134g 2>&1; echo no)
+  check rox6 "$(s134s "$e")" 'local: warning: s134w: circular name reference;warning: s134w: circular name reference;warning: s134w: maximum nameref depth (8) exceeded;s134w: readonly variable;'
+  e=$(declare -n 's134h[x y]' 2>&1; echo "s=$?"; s134g() { local -n 's134i[a b]'; }; s134g 2>&1)
+  check rox7 "$(s134s "$e")" 'declare: s134h[x y]: reference variable cannot be an array;s=1;local: s134i[a b]: reference variable cannot be an array;'
+  o=-nt; p=/s134-none
+  e=$([ /dev/null -nt "$p" ]; echo -n $?; [ "$p" -nt /dev/null ]; echo -n $?; test "$p" -ot / ; echo -n $?; [[ / -ot $p ]]; echo -n $?; [ / $o "$p" ]; echo -n $?; [ "$p" $o "$p" ]; echo -n $?)
+  e="$e $([ /usr -ef /usr ]; echo -n $?; [[ /dev/null -ef /dev/null ]]; echo -n $?; test / -ef /dev; echo -n $?; o=-ef; [ "$p" $o "$p" ]; echo -n $?; [ /usr -nt /usr ]; echo -n $?; [[ / -ot / ]]; echo -n $?)"
+  check rox8 "$e" '010101 001111'
+}
 # ===== END SECTIONS =====
 
 s129  # SECTION-CALL 129
@@ -150,5 +178,6 @@ s130  # SECTION-CALL 130
 s131  # SECTION-CALL 131
 s132  # SECTION-CALL 132
 s133  # SECTION-CALL 133
+s134  # SECTION-CALL 134
 echo "full: $checks checks, $fails failures"
 exit $fails

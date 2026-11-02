@@ -535,15 +535,15 @@
             "name": "Bash to LLVM IR -qq, a compile error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",
-            "expectError": "bash-to-llvm-ir error: unsupported binary test operator (must be a literal): -nt",
-            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "[ a -nt b ]", "-qq"]
+            "expectError": "bash-to-llvm-ir error: the enable builtin is not supported",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "enable -n echo", "-qq"]
         },
         {
             "name": "Bash interpreter -qq, an interpreter error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",
-            "expectError": "bash interpreter error: unknown binary test operator: -nt",
-            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "[ a -nt b ]", "-qq"]
+            "expectError": "bash interpreter error: the enable builtin is not supported",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "enable -n echo", "-qq"]
         },
         {
             "name": "TinyC to LLVM IR -qq, a compile error still shows SHOULD FAIL",

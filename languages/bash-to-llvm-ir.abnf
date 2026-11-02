@@ -4257,8 +4257,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k
             var mk = keep ? heapMark(b) : null
             for (k = 0; k < as.length; k++) {
-                // A readonly name abandons the command line, as an arithmetic error does.
-                if (roRefused(b, as[k].name, "")) { b.NewStore(one, gArithErr); return emitAbortCheck(b) }
+                // A readonly name abandons the command line, as an arithmetic error does; a
+                // nameref, by what its chain ends at when it runs (refRoAbort).
+                if (!attrOn(refVars, as[k].name) && roRefused(b, as[k].name, "")) { b.NewStore(one, gArithErr); return emitAbortCheck(b) }
                 b = refRoAbort(b, as[k].name)
                 b = emitAssign(b, as[k], false, mk)
             }
@@ -4403,8 +4404,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if ("+t".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
         }
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
-        var setRo = kw == "readonly" || flags.indexOf("r") >= 0
-        var isRef = kw != "export" && flags.indexOf("n") >= 0
+        // readonly -n takes nothing: see setRo in makeDecl in bash-interpreter.abnf.
+        var setRo = (kw == "readonly" && flags.indexOf("n") < 0) || flags.indexOf("r") >= 0
+        var isRef = kw != "export" && kw != "readonly" && flags.indexOf("n") >= 0
         var roAttr = bashDeclRoAttr(kw, flags, plus)
         // +a / +A, which an array of that kind refuses at run time (rt_arr_plus).
         var plusArr = plus.indexOf("a") >= 0 || plus.indexOf("A") >= 0
@@ -4538,7 +4540,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // -n of an operand written NAME[SUB] is refused first; -n with -i fails, silently.
             // Twin of declOne in bash-interpreter.abnf.
             var aw = asgsWritten[j]
-            if (isRef && kw != "readonly" && (darrs[j] != null || (aw != null && aw.idxT != null && aw.isrc != ""))) {
+            if (isRef && (darrs[j] != null || (aw != null && aw.idxT != null && aw.isrc != ""))) {
                 var shownSub = gepStr(b, kw + ": " + ((aw != null) ? names[j] + "[" : darrs[j]))
                 if (aw != null) {
                     var sw = evalWord(b, aw.idxT)
@@ -4941,9 +4943,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Written operand j, the o-th: declared, or, a literal being assigned with the words,
         // only what its marks refuse reported.
         var declWritten = function(b, o, j) {
-            // export and readonly take no NAME[SUB].
+            // export and readonly take no NAME[SUB], with a value or without.
+            var awj = asgsWritten[j]
             if (darrs[j] != null && (kw == "export" || kw == "readonly")) {
                 emitDiag(b, gepStr(b, kw + ": `" + darrs[j] + "': not a valid identifier\n"))
+                roFail = true
+                return b
+            }
+            if ((kw == "export" || kw == "readonly") && awj != null && awj.idxT != null && awj.lit == null) {
+                var bw = evalWord(b, awj.idxT)
+                b = bw.b
+                emitDiag(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, kw + ": `" + names[j] + "["), bw.v]),
+                                                  gepStr(b, "]': not a valid identifier\n")]))
                 roFail = true
                 return b
             }
@@ -5112,7 +5123,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeDeclSpelled(kw, dt, redirs) {
         var body = function(b) {
             var k
-            for (k = 0; k < dt.bad.length; k++) { emitDiag(b, gepStr(b, kw + ": `" + dt.bad[k] + "': not a valid identifier\n")) }
+            for (k = 0; k < dt.bad.length; k++) { emitDiag(b, gepStr(b, kw + ": " + dt.bad[k] + "\n")) }
             if (dt.operands > 0) { b = compileSnippet(dt.text, 0)(b) }
             if (dt.bad.length > 0 || dt.operands == 0) { storeStatusI(b, (dt.bad.length > 0) ? 1 : 0) }
             return b
@@ -5208,10 +5219,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         emitAbortCheck(roB).NewBr(okB)
         return okB
     }
+    // Does NAME's readonly refuse a store to it? A store through a nameref whose target is
+    // known here lands on that target, and the nameref's own readonly does not refuse it
+    // (bash 5.3: declare -nr r=x; r=y sets x).
+    function roStore(name) {
+        if (!attrOn(roVars, name)) { return false }
+        var rt = attrOn(refVars, name)
+        return typeof rt != "string" || rt == name
+    }
     // Is NAME readonly here? Then the code says so on stderr. Twin of roRefused in
     // bash-interpreter.abnf.
     function roRefused(b, name, who) {
-        if (!attrOn(roVars, name)) { return false }
+        if (!roStore(name)) { return false }
         emitDiag(b, gepStr(b, who + name + ": readonly variable\n"))
         return true
     }
@@ -5436,6 +5455,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // There is no real filesystem behind a compiled run either, so the file predicates go
     // through rt_fskind, a model of the standard paths (see bash-interpreter.abnf).
     var rtFskind = rtDecl("rt_fskind", false, [1])
+    var rtTestFcmp = rtDecl("rt_test_fcmp", false, [1, 1, 0])
 
     // "name" or "name[key]"
     // A subscript text that is already a canonical index needs no evaluation.
@@ -5607,6 +5627,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "!=") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtStreq, [l.v, r.v]), zero)) }
         if (op == "<") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSLT, b.NewCall(rtStrcmp, [l.v, r.v]), zero)) }
         if (op == ">") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtStrcmp, [l.v, r.v]), zero)) }
+        if (op == "-nt" || op == "-ot" || op == "-ef") {
+            var fop = llvm.constant.NewInt(i32, op.charCodeAt(1))
+            return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtTestFcmp, [l.v, r.v, fop]), zero))
+        }
         var il = testInt(b, l), ir = testInt(b, r)
         if (op == "-eq") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, il, ir)) }
         if (op == "-ne") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, il, ir)) }
@@ -6459,7 +6483,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var k
         for (k = 0; k < names.length && stopK == names.length; k++) {
             if (!bashIsRef(names[k])) { stopK = k; stopSt = 1; stopBad = true }
-            else if (attrOn(roVars, names[k])) { stopK = k; stopSt = (k < names.length - 1) ? 2 : 1 }
+            else if (roStore(names[k])) { stopK = k; stopSt = (k < names.length - 1) ? 2 : 1 }
         }
         var ifs = emptyPtr(b)
         // -N splits nothing, as an empty IFS.

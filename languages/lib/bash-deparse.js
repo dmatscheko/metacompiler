@@ -845,8 +845,9 @@ function bashSubNeedsX(t) {
 // fields, or null to give up; quote(v) spells v as one shell word. A leading -X/+X field is an
 // option, NAME or NAME[SUB]=VALUE / NAME+=VALUE an operand (the value quoted, or kept as an
 // array literal (...) under -a/-A), and so is NAME[SUB] for declare, typeset and local, which
-// never evaluate SUB. Answers {text, operands, bad: [the fields that are no operand, bash's
-// "not a valid identifier"]}, or null.
+// never evaluate SUB. Answers {text, operands, bad: [the diagnostics, after "KW: ", of the
+// fields that are no operand, in order]}, or null: bash's "not a valid identifier", and -n's
+// refusal of a NAME[SUB] whose SUB the text spells 0, which names SUB as written.
 //
 // The builtin reads the SUB of a computed NAME[SUB]=VALUE as it stands, as an assignment
 // statement does (AsgIdx): an associative array's as a word, an indexed array's as
@@ -870,6 +871,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
     var operands = 0
     var bad = []
     var assoc = false
+    var nref = false
     var i
     var k
     for (i = 1; i < items.length; i++) {
@@ -877,6 +879,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
         if (it.dflag != undefined) {
             text = text + " " + it.dflag
             sflags = sflags + " " + it.dflag
+            if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("n") >= 0) { nref = !xr }
             if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("a") >= 0 || it.dflag.indexOf("A") >= 0)) { arr = true }
             if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("A") >= 0) { assoc = true }
             continue
@@ -903,13 +906,15 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
                 fopt = true
                 if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }
                 if (f.charAt(0) == "-" && f.indexOf("A") >= 0) { assoc = true }
+                if (f.charAt(0) == "-" && f.indexOf("n") >= 0) { nref = !xr }
                 continue
             }
             opts = false
             var op = bashDeclOperand(f, arr, quote, !xr)
-            if (op == "") { bad.push(f); continue }
+            if (op == "") { bad.push("`" + f + "': not a valid identifier"); continue }
             var br = f.indexOf("[")
             var cl = (br > 0) ? f.indexOf("]", br) : -1
+            if (nref && cl == f.length - 1 && op != f) { bad.push(f + ": reference variable cannot be an array"); continue }
             if (cl > br + 1 && cl + 1 < f.length && bashSubQuoted(f.slice(br + 1, cl))) {
                 var kind = assoc ? "A" : kindOf(f.slice(0, br))
                 if (kind == "") { return null }
@@ -997,7 +1002,8 @@ function bashDeclOperand(f, arr, quote, elem) {
         if (j < 0) { return "" }
         j = j + 1
         // SUB is not evaluated. It stays when the written NAME[SUB] reads it back (declare -n
-        // names it when it refuses the operand), else it is spelled 0.
+        // names it when it refuses the operand), else it is spelled 0 (bashDeclText reports
+        // that refusal itself).
         if (j == f.length) {
             if (!elem || j <= i + 2) { return "" }
             var sub = f.slice(i + 1, j - 1)

@@ -1837,7 +1837,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         act()
         var now = bindingOf(name)
         ge.had = now.had; ge.val = now.val; ge.ai = now.ai; ge.au = now.au; ge.al = now.al
-        ge.at = now.at; ge.ad = now.ad; ge.ar = now.ar; ge.hasArr = now.hasArr; ge.arr = now.arr
+        ge.at = now.at; ge.ad = now.ad; ge.ar = now.ar; ge.ax = now.ax; ge.an = now.an
+        ge.hasArr = now.hasArr; ge.arr = now.arr
         restoreLocal(cur)
     }
 
@@ -3307,8 +3308,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if ("+t".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
         }
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
-        var setRo = kw == "readonly" || flags.indexOf("r") >= 0
-        var isRef = kw != "export" && flags.indexOf("n") >= 0
+        // readonly's -n takes its attribute away, as export's does, and readonly is never
+        // removed: `readonly -n NAME=VALUE` only assigns (bash 5.3).
+        var setRo = (kw == "readonly" && flags.indexOf("n") < 0) || flags.indexOf("r") >= 0
+        var isRef = kw != "export" && kw != "readonly" && flags.indexOf("n") >= 0
         var roAttr = bashDeclRoAttr(kw, flags, plus)
         // A readonly name the declaration would assign or make local is refused (status 1).
         var roFail = false
@@ -3325,7 +3328,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // -n of an operand written NAME[SUB] is refused before any other check (bash
             // 5.3). Twin of declOne in bash-to-llvm-ir.abnf.
             var aw = asgsWritten[k]
-            if (isRef && kw != "readonly" && (darrs[k] != null || (aw != null && aw.idxT != null && aw.isrc != ""))) {
+            if (isRef && (darrs[k] != null || (aw != null && aw.idxT != null && aw.isrc != ""))) {
                 diagErr(kw + ": " + ((aw != null) ? names[k] + "[" + wordJoin(aw.idxT()) + "]" : darrs[k]) + ": reference variable cannot be an array\n")
                 roFail = true
                 return
@@ -3608,9 +3611,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 setStatus(0); return 0
             }
             for (k = 0; k < names.length; k++) {
-                // export and readonly take no NAME[SUB].
-                if (darrs[k] != null && (kw == "export" || kw == "readonly")) {
-                    diagErr(kw + ": `" + darrs[k] + "': not a valid identifier\n")
+                // export and readonly take no NAME[SUB], with a value or without. Twin of
+                // declWritten in bash-to-llvm-ir.abnf.
+                var awk = asgsWritten[k]
+                if ((kw == "export" || kw == "readonly") && (darrs[k] != null || (awk != null && awk.idxT != null && awk.lit == null))) {
+                    diagErr(kw + ": `" + ((darrs[k] != null) ? darrs[k] : names[k] + "[" + wordJoin(awk.idxT()) + "]") + "': not a valid identifier\n")
                     roFail = true
                     continue
                 }
@@ -3704,7 +3709,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var operands = dt.operands
             var errs = ""
             var k
-            for (k = 0; k < dt.bad.length; k++) { errs = errs + diagPfx() + kw + ": `" + dt.bad[k] + "': not a valid identifier\n" }
+            for (k = 0; k < dt.bad.length; k++) { errs = errs + diagPfx() + kw + ": " + dt.bad[k] + "\n" }
             var st = anytype
             st = 0
             if (operands > 0 || errs != "") {
@@ -6350,12 +6355,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Is NAME readonly? Then says so (`bash: [who]NAME: readonly variable`). Twin of roRefused
     // in bash-to-llvm-ir.abnf.
     function roRefused(name, who) {
-        // A store through a nameref is refused by the variable it names, and names that.
+        // A store through a nameref is refused by the variable it names, and names that;
+        // through a circular one refGlobal resolves, by that global variable.
         if (anyRef && attrOn(refVars, name)) {
             refQuiet = true
             var rt = refTarget(name)
             refQuiet = false
             if (rt != "") { name = splitSubscript(rt).name }
+            else {
+                var gn = refGlobal(name)
+                if (gn != "") {
+                    if (!globalEntry(gn).ar) { return false }
+                    if (!refQuiet) { diagErr("warning: " + name + ": maximum nameref depth (8) exceeded\n") }
+                    diagErr(who + gn + ": readonly variable\n")
+                    return true
+                }
+            }
         }
         if (!attrOn(roVars, name)) { return false }
         diagErr(who + name + ": readonly variable\n")
@@ -6462,8 +6477,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         arPfx = svp
         return k
     }
-    // The same, with the value already expanded.
+    // The same, with the value already expanded. A scalar store to a nameref that is an
+    // array (a function's circular one given an array literal) changes nothing: its value
+    // names no variable bash can follow (bash 5.3). Twin of rt_setvar_byname.
     function runAssignV(a, assoc, v, decl) {
+        if (anyRef && noRef == 0 && a.idxT == null && a.lit == null && attrOn(refVars, a.name) && isArr(a.name)) { return }
         a = refAssign(a)
         if (a == null) { return }
         if (a.glob == true) {
@@ -7851,6 +7869,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (s == "pipefail") { return optPipefail }
         return s == "braceexpand" || s == "hashall" || s == "interactive-comments"
     }
+    // FILE1 -nt FILE2 is "newer, or FILE1 exists and FILE2 does not", -ot the mirror, and
+    // -ef "the same device and inode". The model has no times, so two existing files are
+    // never newer than each other, and a modelled path is one inode, named by one spelling.
+    // Twin of rt_test_fcmp in bash-rt.c.
+    function testFileCmp(l, op, r) {
+        var kl = fsKind(l), kr = fsKind(r)
+        if (op == "-nt") { return kl != 0 && kr == 0 }
+        if (op == "-ot") { return kl == 0 && kr != 0 }
+        return kl != 0 && l == r
+    }
     var testNumOps = {"-eq": "==", "-ne": "!=", "-lt": "<", "-le": "<=", "-gt": ">", "-ge": ">="}
     // An operand of test's -eq ... -ge, which takes bash's legal_number, not arithmetic:
     // white space, one optional sign, decimal digits that fit an intmax_t, white space.
@@ -7882,6 +7910,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "!=") { return (l != r) ? 0 : 1 }
         if (op == "<") { return (l < r) ? 0 : 1 }
         if (op == ">") { return (l > r) ? 0 : 1 }
+        if (op == "-nt" || op == "-ot" || op == "-ef") { return testFileCmp(l, op, r) ? 0 : 1 }
         fail("unknown binary test operator: " + op)
         return 2
     }
