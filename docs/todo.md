@@ -114,7 +114,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1111 kotlin: MutableMap putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll value; shuffle(Random); view and iterator classes · P3 · KT · OPEN [V]
+### T-1111 kotlin: MutableMap putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll value; shuffle(Random); view and iterator classes · P3 · KT · IN PROGRESS (KT worker, round 32) [V]
 
 Oracle: kotlinc 2.2.21. All three engines are wrong, and all of these predate r31:
 - `mutableMapOf(..).putIfAbsent`, `computeIfAbsent` and `merge` abort with "unknown Map method" ("unknown dict method" in llvm.Run). kotlinc gives 1 / null / 7 / 6 for the r31 worker's probe; re-derive it.
