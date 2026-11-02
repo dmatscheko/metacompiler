@@ -2324,6 +2324,7 @@ func init() {
 		}
 		ktRefs = map[*hostFunc]*ktRefInfo{}
 		ktFuncNames = map[interface{}]string{}
+		ktEmptyOnes = map[string]interface{}{}
 
 		// js_ktrefbase(scope, "Box") resolves the BASE of a `::`. A base that names a
 		// value answers that value; one that names a TYPE this value model has no
@@ -2412,7 +2413,7 @@ func init() {
 			for s := sc; s != nil; s = s.parent {
 				if v, ok := s.get(name); ok {
 					if isCallable(v) && !prop {
-						ktFuncNames[v] = name
+						return w(rt.ktFnRefOf(v, name))
 					} else if o, isObj := v.(*jsObject); !isObj || o.props["__isclass"] != true {
 						return w(rt.ktMakeRef(&ktRefInfo{recv: ktVarHolder(s, name), name: name, bound: true}))
 					}
@@ -2432,7 +2433,7 @@ func init() {
 			}
 			r := m["js_ktget"](a)
 			if isCallable(u(r)) {
-				ktFuncNames[u(r)] = name
+				return w(rt.ktFnRefOf(u(r), name))
 			}
 			return m["js_ktctorref"]([]uint64{r})
 		}
@@ -2512,14 +2513,10 @@ func init() {
 			return m["js_ktclasslit"](a)
 		}
 
-		// js_ktnameval(v, "topFun") remembers the name a `::` spelled against the
-		// closure it resolved to, so KFunction.name can answer it, and hands the value
-		// straight back. The twin is fnRefName in kotlin-interpreter.abnf.
+		// js_ktnameval(v, "topFun") is `::topFun` of the closure v the name resolved
+		// to (ktFnRefOf); any other value is handed straight back.
 		m["js_ktnameval"] = func(a []uint64) uint64 {
-			if isCallable(u(a[0])) {
-				ktFuncNames[u(a[0])] = rt.toString(u(a[1]))
-			}
-			return a[0]
+			return w(rt.ktFnRefOf(u(a[0]), rt.toString(u(a[1]))))
 		}
 
 		// js_ktglobal(name) is the VALUE of one global builder; buildMain declares
@@ -5601,10 +5598,10 @@ func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 			}
 		}
 	}
-	// A class literal is equal to one naming the same class (ktRefEq), the half of
-	// the contract ktKClassHash keeps.
-	if _, isCls := ktIsClassLit(a); isCls {
-		eq, _ := ktRefEq(a, b)
+	// A class literal is equal to one naming the same class, the half of the
+	// contract ktKClassHash keeps, and a callable reference to one naming the same
+	// member or function (ktRefEq).
+	if eq, decided := ktRefEq(a, b); decided {
 		return eq
 	}
 	if v, decided := rt.ktStructEq(a, b); decided {
@@ -7887,9 +7884,10 @@ func ktIsCollection(v interface{}) bool {
 }
 
 // ktSumOf is Kotlin's sumOf/sum, at the WIDTH of what it is summing: a Long
-// selector sums to a Long and a Double selector to a Double.
+// selector sums to a Long and a Double selector to a Double; an unsigned one to a
+// UInt (UByte, UShort and UInt) or a ULong.
 func ktSumOf(rt *jsrt, o *jsArray, f interface{}, ck *ktIterChk) interface{} {
-	isFlo, isLong, allF32 := false, false, len(o.elems) > 0
+	isFlo, isLong, isU, allF32 := false, false, false, len(o.elems) > 0
 	vals := make([]interface{}, 0, len(o.elems))
 	for i := 0; rt.ktIterMore(ck, o, i); i++ {
 		v := o.elems[i]
@@ -7904,8 +7902,9 @@ func ktSumOf(rt *jsrt, o *jsArray, f interface{}, ck *ktIterChk) interface{} {
 		if !ok || !jvmIs32(fv.sty) {
 			allF32 = false
 		}
-		if b, ok := v.(jsGInt); ok && b.w == 64 {
-			isLong = true
+		if b, ok := v.(jsGInt); ok {
+			isLong = isLong || b.w == 64
+			isU = isU || b.u
 		}
 	}
 	// Iterable<Float>.sum() is a Float, accumulated in float: each step rounds.
@@ -7928,9 +7927,9 @@ func ktSumOf(rt *jsrt, o *jsArray, f interface{}, ck *ktIterChk) interface{} {
 		acc += giVal(rt, v)
 	}
 	if isLong {
-		return ktNorm(acc, 64, false)
+		return ktNorm(acc, 64, isU)
 	}
-	return ktNorm(acc, 32, false)
+	return ktNorm(acc, 32, isU)
 }
 
 // ktElems reads the element list out of a list, a string (its Chars) or a map
@@ -10727,6 +10726,29 @@ func ktJvmTagged(o *jsObject, builder string, n int) *jsObject {
 	return o
 }
 
+// ktEmptyOnes holds kotlin-stdlib's singleton EmptyList, EmptySet and EmptyMap,
+// which emptyList() / emptySet() / emptyMap() and the element-less listOf() /
+// setOf() / mapOf() return, so two of them are one object (===). Twin of kEmptyOne
+// in kotlin-interpreter.abnf and ktEmptyOne in languages/lib/kotlin-rt.metajs.
+var ktEmptyOnes map[string]interface{}
+
+func ktEmptyOne(kind string) interface{} {
+	if o, has := ktEmptyOnes[kind]; has {
+		return o
+	}
+	var o interface{}
+	switch kind {
+	case "List":
+		o = &jsArray{elems: []interface{}{}, kind: ktArrFixed}
+	case "Set":
+		o = ktJvmTagged(ktMakeSet(), "emptySet", 0)
+	default:
+		o = ktJvmTagged(ktMakeMap(), "emptyMap", 0)
+	}
+	ktEmptyOnes[kind] = o
+	return o
+}
+
 // The JVM class of buildMap's map.
 const ktMapBuilderClass = "kotlin.collections.builders.MapBuilder"
 
@@ -10761,6 +10783,9 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		return d
 	case "mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "emptyMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if name == "emptyMap" || (name == "mapOf" && len(args) == 0) {
+				return ktEmptyOne("Map")
+			}
 			return ktJvmTagged(rt.ktMapOf(args), name, len(args))
 		})
 	case "sortedMapOf":
@@ -11057,6 +11082,9 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		})
 	case "listOf", "emptyList":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if len(args) == 0 {
+				return ktEmptyOne("List")
+			}
 			return &jsArray{elems: append([]interface{}{}, args...), kind: ktArrFixed}
 		})
 	// The Array and Sequence builders are the same list, carrying its kind number.
@@ -11084,6 +11112,9 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		})
 	case "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if name == "setOf" && len(args) == 0 {
+				return ktEmptyOne("Set")
+			}
 			return ktJvmTagged(rt.ktSetFrom(args), name, len(args))
 		})
 	case "PriorityQueue":
@@ -11110,7 +11141,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		})
 	case "emptySet":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return ktJvmTagged(ktMakeSet(), name, 0)
+			return ktEmptyOne("Set")
 		})
 	case "setOfNotNull":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -13312,10 +13343,33 @@ func ktIsClassLit(v interface{}) (*jsObject, bool) {
 	return o, isB && b
 }
 
-// ktRefEq is Kotlin's equality on the two reflection shapes: two BOUND references
-// are equal when they name the same member of the same receiver (`b::v == b::v` is
-// true), and two class literals when they name the same class. Answers handled=false
-// for anything that is not one of the two.
+// ktFnRefOf answers `::name` of the function v: a new KFunction object each time
+// the reference is evaluated, so two are never ===, with v's arity and the name
+// in its meta (which ktRefEq compares) and in ktFuncNames (which KFunction.name
+// and toString read). Any other value is answered as it is. Twin of kFnRefOf in
+// kotlin-interpreter.abnf and js_ktnameval in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktFnRefOf(v interface{}, name string) interface{} {
+	if !isCallable(v) {
+		return v
+	}
+	var cp interface{}
+	if c, ok := v.(*jsClosure); ok {
+		cp = &jsClosure{fn: c.fn, env: c.env, ma: c.ma}
+	} else {
+		cp = jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.call(v, jsUndef, args)
+		})
+	}
+	jsvFnMetaSet(cp, name, jsvFnMeta(v).length)
+	ktFuncNames[cp] = name
+	return cp
+}
+
+// ktRefEq is Kotlin's equality on the reflection shapes: two BOUND references are
+// equal when they name the same member of the same receiver (`b::v == b::v` is
+// true), two class literals when they name the same class, and two function
+// references (ktFnRefOf) when they name the same function. Answers handled=false
+// for anything that is not one of these.
 func ktRefEq(l, r interface{}) (bool, bool) {
 	li, lIsRef := ktRefOf(l)
 	ri, rIsRef := ktRefOf(r)
@@ -13334,6 +13388,12 @@ func ktRefEq(l, r interface{}) (bool, bool) {
 		}
 		// A javaClass also compares its JVM name (Arrays$ArrayList is no ArrayList).
 		return lc.props["kname"] == rc.props["kname"] && lc.props["jname"] == rc.props["jname"], true
+	}
+	// Two references to one function (ktFnRefOf) are equal; a lambda has no name
+	// and equals only itself.
+	if lm := jsvFnMeta(l); lm.name != "" && isCallable(l) && isCallable(r) {
+		rm := jsvFnMeta(r)
+		return lm.name == rm.name && lm.length == rm.length, true
 	}
 	return false, false
 }

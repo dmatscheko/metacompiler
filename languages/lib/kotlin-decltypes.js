@@ -46,13 +46,13 @@ function ktSplitTArgs(s) {
 var ktPrimArrElem = {"$IntArray": "Int", "$LongArray": "Long", "$ShortArray": "Short",
                      "$ByteArray": "Byte", "$FloatArray": "Float", "$DoubleArray": "Double",
                      "$UIntArray": "UInt", "$ULongArray": "ULong", "$UShortArray": "UShort",
-                     "$UByteArray": "UByte"}
+                     "$UByteArray": "UByte", "$CharArray": "Char", "$BooleanArray": "Boolean"}
 // A parameter's static type: a vararg parameter of element type T is an IntArray
 // for Int (each primitive and unsigned type has its own array) and an Array<T>
 // otherwise.
 function ktParamTy(ty, vararg) {
     if (!vararg || ty == "") { return ty }
-    if (ktPrimArrElem["$" + ty + "Array"] == ty || ty == "Char" || ty == "Boolean") { return ty + "Array" }
+    if (ktPrimArrElem["$" + ty + "Array"] == ty) { return ty + "Array" }
     return "Array<" + ty + ">"
 }
 var ktOneArgColl = {"$List": 1, "$MutableList": 1, "$ArrayList": 1, "$Set": 1, "$MutableSet": 1,
@@ -219,7 +219,9 @@ var ktBuilderKind = {"$listOf": "List", "$listOfNotNull": "List", "$emptyList": 
                      "$floatArrayOf": "FloatArray", "$doubleArrayOf": "DoubleArray",
                      "$IntArray": "IntArray", "$LongArray": "LongArray", "$ShortArray": "ShortArray",
                      "$ByteArray": "ByteArray", "$FloatArray": "FloatArray",
-                     "$DoubleArray": "DoubleArray"}
+                     "$DoubleArray": "DoubleArray", "$charArrayOf": "CharArray",
+                     "$booleanArrayOf": "BooleanArray", "$CharArray": "CharArray",
+                     "$BooleanArray": "BooleanArray"}
 function ktBuilderType(name, targs) {
     var kind = ktBuilderKind["$" + name]
     if (kind == undefined) { return "" }
@@ -1144,13 +1146,15 @@ function ktCallEnd(s) {
         i++
     }
     var groups = 0
+    var end = i
     while (i < s.length && (s.charAt(i) == "(" || s.charAt(i) == "{")) {
         var e = (s.charAt(i) == "(") ? ktMatchClose(s, i, "(", ")") : ktMatchClose(s, i, "{", "}")
         if (e < 0) { return -1 }
-        i = e + 1
+        end = e + 1
+        i = ktSkipWs(s, end)
         groups++
     }
-    return groups == 0 ? -1 : i
+    return groups == 0 ? -1 : end
 }
 // The builder type of a call's text.
 function ktCallType(s) {
@@ -1307,16 +1311,21 @@ function ktJvmPrimSfxs(sfx) {
 // The type of the value an expression's text leaves on the JVM stack, where it
 // differs from the static type (ktStaticTy): a cast (`as Int`), a `!!`, an
 // element read off a list or an Array and a generic element result
-// (`xs.first()`, ktElemFns) leave a BOXED value, while an arithmetic
-// result, a local, a property or a function result of a primitive type is
-// unboxed.
+// (`xs.first()`, ktElemFns, unless a String, a primitive array or a range
+// declares its own) leave a BOXED value, while an arithmetic result, a local, a
+// property or a function result of a primitive type is unboxed.
 function ktJvmTy(t) {
     var s = ktTrimWs(t)
     while (s.charAt(0) == "(" && ktMatchClose(s, 0, "(", ")") == s.length - 1) { s = ktTrimWs(s.substring(1, s.length - 1)) }
     var ops = ktTopOps(s)
     if (ops.length == 1 && ops[0].op == "as") { return "" }
     if (ops.length == 0 && s.substring(s.length - 2) == "!!") { return "" }
-    if (ops.length == 0 && ktElemFns["$" + ktLastMethod(s)] == true) { return "" }
+    var lc = ops.length == 0 ? ktLastCall(s) : null
+    if (lc !== null && ktElemFns["$" + lc[0]] == true) {
+        var rb = lc[1].charAt(lc[1].length - 1) == "?" ? "" : ktBaseName(ktStaticTy(lc[1]))
+        if (rb != "String" && ktPrimArrElem["$" + rb] == undefined && rb.indexOf("Range") <= 0 &&
+            rb.indexOf("Progression") <= 0) { return "" }
+    }
     if (ops.length == 0 && s.charAt(s.length - 1) == "]") {
         var lb = ktMatchOpen(s, s.length - 1, "[", "]")
         var cb = ktBaseName(ktStaticTy(s.substring(0, lb)))
@@ -1784,6 +1793,11 @@ var ktSameElemFns = {"$filter": true, "$filterNot": true, "$sorted": true, "$sor
 var ktElemFns = {"$first": true, "$last": true, "$single": true}
 var ktNumConvFns = {"$toInt": "Int", "$toLong": "Long", "$toShort": "Short", "$toByte": "Byte",
                     "$toDouble": "Double", "$toFloat": "Float"}
+// The primitive array a conversion (`"ab".toCharArray()`, `xs.toIntArray()`) makes.
+var ktToPrimArr = {"$toIntArray": "IntArray", "$toLongArray": "LongArray", "$toShortArray": "ShortArray",
+                   "$toByteArray": "ByteArray", "$toFloatArray": "FloatArray",
+                   "$toDoubleArray": "DoubleArray", "$toCharArray": "CharArray",
+                   "$toBooleanArray": "BooleanArray"}
 var ktStrStrFns = {"$uppercase": true, "$lowercase": true, "$trim": true, "$substring": true,
                    "$replace": true, "$repeat": true, "$padStart": true, "$padEnd": true}
 function ktMethodTy(ty, name, call) {
@@ -1798,6 +1812,7 @@ function ktMethodTy(ty, name, call) {
     }
     var args = ktTrimWs(call)
     if (name == "toString" && args == "()") { return "String" }
+    if (ktToPrimArr["$" + name] != undefined && args == "()") { return ktToPrimArr["$" + name] }
     if (ktNumConvFns["$" + name] != undefined && args == "()" && (base == "String" || ktNumTy(base) != "")) { return ktNumConvFns["$" + name] }
     if (base == "String" && ktStrStrFns["$" + name] == true && args.charAt(0) == "(") { return "String" }
     var el = ktElemOfTy(ty)
@@ -1807,23 +1822,24 @@ function ktMethodTy(ty, name, call) {
         return rt == "" ? "" : "List<" + rt + ">"
     }
     if (ktElemFns["$" + name] == true) { return (args == "()" || args.charAt(0) == "{") ? el : "" }
+    if (name == "sum" && args == "()") { return ktSumTy(el) }
     return (ktSameElemFns["$" + name] == true && base != "String" && base.indexOf("Range") < 0 && base.indexOf("Progression") < 0) ? "List<" + el + ">" : ""
 }
-// The name of the method a postfix chain's text ends by calling (`xs.first { p }`
-// is first), "" when it ends otherwise.
-function ktLastMethod(s) {
+// The method a postfix chain's text ends by calling (`xs.first { p }` is first),
+// as its name and its receiver's text, null when it ends otherwise.
+function ktLastCall(s) {
     var k = s.length
     while (k > 0 && (s.charAt(k - 1) == ")" || s.charAt(k - 1) == "}")) {
         var cl = s.charAt(k - 1)
         k = ktMatchOpen(s, k - 1, cl == ")" ? "(" : "{", cl)
         while (k > 0 && ktIsWs(s.charAt(k - 1))) { k-- }
     }
-    if (k <= 0 || k == s.length) { return "" }
+    if (k <= 0 || k == s.length) { return null }
     var e = k
     while (k > 0 && ktIdChar(s.charAt(k - 1))) { k-- }
     var d = k
     while (d > 0 && ktIsWs(s.charAt(d - 1))) { d-- }
-    return (k < e && d > 0 && s.charAt(d - 1) == ".") ? s.substring(k, e) : ""
+    return (k < e && d > 0 && s.charAt(d - 1) == ".") ? [s.substring(k, e), s.substring(0, d - 1)] : null
 }
 // The type of `this` at ktAt: the receiver of the extension function around it
 // (noted by ktNoteGeneric) unless a class declared inside that function is
@@ -2417,10 +2433,19 @@ function ktPlusTys(items, txt, at) {
     ktAt = saved
     return tys
 }
-// The type a method's RESULT takes: sum() of an empty collection is its element
+// The type a method's RESULT takes: sum() of an empty collection is its result
 // type's zero, not an Int.
 function ktMResType(name, nargs, el) {
-    return (name == "sum" && nargs == 0 && el.v != "Int") ? el.v : ""
+    var t = (name == "sum" && nargs == 0) ? ktSumTy(el.v) : ""
+    return t == "Int" ? "" : t
+}
+// The type sum() of elements of type el yields: a Short or Byte sum widens to Int,
+// a UShort or UByte sum to UInt, the other numeric types keep theirs; "" else.
+function ktSumTy(el) {
+    var n = ktNumTy(el)
+    if (n == "" || n.charAt(n.length - 1) == "?") { return "" }
+    if (n == "Short" || n == "Byte") { return "Int" }
+    return (n == "UShort" || n == "UByte") ? "UInt" : n
 }
 
 // The parameter names of the stdlib members a call may fill by NAME

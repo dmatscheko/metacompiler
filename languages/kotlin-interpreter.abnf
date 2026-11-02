@@ -4367,6 +4367,7 @@ NotMemberKw = :script(~~ "pure";
     // are a shape of their own (see kMakeSet), so setOf(1, 1, 2) deduplicates and
     // setOf(2, 1) == setOf(1, 2).
     hostGlobals["listOf"] = function() {
+        if (arguments.length == 0) { return kEmptyOne("List") }
         var out = []
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
         return arrKindSet(out, 4)
@@ -4411,7 +4412,23 @@ NotMemberKw = :script(~~ "pure";
         if (n == 0) { return "kotlin.collections.Empty" + kind }
         return n == 1 ? "java.util.Collections$Singleton" + kind : ""
     }
+    // emptyList(), emptySet() and emptyMap(), and listOf(), setOf() and mapOf() with
+    // no elements, which return them, are kotlin-stdlib's singleton objects
+    // EmptyList, EmptySet and EmptyMap: two of them are one object (===). Twin of
+    // ktEmptyOne in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    var kEmptyOnes = {}
+    function kEmptyOne(kind) {
+        var o = anytype
+        o = kEmptyOnes["$" + kind]
+        if (o !== undefined) { return o }
+        if (kind == "List") { o = arrKindSet([], 4) }
+        else if (kind == "Set") { o = kJvmTagged(kMakeSet(), "kotlin.collections.EmptySet") }
+        else { o = kJvmTagged(kMakeMap(), "kotlin.collections.EmptyMap") }
+        kEmptyOnes["$" + kind] = o
+        return o
+    }
     hostGlobals["setOf"] = function() {
+        if (arguments.length == 0) { return kEmptyOne("Set") }
         return kJvmTagged(hostGlobals["mutableSetOf"].apply(undefined, arguments), kJvmSmall(arguments.length, "Set"))
     }
     hostGlobals["hashSetOf"] = function() {
@@ -4446,7 +4463,7 @@ NotMemberKw = :script(~~ "pure";
     hostGlobals["ulongArrayOf"] = hostGlobals["arrayOf"]
     hostGlobals["emptyArray"] = hostGlobals["arrayOf"]
     hostGlobals["emptyList"] = hostGlobals["listOf"]
-    hostGlobals["emptySet"] = function() { return kJvmTagged(kMakeSet(), "kotlin.collections.EmptySet") }
+    hostGlobals["emptySet"] = function() { return kEmptyOne("Set") }
     // The java.util collection constructors - ArrayList, HashSet / LinkedHashSet,
     // HashMap / LinkedHashMap, TreeSet / TreeMap: empty, with an Int capacity, or a
     // copy of a collection (of a map). A HashSet / HashMap iterates in insertion
@@ -4516,6 +4533,7 @@ NotMemberKw = :script(~~ "pure";
     }
     hostGlobals["linkedMapOf"] = hostGlobals["mutableMapOf"]
     hostGlobals["mapOf"] = function() {
+        if (arguments.length == 0) { return kEmptyOne("Map") }
         return kJvmTagged(hostGlobals["mutableMapOf"].apply(undefined, arguments), kJvmSmall(arguments.length, "Map"))
     }
     hostGlobals["hashMapOf"] = function() {
@@ -4529,7 +4547,7 @@ NotMemberKw = :script(~~ "pure";
         for (var i = 0; i < ks.length; i++) { kMapPut(out, ks[i], m.vals[kMapFind(m, ks[i])]) }
         return kJvmTagged(out, "java.util.TreeMap")
     }
-    hostGlobals["emptyMap"] = function() { return kJvmTagged(kMakeMap(), "kotlin.collections.EmptyMap") }
+    hostGlobals["emptyMap"] = function() { return kEmptyOne("Map") }
     // buildMap { put(k, v) } - the builder lambda takes the fresh map as `this`. The
     // builders also take an optional capacity first, so the lambda is the LAST
     // argument. The result is the receiver itself, sealed read-only (__ro, kind -5
@@ -7230,6 +7248,7 @@ NotMemberKw = :script(~~ "pure";
     function kSumOf(es, f, n0) {
         var isFlo = false
         var isLong = false
+        var isU = false
         var allF32 = es.length > 0
         var vals = []
         for (var i = 0; kForNext(es, i, n0); i++) {
@@ -7239,9 +7258,10 @@ NotMemberKw = :script(~~ "pure";
             if (kIsFlo(v)) { isFlo = true }
             if (!kIsFlo(v) || !kIsF32(v)) { allF32 = false }
             if (szIs(v) && v.w == 64) { isLong = true }
+            if (szIs(v) && v.u) { isU = true }
         }
-        // Iterable<Float>.sum() is a Float, accumulated in float: each step rounds.
-        // Twin of ktSumOf in abnf/jsrtkotlin.go.
+        // Iterable<Float>.sum() is a Float, accumulated in float: each step rounds;
+        // an unsigned sum is a UInt or a ULong. Twin of ktSumOf in abnf/jsrtkotlin.go.
         if (allF32) {
             var ft = 0
             for (var fj = 0; fj < vals.length; fj++) { ft = coreF32Round(ft + vals[fj].__flo) }
@@ -7258,7 +7278,7 @@ NotMemberKw = :script(~~ "pure";
         var acc = anytype
         acc = szMake(i64Make(0, 0), 64, false)
         for (var k = 0; k < vals.length; k++) { acc = szArith("+", acc, kSz(kNum2(vals[k]), 64, kNoU)) }
-        return kConv(acc, isLong ? 64 : 32, false)
+        return kConv(acc, isLong ? 64 : 32, isU)
     }
     function kNum2(v) { return szIs(v) ? v : kNum(v) }
     // Two Strings order by UTF-16 unit, as java.lang.String.compareTo does; a host
@@ -9575,6 +9595,12 @@ NotMemberKw = :script(~~ "pure";
         }
         if (a === b) { return true }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
+        // Two references to one function (kFnRefOf) are equal; a lambda has no name
+        // and equals only itself.
+        if (typeof a == "function" && typeof b == "function") {
+            var an = fnRefName(a)
+            return an !== undefined && an === fnRefName(b) && fnMeta(a, "length") === fnMeta(b, "length")
+        }
         if (typeof a == "object" && typeof b == "object") {
             // The COLLECTION shapes have structural equality in Kotlin (they are
             // java.util.List / Map / AbstractSet on the JVM, whose equals is
@@ -9649,7 +9675,9 @@ NotMemberKw = :script(~~ "pure";
     }
     // contentHashCode: java.util.Arrays.hashCode, the List fold 31 * h + element hash
     // from 1 (intArrayOf(1, 2) is 994); deep (contentDeepHashCode) hashes a nested
-    // array by its contents in turn. Twin of ktArrContentHash in abnf/jsrtkotlin.go and
+    // array by its contents in turn. The shallow form hashes a nested array by its
+    // identity hash, whose stand-in here is 1 (kHash), so distinct nested arrays
+    // hash alike. Twin of ktArrContentHash in abnf/jsrtkotlin.go and
     // languages/lib/kotlin-rt.metajs.
     function kArrContentHash(es, deep) {
         var h = 1
@@ -12632,24 +12660,34 @@ NotMemberKw = :script(~~ "pure";
                         return propRefOf(kVarHolder(sc[i], name), name)
                     }
                     // A function with a vararg parameter (kVarargRefParams).
-                    if (ho.call(sc[i], name + "$vref")) { return sc[i][name + "$vref"] }
-                    return kCtorRefOf(vr())
+                    if (ho.call(sc[i], name + "$vref")) { return kFnRefOf(sc[i][name + "$vref"], name) }
+                    return kFnRefOf(kCtorRefOf(vr()), name)
                 }
             }
             var chain = findThisChain()
             for (var ci = 0; ci < chain.length; ci++) {
                 var r = chain[ci]
-                // A property of the implicit receiver, or a method with a vararg, which
-                // the reference calls through its name$vref (kRefApply).
+                // A property or a method of the implicit receiver; a method with a
+                // vararg is called through its name$vref (kRefApply).
                 if (r !== null && r !== undefined && typeof r == "object" &&
-                    (hasOwn(r, name) || lookupMethod(r, name + "$vref") != null)) {
+                    (hasOwn(r, name) || lookupMethod(r, name + "$vref") != null ||
+                     (r.__class != undefined && typeof clsFind(r.__class, name) == "function"))) {
                     var br = propRefOf(r, name)
                     br.kthis = true
                     return br
                 }
             }
-            return kCtorRefOf(vr())
+            return kFnRefOf(kCtorRefOf(vr()), name)
         }
+    }
+    // `::f` of a function is a new KFunction object each time it is evaluated, so
+    // two are never ===; they are == (kEq: the same name and arity). Any other value
+    // is answered as it is. Twin of ktFnRefOf in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kFnRefOf(f, name) {
+        if (typeof f != "function") { return f }
+        var w = function() { return f.apply(undefined, arguments) }
+        return fnMetaSet(w, name, fnMeta(f, "length"))
     }
     // The receiver of `::top` for a top-level property: a record naming the scope that
     // binds it, read and written through by kRefRead / kRefSet, so the reference sees

@@ -1486,8 +1486,11 @@ function ktEqVals(a, b) {
             }
         }
     }
-    // A class literal is equal to one naming the same class (k4RefEq).
-    if (ktIsClassLit(a)) { return k4RefEq(a, b) }
+    // A class literal is equal to one naming the same class, and a callable
+    // reference to one naming the same member or function (ktRefEq).
+    var re = anytype
+    re = ktRefEq(a, b)
+    if (!ktMiss(re)) { return re }
     var s = anytype
     s = ktStructEq(a, b)
     if (!ktMiss(s)) { return s }
@@ -4997,10 +5000,12 @@ function ktTimSort(es, cmp) {
 }
 
 // ktSumOf is jsrtkotlin.go:4448 -- Kotlin's sumOf/sum at the WIDTH of what it is
-// summing: a Long selector sums to a Long and a Double selector to a Double.
+// summing: a Long selector sums to a Long and a Double selector to a Double; an
+// unsigned one to a UInt or a ULong.
 function ktSumOf(es, f, ck) {
     var isFlo = false
     var isLong = false
+    var isU = 0
     var vals = []
     var i = 0
     var v = anytype
@@ -5018,6 +5023,7 @@ function ktSumOf(es, f, ck) {
         if (!floIs(v) || !ktIsF32(v)) { allF32 = false }
         if (sintIs(v)) {
             if (sintWidth(v) == 64) { isLong = true }
+            if (sintUns(v)) { isU = 1 }
         }
     }
     // Iterable<Float>.sum() is a Float, accumulated in float: each step rounds.
@@ -5031,8 +5037,8 @@ function ktSumOf(es, f, ck) {
     }
     acc = sintConv(0, 64, 0)
     for (i = 0; i < vals.length; i = i + 1) { acc = sintOp(0, acc, k3IVal(vals[i])) }
-    if (isLong) { return ktNorm(acc, 64, 0) }
-    return ktNorm(acc, 32, 0)
+    if (isLong) { return ktNorm(acc, 64, isU) }
+    return ktNorm(acc, 32, isU)
 }
 
 // ============================================================================
@@ -7786,12 +7792,6 @@ function k4bRefInfo(recv, name, bound, ctor, tname, ext) {
 var k4bRefFns = []
 var k4bRefInfos = []
 
-// ktFuncNames (jsrtkotlin.go:5764): the name a `::` spelled, against the closure
-// it resolved to, so KFunction.name can answer it. SECTION 4a's js_ktfget reads
-// it through k4bFuncName.
-var k4bNamedFns = []
-var k4bNamedNames = []
-
 // ktRefOf (jsrtkotlin.go:5766). undefined means "not a callable reference".
 function ktRefOf(v) {
     if (!ktIsFn(v)) { return undefined }
@@ -8232,6 +8232,12 @@ function ktRefEq(l, r) {
         if (!lc || !rc) { return false }
         return l["kname"] === r["kname"] && l["jname"] === r["jname"]
     }
+    // Two references to one function (js_ktnameval) are equal; a lambda has no
+    // name and equals only itself.
+    if (ktIsFn(l) && ktIsFn(r)) {
+        var ln = fnMeta(l, "name")
+        if (ln != "") { return ln == fnMeta(r, "name") && fnMeta(l, "length") == fnMeta(r, "length") }
+    }
     return KT_MISS
 }
 
@@ -8426,24 +8432,17 @@ function k4bClassOfDescName(d) {
     return ktClassLit(n)
 }
 
-// js_ktnameval(v, "topFun") remembers the name a `::` spelled against the
-// closure it resolved to, so KFunction.name can answer it, and hands the value
-// straight back.
+// jsrtkotlin.go ktFnRefOf: `::topFun` of the function v is a new KFunction object
+// each time it is evaluated, so two are never ===, with v's arity and the name in
+// its meta (which ktRefEq compares) and in k4NameFns (which KFunction.name and
+// toString read). Any other value is handed straight back.
 function js_ktnameval(v, name) {
-    k4NameVal(v, name)
-    if (ktIsFn(v)) {
-        var i = 0
-        while (i < k4bNamedFns.length) {
-            if (k4bNamedFns[i] === v) {
-                k4bNamedNames[i] = name
-                return v
-            }
-            i = i + 1
-        }
-        k4bNamedFns.push(v)
-        k4bNamedNames.push(name)
-    }
-    return v
+    if (!ktIsFn(v)) { return v }
+    var f = anytype
+    f = v
+    var w = function () { return f.apply(undefined, arguments) }
+    fnMetaSet(w, name, fnMeta(f, "length"))
+    return k4NameVal(w, name)
 }
 
 // ========================================= property writes and super access ==
@@ -10282,6 +10281,27 @@ function k4Contract(name, args) {
     return undefined
 }
 
+// jsrtkotlin.go ktEmptyOne: kotlin-stdlib's singleton EmptyList, EmptySet and
+// EmptyMap, which emptyList() / emptySet() / emptyMap() and the element-less
+// listOf() / setOf() / mapOf() return.
+var ktEmptyOnes = {}
+
+function ktEmptyOne(kind) {
+    var o = anytype
+    o = ktEmptyOnes["$" + kind]
+    if (o !== undefined) { return o }
+    if (kind == "List") {
+        o = []
+        arrKindSet(o, 4)
+    } else if (kind == "Set") {
+        o = ktJvmTagged(ktMakeSet(), "emptySet", 0)
+    } else {
+        o = ktJvmTagged(ktMakeMap(), "emptyMap", 0)
+    }
+    ktEmptyOnes["$" + kind] = o
+    return o
+}
+
 // ktJvmTagged records on a set or map the JVM class its builder answers, when that
 // is not a LinkedHashSet / LinkedHashMap; n is setOf / mapOf's argument count. Twin
 // of ktJvmTagged in abnf/jsrtkotlin.go.
@@ -10331,7 +10351,9 @@ function ktGlobalFn(name) {
         return d
     }
     if (k4IsMapName(name)) {
+        var mname = name
         return function () {
+            if (mname == "emptyMap" || (mname == "mapOf" && arguments.length == 0)) { return ktEmptyOne("Map") }
             var as = []
             var i = 0
             while (i < arguments.length) {
@@ -10535,6 +10557,7 @@ function ktGlobalFn(name) {
         var lk = k4ListKind(name)
         var lname = name
         return function () {
+            if (lk == 4 && arguments.length == 0) { return ktEmptyOne("List") }
             var out = []
             var i = 0
             while (i < arguments.length) {
@@ -10553,7 +10576,9 @@ function ktGlobalFn(name) {
         }
     }
     if (k4IsSetName(name)) {
+        var sname = name
         return function () {
+            if (sname == "setOf" && arguments.length == 0) { return ktEmptyOne("Set") }
             var as = []
             var i = 0
             while (i < arguments.length) {
@@ -10597,7 +10622,7 @@ function ktGlobalFn(name) {
         }
     }
     if (name == "emptySet") {
-        return function () { return ktJvmTagged(ktMakeSet(), "emptySet", 0) }
+        return function () { return ktEmptyOne("Set") }
     }
     if (name == "setOfNotNull") {
         return function () {

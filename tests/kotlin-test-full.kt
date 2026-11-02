@@ -8355,6 +8355,56 @@ fun s187() {
         a is Short)
 }
 
+// ===== SECTION 188: primitive element and sum types, empty-collection singletons, function reference identity =====
+// A CharArray's and a BooleanArray's elements are the primitives char and
+// boolean, and so is first()/last() of a primitive array, a String or a range
+// (only a generic collection's is boxed). sum() of Shorts or Bytes is an Int, of
+// unsigned values a UInt. emptyList() / emptySet() / emptyMap() - and listOf(),
+// setOf() and mapOf() with no elements - are one singleton object each, while
+// every evaluation of `::f` is a new KFunction object, == to the others but never
+// === (kotlinc 2.2.21).
+fun fs188(vararg xs: Short) = xs
+fun fc188(vararg cs: Char) = cs
+fun f188() = 1
+fun g188(x: Int) = x + 1
+fun v188(vararg xs: Int) = xs.size
+class K188 {
+    fun m() = 2
+    fun self() = ::m
+    fun same() = ::m === ::m
+    fun eq() = ::m == ::m
+}
+
+@OptIn(ExperimentalUnsignedTypes::class)
+fun s188() {
+    val ca = charArrayOf('a', 'b')
+    check("jprim188a", charArrayOf('x')[0].javaClass.name == "char" && booleanArrayOf(true)[0].javaClass.name == "boolean" &&
+        ca[1].javaClass.name == "char" && fc188('x')[0].javaClass.name == "char" && BooleanArray(1)[0].javaClass.name == "boolean" &&
+        "hey".toCharArray()[0].javaClass.name == "char" && CharArray(1) { 'q' }[0].javaClass.name == "char")
+    val bs: List<Byte> = listOf(100, 100)
+    val ss = listOf<Short>()
+    check("sumty188b", fs188(1, 2).sum().javaClass.name == "int" && bs.sum().javaClass.name == "int" && bs.sum() == 200 &&
+        ss.sum().javaClass.name == "int" && shortArrayOf(30000, 30000).sum() == 60000 &&
+        ubyteArrayOf(1u, 2u).sum().javaClass.name == "kotlin.UInt" && listOf(1u, 2u).sum().javaClass.name == "kotlin.UInt" &&
+        listOf(1L).sum().javaClass.name == "long")
+    check("first188c", intArrayOf(1).first().javaClass.name == "int" && "ab".last().javaClass.name == "char" &&
+        (1..3).first().javaClass.name == "int" && ca.single { it == 'a' }.javaClass.name == "char" &&
+        listOf(1).first().javaClass.name == "java.lang.Integer" && arrayOf(1).first().javaClass.name == "java.lang.Integer")
+    var xs = emptyList<Int>()
+    xs += 1
+    check("empty188d", emptyList<Int>() === emptyList<String>() && listOf<Int>() === emptyList<Int>() &&
+        setOf<Int>() === emptySet<Int>() && mapOf<Int, Int>() === emptyMap<Int, Int>() && listOf(1) !== listOf(1) &&
+        mutableListOf<Int>() !== mutableListOf<Int>() && emptyArray<Int>() !== emptyArray<Int>() && xs == listOf(1) &&
+        emptyList<Int>().isEmpty())
+    val r = ::f188
+    fun loc188(a: Int) = a * 2
+    check("fref188e", ::f188 !== ::f188 && ::f188 == ::f188 && r === r && r == ::f188 && ::g188 !== ::g188 &&
+        (::f188 as Any) != (::g188 as Any) && setOf(::f188, ::f188).size == 1 && ::v188 !== ::v188 && ::v188 == ::v188 &&
+        ::loc188 !== ::loc188 && ::loc188 == ::loc188 && listOf(2).map(::g188) == listOf(3) && ::f188.name == "f188")
+    val k = K188()
+    check("mref188f", !k.same() && k.eq() && k.self() == k.self() && k.self() != K188().self() && k.self() == k::m)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8540,6 +8590,7 @@ fun main() {
     s185() // SECTION-CALL 185
     s186() // SECTION-CALL 186
     s187() // SECTION-CALL 187
+    s188() // SECTION-CALL 188
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
