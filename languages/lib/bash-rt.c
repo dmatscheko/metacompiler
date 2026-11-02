@@ -312,6 +312,8 @@ int rt_ro_bind(int id);
 int rt_ro_now(int id, int g);
 int rt_atmark(char *nm, int at);
 int rt_nref_atmark(char *n, int at, int d);
+int rt_nref_roex(char *n, int x);
+int rt_nref_elemend(char *n);
 int rt_dyn_at(char *nm);
 int rt_dyn_atn(char *n);
 int rt_glob_swap(int id);
@@ -329,7 +331,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at);
 char *rt_nref_base(char *n);
 char *rt_nref_arname(char *n);
 char *rt_ar_nget(char *nm, char *k);
-int rt_ar_nset(char *nm, char *k, char *v, int at);
+int rt_ar_nset(char *nm, char *k, char *v, int at, char *as);
 int ar_rmw(char *nm, char *key);
 int rt_arr_marks(char *nm);
 int rt_indbr(char *v);
@@ -339,7 +341,7 @@ int rt_nref_glob(char *n);
 int rt_nref_close(char *n);
 int rt_nref_gstore(char *n);
 int rt_nref_gset(char *n, char *v, int app, int at);
-int rt_nref_fstore(char *n, char *v);
+int rt_nref_fstore(char *n, char *v, int at);
 int rt_nref_isarr(char *n, int sub);
 int rt_nref_subdrop(char *nm, int v);
 char *rt_nref_arrstore(char *nm);
@@ -353,6 +355,8 @@ char *rt_subx(char *s);
 char *rt_subxa(char *nm, char *s);
 int rt_vset(char *s, int cond);
 int rt_sub_empty(char *nm, char *k, char *lbl);
+int rt_sub_dflt(char *nm, char *k, char *v, int whole, char *as, int at);
+int rt_prefix_ref(char *n, char *v, int at);
 int rt_eval_assign(char *s);
 int rt_decl_word(char *w, int d, int x, int at, char *who);
 int rt_decl_qcomp(char *nm, char *sub, char *op, char *v, int d, int x, int at, char *who, int mine);
@@ -1826,7 +1830,7 @@ long ar_store(char *nm, char *key, long v)
         rt_berr("", rt_strcat(rt_strcat(rt_strcat(ar_pfx(), "`"), nm), "[]'"), "not a valid identifier");
         return v;
     }
-    rt_ar_nset(nm, key, rt_int2str(v), 0);
+    rt_ar_nset(nm, key, rt_int2str(v), 0, nm);
     return v;
 }
 
@@ -6382,7 +6386,9 @@ int rt_mf_begin(char *who, char *nm, char *dlm, char *cnt, char *org, char *skp,
         rt_berr(who, rt_strcat(rt_strcat("`", nm), "'"), "not a valid identifier");
         return 1;
     }
+    /* Through a circular nameref the lookup warns first (rt_nref_end). */
     if ((at & 8) != 0) {
+        rt_nref_end(nm);
         rt_berr("", nm, "readonly variable");
         return 1;
     }
@@ -6793,10 +6799,16 @@ int rt_nref_gset(char *n, char *v, int app, int at)
 
 /* A for loop's nameref control variable n stores the word v through a chain
  * that closes on a local as any scalar store does (rt_nref_gstore): 1 when it
- * did, 0 when the store is n's own. */
-int rt_nref_fstore(char *n, char *v)
+ * did, 0 when the store is n's own, 2 when the variable it lands on is readonly
+ * (at & 8), which names n after the chain's warning and ends the loop. */
+int rt_nref_fstore(char *n, char *v, int at)
 {
     if (rt_nref_close(n) < 0) return 0;
+    if ((at & 8) != 0) {
+        if (nref_quiet == 0) rt_berr("warning", n, "maximum nameref depth (8) exceeded");
+        rt_berr("", n, "readonly variable");
+        return 2;
+    }
     rt_setvar_byname(n, v, 0, 0);
     return 1;
 }
@@ -6996,27 +7008,30 @@ int rt_nref_loops(char *n)
  * itself when its chain is circular. rt_setvar_byname applies them to a store
  * through a nameref and rt_xletters shows them; the local save stack and the
  * subshell snapshot carry them with the other marks, and a fresh local or
- * `unset` drops them. at_any stays 0 until one is set. */
+ * `unset` drops them. at_any stays 0 until one is set. Readonly (at & 8,
+ * mark 32768) is one too, given by `readonly` through such a nameref
+ * (rt_nref_roex), which a store through a nameref reads (rt_dyn_atn). */
 int at_any;
 int rt_atmark(char *nm, int at)
 {
     int r;
-    if ((at & 7) == 0) return 0;
+    if ((at & 15) == 0) return 0;
     at_any = 1;
     r = rt_ar_rec(nm);
     if ((at & 1) != 0) ar_mk[r] = ar_mk[r] | 128;
+    if ((at & 8) != 0) ar_mk[r] = ar_mk[r] | 32768;
     /* -u and -l replace each other; both is -c. */
     if ((at & 6) != 0) ar_mk[r] = (ar_mk[r] & ~24576) | ((at & 2) != 0 ? 8192 : 0) | ((at & 4) != 0 ? 16384 : 0);
     return 0;
 }
 
-/* The rt_attrv bits of nm's run-time marks. */
+/* The rt_attrv bits of nm's run-time marks, and 8 for readonly. */
 int rt_dyn_at(char *nm)
 {
     int mk;
     if (at_any == 0) return 0;
     mk = rt_arr_marks(nm);
-    return ((mk & 128) != 0 ? 1 : 0) | ((mk & 8192) != 0 ? 2 : 0) | ((mk & 16384) != 0 ? 4 : 0);
+    return ((mk & 128) != 0 ? 1 : 0) | ((mk & 8192) != 0 ? 2 : 0) | ((mk & 16384) != 0 ? 4 : 0) | ((mk & 32768) != 0 ? 8 : 0);
 }
 
 /* The same of the variable a store through the name n lands on. */
@@ -7045,6 +7060,37 @@ int rt_nref_atmark(char *n, int at, int d)
     if (id >= 0 && rt_local_here(id, d) == 0) rt_local_new(id, d);
     rt_atmark(t, at);
     return 1;
+}
+
+/* Does the nameref n's chain end at NAME[SUB]? A function's localizing
+ * declaration through it does nothing then. Twin of the nameref arm of
+ * declOneN in bash-interpreter.abnf. */
+int rt_nref_elemend(char *n)
+{
+    char *t;
+    if (rt_nref_void(n) != 0) return 0;
+    nref_quiet = nref_quiet + 1;
+    t = rt_nref_end(n);
+    nref_quiet = nref_quiet - 1;
+    return t != 0 && rt_indbr(t) > 0 ? 1 : 0;
+}
+
+/* export (x 1) or readonly of a function's nameref n whose target is known only
+ * when it runs: the variable its chain ends at takes it, or n itself when it
+ * has no value, its chain is circular or ends at NAME[SUB]. Twin of the nameref
+ * arm of declOne in bash-interpreter.abnf. */
+int rt_nref_roex(char *n, int x)
+{
+    char *t = n;
+    if (rt_nref_void(n) == 0) {
+        nref_quiet = nref_quiet + 1;
+        t = rt_nref_end(n);
+        nref_quiet = nref_quiet - 1;
+        if (t == 0 || rt_indbr(t) > 0) t = n;
+    }
+    rt_varslot_new(t);
+    if (x != 0) return rt_xmark(t, 1);
+    return rt_atmark(t, 8);
 }
 
 /* ${!REF} of the nameref n: the name its chain ends at, or n's own value when
@@ -7109,6 +7155,11 @@ char *rt_xletters(char *nm, char *at) {
     if ((d & 1) != 0 && rt_haschar(at, 105) == 0) at = rt_strcat("i", at);
     if ((d & 6) != 0 && rt_haschar(at, 99) == 0 && rt_haschar(at, 108) == 0 && rt_haschar(at, 117) == 0)
         at = rt_strcat(at, (d & 6) == 6 ? "c" : ((d & 4) != 0 ? "l" : "u"));
+    if ((d & 8) != 0 && rt_haschar(at, 114) == 0) {
+        while (at[i] != 0 && at[i] != 116 && at[i] != 99 && at[i] != 108 && at[i] != 117) i = i + 1;
+        at = rt_strcat(rt_strcat(rt_substr(at, 0, i), "r"), rt_substr(at, i, -1));
+        i = 0;
+    }
     if ((mk & 32) != 0) {
         while (at[i] != 0 && at[i] != 114 && at[i] != 116 && at[i] != 99 && at[i] != 108 && at[i] != 117) i = i + 1;
         at = rt_strcat(rt_strcat(rt_substr(at, 0, i), "n"), rt_substr(at, i, -1));
@@ -9200,7 +9251,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
             arith_err = 1;
             return 0;
         }
-        if (at_any != 0) at = at | rt_dyn_at(n);
+        if (at_any != 0) at = at | (rt_dyn_at(n) & 7);
     }
     /* A readonly nameref with no value refuses one that names no variable as
      * any nameref does (rt_nref_self_bad), before it is readonly. */
@@ -9260,12 +9311,18 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
 /* The variable a store through n lands on: the end of its nameref chain, less
  * any [SUB]. A circular chain that closes on a local stores the global variable
  * n (rt_nref_gstore), and nref_gbase says so, since the local has the same name;
- * any other is "", which the store itself reports. */
+ * any other is "", which the store itself reports. While such a global binding
+ * of n is in effect (nref_glob: an expansion's store of ${n[SUB]:=WORD}) it is
+ * that global variable too. */
 char *rt_nref_base(char *n)
 {
     int i;
     char *t;
     nref_gbase = 0;
+    if (nref_glob != 0 && rt_varslot(n) == nref_glob - 1) {
+        nref_gbase = 1;
+        return n;
+    }
     if (nref_any != 0) {
         nref_quiet = nref_quiet + 1;
         t = rt_nref_end(n);
@@ -9368,16 +9425,47 @@ int rt_nref_unref(char *n)
     return rt_nmark(n, 0);
 }
 
+/* A builtin's prefix binding of v to the nameref n, undone with the command's
+ * locals (rt_pop_locals): bash's temporary environment binds the variable n's
+ * chain ends at - n itself for one ending at an element - or, through a
+ * circular chain, after the lookup's warning, a plain n hiding the nameref. A
+ * readonly variable it lands on (at & 8) keeps its value, naming n. Twin of
+ * applyPrefix in bash-interpreter.abnf. */
+int rt_prefix_ref(char *n, char *v, int at)
+{
+    char *t;
+    int i;
+    nref_quiet = nref_quiet + 1;
+    t = rt_nref_end(n);
+    nref_quiet = nref_quiet - 1;
+    if (t == 0 && nref_quiet == 0) rt_berr("warning", n, "circular name reference");
+    if ((at & 8) != 0) {
+        rt_berr("", n, "readonly variable");
+        return 0;
+    }
+    i = rt_varslot_new(t == 0 || rt_indbr(t) > 0 ? n : t);
+    rt_push_local(i);
+    if (t == 0) rt_nmark(n, 0);
+    t = varnames[i];
+    rt_xmark(t, 1);
+    gvars[i] = v;
+    return 0;
+}
+
 /* The element store rt_nref_arr found circular, its subscript now good: bash's
- * second warning, and the nameref goes - unless the store is the global's. */
+ * second warning, and the nameref goes - unless the store is the global's,
+ * whose set scalar becomes its element 0. */
 int rt_nref_circ(void)
 {
     char *n = nref_circ;
+    int i;
     if (n == 0) return 0;
     nref_circ = 0;
     if (nref_quiet == 0) rt_berr("warning", n, "circular name reference");
-    if (nref_ckeep != 0) return 0;
-    return rt_nref_unref(n);
+    if (nref_ckeep == 0) return rt_nref_unref(n);
+    i = rt_varslot(n);
+    if (i >= 0) rt_arr_adopt(n, i);
+    return 0;
 }
 
 /* The array an array store through the nameref n lands on (the end of its
@@ -9475,9 +9563,10 @@ char *rt_ar_nget(char *nm, char *k)
  * and the store lands on the global variable rt_nref_glob finds - element 0
  * of an array, warned as an element store - or, outside a function, nowhere
  * for a scalar and on the nameref itself, which stops being one, for an
- * element. An element store makes a set scalar its element 0. Twin of arSet
- * in bash-interpreter.abnf. */
-int rt_ar_nset(char *nm, char *k, char *v, int at)
+ * element. An element store makes a set scalar its element 0. Refused by the
+ * readonly of the array an element lands on, it names as, the nameref as
+ * written. Twin of arSet in bash-interpreter.abnf. */
+int rt_ar_nset(char *nm, char *k, char *v, int at, char *as)
 {
     int i = -1;
     int r;
@@ -9503,6 +9592,10 @@ int rt_ar_nset(char *nm, char *k, char *v, int at)
             if (k == 0) return 0;
             rt_nref_unref(nm);
         }
+    } else if (k != 0 && (at & 8) != 0) {
+        rt_berr("", as, "readonly variable");
+        arith_err = 1;
+        return 0;
     }
     /* A number names no variable, and nor does an element, so a nameref with no
      * value takes none; reported, the expression goes on. Twin of the same check
@@ -9626,6 +9719,39 @@ int rt_sub_empty(char *nm, char *k, char *lbl)
     rt_berr("", lbl, "bad array subscript");
     arith_err = 1;
     return 0;
+}
+
+/* ${NAME[SUB]=WORD} storing v, its blank element's default, in nm, the array
+ * the expansion read (through a nameref, rt_nref_elems; as is the name as
+ * written). whole is 1 for SUB @, 2 for *: bash stores that key of an
+ * associative array, and of any other the subscript is bad. at & 8: nm is
+ * readonly, which refuses the store naming the nameref - through a circular
+ * one (nref_glob), the global it lands on. An element store looks a circular
+ * chain up twice more, a whole one once, and makes a set scalar element 0. A
+ * refusal abandons the line, status 2 (arith_err 3). Twin of elemOpValue and
+ * listDefault in bash-interpreter.abnf. */
+int rt_sub_dflt(char *nm, char *k, char *v, int whole, char *as, int at)
+{
+    int i;
+    if (whole != 0 && rt_isassoc(nm) == 0) {
+        if (nref_glob != 0 && nref_quiet == 0) rt_berr("warning", as, "circular name reference");
+        rt_berr("", rt_strcat(as, whole == 2 ? "[*]" : "[@]"), "bad array subscript");
+        arith_err = 3;
+        return 0;
+    }
+    if (whole == 0 && nref_glob != 0 && nref_quiet == 0) {
+        rt_berr("warning", as, "circular name reference");
+        rt_berr("warning", as, "circular name reference");
+    }
+    if ((at & 8) != 0) {
+        rt_berr("", nref_glob != 0 ? nm : as, "readonly variable");
+        arith_err = 3;
+        return 0;
+    }
+    if (whole != 0) return rt_arr_set(nm, whole == 2 ? "*" : "@", v);
+    i = rt_varslot(nm);
+    if (i >= 0) rt_arr_adopt(nm, i);
+    return rt_arr_iset(nm, k, v);
 }
 
 /* test -v: for NAME a set variable, or element 0 of an array (key "0" of an
