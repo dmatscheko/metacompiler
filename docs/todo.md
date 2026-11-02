@@ -146,7 +146,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list assignment parse, quoted compound values, reads through circular array nameref, path-length-dependent frozen step cost · P3 · SH · OPEN [V]
+### T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list assignment parse, quoted compound values, reads through circular array nameref, path-length-dependent frozen step cost · P3 · SH · IN PROGRESS (SH worker, round 44) [V]
 
 Found while working T-1134. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
