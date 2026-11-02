@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for step · P3 · RB · OPEN [V]
+### T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for step · P3 · RB · IN PROGRESS (RB worker, round 53) [V]
 
 Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8. Every engine says "cannot convert an endless range to an array" for these:
 - `(2.5..).each {}` must raise TypeError "can't iterate from Float".
