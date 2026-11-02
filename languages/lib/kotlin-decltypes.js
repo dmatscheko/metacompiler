@@ -121,12 +121,14 @@ function ktRecvFnArity(t) {
 }
 // The parameter count of the member a `::` names, from the shapes of the program's
 // methods of its name (l, [min, max, names, ...] each): theirs when every one
-// agrees, else 0, which is also a property's and an unknown builtin's. A class
-// that declares no `name` method still inherits Any.equals(other).
+// agrees, else -1: the receiver's class decides, from the parameter count its
+// method of the name recorded on its closure. 0 is a property's and an unknown
+// builtin's. A class that declares no `name` method still inherits
+// Any.equals(other).
 function ktRefParams(l, name) {
     if (l == undefined) { return name == "equals" ? 1 : 0 }
     var n = l[0][2].length
-    for (var i = 1; i < l.length; i++) { if (l[i][2].length != n) { return 0 } }
+    for (var i = 1; i < l.length; i++) { if (l[i][2].length != n) { return 0 - 1 } }
     return n
 }
 // The parameter count of a builtin member a `::` names, as an arity spec: "n" on

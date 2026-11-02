@@ -2408,13 +2408,16 @@ func init() {
 		// bound reference whose receiver is no class instance names a builtin member,
 		// whose count the arity spec (ktBuiltinArity in kotlin-decltypes.js) gives
 		// for the receiver's member-table row; spec is undefined where n is final.
-		// Twin of kBoundRef in kotlin-interpreter.abnf and js_ktrefarity in
-		// languages/lib/kotlin-rt.metajs.
+		// n is -1 where the program's methods of the name disagree: the receiver's
+		// class decides (ktRefMethodArity). Twin of kBoundRef in
+		// kotlin-interpreter.abnf and js_ktrefarity in languages/lib/kotlin-rt.metajs.
 		m["js_ktrefarity"] = func(a []uint64) uint64 {
 			if info, isRef := ktRefOf(u(a[0])); isRef {
 				n := int(rt.toNumber(u(a[1])))
 				if spec := u(a[2]); !isUndefOrNull(spec) && info.bound && !ktIsInstance(info.recv) {
 					n = ktSpecArity(rt.toString(spec), ktBuiltinKind(info.recv))
+				} else if n < 0 {
+					n = ktRefMethodArity(info)
 				}
 				if !info.bound {
 					n++
@@ -10031,6 +10034,28 @@ func ktSpecArity(spec string, kind byte) int {
 		}
 	}
 	return int(spec[0] - '0')
+}
+
+// ktRefMethodArity is the parameter count of the method a reference names, read
+// off its class chain: the count its closure records (emitMethodInto in
+// kotlin-to-llvm-ir.abnf). A class without one inherits Any.equals(other); any
+// other miss is a property. Twin of kRefMethodArity in kotlin-interpreter.abnf
+// and ktRefMethodArity in languages/lib/kotlin-rt.metajs.
+func ktRefMethodArity(info *ktRefInfo) int {
+	cls := info.cls
+	if o, isObj := info.recv.(*jsObject); isObj && info.bound {
+		cls, _ = o.props["__class"].(*jsObject)
+	}
+	for guard := 0; cls != nil && guard < 64; guard++ {
+		if mth, ok := cls.props[info.name]; ok && isCallable(mth) {
+			return jsvFnMeta(mth).length
+		}
+		cls, _ = cls.props["__super"].(*jsObject)
+	}
+	if info.name == "equals" {
+		return 1
+	}
+	return 0
 }
 
 // ktIsInstance reports a class instance or a class descriptor, whose members are

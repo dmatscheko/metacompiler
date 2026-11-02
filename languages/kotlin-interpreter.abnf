@@ -8566,14 +8566,15 @@ NotMemberKw = :script(~~ "pure";
             var csm = kCursorMethod(target, name)
             if (csm != null) { return csm.v }
         }
-        // A stdlib member filled by NAME (kotlin-decltypes.js): the named arguments go
-        // to their parameter's slot. Any other builtin member - one whose receiver
-        // is no class instance - takes them after the positional ones in source
-        // order, as the compiled half passes them. Twin of paramsFor / orderArgs in
+        // A stdlib member filled by NAME (kotlin-decltypes.js), on a receiver whose
+        // class declares no method of the name: the named arguments go to their
+        // parameter's slot. Any other builtin member - one whose receiver is no
+        // class instance - takes them after the positional ones in source order, as
+        // the compiled half passes them. Twin of paramsFor / orderArgs in
         // kotlin-to-llvm-ir.abnf.
         if (sp.named != null) {
             var sn = ktStdParams(name)
-            if (sn != undefined && classMethodNames["$" + name] != true) { args = kStdOrder(sp, sn) }
+            if (sn != undefined && lookupMethod(target, name) == null) { args = kStdOrder(sp, sn) }
             else if (sn == undefined && !(target !== null && typeof target == "object" && target.__class != undefined)) {
                 args = concat2impl(sp.pos, sp.nvals)
             }
@@ -10041,11 +10042,11 @@ NotMemberKw = :script(~~ "pure";
     // CAPTURED when the object expression evaluated (the compiled twin's js_closure
     // env is that same scope), with the instance and parameters in a child scope.
     function makeCapturedMethod(f, captured) {
-        return function() {
+        return kMethodArity(function() {
             var base = captured.slice(0)
             base.push({})
             return runFrame(base, arguments[0], true, f.params, arguments, 1, f.body)
-        }
+        }, f)
     }
 
     // An assignment to a non-lvalue left side (a postfix expression ending in or
@@ -10717,13 +10718,17 @@ NotMemberKw = :script(~~ "pure";
         }
     }
     function makeMethodClosure(f) {
-        return function() {
+        return kMethodArity(function() {
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
             return kRetAdopt(f, invokeBody(f.params, f.body, self, "this", args))
-        }
+        }, f)
     }
+    // A method closure records its parameter count, which a `::` reference to its
+    // name reads off the receiver's class where the program's methods of the name
+    // disagree (kRefMethodArity). Twin of emitMethodInto in kotlin-to-llvm-ir.abnf.
+    function kMethodArity(cl, f) { return f.params.length > 0 ? fnMetaSet(cl, "", f.params.length) : cl }
     // A primary-constructor parameter is a Param record ({pname, def, vararg}) plus the
     // `prop` flag that says the parameter is also a property of the instance.
     function makeCtorParam(items) {
@@ -12548,6 +12553,7 @@ NotMemberKw = :script(~~ "pure";
                     ur.kparams = ktSpecArity(ktBuiltinArity(name), ktTypeKind(baseName))
                 } else {
                     ur.kparams = ur.kcls != undefined && kClsOwnProp(ur.kcls, name) ? 0 : ktRefParams(kMemberArity["$" + name], name)
+                    if (ur.kparams < 0) { ur.kparams = kRefMethodArity(ur.kcls, name) }
                 }
                 return ur
             }
@@ -12573,10 +12579,18 @@ NotMemberKw = :script(~~ "pure";
         var r = kRefMake(recv, name, true, null)
         if (recv !== null && typeof recv == "object" && (recv.__class != undefined || recv.__isclass != undefined)) {
             r.kparams = ktRefParams(kMemberArity["$" + name], name)
+            if (r.kparams < 0) { r.kparams = kRefMethodArity(recv.__class, name) }
         } else {
             r.kparams = ktSpecArity(ktBuiltinArity(name), kIsBuiltinRecv(recv) ? kBuiltinKind(recv) : "")
         }
         return r
+    }
+    // The parameter count of the method `name` on class cls's chain (kMethodArity).
+    // Twin of ktRefMethodArity in abnf/jsrtkotlin.go.
+    function kRefMethodArity(cls, name) {
+        var m = cls == undefined || cls == null ? undefined : clsFind(cls, name)
+        if (typeof m == "function") { return fnMeta(m, "length") }
+        return name == "equals" ? 1 : 0
     }
     // A function value's toString, as Kotlin/JVM prints it without kotlin-reflect on
     // the class path (the stdlib alone): "function g (Kotlin reflection is not

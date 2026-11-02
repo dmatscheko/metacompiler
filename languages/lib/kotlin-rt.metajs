@@ -8172,21 +8172,37 @@ var ktStdJvm = {"$Pair": "kotlin.Pair", "$Triple": "kotlin.Triple",
     "$MutableCollection": "java.util.Collection", "$Runnable": "java.lang.Runnable"}
 // js_ktrefarity(ref, n, spec) (jsrtkotlin.go): a reference's arity, which
 // k4FnTypeIs reads - the n parameters of what it names, and an unbound one's
-// receiver; a bound builtin receiver's from the arity spec.
+// receiver; a bound builtin receiver's from the arity spec; n -1 asks the
+// receiver's class (ktRefMethodArity).
 function js_ktrefarity(ref, n, spec) {
     var info = ktRefOf(ref)
     if (!k4IsRef(info)) { return ref }
     if (info["bound"] !== true) {
-        fnMetaSet(ref, "", n + 1)
+        fnMetaSet(ref, "", (n < 0 ? ktRefMethodArity(info["cls"], info["name"]) : n) + 1)
         return ref
     }
     var recv = info["recv"]
     if (spec !== undefined && !(ktIsObj(recv) && (recv["__class"] !== undefined || recv["__isclass"] !== undefined))) {
         fnMetaSet(ref, "", ktSpecArity(spec, k4IsBuiltinRecv(recv) ? k4BuiltinKind(recv) : ""))
+    } else if (n < 0) {
+        fnMetaSet(ref, "", ktRefMethodArity(ktIsObj(recv) ? recv["__class"] : undefined, info["name"]))
     } else {
         fnMetaSet(ref, "", n)
     }
     return ref
+}
+// ktRefMethodArity (jsrtkotlin.go): the parameter count the method `name` of
+// class chain cls records on its closure.
+function ktRefMethodArity(cls, name) {
+    var c = cls
+    var guard = 0
+    while (guard < 64 && ktIsObj(c)) {
+        guard = guard + 1
+        var mth = c[name]
+        if (typeof mth == "function") { return fnMeta(mth, "length") }
+        c = c["__super"]
+    }
+    return name == "equals" ? 1 : 0
 }
 // ktSpecArity (jsrtkotlin.go): what arity spec `spec` gives a receiver of
 // member-table row kind.

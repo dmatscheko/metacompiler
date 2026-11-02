@@ -8101,6 +8101,40 @@ fun s181() {
 }
 
 
+// ===== SECTION 182: the arity of a reference to a method other classes declare too =====
+// Where the program's methods of a name disagree on their parameter count, the
+// class a reference names (or its bound receiver's) decides, inherited members,
+// interface defaults, objects and object expressions included. Named arguments of a
+// stdlib member go to its own parameters even when some class declares a method
+// of that name.
+class Ea182 { fun eat(x: Int) = x }
+open class Bt182 { fun bite(x: Int, y: Int) = x + y }
+class Sb182 : Bt182()
+class Bo182 { fun bite(x: Int) = x }
+interface If182 { fun bite(a: Int, b: Int, c: Int): Int = a + b + c }
+class Ic182 : If182
+object Ob182 { fun eat(a: Int, b: Int, c: Int) = a }
+class Pd182 { fun padStart(a: Int, b: Int, c: Int) = a * 100 + b * 10 + c }
+fun ar182(f: Any): Int = when (f) {
+    is Function4<*, *, *, *, *> -> 4
+    is Function3<*, *, *, *> -> 3
+    is Function2<*, *, *> -> 2
+    is Function1<*, *> -> 1
+    is Function0<*> -> 0
+    else -> -1
+}
+
+fun s182() {
+    val b: Bt182 = Sb182()
+    val ob = object { fun bite() = 0 }
+    check("dis182a", listOf(ar182(Ea182::eat), ar182(Ea182()::eat), ar182(Sb182::bite), ar182(b::bite), ar182(Bo182::bite),
+        ar182(Ic182::bite), ar182(Ic182()::bite), ar182(Ob182::eat), ar182(ob::bite), ar182(Bo182()::equals)) ==
+        listOf(2, 1, 3, 2, 2, 4, 3, 3, 0, 1))
+    check("nam182b", "abcde".padStart(padChar = '*', length = 7) == "**abcde" && "ab".padStart(length = 4, padChar = '-') == "--ab" &&
+        Pd182().padStart(c = 1, a = 2, b = 3) == 231 && "x".padStart(3) == "  x")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -8279,6 +8313,7 @@ fun main() {
     s179() // SECTION-CALL 179
     s180() // SECTION-CALL 180
     s181() // SECTION-CALL 181
+    s182() // SECTION-CALL 182
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

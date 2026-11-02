@@ -3748,7 +3748,9 @@ KwContract  = "contract" KwEnd ;
     // declaring a method of the same name would overwrite the first one's slots (a data
     // class's `copy` slots are its component names, so `p.copy(y = 9)` must not take
     // another data class's order). Every declared vector is kept here; the one that
-    // carries every named argument of this call site wins, latest declaration first.
+    // carries every named argument of this call site wins, latest declaration first;
+    // when none does, the call is the stdlib member's (ktStdParams). Twin of mcall in
+    // kotlin-interpreter.abnf.
     var methodParamAlts = {}
     function noteParams(name, params) {
         methodParams["$" + name] = params
@@ -3763,17 +3765,16 @@ KwContract  = "contract" KwEnd ;
             var mp = methodParams["$" + name]
             return mp == undefined ? ktStdParams(name) : mp
         }
-        for (var i = alts.length - 1; i >= 0; i--) {
-            var ok = true
-            for (var j = 0; j < args.length; j++) {
-                if (args[j].aname == undefined) { continue }
-                var found = false
-                for (var k = 0; k < alts[i].length; k++) { if (alts[i][k] == args[j].aname) { found = true } }
-                if (!found) { ok = false }
-            }
-            if (ok) { return alts[i] }
+        for (var i = alts.length - 1; i >= 0; i--) { if (namesCover(alts[i], args)) { return alts[i] } }
+        var std = ktStdParams(name)
+        return std != undefined && namesCover(std, args) ? std : methodParams["$" + name]
+    }
+    // Whether every named argument of args names one of the parameters names.
+    function namesCover(names, args) {
+        for (var j = 0; j < args.length; j++) {
+            if (args[j].aname != undefined && names.indexOf(args[j].aname) < 0) { return false }
         }
-        return methodParams["$" + name]
+        return true
     }
     function orderArgs(args, names) {
         var named = false
@@ -5390,6 +5391,17 @@ KwContract  = "contract" KwEnd ;
         }
         return emitFunc(params, body, true)
     }
+    // A method's closure on a descriptor. Where the program's methods of its name
+    // disagree on their parameter count (ktRefParams), it records its own, which a
+    // `::` reference to the name reads off the receiver's class (js_ktrefarity).
+    // Twin of installMembers in kotlin-interpreter.abnf.
+    function emitMethodInto(b, clsV, m) {
+        var cloV = callExt(b, "js_closure", [handle(emitFunc(m.params, m.body, true, false, m.sig)), curScopeV])
+        if (ktRefParams(memberArity["$" + m.name], m.name) < 0) {
+            cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, m.params.length)])
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, m.name), cloV])
+    }
     // Emit a class-style descriptor (methods closed over the current scope via js_closure)
     // plus an instance whose __class is the descriptor, then run the property initializers
     // with the instance bound to `this`. Shared by the object EXPRESSION (returns the fresh
@@ -5414,8 +5426,7 @@ KwContract  = "contract" KwEnd ;
         emitSuperName = pickSuperName(supers)
         emitSuperRaw = pickSuperRaw(supers)
         for (var k = 0; k < methods.length; k++) {
-            var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
-            callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+            emitMethodInto(b, clsV, methods[k])
         }
         for (var ap = 0; ap < accprops.length; ap++) { b = emitAccessorPair(b, clsV, accprops[ap]) }
         b = emitMemberExts(b, clsV, memberExts)
@@ -8669,8 +8680,7 @@ KwContract  = "contract" KwEnd ;
             }
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(entryIdx), curScopeV])])
             for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+                emitMethodInto(b, clsV, methods[k])
             }
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
             b = emitMemberExts(b, clsV, parts.memberExts)
@@ -8762,8 +8772,7 @@ KwContract  = "contract" KwEnd ;
             emitSuperName = pickSuperName(hdr.supers)
             emitSuperRaw = pickSuperRaw(hdr.supers)
             for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+                emitMethodInto(b, clsV, methods[k])
             }
             // An enum class's own ACCESSOR properties (`open val p: Int get() = 5`),
             // member extensions and member extension properties are installed here too,
@@ -8880,8 +8889,7 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_set", [holderV, emitStr(b, "__name"), emitStr(b, ktCompHolderName(ownerName, compName))])
         callExt(b, "js_set", [holderV, emitStr(b, "__bname"), emitStr(b, ownerBin + "$" + (compName != null ? compName : "Companion"))])
         for (var k = 0; k < cmethods.length; k++) {
-            var idx = emitFunc(cmethods[k].params, cmethods[k].body, true, false, cmethods[k].sig)
-            callExt(b, "js_set", [holderV, emitStr(b, cmethods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+            emitMethodInto(b, holderV, cmethods[k])
         }
         b = emitSuperLinks(b, holderV, chdr.supers, own)
         callExt(b, "js_set", [clsV, emitStr(b, "__class"), holderV])
@@ -9027,8 +9035,7 @@ KwContract  = "contract" KwEnd ;
             emitSuperName = pickSuperName(hdr.supers)
             emitSuperRaw = pickSuperRaw(hdr.supers)
             for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+                emitMethodInto(b, clsV, methods[k])
             }
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
             b = emitMemberExts(b, clsV, parts.memberExts)
