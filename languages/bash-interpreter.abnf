@@ -3146,7 +3146,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var d = (wordT != null) ? wordJoin(wordT()) : ""
                     if (gp != "" && !refQuiet) { diagErr("warning: " + gp + ": maximum nameref depth (8) exceeded\n") }
                     // A readonly NAME abandons the line, as an expansion error does.
-                    if (tn != null && roRefused(tn, "")) { arithErr = true; return "" }
+                    if (tn != null && roRefusedV(tn)) { arithErr = true; return "" }
                     if (tn != null) { d = storeAttr(tn, d, false) }
                     return d
                 }
@@ -5409,7 +5409,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arLhsSet(name, key, v) {
         if (arithErr) { return }
         // A readonly name is an arithmetic error: (( )) and let fail, $(( )) abandons the line.
-        if (roRefused(name, "")) { arithErr = true; return }
+        if (roRefusedV(name)) { arithErr = true; return }
         arSet(name, key, numToStr(v))
     }
     // An arithmetic store of s to NAME (NAME[key]). bash's bind_int_variable looks the name
@@ -5438,6 +5438,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (key == null) { return }
             refVars["$" + name] = false
             unsetVar(name)
+        }
+        // A number names no variable, and nor does an element, so a nameref with no value
+        // takes none; reported, the expression goes on. Twin of the same check in rt_ar_nset.
+        if (refVoid(name)) {
+            diagErr(arPfx + "`" + ((key == null) ? s : "") + "': not a valid identifier\n")
+            return
         }
         // An element store makes a set scalar its element 0: x=7; (( x[2]=4 )) is (7 '' 4).
         if (key != null) { arrAdopt(name); arrSet(name, key, s) } else { setVarVal(name, s) }
@@ -5904,7 +5910,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arStore(nm, key, v) {
         if (arNoeval > 0 || arithErr) { return v }
         if (key == AR_NOSUB) { diagErr(arPfx + "`" + nm + "[]': not a valid identifier\n"); return v }
-        if (roRefused(nm, "")) { arBad = true; arithErr = true; return v }
+        if (roRefusedV(nm)) { arBad = true; arithErr = true; return v }
         arSet(nm, key, numToStr(v))
         return v
     }
@@ -6385,7 +6391,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     diagErr(as[k].lbl + "[" + as[k].isrc + "]: cannot assign list to array member\n")
                     abortSignal = {ret: 1, isExit: 1, soft: 1}
                 }
-                else if (roRefused(as[k].name, "")) { abortSignal = {ret: 1, isExit: 1, soft: 1} }
+                else if (roRefusedV(as[k].name)) { abortSignal = {ret: 1, isExit: 1, soft: 1} }
                 else { runAssign(as[k], false, false) }
                 var ab = takeAbort()
                 if (ab != null) { return ab }
@@ -6423,6 +6429,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         diagErr(who + name + ": readonly variable\n")
         return true
     }
+    // roRefused for a store of a value: a nameref with no value takes the value first, which
+    // must name a variable before the nameref's readonly refuses it (refSelfBad, refRoBad).
+    function roRefusedV(name) {
+        if (refVoid(name)) { return false }
+        return roRefused(name, "")
+    }
+    // Is NAME a nameref with no value (unset or empty)? A store through it is one to the
+    // nameref itself. Twin of rt_nref_void.
+    function refVoid(name) {
+        if (!anyRef || noRef > 0 || !attrOn(refVars, name)) { return false }
+        var k = "$" + name
+        return !hasOwn(varsHas, k) || !varsHas[k] || vars[k] == ""
+    }
+    // An element store through a nameref with no value names no variable: bash's "`'",
+    // which abandons the line. Twin of the same check in rt_nref_arr.
+    function refVoidElem(a) {
+        if (a.idxT == null || a.circ == true || !refVoid(a.name)) { return false }
+        diagErr(arPfx + "`': not a valid identifier\n")
+        arithErr = true
+        return true
+    }
     // An error an expansion raised, taken before the command runs. set -u and ${v:?} end the
     // (sub)shell; an arithmetic or substring error ({soft}) abandons the command line - a
     // subshell treats it as any exit, a top-level line catches it (runProgram). Both leave
@@ -6453,6 +6480,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.idxT != null || a.lit != null) { refArrBad() }
             return
         }
+        if (!decl && anyRef && refVoidElem(a)) { return }
         if (anyRef && a.circ != true && refGlobStore(a)) {
             onRefGlobal(a.name, function() { runAssign(a, assoc, decl) })
             return
@@ -6535,6 +6563,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.idxT != null) { refArrBad() } else if (decl) { diagErr(arPfx + "`': not a valid identifier\n") }
             return
         }
+        if (!decl && anyRef && refVoidElem(a)) { return }
         a = refAssign(a)
         if (a == null) { return }
         if (a.glob == true) {
@@ -6588,8 +6617,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // variable, NAME or NAME[SUB]: otherwise bash's "not a valid identifier", which abandons
     // the line, or fails the builtin that stored (subBad). Twin of rt_nref_self_bad.
     function refSelfBad(name, v) {
-        if (!anyRef || !attrOn(refVars, name) || bashIsRef(v)) { return false }
+        if (!anyRef || !attrOn(refVars, name)) { return false }
+        if (bashIsRef(v)) { return refRoBad(name) }
         diagErr(arPfx + "`" + v + "': not a valid identifier\n")
+        arithErr = true
+        subBad = true
+        return true
+    }
+    // A readonly nameref with no value refuses one that names a variable (bash 5.3:
+    // `declare -nr r; r=x` is "r: readonly variable"). Twin of the at & 8 arm of
+    // rt_setvar_byname.
+    function refRoBad(name) {
+        if (noRef > 0 || !attrOn(roVars, name)) { return false }
+        diagErr(name + ": readonly variable\n")
         arithErr = true
         subBad = true
         return true
@@ -7368,7 +7408,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var res = normBytes(pf.e)
         if (dest != null) {
-            if (roRefused(dest, "")) { return 1 }
+            if (roRefusedV(dest)) { return 1 }
             var svp = arPfx
             arPfx = "printf: "
             storeAttr(dest, cutNul(res), true)
@@ -7613,7 +7653,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var k
         for (k = 0; k < names.length && !arithErr; k++) {
             if (!bashIsRef(names[k])) { diagErr("read: `" + names[k] + "': not a valid identifier\n"); st = 1; break }
-            if (roRefused(names[k], "")) { st = (k < names.length - 1) ? 2 : 1; break }
+            if (roRefusedV(names[k])) { st = (k < names.length - 1) ? 2 : 1; break }
             storeAttr(names[k], vs[k], true)
             // A refused subscript, like a readonly name: 2 and the rest unset, 1 for the last.
             if (takeSubBad()) { st = (k < names.length - 1) ? 2 : 1; break }

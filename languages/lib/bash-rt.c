@@ -334,6 +334,7 @@ int rt_nref_gstore(char *n);
 int rt_nref_gset(char *n, char *v, int app, int at);
 int rt_nref_fstore(char *n, char *v);
 int rt_nref_isarr(char *n, int sub);
+int rt_nref_void(char *n);
 int rt_nref_unglob(void);
 char *rt_nref_gread(void);
 int rt_unset_name(char *n);
@@ -6751,6 +6752,16 @@ int rt_nref_fstore(char *n, char *v)
     return 1;
 }
 
+/* Is n a nameref with no value (unset or empty)? A store through it is one to
+ * the nameref itself. Twin of refVoid in bash-interpreter.abnf. */
+int rt_nref_void(char *n)
+{
+    int i;
+    if (nref_any == 0 || (rt_arr_marks(n) & 32) == 0) return 0;
+    i = rt_varslot(n);
+    return i < 0 || gvars[i] == &unset_marker[0] || gvars[i][0] == 0 ? 1 : 0;
+}
+
 /* Is n a nameref that is an array (a function's circular one given an array
  * literal)? It names no variable bash can follow: a store to it changes
  * nothing, and an element store (sub 1) is refused as one to the name "" -
@@ -8990,6 +9001,9 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
             return 0;
         }
     }
+    /* A readonly nameref with no value refuses one that names no variable as
+     * any nameref does (rt_nref_self_bad), before it is readonly. */
+    if (ro != 0 && rt_nref_self_bad(n, v) != 0) return 0;
     if (ro != 0) {
         rt_berr("", rt_nref_base(n), "readonly variable");
         arith_err = 1;
@@ -9171,8 +9185,9 @@ int rt_nref_circ(void)
  * circular chain the store lands on the global variable rt_nref_glob puts in
  * effect, until the caller's rt_nref_unglob, or else on n itself, which stops
  * being a nameref and drops its value (bash 5.3); for an element (sub) that
- * waits for rt_nref_circ, once its subscript is good. Twin of refAssign in
- * bash-interpreter.abnf. */
+ * waits for rt_nref_circ, once its subscript is good. An assignment's element
+ * (sub 2) of a nameref with no value is "not a valid identifier" for the name
+ * "". Twin of refAssign in bash-interpreter.abnf. */
 char *rt_nref_arr(char *n, int lit, int sub)
 {
     char *t = rt_nref_end(n);
@@ -9188,6 +9203,12 @@ char *rt_nref_arr(char *n, int lit, int sub)
             return t;
         }
         if (i < 0) rt_nref_unref(n);
+    }
+    /* Twin of refVoidElem in bash-interpreter.abnf. */
+    if (sub == 2 && rt_nref_void(t) != 0) {
+        rt_berr("", "`'", "not a valid identifier");
+        arith_err = 1;
+        return empty;
     }
     if (rt_indbr(t) > 0) {
         rt_berr("", rt_strcat(rt_strcat("`", t), "'"), "not a valid identifier");
@@ -9272,6 +9293,13 @@ int rt_ar_nset(char *nm, char *k, char *v, int at)
             if (k == 0) return 0;
             rt_nref_unref(nm);
         }
+    }
+    /* A number names no variable, and nor does an element, so a nameref with no
+     * value takes none; reported, the expression goes on. Twin of the same check
+     * in arSet in bash-interpreter.abnf. */
+    if (rt_nref_void(nm) != 0) {
+        rt_berr("", rt_strcat(rt_strcat(rt_strcat(ar_pfx(), "`"), k == 0 ? v : empty), "'"), "not a valid identifier");
+        return 0;
     }
     if (k == 0) {
         if (rt_arr_any(nm) != 0) return rt_arr_iset(nm, "0", v);
