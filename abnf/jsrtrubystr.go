@@ -1989,6 +1989,38 @@ func rubyEncStr(b, enc string) interface{} {
 	return &jsRBin{b: b, enc: enc}
 }
 
+// retag makes t hold the bytes b in encoding enc, in place: bytes that are valid
+// UTF-8 make it an ordinary String, a new one. Twin of binRetag in
+// ruby-interpreter.abnf.
+func (t *jsRBin) retag(b, enc string) {
+	switch v := rubyEncStr(b, enc).(type) {
+	case *jsRBin:
+		t.b, t.enc = b, v.enc
+	case *jsRStr:
+		t.str = v
+	}
+}
+
+// rubySetByte is String#setbyte's new bytes: byte pos[0] of b (counted from the
+// end when negative) becomes pos[1] mod 256. Twin of setByte in
+// ruby-interpreter.abnf and rbsSetByte in lib/ruby-str.js.
+func (rt *jsrt) rubySetByte(b string, pos []interface{}) string {
+	i := rt.rubyLongArg("setbyte", argAt(pos, 0))
+	v := rt.rubyLongArg("setbyte", argAt(pos, 1))
+	k := i
+	if k < 0 {
+		k += len(b)
+	}
+	if k < 0 || k >= len(b) {
+		rt.rubyRaiseErr("setbyte", "IndexError", "index "+strconv.Itoa(i)+" out of string")
+	}
+	m := v % 256
+	if m < 0 {
+		m += 256
+	}
+	return b[:k] + string([]byte{byte(m)}) + b[k+1:]
+}
+
 // rubyByteSlice is String#byteslice over the bytes b in encoding enc. Twin of
 // byteSlice in ruby-interpreter.abnf.
 func rubyByteSlice(b, enc string, pos []interface{}) interface{} {
@@ -2104,12 +2136,28 @@ func rubyAsciiCase(b, name string) string {
 
 // rubyBinInspect is a binary String's #inspect. Twin of rbsBinInspect in
 // ruby-str.js.
-func rubyBinInspect(b string) string {
+func rubyBinInspect(b string) string { return rubyDump(b, false) }
+
+// rubyDump is String#dump of the bytes b: rubyBinInspect's form, where u8 (a
+// UTF-8 String) writes each valid multi-byte character as \uXXXX, or \u{X} past
+// U+FFFF. Twin of rbsDump in lib/ruby-str.js.
+func rubyDump(b string, u8 bool) string {
 	const hx = "0123456789ABCDEF"
 	var sb strings.Builder
 	sb.WriteByte('"')
 	for i := 0; i < len(b); i++ {
 		c := b[i]
+		if u8 && c >= 128 {
+			if r, n := utf8.DecodeRuneInString(b[i:]); n > 1 {
+				if r > 0xFFFF {
+					fmt.Fprintf(&sb, "\\u{%X}", r)
+				} else {
+					fmt.Fprintf(&sb, "\\u%04X", r)
+				}
+				i += n - 1
+				continue
+			}
+		}
 		switch {
 		case c == '"':
 			sb.WriteString("\\\"")
@@ -2752,7 +2800,18 @@ func (rt *jsrt) rubyEncArg(e interface{}) string {
 			return n
 		}
 	}
-	switch strings.ToUpper(rt.rubyStr(e)) {
+	n := rubyEncCanon(rt.rubyStr(e))
+	if n == "" {
+		rt.rubyRaiseErr("force_encoding", "ArgumentError", "unknown encoding name - "+rt.rubyStr(e))
+	}
+	return n
+}
+
+// rubyEncCanon is the encoding a name selects (case does not matter):
+// ASCII-8BIT, US-ASCII or UTF-8, or "" for any other. Twin of rbsEncCanon in
+// lib/ruby-str.js.
+func rubyEncCanon(n string) string {
+	switch strings.ToUpper(n) {
 	case "BINARY", "ASCII-8BIT":
 		return "ASCII-8BIT"
 	case "US-ASCII", "ASCII":
@@ -2760,8 +2819,176 @@ func (rt *jsrt) rubyEncArg(e interface{}) string {
 	case "UTF-8":
 		return "UTF-8"
 	}
-	rt.rubyRaiseErr("force_encoding", "ArgumentError", "unknown encoding name - "+rt.rubyStr(e))
 	return ""
+}
+
+// rubyHexRun is the value of the hex digits of s from i up to (not including)
+// lim, and how many there were. Twin of rbsHexRun in lib/ruby-str.js.
+func rubyHexRun(s string, i, lim int) (int, int) {
+	v, k := 0, i
+	for ; k < lim; k++ {
+		c := s[k]
+		switch {
+		case c >= '0' && c <= '9':
+			v = v*16 + int(c-'0')
+		case c|0x20 >= 'a' && c|0x20 <= 'f':
+			v = v*16 + int(c|0x20-'a') + 10
+		default:
+			return v, k - i
+		}
+	}
+	return v, k - i
+}
+
+// rubyUndump is String#undump of the bytes s: the bytes and the encoding name
+// ("" for the receiver's own), or the RuntimeError's message. Twin of rbsUndump
+// in lib/ruby-str.js.
+func rubyUndump(s string) (string, string, string) {
+	const badForm = "invalid dumped string; not wrapped with '\"' nor '\"...\".force_encoding(\"...\")' form"
+	if !rubyAsciiOnly(s) {
+		return "", "", "non-ASCII character detected"
+	}
+	if strings.IndexByte(s, 0) >= 0 {
+		return "", "", "string contains null byte"
+	}
+	if len(s) < 2 || s[0] != '"' {
+		return "", "", badForm
+	}
+	n := len(s)
+	var out strings.Builder
+	enc := ""
+	utf8Esc, hexed := false, false
+	i := 1
+	for {
+		if i >= n {
+			return "", "", "unterminated dumped string"
+		}
+		c := s[i]
+		if c == '"' {
+			break
+		}
+		if c != '\\' {
+			out.WriteByte(c)
+			i++
+			continue
+		}
+		i++
+		if i >= n {
+			return "", "", "invalid escape"
+		}
+		e := s[i]
+		named := strings.IndexByte("nrtfvbae", e)
+		switch {
+		case e == '\\' || e == '"' || e == '#':
+			out.WriteByte(e)
+			i++
+		case named >= 0:
+			out.WriteByte([]byte{10, 13, 9, 12, 11, 8, 7, 27}[named])
+			i++
+		case e == 'u':
+			if hexed {
+				return "", "", "hex escape and Unicode escape are mixed"
+			}
+			utf8Esc, enc = true, "UTF-8"
+			i++
+			if i >= n {
+				return "", "", "invalid Unicode escape"
+			}
+			braced := s[i] == '{'
+			if braced {
+				i++
+			}
+			for {
+				if braced && i >= n {
+					return "", "", "unterminated Unicode escape"
+				}
+				if braced && s[i] == '}' {
+					i++
+					break
+				}
+				if braced && (s[i] == ' ' || s[i] >= 9 && s[i] <= 13) {
+					i++
+					continue
+				}
+				lim := n
+				if !braced && i+4 <= n {
+					lim = i + 4
+				}
+				v, hn := rubyHexRun(s, i, lim)
+				if braced && (hn == 0 || hn > 6) || !braced && hn != 4 {
+					return "", "", "invalid Unicode escape"
+				}
+				if v > 0x10FFFF {
+					return "", "", "invalid Unicode codepoint (too large)"
+				}
+				if v >= 0xD800 && v <= 0xDFFF {
+					return "", "", "invalid Unicode codepoint"
+				}
+				out.WriteRune(rune(v))
+				i += hn
+				if !braced {
+					break
+				}
+			}
+		case e == 'x':
+			if utf8Esc {
+				return "", "", "hex escape and Unicode escape are mixed"
+			}
+			hexed = true
+			i++
+			lim := n
+			if i+2 <= n {
+				lim = i + 2
+			}
+			v, hn := rubyHexRun(s, i, lim)
+			if hn != 2 {
+				return "", "", "invalid hex escape"
+			}
+			out.WriteByte(byte(v))
+			i += 2
+		default:
+			out.WriteByte('\\')
+			out.WriteByte(e)
+			i++
+		}
+	}
+	rest := s[i+1:]
+	if rest == "" {
+		return out.String(), enc, ""
+	}
+	if len(rest) > 4 && rest[:4] == ".dup" {
+		rest = rest[4:]
+	}
+	const fe = ".force_encoding(\""
+	if len(rest) <= len(fe) || rest[:len(fe)] != fe {
+		return "", "", badForm
+	}
+	if utf8Esc {
+		return "", "", "dumped string contained Unicode escape but used force_encoding"
+	}
+	rest = rest[len(fe):]
+	q := strings.IndexByte(rest, '"')
+	if q < 0 || rest[q:] != "\")" {
+		return "", "", badForm
+	}
+	en := rubyEncCanon(rest[:q])
+	if en == "" {
+		return "", "", "dumped string has unknown encoding name"
+	}
+	return out.String(), en, ""
+}
+
+// rubyStrUndump is String#undump of the bytes b of a String in encoding enc.
+// Twin of strUndump in ruby-interpreter.abnf.
+func (rt *jsrt) rubyStrUndump(b, enc string) interface{} {
+	ub, uenc, msg := rubyUndump(b)
+	if msg != "" {
+		rt.rubyRaiseErr("undump", "RuntimeError", msg)
+	}
+	if uenc == "" {
+		uenc = enc
+	}
+	return rubyEncStr(ub, uenc)
 }
 
 // rubyEncoding is the Encoding object of a name: UTF-8, ASCII-8BIT or US-ASCII.
@@ -3073,19 +3300,20 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 			rt.call(blk, jsUndef, []interface{}{float64(t.b[i])})
 		}
 		return t
-	case "inspect", "dump":
+	case "inspect":
 		return rubyBoxInspect(t)
+	case "dump":
+		return rubyEncStr(rubyDump(t.b, enc == "UTF-8"), enc)
+	case "undump":
+		return rt.rubyStrUndump(t.b, enc)
 	case "encoding":
 		return rt.rubyEncoding(enc)
 	case "force_encoding":
-		// In place; bytes that become valid UTF-8 are an ordinary String, a new one.
-		v := rubyEncStr(t.b, rt.rubyEncArg(argAt(pos, 0)))
-		if nb, isBox := v.(*jsRBin); isBox {
-			t.enc = nb.enc
-		} else {
-			t.str = v.(*jsRStr)
-		}
+		t.retag(t.b, rt.rubyEncArg(argAt(pos, 0)))
 		return t
+	case "setbyte":
+		t.retag(rt.rubySetByte(t.b, pos), enc)
+		return argAt(pos, 1)
 	case "b":
 		return &jsRBin{b: t.b}
 	case "byteslice":

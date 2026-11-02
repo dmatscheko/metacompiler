@@ -610,6 +610,17 @@ function rbsBinOf(s) {
     return out
 }
 
+// String#setbyte over the bytes b: byte i (counted from the end when negative)
+// becomes v mod 256. Answers null when i is outside b. Go twin: rubySetByte in
+// abnf/jsrtrubystr.go.
+function rbsSetByte(b, i, v) {
+    var k = i < 0 ? i + b.length : i
+    if (k < 0 || k >= b.length) { return null }
+    var m = v % 256
+    if (m < 0) { m = m + 256 }
+    return b.substring(0, k) + String.fromCharCode(m) + b.substring(k + 1)
+}
+
 // The text a binary String's bytes spell as UTF-8, or null when they are not
 // valid UTF-8 (a stray continuation byte, an overlong form, a surrogate, past
 // U+10FFFF, or a sequence cut short).
@@ -727,13 +738,25 @@ function rbsAsciiCase(b, name) {
 
 // A binary String's #inspect: printable ASCII as itself, the named escapes, and
 // every other byte as \xHH.
-function rbsBinInspect(b) {
+function rbsBinInspect(b) { return rbsDump(b, false) }
+
+// String#dump of the bytes b: rbsBinInspect's form, where u8 (a UTF-8 String)
+// writes each valid multi-byte character as \uXXXX, or \u{X} past U+FFFF. Go
+// twin: rubyDump in abnf/jsrtrubystr.go.
+function rbsDump(b, u8) {
     var hx = "0123456789ABCDEF"
     var out = "\""
     var i = 0
     while (i < b.length) {
         var c = b.charCodeAt(i)
         var nx = i + 1 < b.length ? b.charCodeAt(i + 1) : 0
+        var n = u8 && c >= 128 ? rbsU8At(b, i) : 0
+        if (n > 1) {
+            var cp = rbsHexUp(rbsU8Cp(b, i, n))
+            out = out + (cp.length > 4 ? "\\u{" + cp + "}" : "\\u" + "0000".substring(cp.length) + cp)
+            i = i + n
+            continue
+        }
         if (c == 34) { out = out + "\\\"" }
         else if (c == 92) { out = out + "\\\\" }
         else if (c == 10) { out = out + "\\n" }
@@ -750,6 +773,115 @@ function rbsBinInspect(b) {
         i = i + 1
     }
     return out + "\""
+}
+
+// The encoding a name selects (case does not matter): ASCII-8BIT, US-ASCII or
+// UTF-8, or "" for any other. Go twin: rubyEncCanon in abnf/jsrtrubystr.go.
+function rbsEncCanon(n) {
+    var u = n.toUpperCase()
+    if (u == "BINARY" || u == "ASCII-8BIT") { return "ASCII-8BIT" }
+    if (u == "US-ASCII" || u == "ASCII") { return "US-ASCII" }
+    if (u == "UTF-8") { return "UTF-8" }
+    return ""
+}
+
+// The value of the hex digits of s from i up to (not including) lim, and how
+// many there were.
+function rbsHexRun(s, i, lim) {
+    var v = 0
+    var k = i
+    while (k < lim) {
+        var d = "0123456789abcdef".indexOf(s.charAt(k).toLowerCase())
+        if (d < 0) { break }
+        v = v * 16 + d
+        k = k + 1
+    }
+    return {v: v, n: k - i}
+}
+
+// String#undump of the bytes s, MRI's str_undump: s must be a double-quoted
+// String#dump form, optionally followed by .force_encoding("NAME") (with or
+// without .dup). Answers {ok: true, b: the bytes, enc: the encoding name, "" for
+// the receiver's own} or {ok: false, msg: the RuntimeError's message}. A \u
+// escape makes the result UTF-8 and cannot be mixed with \x. Go twin:
+// rubyUndump in abnf/jsrtrubystr.go.
+function rbsUndump(s) {
+    var badForm = "invalid dumped string; not wrapped with '\"' nor '\"...\".force_encoding(\"...\")' form"
+    if (!rbsAsciiOnly(s)) { return {ok: false, msg: "non-ASCII character detected"} }
+    if (s.indexOf(String.fromCharCode(0)) >= 0) { return {ok: false, msg: "string contains null byte"} }
+    if (s.length < 2 || s.charAt(0) != "\"") { return {ok: false, msg: badForm} }
+    var n = s.length
+    var out = ""
+    var enc = ""
+    var utf8 = false
+    var hexed = false
+    var i = 1
+    while (true) {
+        if (i >= n) { return {ok: false, msg: "unterminated dumped string"} }
+        var c = s.charAt(i)
+        if (c == "\"") { break }
+        if (c != "\\") {
+            out = out + c
+            i = i + 1
+            continue
+        }
+        i = i + 1
+        if (i >= n) { return {ok: false, msg: "invalid escape"} }
+        var e = s.charAt(i)
+        var named = "nrtfvbae".indexOf(e)
+        if (e == "\\" || e == "\"" || e == "#") {
+            out = out + e
+            i = i + 1
+        } else if (named >= 0) {
+            out = out + String.fromCharCode([10, 13, 9, 12, 11, 8, 7, 27][named])
+            i = i + 1
+        } else if (e == "u") {
+            if (hexed) { return {ok: false, msg: "hex escape and Unicode escape are mixed"} }
+            utf8 = true
+            enc = "UTF-8"
+            i = i + 1
+            if (i >= n) { return {ok: false, msg: "invalid Unicode escape"} }
+            var braced = s.charAt(i) == "{"
+            if (braced) { i = i + 1 }
+            while (true) {
+                if (braced && i >= n) { return {ok: false, msg: "unterminated Unicode escape"} }
+                var ch = s.charAt(i)
+                if (braced && ch == "}") { i = i + 1; break }
+                var cc = s.charCodeAt(i)
+                if (braced && (cc == 32 || (cc >= 9 && cc <= 13))) { i = i + 1; continue }
+                var h = rbsHexRun(s, i, braced || i + 4 > n ? n : i + 4)
+                if (braced ? h.n == 0 || h.n > 6 : h.n != 4) { return {ok: false, msg: "invalid Unicode escape"} }
+                if (h.v > 1114111) { return {ok: false, msg: "invalid Unicode codepoint (too large)"} }
+                if (h.v >= 55296 && h.v <= 57343) { return {ok: false, msg: "invalid Unicode codepoint"} }
+                out = out + rbsBinOf(rbsChrUtf8(h.v, []))
+                i = i + h.n
+                if (!braced) { break }
+            }
+        } else if (e == "x") {
+            if (utf8) { return {ok: false, msg: "hex escape and Unicode escape are mixed"} }
+            hexed = true
+            i = i + 1
+            var h2 = rbsHexRun(s, i, i + 2 < n ? i + 2 : n)
+            if (h2.n != 2) { return {ok: false, msg: "invalid hex escape"} }
+            out = out + String.fromCharCode(h2.v)
+            i = i + 2
+        } else {
+            out = out + "\\" + e
+            i = i + 1
+        }
+    }
+    var rest = s.substring(i + 1)
+    if (rest == "") { return {ok: true, b: out, enc: enc} }
+    if (rest.length > 4 && rest.substring(0, 4) == ".dup") { rest = rest.substring(4) }
+    var fe = ".force_encoding(\""
+    if (rest.length <= fe.length || rest.substring(0, fe.length) != fe) { return {ok: false, msg: badForm} }
+    if (utf8) { return {ok: false, msg: "dumped string contained Unicode escape but used force_encoding"} }
+    rest = rest.substring(fe.length)
+    var q = rest.indexOf("\"")
+    if (q < 0 || rest.substring(q) != "\")") { return {ok: false, msg: badForm} }
+    var en = rbsEncCanon(rest.substring(0, q))
+    if (en == "") { return {ok: false, msg: "dumped string has unknown encoding name"} }
+    return {ok: true, b: out, enc: en}
 }
 
 // The invalid UTF-8 sequence at byte i of b (where rbsU8At answers 0) as MRI's

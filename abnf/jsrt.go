@@ -12094,7 +12094,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			return o
 		case "dump":
-			return rubyStrInspect(o)
+			return rubyDump(o, true)
+		case "undump":
+			return rt.rubyStrUndump(o, "UTF-8")
 		// String#slice! on a plain string answers the REMOVED part; nothing holds
 		// the string to see the removal (a held one is a box, see rubyStrMutate).
 		case "slice!":

@@ -264,6 +264,27 @@ function rbEncStr(s, enc) {
     }
     return {__rbin: true, __s: s, __benc: enc}
 }
+// Twin of binRetag in ruby-interpreter.abnf.
+function rbBinRetag(t, b, enc) {
+    var fv = rbEncStr(b, enc)
+    if (rbIsBox(fv)) {
+        t["__s"] = b
+        t["__benc"] = fv["__benc"]
+        return t
+    }
+    t["__rbin"] = false
+    t["__rstr"] = true
+    t["__s"] = fv["__s"]
+    t["__fz"] = false
+    return t
+}
+// Twin of setByte in ruby-interpreter.abnf.
+function rbSetByte(b, args) {
+    var i = rbLongArg("setbyte", rbArgAt(args, 0))
+    var nb = rbsSetByte(b, i, rbLongArg("setbyte", rbArgAt(args, 1)))
+    if (nb === null) { rbRaiseErr("setbyte", "IndexError", "index " + i + " out of string") }
+    return nb
+}
 // Twin of byteSlice in ruby-interpreter.abnf.
 function rbByteSlice(b, enc, args) {
     var n = b.length
@@ -361,19 +382,14 @@ function rbBinMethod(t, name, args) {
         while (i < b.length) { rbCall1(blk, b.charCodeAt(i)); i = i + 1 }
         return t
     }
-    if (name == "inspect" || name == "dump") { return rbBoxInspect(t) }
+    if (name == "inspect") { return rbBoxInspect(t) }
+    if (name == "dump") { return rbEncStr(rbsDump(b, enc == "UTF-8"), enc) }
+    if (name == "undump") { return rbStrUndump(b, enc) }
     if (name == "encoding") { return rbEncObj(enc) }
-    if (name == "force_encoding") {
-        var fv = rbEncStr(b, rbEncArg(rbArgAt(args, 0)))
-        if (rbIsBox(fv)) {
-            t["__benc"] = fv["__benc"]
-            return t
-        }
-        t["__rbin"] = false
-        t["__rstr"] = true
-        t["__s"] = fv["__s"]
-        t["__fz"] = false
-        return t
+    if (name == "force_encoding") { return rbBinRetag(t, b, rbEncArg(rbArgAt(args, 0))) }
+    if (name == "setbyte") {
+        rbBinRetag(t, rbSetByte(b, args), enc)
+        return rbArgAt(args, 1)
     }
     if (name == "b") { return rbMkBin(b) }
     if (name == "byteslice") { return rbByteSlice(b, enc, args) }
@@ -471,12 +487,17 @@ function rbBinEq(l, r) {
 // ruby-interpreter.abnf.
 function rbEncArg(e) {
     if (rbIsObj(e) && typeof e["__renc"] == "string") { return e["__renc"] }
-    var n = rbStr(e).toUpperCase()
-    if (n == "BINARY" || n == "ASCII-8BIT") { return "ASCII-8BIT" }
-    if (n == "US-ASCII" || n == "ASCII") { return "US-ASCII" }
-    if (n == "UTF-8") { return "UTF-8" }
-    rbRaiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rbStr(e))
-    return ""
+    var n = rbsEncCanon(rbStr(e))
+    if (n == "") { rbRaiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rbStr(e)) }
+    return n
+}
+// Twin of strUndump in ruby-interpreter.abnf.
+function rbStrUndump(b, enc) {
+    var r = rbsUndump(b)
+    if (!r["ok"]) { rbRaiseErr("undump", "RuntimeError", r["msg"]) }
+    var ue = r["enc"]
+    if (ue == "") { ue = enc }
+    return rbEncStr(r["b"], ue)
 }
 // String#encode, and #scrub with no block, of the bytes b in encoding enc. Twin
 // of strEncode in ruby-interpreter.abnf, which states the rule.
@@ -625,6 +646,11 @@ function rbStrMutate(b, name, args) {
     }
     if (name == "replace") { b["__s"] = rbStr(rbArgAt(args, 0)); return b }
     if (name == "clear") { b["__s"] = ""; return b }
+    if (name == "setbyte") {
+        var sv = rbEncStr(rbSetByte(rbsBinOf(b["__s"]), args), "UTF-8")
+        if (rbIsBox(sv)) { rbBecomeBin(b, sv) } else { b["__s"] = sv["__s"] }
+        return rbArgAt(args, 1)
+    }
     if (name == "[]=") {
         var k2 = anytype
         k2 = undefined
@@ -12972,7 +12998,8 @@ function rbStrExtra(target, name, args) {
         while (k < list.length) { rbCall1(blk, rbBoxOut(target, list[k])); k = k + 1 }
         return {ok: true, v: target}
     }
-    if (name == "dump") { return {ok: true, v: rbStrInspect(target)} }
+    if (name == "dump") { return {ok: true, v: rbsDump(rbsBinOf(target), true)} }
+    if (name == "undump") { return {ok: true, v: rbStrUndump(rbsBinOf(target), "UTF-8")} }
     // String#slice! on a plain string answers the REMOVED part; nothing holds the
     // string to see the removal (a held one is a box, see rbStrMutate).
     if (name == "slice!") { return {ok: true, v: rbMethod(target, "slice", args)} }

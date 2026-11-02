@@ -1548,6 +1548,74 @@ def s192
         q[5] == Complex(Math.cos(0.5), Math.sin(0.5)) && q[6] == Complex(-Math.cos(1), -Math.sin(1)) &&
         q[7] == Complex(Math.cos(2), Math.sin(2)) && (begin; Complex(pl[7]); rescue ArgumentError; :bad; end) == :bad)
 end
+# ===== SECTION 193: String#setbyte =====
+# setbyte(i, v) stores v mod 256 at byte i (from the end when negative), in
+# place, and answers v. A byte outside the String is IndexError; the bytes may
+# turn a UTF-8 String invalid and back. /usr/bin/ruby 2.6 settles each.
+def s193
+  s = "abc"
+  t = s
+  r = [s.setbyte(0, 65), s.setbyte(-1, 321), s.setbyte(1.9, 0x7a)]
+  check("sb193a", r == [65, 321, 0x7a] && t == "AzA" && s.equal?(t))
+  e = [5, -4].map { |i| begin; "abc".setbyte(i, 1); rescue IndexError => x; x.message; end }
+  f = begin; "q".freeze.setbyte(0, 1); rescue FrozenError => x; x.message; end
+  g = begin; "q".dup.setbyte(0, "a"); rescue TypeError => x; x.message; end
+  check("sb193b", e == ["index 5 out of string", "index -4 out of string"] && f == "can't modify frozen String" &&
+        g == "no implicit conversion of String into Integer")
+  u = "h\u{e9}llo"
+  u.setbyte(1, 0x41)
+  w = "xy"
+  w.setbyte(0, 0xC3)
+  v1 = w.valid_encoding?
+  w.setbyte(1, 0xA9)
+  check("sb193c", u.bytes == [104, 65, 169, 108, 108, 111] && !u.valid_encoding? && u.length == 6 &&
+        u.encoding == Encoding::UTF_8 && !v1 && w == "\u{e9}" && w.valid_encoding? && w.length == 1)
+  b = "\xff\xfe".b
+  a = [b.dup]
+  b.setbyte(0, 65)
+  a[0].setbyte(1, 66)
+  check("sb193d", b == "A\xFE".b && b.encoding == Encoding::BINARY && a[0].bytes == [255, 66] &&
+        "".respond_to?(:setbyte) && "".method(:setbyte).arity == 2)
+end
+# ===== SECTION 194: String#dump / #undump =====
+# dump writes a valid multi-byte UTF-8 character as \uXXXX (\u{X} past U+FFFF)
+# and every other non-printable byte as \xHH; the dump of a binary String is
+# itself binary. undump reads that form back, with MRI's RuntimeError for each
+# malformed one. u is a backslash and "u", spelled so the source holds no \u
+# escape of its own. /usr/bin/ruby 2.6 settles each.
+def s194
+  u = 92.chr + "u"
+  src = ["abc", "a\"b\\c", "tab\there\n", "\u{e9}", "\u{1F600}", "\x01\x7f\0", "\e1", "\#{x}", "\#$y \#@z", "#a",
+         "a\u{3042}\u{10000}"]
+  d = src.map(&:dump)
+  check("du194a", d[3] == '"' + u + '00E9"' && d[4] == '"' + u + '{1F600}"' && d[5] == '"\x01\x7F\x00"' &&
+        d[6] == '"\e1"' && d[8] == '"\#$y \#@z"' && d[9] == '"#a"' && d[10] == '"a' + u + '3042' + u + '{10000}"' &&
+        d.map(&:undump) == src)
+  b = "\x00\u{e9}\x7f\x80".b
+  bd = b.dump
+  iv = "\xE3\x81".force_encoding("UTF-8")
+  check("du194b", bd == '"\x00\xC3\xA9\x7F\x80"' && bd.encoding == Encoding::BINARY && bd.undump == b &&
+        bd.undump.encoding == Encoding::BINARY && iv.dump == '"\xE3\x81"' && iv.dump.undump.bytes == [0xE3, 0x81] &&
+        !iv.dump.undump.valid_encoding?)
+  f = ['"' + u + '{1F600 41}"', '"\x41\101"', '"\xC3\xA9"', '"\xC3"', '"' + u + '{}"', '"' + u + '{41  42}"',
+       '"a".force_encoding("ASCII-8BIT")', '"\xFF".dup.force_encoding("BINARY")', '"\xFF".force_encoding("US-ASCII")',
+       '"\#x\z\M-a"', "\"\t\""]
+  r = f.map(&:undump)
+  check("du194c", r[0] == "\u{1F600}A" && r[1] == "A\\101" && r[2] == "\u{e9}" && r[2].valid_encoding? &&
+        r[3].bytes == [0xC3] && !r[3].valid_encoding? && r[4] == "" && r[5] == "AB" && r[6].encoding == Encoding::BINARY &&
+        r[7] == "\xFF".b && r[8].encoding == Encoding::US_ASCII && !r[8].valid_encoding? && r[9] == "#x\\z\\M-a" &&
+        r[10] == "\t" && !f[0].undump.equal?(f[0]))
+  bad = ['abc', '"abc', '"' + u + '12"', '"\x7"', '"' + u + '00e9\xff"', '"' + u + '{110000}"', '"' + u + 'D800"',
+         '"a\\', '"\xFF".force_encoding("nope")', '"' + u + '{41', '"' + u + '{41}".force_encoding("UTF-8")', "\"\u{e9}\"",
+         "\"\0\"", '"' + u + '{1234567}"']
+  m = bad.map { |x| begin; x.undump; rescue RuntimeError => e; e.message; end }
+  form = "invalid dumped string; not wrapped with '\"' nor '\"...\".force_encoding(\"...\")' form"
+  check("du194d", m == [form, "unterminated dumped string", "invalid Unicode escape", "invalid hex escape",
+        "hex escape and Unicode escape are mixed", "invalid Unicode codepoint (too large)", "invalid Unicode codepoint",
+        "invalid escape", "dumped string has unknown encoding name", "unterminated Unicode escape",
+        "dumped string contained Unicode escape but used force_encoding", "non-ASCII character detected",
+        "string contains null byte", "invalid Unicode escape"] && "".respond_to?(:undump))
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1587,5 +1655,7 @@ s189() # SECTION-CALL 189
 s190() # SECTION-CALL 190
 s191() # SECTION-CALL 191
 s192() # SECTION-CALL 192
+s193() # SECTION-CALL 193
+s194() # SECTION-CALL 194
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

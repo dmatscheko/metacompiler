@@ -4006,6 +4006,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out + "\""
     }
+    // The box t now holds the bytes b in encoding enc, in place: bytes that are
+    // valid UTF-8 turn it into an ordinary String box, so every alias sees the
+    // change.
+    function binRetag(t, b, enc) {
+        var fv = anytype
+        fv = encStr(b, enc)
+        if (isBin(fv)) {
+            t.__rbin = b
+            t.__benc = fv.__benc
+            return t
+        }
+        t.__rs = fv.__rs
+        t.__fz = false
+        t.__rbin = undefined
+        t.__benc = undefined
+        return t
+    }
+    // String#setbyte's new bytes: byte args[0] of b becomes args[1] mod 256.
+    // Twins: rubySetByte in abnf/jsrtrubystr.go, rbSetByte in lib/ruby-rt.metajs.
+    function setByte(b, args) {
+        var i = longArg("setbyte", args[0])
+        var nb = anytype
+        nb = rbsSetByte(b, i, longArg("setbyte", args[1]))
+        if (nb === null) { raiseErr("setbyte", "IndexError", "index " + i + " out of string") }
+        return nb
+    }
     // The methods a box answers on its bytes; every other String method runs on
     // the text, and a String it answers has the box's encoding. Twins:
     // rubyBinMethod in abnf/jsrtrubystr.go, rbBinMethod in lib/ruby-rt.metajs.
@@ -4029,23 +4055,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var i = 0; i < b.length; i++) { blockCall(blk, [b.charCodeAt(i)]) }
             return t
         }
-        if (name == "inspect" || name == "dump") { return binInspect(t) }
+        if (name == "inspect") { return binInspect(t) }
+        if (name == "dump") { return encStr(rbsDump(b, enc == "UTF-8"), enc) }
+        if (name == "undump") { return strUndump(b, enc) }
         if (name == "encoding") { return encObj(enc) }
         // force_encoding changes the box in place; bytes that become valid UTF-8
         // turn it into an ordinary String box, so every alias sees the change.
-        if (name == "force_encoding") {
-            var fe = encArgName(args[0])
-            var fv = anytype
-            fv = encStr(b, fe)
-            if (isBin(fv)) {
-                t.__benc = fv.__benc
-                return t
-            }
-            t.__rs = fv.__rs
-            t.__fz = false
-            t.__rbin = undefined
-            t.__benc = undefined
-            return t
+        if (name == "force_encoding") { return binRetag(t, b, encArgName(args[0])) }
+        if (name == "setbyte") {
+            binRetag(t, setByte(b, args), enc)
+            return args[1]
         }
         if (name == "b") { return mkBin(b) }
         if (name == "byteslice") { return byteSlice(b, enc, args) }
@@ -4147,12 +4166,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // rbEncArg in lib/ruby-rt.metajs.
     function encArgName(e) {
         if (isUserObj(e) && e.__renc !== undefined) { return e.__renc }
-        var n = rstr(e).toUpperCase()
-        if (n == "BINARY" || n == "ASCII-8BIT") { return "ASCII-8BIT" }
-        if (n == "US-ASCII" || n == "ASCII") { return "US-ASCII" }
-        if (n == "UTF-8") { return "UTF-8" }
-        raiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rstr(e))
-        return ""
+        var n = rbsEncCanon(rstr(e))
+        if (n == "") { raiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rstr(e)) }
+        return n
+    }
+    // String#undump of the bytes b of a String in encoding enc (rbsUndump in
+    // lib/ruby-str.js). Twins: rubyStrUndump in abnf/jsrtrubystr.go,
+    // rbStrUndump in lib/ruby-rt.metajs.
+    function strUndump(b, enc) {
+        var r = anytype
+        r = rbsUndump(b)
+        if (!r.ok) { raiseErr("undump", "RuntimeError", r.msg) }
+        return encStr(r.b, r.enc == "" ? enc : r.enc)
     }
     // String#encode, and #scrub with no block, of the bytes b in encoding enc
     // (rbsEncode in lib/ruby-str.js): encode(dst = enc, src = enc, invalid:
@@ -4334,6 +4359,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "replace") { b.__rs = rstr(args[0]); return b }
         if (name == "clear") { b.__rs = ""; return b }
+        if (name == "setbyte") {
+            var sv = anytype
+            sv = encStr(setByte(rbsBinOf(b.__rs), args), "UTF-8")
+            if (isBin(sv)) { becomeBin(b, sv) } else { b.__rs = sv.__rs }
+            return args[1]
+        }
         if (name == "[]=") {
             var nv = anytype
             nv = rsetSlice(b.__rs, args[0], args.length > 2 ? args[1] : undefined, args[args.length - 1])
@@ -4879,7 +4910,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var k = 0; k < list.length; k++) { blockCall(blk, [boxOut(target, list[k])]) }
             return {ok: true, v: target}
         }
-        if (name == "dump") { return {ok: true, v: strInspect(target)} }
+        if (name == "dump") { return {ok: true, v: rbsDump(rbsBinOf(target), true)} }
+        if (name == "undump") { return {ok: true, v: strUndump(rbsBinOf(target), "UTF-8")} }
         // String#slice! on a plain string answers the REMOVED part; nothing holds
         // the string to see the removal (a held one is a box, see strMutate).
         if (name == "slice!") { return {ok: true, v: mcall(target, "slice", args, blk)} }

@@ -2709,10 +2709,11 @@ var rubyRespondNames = map[string][]string{
 		"include?", "index", "insert", "instance_of?", "instance_variables", "intern", "is_a?",
 		"kind_of?", "length", "lines", "ljust", "lstrip", "lstrip!", "match", "match?", "next", "next!",
 		"nil?", "oct", "ord", "partition", "prepend", "public_send", "replace", "reverse", "reverse!",
-		"rindex", "rjust", "rpartition", "rstrip", "rstrip!", "scan", "scrub", "send", "size", "slice",
-		"slice!", "split", "squeeze", "squeeze!", "start_with?", "strip", "strip!", "sub", "sub!", "succ",
-		"succ!", "sum", "swapcase", "swapcase!", "to_f", "to_i", "to_str", "to_sym", "tr", "tr!", "tr_s",
-		"tr_s!", "unicode_normalize", "unicode_normalized?", "unpack", "unpack1", "upcase", "upcase!",
+		"rindex", "rjust", "rpartition", "rstrip", "rstrip!", "scan", "scrub", "send", "setbyte", "size",
+		"slice", "slice!", "split", "squeeze", "squeeze!", "start_with?", "strip", "strip!", "sub", "sub!",
+		"succ", "succ!", "sum", "swapcase", "swapcase!", "to_c", "to_f", "to_i", "to_r", "to_str", "to_sym",
+		"tr", "tr!", "tr_s", "tr_s!", "undump", "unicode_normalize", "unicode_normalized?", "unpack",
+		"unpack1", "upcase", "upcase!",
 		"upto", "valid_encoding?"},
 	"Symbol": {"<", "<=", "<=>", ">", ">=", "[]", "between?", "capitalize", "clamp", "downcase",
 		"empty?", "equal?", "frozen?", "id2name", "instance_of?", "instance_variables", "is_a?",
@@ -2847,7 +2848,7 @@ var rubyArityNames = map[string][]string{
 		"swapcase!", "to_i", "unicode_normalize", "unicode_normalized?", "upcase", "upto"},
 	"String 1": {"casecmp", "casecmp?", "delete_prefix", "delete_prefix!", "delete_suffix",
 		"delete_suffix!", "force_encoding", "getbyte", "partition", "replace", "rpartition"},
-	"String 2":  {"insert", "tr", "tr!", "tr_s", "tr_s!"},
+	"String 2":  {"insert", "setbyte", "tr", "tr!", "tr_s", "tr_s!"},
 	"Symbol -1": {"capitalize", "downcase", "swapcase", "upcase"},
 	"Array -1": {"append", "concat", "each_with_index", "fetch", "fill", "flatten", "flatten!",
 		"index", "insert", "join", "permutation", "pop", "prepend", "product", "push", "rindex",
@@ -2925,10 +2926,11 @@ var rubyOwnNames = map[string][]string{
 		"encode", "end_with?", "force_encoding", "freeze", "getbyte", "hash", "hex", "include?",
 		"index", "insert", "inspect", "intern", "length", "lines", "ljust", "lstrip", "lstrip!",
 		"next", "oct", "ord", "partition", "prepend", "replace", "reverse", "reverse!", "rindex",
-		"rjust", "rpartition", "rstrip", "rstrip!", "scrub", "size", "slice", "slice!", "split",
-		"squeeze", "squeeze!", "start_with?", "strip", "strip!", "succ", "sum", "swapcase",
-		"swapcase!", "to_f", "to_i", "to_s", "to_str", "to_sym", "tr", "tr!", "tr_s", "tr_s!",
-		"unicode_normalize", "unicode_normalized?", "upcase", "upto", "valid_encoding?"},
+		"rjust", "rpartition", "rstrip", "rstrip!", "scrub", "setbyte", "size", "slice", "slice!",
+		"split", "squeeze", "squeeze!", "start_with?", "strip", "strip!", "succ", "sum", "swapcase",
+		"swapcase!", "to_c", "to_f", "to_i", "to_r", "to_s", "to_str", "to_sym", "tr", "tr!", "tr_s",
+		"tr_s!", "undump", "unicode_normalize", "unicode_normalized?", "upcase", "upto",
+		"valid_encoding?"},
 	"Symbol": {"<=>", "==", "===", "[]", "capitalize", "downcase", "empty?", "id2name",
 		"inspect", "length", "next", "size", "succ", "swapcase", "to_proc", "to_s", "to_sym",
 		"upcase"},
@@ -5473,6 +5475,15 @@ func (rt *jsrt) rubyStrMutate(b *jsRStr, name string, args []interface{}) interf
 	case "clear":
 		b.s = ""
 		return b
+	case "setbyte":
+		pos, _ := rubyBlockArgs(args)
+		switch nv := rubyEncStr(rt.rubySetByte(b.s, pos), "UTF-8").(type) {
+		case *jsRBin:
+			b.bin = nv
+		case *jsRStr:
+			b.s = nv.s
+		}
+		return argAt(pos, 1)
 	case "[]=":
 		var k2 interface{} = jsUndef
 		if len(args) > 2 {
