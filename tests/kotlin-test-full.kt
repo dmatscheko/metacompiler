@@ -7810,7 +7810,8 @@ fun s176() {
 // A super.toString() / equals() / hashCode() that no class above the caller declares
 // reaches kotlin.Any - also from a class with no superclass - and an enum's reaches
 // Enum.toString (the name), a Throwable's Throwable.toString. `::top` of a top-level
-// property is a KProperty0 that reads and writes the variable. An Array whose
+// property is a KProperty0 that reads and writes the variable, and a newline before
+// a `::` ends the statement in front of it. An Array whose
 // element type is a class the program declares has that class's JVM name, from a
 // type argument, a declared type or a shared element class. A reference to an
 // extension function is a function reference.
@@ -7831,6 +7832,7 @@ class Bx177(val v: Int)
 fun Bx177.ext177() = v + 1
 val top177 = 5
 var cnt177 = 1
+val lz177 by lazy { 40 + 2 }
 
 fun s177() {
     val x = X177()
@@ -7846,6 +7848,10 @@ fun s177() {
     r.set(9)
     check("ref177d", (::top177).toString() == "property top177" + nr && ::top177.name == "top177" && ::top177.get() == 5 &&
         (::top177)() == 5 && got == 7 && cnt177 == 9 && ::cnt177 == ::cnt177 && "${::top177}" == "property top177" + nr)
+    ::cnt177.set(12)
+    val q = nr
+    ::cnt177.set(cnt177 + 1)
+    check("ref177g", cnt177 == 13 && q == nr && ::lz177.get() == 42 && ::cnt177.invoke() == 13)
     val b = Bx177(1)
     check("ref177e", (b::ext177).toString() == "function ext177" + nr && (Bx177::ext177).toString() == "function ext177" + nr &&
         (b::v).toString() == "property v" + nr && (Bx177::ext177)(b) == 2 && (b::ext177)() == 2)
