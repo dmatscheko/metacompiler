@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1149** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1150** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -109,20 +109,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1147 kotlin: non-last vararg parameters, same-named nested class/object across owners (compiled), nested-object bound-ref arity (interp) · P2 · KT · IN PROGRESS (KT worker, round 45) [V]
+### T-1149 kotlin: function reference to a vararg function called with an array, interpreter by-name static return type · P3 · KT · OPEN [V]
 
-Found while working T-1144. The oracle is kotlinc 2.2.21 (stdlib only). Items 1 and 2 give wrong results or crashes on valid programs, hence P2.
+Found while working T-1147. The oracle is kotlinc 2.2.21 (stdlib only).
 
-1. A vararg parameter that is not the last parameter is broken in all engines:
-   - `fun fv(vararg xs: Int, tag: String) = xs.joinToString(",") + tag`
-     - `fv(1, 2, tag = "t")`: the oracle gives `1,2t`; the interpreter `1,22`; run and native `1,tt`.
-     - `fv(xs = intArrayOf(1,2), tag = "t")`: the oracle gives `1,2t`; run gives `1,2,t2`.
-     - `fv(*intArrayOf(1,2), 3, tag = "t")`: the oracle gives `1,2,3t`.
-   - `fun fd(vararg xs: Int, tag: String = "D")`: `fd(1,2)` gives `1,2D` in the oracle and `1,22` in all engines.
-   - `fun fl(vararg xs: Int, block: (Int) -> Int)` with `fl(1,2) { it*10 }`: the oracle gives `[10, 20]`. The interpreter aborts with "Value is not an object"; the compiled legs print nothing.
-   - The cause is that the callee collects everything from the vararg index onward (js_pyrest / bindParams), so positional slots after the vararg take vararg elements. The fix needs the caller to pack a non-last vararg (only named arguments or a trailing lambda can follow it), and to mark the trailing lambda syntactically, in both grammars.
-2. Compiled only: a nested class and a nested object with the same simple name in different owners break the class's constructor calls. Repro: `class A { class In(val a: Int); fun mk() = In(2).a }` plus `class B { object In { fun f() = 1 } }`, then `A().mk()`. The oracle and the interpreter print 2; run and native abort with "call of a non function value: [object Object]". The cause is that classNames is keyed by simple name, and the object overwrites it. Key it by binary name (Owner$In).
-3. Interpreter only: a bound reference to a method of a nested object has arity 0 when the program's methods of that name have different arities. Repro: `class Out { object In { fun f(a: Int) = a*2 } }` plus `class Q9 { fun f(a: Int, b: Int) = 1 }`. Then `val o = Out.In; o::f is Function1` is true in the oracle and false in the interpreter. The closure found on In's descriptor carries no fnMeta length, although kMethodArity set it on the closure it built, so something replaces the method later.
+1. A function reference to a vararg function, called with an array, is wrong. Last vararg: `fun fx(vararg xs: Int) = xs.sum(); val r = ::fx; println(r(intArrayOf(1, 2)))` prints 3 in the oracle and 0 in all engines. Non-last vararg: `fun fd(vararg xs: Int, tag: String = "D")`, then `val q = ::fd; q(intArrayOf(9, 8), "R")` gives `9,8R` in the oracle and in run/native, but `[9, 8],RD` in the interpreter. The cause is that a reference call passes the array as one element, and the callee re-collects the positional arguments. A KFunction of a vararg function takes the array as its parameter, so a reference call must bind it directly.
+2. Interpreter: the static type of `q.m().javaClass` is judged by method name. A second class declaring a `fun m(...)` with a List result made `q.m().javaClass.name` stop being "int" (assertion jstat160c in section 160). The lookup should use the receiver's declared class, and fall back to the name only when that class is unknown.
 
 Verify with `tests/probe.sh kotlin` on all four legs.
 
@@ -1220,6 +1212,7 @@ T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer e
 T-1143 bash: declaration error prefix rule, compiler run-time-circular and readonly nameref array decls, valueless local nameref subscript store, compiler step cost of comsub+extglob probes — merged 904aa2c2: this_command_name error prefix in both engines, compiler run-time readonly flags (readonly set after function definition), run-time-circular nameref array decls (rt_nref_loops), local -nr w=w; local w=(q) per oracle (ticket expectation was wrong), valueless local nameref subscript store, extglob strip literal-run filter (19-case probe >100M -> <10M steps); 4-leg probe (162 pattern removals + decl diagnostics) matches bash 5.3 stdout + stderr; bash gates green; bench +0.01%
 T-1144 kotlin: compiled named arguments evaluated in parameter order, not source order; qualified-object member references; same-named stdlib parameter order — merged f3844925: compiled named arguments evaluated in source order (slot-0 thunk evaluates in source order only when slots are out of order; positional calls unchanged), qualified object-value references bound (E.X::run, Cm::bite via js_ktbref/js_ktcref), stdlib/class same-name argument order chosen by receiver at run time; 4-leg probe incl. ++i ordering matches kotlinc 2.2.21; kotlin gates green; bench +0.05%
 T-1145 ruby: uncaught-exception report via $stderr, (1..).take, big Integer#step, compiled for over endless String range, define_method rescue-modifier crash, `{` after a command call parse, warn uplevel limits — merged e5203845: uncaught-exception report through $stderr.write in MRI print_errinfo shape (abort probe + launch.json updated), endless-range take/first/min(n) incl. negative-size errors, exact big Integer step/upto/downto/times/Range#step, for over endless String ranges, top-level define_method/alias_method NoMethodError instead of engine crash (full define_method needs Object instance methods: follow-up), block must start on the call's line; item 7 left as limits (uplevel>=2 needs per-call cost; rescue-clause line is an MRI line-table artifact); 4-leg probe matches ruby 2.6; matrix 605/605; bench -0.03%
+T-1147 kotlin: non-last vararg parameters, same-named nested class/object across owners (compiled), nested-object bound-ref arity (interp) — merged 2900b17f: non-last vararg parameters (caller packs the vararg slot, named args + trailing lambda placed after it, source-order evaluation kept; callee skips rest-collection) in both engines, nested class/object same simple name resolved by binary name in compiled code, nested-object method arity under goja (kNestedRec keeps the original value); 4-leg probe matches kotlinc 2.2.21; kotlin gates + gen-all green; bench IR byte-identical to base
 
 # Settled — do not re-open
 
