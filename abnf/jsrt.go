@@ -9936,7 +9936,7 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 			return rt.rubyInspect(t)
 		}
 		// A plain instance with no #to_s of its own: `#<A:0x...>'.
-		if n := rubyInstClassName(t); n != "" {
+		if n := rt.rubyInstClsPath(t); n != "" {
 			return rt.rubyObjToS(t, n)
 		}
 		if rxIsRegexObj(t) || rxIsMatchObj(t) {
@@ -10249,7 +10249,7 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		}
 		// Object#inspect never calls a user #to_s.
 		if _, isCls := t.props["__isclass"]; !isCls {
-			if n := rubyInstClassName(t); n != "" {
+			if n := rt.rubyInstClsPath(t); n != "" {
 				return rt.rubyObjInspect(t, n)
 			}
 		}
@@ -10276,8 +10276,26 @@ func (rt *jsrt) rubyClassText(o *jsObject, name string) string {
 	if ok {
 		return rt.rubyStr(rt.call(m, jsUndef, []interface{}{o}))
 	}
-	n, _ := o.props["__name"].(string)
-	return n
+	return rt.rubyClsPath(o)
+}
+
+// rubyClsPath is a class's name, or for an anonymous one (Class.new, Struct.new)
+// MRI's "#<Class:0x...>". Twin of clsPath in ruby-interpreter.abnf.
+func (rt *jsrt) rubyClsPath(c *jsObject) string {
+	if n, _ := c.props["__name"].(string); n != "" {
+		return n
+	}
+	return "#<Class:" + rubyObjAddr(rt.rubyObjectId(c)) + ">"
+}
+
+// rubyInstClsPath is the rubyClsPath of an instance's class, "" when it has none.
+func (rt *jsrt) rubyInstClsPath(o *jsObject) string {
+	if cls, ok := o.props["__class"].(*jsObject); ok {
+		if _, isStr := cls.props["__name"].(string); isStr {
+			return rt.rubyClsPath(cls)
+		}
+	}
+	return ""
 }
 
 // rubyInstClassName is the __name of an instance's class, "" when it has none.
@@ -12377,6 +12395,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			// Class#name, #to_s and #inspect are the class NAME.
 			switch name {
 			case "name", "to_s", "inspect":
+				if _, sing := rubySingFind(o, name); name == "name" && !sing && o.props["__name"] == "" {
+					return jsNull
+				}
 				return rt.rubyClassText(o, name)
 			case "new":
 				return rt.rubyNew(o, args)

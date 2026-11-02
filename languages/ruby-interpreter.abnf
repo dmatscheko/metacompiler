@@ -6886,8 +6886,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // and rbClassText of lib/ruby-rt.metajs.
     function classText(v, name) {
         if (singRespond(v, name)) { return rstr(mcall(v, name, [], null)) }
-        return v.__name
+        return clsPath(v)
     }
+    // A class's name, or for an anonymous one (Class.new, Struct.new) MRI's
+    // "#<Class:0x...>". Twins: rubyClsPath in abnf/jsrtruby.go, rbClsPath in
+    // lib/ruby-rt.metajs.
+    function clsPath(c) { return c.__name != "" ? c.__name : "#<Class:" + rbaObjAddr(objectId(c)) + ">" }
     // MRI's Exception#inspect: "#<Class: to_s>", or the bare class name when to_s
     // is empty. Mirrors rubyExcInspect of abnf/jsrt.go.
     function excInspect(name, msg) {
@@ -8995,10 +8999,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // @y="s">' - or ` ...' for an object whose #inspect is already running, as
     // MRI cuts a cycle. Twins: rubyObjToS / rubyObjInspect in abnf/jsrtruby.go,
     // rbObjToS / rbObjInspect in lib/ruby-rt.metajs.
-    function objToS(v) { return "#<" + v.__class.__name + ":" + rbaObjAddr(objectId(v)) + ">" }
+    function objToS(v) { return "#<" + clsPath(v.__class) + ":" + rbaObjAddr(objectId(v)) + ">" }
     var objInspecting = []
     function objInspect(v) {
-        var head = "#<" + v.__class.__name + ":" + rbaObjAddr(objectId(v))
+        var head = "#<" + clsPath(v.__class) + ":" + rbaObjAddr(objectId(v))
         if (v.__ivn == undefined || v.__ivn.length == 0) { return head + ">" }
         for (var i = 0; i < objInspecting.length; i++) { if (objInspecting[i] === v) { return head + " ...>" } }
         objInspecting.push(v)
@@ -10697,6 +10701,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "new" && target === hostGlobals["Array"]) { return arrNew(args, blk) }
             if (name == "new" && target === hostGlobals["Regexp"]) { return regexNew(args) }
             if (name == "new" && target === hostGlobals["Struct"]) { return structNew(args) }
+            if (name == "new" && target === hostGlobals["Class"]) { return classNew(args, blk) }
             if (name == "new" && target === hostGlobals["Enumerator"] && blk != null) { return enumGenNew(args, blk) }
             if (name == "sqrt" && target === hostGlobals["Integer"]) { return intSqrt(args[0]) }
             // Regexp.last_match / last_match(n): $~, or its group n.
@@ -10720,7 +10725,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "new" && typeof lookupMethod(target, "$s$new") != "function" && typeof lookupMethod(target, "$x$new") != "function"
                 && typeof singFind(target, "new") != "function") { return newInstance(target, args, blk) }
             // A class method of the same name (`def self.to_s') answers instead.
-            if ((name == "name" || name == "to_s" || name == "inspect") && !singRespond(target, name)) { return target.__name }
+            // An anonymous class (Class.new) has no name until a constant names it.
+            if ((name == "name" || name == "to_s" || name == "inspect") && !singRespond(target, name)) {
+                return name == "name" && target.__name == "" ? null : clsPath(target)
+            }
             // Class#superclass: nil for a module, and a ROOT class answers Object
             // the way MRI does rather than the nil the __super slot holds.
             if (name == "superclass") {
@@ -14683,12 +14691,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curVis = "public"
         blkSelfFor = wrapCore(blk)
         blkSelf = cls
+        // The block binds its arguments as a Proc does, as instance_exec's.
+        blkSelfProc = true
         var r = anytype
         try { r = blockCall(blk, args) } finally {
             evalClass = savedEval
             curVis = savedVis
+            blkSelfProc = false
         }
         return r
+    }
+    // Class.new(superclass = Object) { |c| ... }: an anonymous class, announced to
+    // its superclass's #inherited, the block run as class_exec with it. Twins:
+    // rubyClassNew in abnf/jsrtruby.go, rbClassNew in lib/ruby-rt.metajs.
+    function classNew(args, blk) {
+        var sup = anytype
+        sup = args.length > 0 ? args[0] : null
+        if (sup !== null && (!isClassObj(sup) || sup.__ismodule === true)) {
+            raiseErr("initialize", "TypeError", "superclass must be a Class (" + classOf(sup).__name + " given)")
+        }
+        var cls = {__isclass: true, __name: "", __super: sup, __mixins: [], __prepends: []}
+        if (sup !== null) { runHook(sup, "inherited", cls) }
+        if (blk != null) { classEval(cls, [cls], blk) }
+        return cls
     }
     function blockMethodDef(o, sing, args, blk) {
         var nm = rstr(args[0])

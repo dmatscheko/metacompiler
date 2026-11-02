@@ -2270,7 +2270,7 @@ function rbStr(v) {
         if (typeof v["__renc"] == "string") { return v["__renc"] }
         if (v["__rubm"] !== undefined) { return rbInspect(v) }
         // A plain instance with no #to_s of its own: `#<A:0x...>'.
-        var cn = rbInstClassName(v)
+        var cn = rbInstClsPath(v)
         if (cn != "") { return rbObjToS(v, cn) }
         if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "to_s", [])) }
         if (rbIsEnum(v)) { return "#<Enumerator>" }
@@ -2434,7 +2434,7 @@ function rbInspect(v) {
         if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "inspect", [])) }
         // Object#inspect never calls a user #to_s.
         if (v["__isclass"] !== true) {
-            var icn = rbInstClassName(v)
+            var icn = rbInstClsPath(v)
             if (icn != "") { return rbObjInspect(v, icn) }
         }
     }
@@ -2454,7 +2454,22 @@ function rbClassText(o, name) {
         sc = sc["__super"]
     }
     if (m !== undefined) { return rbStr(m.apply(undefined, [o])) }
-    return o["__name"]
+    return rbClsPath(o)
+}
+
+// A class's name, or for an anonymous one (Class.new, Struct.new) MRI's
+// "#<Class:0x...>". Twin of rubyClsPath in abnf/jsrt.go.
+function rbClsPath(c) {
+    var n = c["__name"]
+    if (n != "") { return n }
+    return "#<Class:" + rbaObjAddr(rbObjectId(c)) + ">"
+}
+
+// The rbClsPath of an instance's class, "" when it has none.
+function rbInstClsPath(o) {
+    var cls = o["__class"]
+    if (rbIsObj(cls) && typeof cls["__name"] == "string") { return rbClsPath(cls) }
+    return ""
 }
 
 // The __name of an instance's class, "" when it has none.
@@ -9508,8 +9523,8 @@ function rbSuperBuiltin(self, name, args) {
         return null
     }
     if (name == "to_s" && rbExcInst(self)) { return rbExcMessage(self) }
-    if (name == "to_s") { return rbObjToS(self, self["__class"]["__name"]) }
-    if (name == "inspect") { return rbObjInspect(self, self["__class"]["__name"]) }
+    if (name == "to_s") { return rbObjToS(self, rbInstClsPath(self)) }
+    if (name == "inspect") { return rbObjInspect(self, rbInstClsPath(self)) }
     if (name == "message" && rbExcInst(self)) { return rbStr(self) }
     if (name == "hash") { return rbStrHash("o" + rbInspect(rbObjectId(self))) }
     if (name == "object_id") { return rbObjectId(self) }
@@ -10304,7 +10319,10 @@ function rbMethod(target, name, args) {
                 sc = sc["__super"]
             }
             // Class#name, #to_s and #inspect are the class NAME.
-            if (name == "name" || name == "to_s" || name == "inspect") { return rbClassText(target, name) }
+            if (name == "name" || name == "to_s" || name == "inspect") {
+                if (name == "name" && target["__name"] === "" && rbSingFind(target, name) === undefined) { return null }
+                return rbClassText(target, name)
+            }
             if (name == "new") { return js_rnew(target, args) }
             if (name == "sqrt" && target["__rbuiltin"] === "Integer") { return rbIntSqrt(rbArgAt(args, 0)) }
             // Regexp.last_match / last_match(n): $~, or its group n.
@@ -11492,6 +11510,39 @@ function js_rconstname(v, name) {
 }
 // Struct.new(:a, :b [, keyword_init: true]). Twin of rubyStructNew in
 // abnf/jsrtruby.go, which says how the values are kept.
+// Class.new(superclass = Object) { |c| ... }. Twin of rubyClassNew in
+// abnf/jsrtruby.go, which states the rule.
+function rbClassNew(argv) {
+    var cls = {__isclass: true, __name: ""}
+    var builtinSuper = true
+    var sup = anytype
+    sup = rbNPos(argv) > 0 ? argv[0] : null
+    if (!rtIsNil(sup)) {
+        if (!rbIsObj(sup) || sup["__isclass"] !== true || sup["__ismodule"] === true) {
+            rbRaiseErr("initialize", "TypeError", "superclass must be a Class (" + rbStr(rbMethod(sup, "class", [])) + " given)")
+        }
+        builtinSuper = sup["__rbuiltin"] !== undefined
+        cls["__super"] = sup
+        rbHook(sup, "inherited", cls)
+    }
+    if (builtinSuper) {
+        cls["initialize"] = function(self) {
+            var rest = []
+            var n = rbNPos(arguments)
+            var i = 1
+            while (i < n) { rest.push(arguments[i]); i = i + 1 }
+            self["__args"] = rest
+            return null
+        }
+    }
+    var blk = anytype
+    blk = rbBlockOf(argv)
+    if (blk !== null) {
+        if (argv[argv.length - 1]["__rself"] === true) { blk.apply(undefined, [cls, cls]) } else { blk.apply(undefined, [cls]) }
+    }
+    return cls
+}
+
 function rbStructNew(argv) {
     var names = []
     var kwi = false
@@ -11785,6 +11836,7 @@ function js_rnew(cls, args) {
             if (bn == "Hash") { return rbNewHash(argv) }
             if (bn == "Regexp") { return rbRegexNew(argv) }
             if (bn == "Struct") { return rbStructNew(argv) }
+            if (bn == "Class") { return rbClassNew(argv) }
             if (bn == "Enumerator" && rbBlockOf(argv) !== null) { return rbEnumGenNew(rbPosArgs(argv), rbBlockOf(argv)) }
             return rbExc(cls, argv)
         }

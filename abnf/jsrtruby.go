@@ -685,6 +685,46 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	}
 }
 
+// rubyClassNew is Class.new(superclass = Object) { |c| ... }: an anonymous class,
+// announced to its superclass's #inherited, the block run as class_exec with it.
+// Twins: classNew in ruby-interpreter.abnf, rbClassNew in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyClassNew(argv []interface{}) interface{} {
+	pos, blk := rubyBlockArgs(argv)
+	cls := newJSObject()
+	cls.set("__isclass", true)
+	cls.set("__name", "")
+	builtinSuper := true
+	if len(pos) > 0 && !isUndefOrNull(pos[0]) {
+		sup, isObj := pos[0].(*jsObject)
+		if !isObj || sup.props["__isclass"] != true || sup.props["__ismodule"] == true {
+			rt.rubyRaiseErr("initialize", "TypeError", "superclass must be a Class ("+rt.rubyStr(rt.rubyMethod(pos[0], "class", nil))+" given)")
+		}
+		_, builtinSuper = sup.props["__rbuiltin"]
+		cls.set("__super", sup)
+		rt.rubyHook(sup, "inherited", cls)
+	}
+	// The default initialize a compiled class over a builtin gets (makeClassStmt
+	// in ruby-to-llvm-ir.abnf): the arguments kept where Exception#message reads
+	// them.
+	if builtinSuper {
+		cls.set("initialize", &hostFunc{name: "method:initialize", fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			if self, ok := a[0].(*jsObject); ok {
+				pa, _ := rubyBlockArgs(a[1:])
+				self.set("__args", &jsArray{elems: append([]interface{}{}, pa...)})
+			}
+			return jsNull
+		}})
+	}
+	if blk != nil {
+		if _, lit := argv[len(argv)-1].(*jsObject).props["__rself"]; lit {
+			rt.call(blk, jsUndef, []interface{}{cls, cls})
+		} else {
+			rt.call(blk, jsUndef, []interface{}{cls})
+		}
+	}
+	return cls
+}
+
 // rubyStructNew is Struct.new(:a, :b [, keyword_init: true]): a new class, a
 // subclass of Struct, with a reader and a writer per member and the Struct
 // instance methods. The member values live in the hidden array slot __sv, in member
@@ -4394,7 +4434,7 @@ func (rt *jsrt) rubySuperBuiltin(self interface{}, name string, args []interface
 		if msg, ok := rt.rubyExcMessage(o); ok && name == "to_s" && rubyExcInst(o) {
 			return msg
 		}
-		cn, _ := o.props["__class"].(*jsObject).props["__name"].(string)
+		cn := rt.rubyInstClsPath(o)
 		if name == "to_s" {
 			return rt.rubyObjToS(o, cn)
 		}
@@ -4450,6 +4490,8 @@ func (rt *jsrt) rubyNew(clsV interface{}, argv []interface{}) interface{} {
 				return rt.rubyRegexNew(argv)
 			case "Struct":
 				return rt.rubyStructNew(argv)
+			case "Class":
+				return rt.rubyClassNew(argv)
 			case "Enumerator":
 				if pos, blk := rubyBlockArgs(argv); blk != nil {
 					return rt.rubyEnumGenNew(pos, blk)

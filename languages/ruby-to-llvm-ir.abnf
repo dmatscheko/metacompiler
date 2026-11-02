@@ -947,7 +947,7 @@ PowExpr     <~~ push(makePow(takeAll())) ~~>
 
 // obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
 // block (do..end or {..}) becomes the last argument of the method call.
-PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
+PostfixExpr <~~ push(foldCallMember(classNewEval(takeAll(), up.in))) ~~>
             = Primary PrimaryEnd { CallSfx | CmdMethodSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
 // obj.m a, b - the parenthesis-less call WITH a receiver (`ScratchPad.record []`,
 // `self.class.send :define_method, m do |x| ... end`, `a.should_receive :m`). It has
@@ -4061,6 +4061,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return r
         }
     }
+    // The literal block of `Class.new(...)' runs as class_exec's does, self the
+    // new class, so it is re-read the way dmArgs reads class_exec's. txt is the
+    // postfix chain as matched. Twin of classNew in ruby-interpreter.abnf.
+    function classNewEval(items, txt) {
+        if (items.length < 3 || txt.slice(0, 9) != "Class.new" || items[2].kind != "mcall" || items[2].name != "new") { return items }
+        var args = items[2].args
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (a != null && a != undefined && typeof a != "function" && a.blkMethT != undefined && a.twinCall == "new") {
+                args[i] = dmArgs("class_exec", [a], "")[0]
+            }
+        }
+        return items
+    }
     function dmArgs(name, args, txt) {
         if (isEvalName(name)) {
             var eo = []
@@ -4068,7 +4082,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var ea = args[ei]
                 if (ea != null && ea != undefined && typeof ea != "function" && ea.blkMethT != undefined) {
                     evalDefsOut(ea.blkFrom, ea.blkTo)
-                    eo.push({blkKinds: ea.blkKinds, blkSplat: ea.blkSplat, blkT: evalBlockT(ea.blkMethT), blkSelf: true})
+                    eo.push({blkKinds: ea.blkKinds, blkSplat: ea.blkSplat, blkT: evalBlockT(ea.blkSelfT), blkSelf: true})
                 } else { eo.push(ea) }
             }
             return eo
@@ -4090,7 +4104,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (a != null && a != undefined && typeof a != "function" && a.blkMethT != undefined) {
                 lit = true
                 if (dm) { out.push({blkKinds: a.blkKinds, blkSplat: a.blkSplat, blkT: isIEvalName(name) ? a.blkSelfT : a.blkMethT, blkSelf: true}) }
-                else { out.push({blkKinds: a.blkKinds, blkSplat: a.blkSplat, blkT: a.blkT, blkMethT: a.blkMethT, twinCall: name}) }
+                else { out.push({blkKinds: a.blkKinds, blkSplat: a.blkSplat, blkT: a.blkT, blkMethT: a.blkMethT, blkSelfT: a.blkSelfT, blkFrom: a.blkFrom, blkTo: a.blkTo, twinCall: name}) }
             } else { out.push(a) }
         }
         if (dm && !isIEvalName(name)) {

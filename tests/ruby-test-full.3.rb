@@ -1464,6 +1464,46 @@ def s190
   x = +"ab"
   check("sb190e", x.scrub!.equal?(x) && x.encode!("UTF-8").equal?(x) && x.unicode_normalize!.equal?(x) && x == "ab")
 end
+# ===== SECTION 191: Class.new =====
+# Class.new(superclass = Object) answers an anonymous class: no name, rendered
+# "#<Class:0x...>", announced to the superclass's #inherited, reflected by
+# ancestors / include? / superclass / <. Its block runs as class_exec, self the
+# new class and the class its argument, closing over the caller's locals; a
+# superclass that is not a class is a TypeError. class_exec binds its arguments
+# as a Proc does. /usr/bin/ruby 2.6 settles each.
+class S191B
+  def self.inherited(k); (@kids ||= []) << k; end
+  def self.kids; @kids; end
+  def hi; "hi"; end
+end
+module S191M; def mm; "mm"; end; end
+def s191
+  x = 7
+  got = nil
+  c = Class.new(S191B) do |k|
+    got = k
+    include S191M
+    define_method(:sev) { x }
+    def two; 2; end
+  end
+  o = c.new
+  check("cn191a", c.name.nil? && c.to_s.start_with?("#<Class:0x") && c.inspect == c.to_s && "#{c}" == c.to_s &&
+        o.inspect.start_with?("#<#<Class:0x") && S191B.kids.size == 1 && S191B.kids[0].equal?(c) && got.equal?(c))
+  check("cn191b", [o.sev, o.two, o.hi, o.mm] == [7, 2, "hi", "mm"] && c.instance_methods(false).sort == [:sev, :two] &&
+        c.superclass == S191B && c < S191B && c.include?(S191M) && c.include?(Kernel) && c.ancestors.first.equal?(c) &&
+        c.ancestors.take(4) == [c, S191M, S191B, Object] && c.ancestors.last == BasicObject && o.is_a?(S191B) && o.class.equal?(c))
+  d = Class.new
+  e = Class.new(StandardError)
+  m = begin; raise e, "boom"; rescue StandardError => ex; [ex.message, ex.class.equal?(e)]; end
+  t = begin; Class.new(S191M); rescue TypeError => ex2; ex2.message; end
+  check("cn191c", d.superclass == Object && d.ancestors.take(2) == [d, Object] && d.new.class.equal?(d) &&
+        d.class == Class && !d.equal?(Class.new) && m == ["boom", true] && t == "superclass must be a Class (Module given)" &&
+        Class.new(Class.new(S191B)).ancestors.size == S191B.ancestors.size + 2)
+  S191B.class_exec(5) do
+    def three; 3; end
+  end
+  check("cn191d", S191B.new.three == 3 && S191B.class_exec(4, 5) { |a| a } == 4)
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1501,5 +1541,6 @@ s187() # SECTION-CALL 187
 s188() # SECTION-CALL 188
 s189() # SECTION-CALL 189
 s190() # SECTION-CALL 190
+s191() # SECTION-CALL 191
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
