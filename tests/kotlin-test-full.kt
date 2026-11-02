@@ -7936,6 +7936,71 @@ fun s178() {
 }
 
 
+// ===== SECTION 179: an unassigned lateinit read, `is FunctionN`, a lambda's class, an array's KClass =====
+// Reading a top-level or local `lateinit var` before it is assigned throws
+// UninitializedPropertyAccessException, and the modifier stays with its own
+// declaration; a nullable local of the same name reads null. Every function value
+// is a kotlin.Function, and a lambda, an anonymous function or a top-level function
+// reference is the FunctionN of its arity: its parameters, or the implicit `it` it
+// reads, plus a declared receiver. A nullable generic type holds null. A lambda's
+// JVM class (AKt$$Lambda/0x...) is not reproducible, so only how its name relates
+// to toString and ::class is asserted. An array's KClass is its JVM array class
+// ([LDg179;, [I), named Array / IntArray.
+class Dg179
+lateinit var late179: String
+class Nl179 { var x: String? = null }
+fun read179(): String = late179
+fun shadow179(): String? { val late179: String? = null; return late179 }
+fun two179(a: Int, b: Int) = a + b
+
+fun s179() {
+    var msg = ""
+    try { msg = read179() } catch (e: UninitializedPropertyAccessException) { msg = e.message ?: "" }
+    var tpl = ""
+    try { tpl = "v=$late179" } catch (e: UninitializedPropertyAccessException) { tpl = "threw" }
+    check("lat179a", msg == "lateinit property late179 has not been initialized" && tpl == "threw" &&
+        shadow179() == null && Nl179().x == null)
+    lateinit var loc: String
+    var lmsg = ""
+    try { lmsg = loc } catch (e: UninitializedPropertyAccessException) { lmsg = e.message ?: "" }
+    loc = "L"
+    late179 = "x"
+    check("lat179b", lmsg == "lateinit property loc has not been initialized" && loc == "L" && read179() == "x")
+    val fs = listOf<Any>({ 1 }, { x: Int -> x }, { x: Int, y: Int -> x + y }, "s", 3)
+    val ar = fs.map { v ->
+        (if (v is Function0<*>) "0" else "") + (if (v is Function1<*, *>) "1" else "") +
+            (if (v is Function2<*, *, *>) "2" else "") + (if (v is Function<*>) "f" else "")
+    }
+    check("fn179c", ar == listOf("0f", "1f", "2f", "", ""))
+    val w = fs.map { v -> when (v) { is Function0<*> -> "f0"; is Function1<*, *> -> "f1"; !is Function2<*, *, *> -> "no"; else -> "f2" } }
+    check("fn179d", w == listOf("f0", "f1", "f2", "no", "no"))
+    val it1: (Int) -> Int = { it * 2 }
+    val rc: Int.() -> Int = { this + 1 }
+    val a1: Any = it1
+    val a2: Any = rc
+    val a3: Any = ::two179
+    val an: Any = fun(x: Int): Int { return x }
+    val tf: (Int) -> String = { "<$it>" }
+    val tp: Any = tf
+    val n: Any? = null
+    check("fn179e", a1 is Function1<*, *> && a1 !is Function0<*> && a2 is Function1<*, *> && an is Function1<*, *> && tp is Function1<*, *> &&
+        a3 is Function2<*, *, *> && a3 !is Function1<*, *> && n is Function0<*>? && n is List<*>? && n !is Function0<*>)
+    val f0 = { 1 }
+    val jn = f0.javaClass.name
+    check("cls179f", jn.isNotEmpty() && f0.toString().startsWith(jn + "@") && f0::class.java.name == jn &&
+        f0.javaClass == f0::class.java)
+    val arr = arrayOf(Dg179())
+    val ia = intArrayOf(1)
+    check("arr179g", arr::class.java.name == "[LDg179;" && "${arr::class.java}" == "class [LDg179;" &&
+        arr::class.simpleName == "Array" && arr::class.qualifiedName == "kotlin.Array" &&
+        arr::class.java.simpleName == "Dg179[]" && arr::class.java == arr.javaClass && arr.javaClass.kotlin == arr::class &&
+        arr::class == arrayOf(Dg179())::class && arr::class != arrayOf("a")::class)
+    check("arr179h", ia::class.java.name == "[I" && "${IntArray::class.java}" == "class [I" && ia::class == IntArray::class &&
+        ia::class.simpleName == "IntArray" && ia::class.qualifiedName == "kotlin.IntArray" &&
+        arrayOf("a")::class.java.name == "[Ljava.lang.String;")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -8111,6 +8176,7 @@ fun main() {
     s176() // SECTION-CALL 176
     s177() // SECTION-CALL 177
     s178() // SECTION-CALL 178
+    s179() // SECTION-CALL 179
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

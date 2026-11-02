@@ -257,6 +257,26 @@ function ktNoteLamIt(items, at) {
     d.lfn = function() { return ktLamParamTy(at, -1) }
     ktAt = saved
 }
+// The offsets of the words `it` walked so far that no lambda has claimed.
+var ktItWords = []
+function ktNoteIt(at) { ktItWords.push(at) }
+// Whether the lambda at [from, to), parts items, reads its implicit `it`, which
+// makes its arity 1 (Function1) rather than 0. A lambda without a parameter list
+// claims every unclaimed `it` inside it; a nested one was walked first and has
+// claimed its own, and one with a parameter list claims none, so an `it` it reads
+// belongs to the lambda around it.
+function ktLamClaimsIt(items, from, to) {
+    for (var i = 0; i < items.length; i++) {
+        if (items[i] != undefined && items[i].lparams != undefined) { return false }
+    }
+    var keep = []
+    var hit = false
+    for (var j = 0; j < ktItWords.length; j++) {
+        if (ktItWords[j] >= from && ktItWords[j] < to) { hit = true } else { keep.push(ktItWords[j]) }
+    }
+    ktItWords = keep
+    return hit
+}
 // The static type of the lambda parameter at offset at (its name n characters
 // long): its written type, else ktLamParamTy's for the lambda's only parameter or
 // either of exactly two (`{ i, e -> ... }`).

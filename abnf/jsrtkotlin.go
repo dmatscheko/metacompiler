@@ -1630,6 +1630,13 @@ func init() {
 				b := ktTypeBase(rt.toString(u(a[1])))
 				return boolH(b == "Any" || b == "Unit")
 			}
+			if is, ok := ktFnTypeIs(v, rt.toString(u(a[1]))); ok {
+				return boolH(is)
+			}
+			// A nullable type holds null, generic or not (`List<*>?`).
+			if v == jsNull && strings.HasSuffix(rt.toString(u(a[1])), "?") {
+				return boolH(true)
+			}
 			if mk := ktMarkerName(ktTypeBase(rt.toString(u(a[1])))); mk != "" {
 				if is, ok := ktMarkerIs(v, mk); ok {
 					return boolH(is)
@@ -3122,6 +3129,25 @@ func init() {
 			return 0
 		}
 
+		// js_ktlatechk(env, name) is a read of a top-level or local `lateinit var`
+		// that found null: when the binding it found is the lateinit one (its scope
+		// also binds name$late, see makeBareDecl in kotlin-to-llvm-ir.abnf) the
+		// property was never assigned and Kotlin throws. A nullable local of the same
+		// name shadowing it answers normally. Twin of kTopLateCheck in
+		// kotlin-interpreter.abnf.
+		m["js_ktlatechk"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
+				if _, ok := s.get(name); ok {
+					if _, late := s.get(name + "$late"); late {
+						rt.ktRaise("UninitializedPropertyAccessException",
+							"lateinit property "+name+" has not been initialized")
+					}
+					break
+				}
+			}
+			return w(jsUndef)
+		}
 		// js_ktrecvof(env, name, iscall) is the implicit receiver whose class
 		// declares `name` - an own field, an accessor, or in call position a method -
 		// innermost first, for a name a top-level declaration also binds; undefined
@@ -4408,6 +4434,13 @@ func ktJvmClass(v interface{}) interface{} {
 	if bn := jvBoxName(v); bn != "" {
 		return "java.lang." + bn
 	}
+	if isCallable(v) {
+		if _, isRef := ktRefOf(v); !isRef {
+			if _, named := ktFuncNames[v]; !named {
+				return ktLambdaClass
+			}
+		}
+	}
 	return ktSimpleName(v)
 }
 
@@ -4537,6 +4570,10 @@ func (rt *jsrt) ktpRender(v interface{}, depth int) string {
 	return rt.toString(v)
 }
 
+// ktLambdaClass stands in for a lambda's hidden JVM class, AKt$$Lambda/0x...: its
+// stable part, which the lambda's toString and javaClass.name share.
+const ktLambdaClass = "$$Lambda"
+
 // ktNoReflect is what Kotlin/JVM appends to a reference's toString without
 // kotlin-reflect on the class path (the stdlib alone).
 const ktNoReflect = " (Kotlin reflection is not available)"
@@ -4556,7 +4593,7 @@ func ktFnStr(v interface{}) string {
 		if n, has := ktFuncNames[v]; has {
 			return "function " + n + ktNoReflect
 		}
-		return "$$Lambda@1"
+		return ktLambdaClass + "@1"
 	}
 	if info.ctor {
 		return "constructor" + ktNoReflect
@@ -11216,6 +11253,29 @@ func ktCmpKeys(rt *jsrt, a, b interface{}, desc bool) int {
 // emitSuperLinks in kotlin-to-llvm-ir.abnf) is named t. Twin of ktDescIs in
 // languages/lib/kotlin-rt.metajs.
 // ktTypeBase is a type name without its type arguments and nullability mark.
+// ktFnTypeIs is `is` against a function type, for a callable v: every function is
+// a kotlin.Function, and the kotlin.jvm.functions.FunctionN of the arity its
+// creation recorded (js_jsfnmeta). ok is false when v is not callable or the type
+// is no function type. Twin of kFnTypeIs in kotlin-interpreter.abnf and
+// k4FnTypeIs in languages/lib/kotlin-rt.metajs.
+func ktFnTypeIs(v interface{}, t string) (is bool, ok bool) {
+	if !isCallable(v) {
+		return false, false
+	}
+	b := strings.TrimPrefix(strings.TrimPrefix(ktTypeBase(t), "kotlin.jvm.functions."), "kotlin.")
+	if b == "Function" {
+		return true, true
+	}
+	if !strings.HasPrefix(b, "Function") {
+		return false, false
+	}
+	n, err := strconv.Atoi(b[len("Function"):])
+	if err != nil {
+		return false, false
+	}
+	return jsvFnMeta(v).length == n, true
+}
+
 func ktTypeBase(t string) string {
 	if i := strings.IndexByte(t, '<'); i >= 0 {
 		t = t[:i]
@@ -12532,6 +12592,27 @@ func ktClassLit(name interface{}) *jsObject {
 	case "Any":
 		o.set("jname", "java.lang.Object")
 	}
+	// A primitive array type is its java array class: IntArray::class renders
+	// "class [I".
+	if n, isStr := name.(string); isStr && strings.HasSuffix(n, "Array") {
+		if jt := ktJavaOfType[n]; strings.HasPrefix(jt, "[") {
+			o.set("jname", jt)
+		}
+	}
+	return o
+}
+
+// ktArrKClass is the KClass of the java array class jn ([I, [LDog;): IntArray or
+// Array, which renders and names itself by jn. Twin of kArrKClass in
+// kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktArrKClass(jn string) *jsObject {
+	if len(jn) == 2 {
+		if i := strings.IndexByte("IJDFCZBS", jn[1]); i >= 0 {
+			return ktClassLit(ktPrimKNames[i] + "Array")
+		}
+	}
+	o := ktClassLit("Array")
+	o.set("jname", jn)
 	return o
 }
 
@@ -12550,6 +12631,10 @@ func ktKClassFq(o *jsObject) interface{} {
 	}
 	if fq, mapped := ktJvmKotlinFq[jn]; mapped {
 		return fq
+	}
+	if strings.HasPrefix(jn, "[") {
+		kn, _ := o.props["kname"].(string)
+		return "kotlin." + kn
 	}
 	return strings.ReplaceAll(jn, "$", ".")
 }
@@ -12597,6 +12682,16 @@ func ktClassOf(v interface{}) *jsObject {
 	if o, isObj := v.(*jsObject); isObj {
 		if cls, has := o.props["__class"].(*jsObject); has {
 			return ktClassOfDesc(cls)
+		}
+	}
+	// An array's KClass is IntArray / Array over its java class ([LDog;), a
+	// lambda's its hidden class.
+	if jc, isStr := ktJvmClass(v).(string); isStr {
+		if strings.HasPrefix(jc, "[") {
+			return ktArrKClass(jc)
+		}
+		if jc == ktLambdaClass {
+			return ktJavaClass(jc)
 		}
 	}
 	return ktClassLit(ktSimpleName(v))
@@ -12695,7 +12790,9 @@ var ktPrimWrappers = [...]string{"Integer", "Long", "Double", "Float", "Characte
 // kotlin-interpreter.abnf and ktKClassJava in languages/lib/kotlin-rt.metajs.
 func ktKClassJava(co *jsObject, wrapper bool) *jsObject {
 	if jn, has := co.props["jname"].(string); has {
-		if an, _ := co.props["anon"].(bool); an {
+		// An anonymous or array KClass's java class names itself apart: simpleName
+		// "" and Dog[].
+		if an, _ := co.props["anon"].(bool); an || strings.HasPrefix(jn, "[") {
 			return ktJavaClass(jn)
 		}
 		return co
@@ -12766,6 +12863,9 @@ func ktKClassOfJava(jc *jsObject) *jsObject {
 	}
 	if kn, _ := jc.props["kname"].(string); ktJavaOfType[kn] == jn {
 		return ktClassLit(kn)
+	}
+	if strings.HasPrefix(jn, "[") {
+		return ktArrKClass(jn)
 	}
 	return jc
 }

@@ -2724,6 +2724,10 @@ function k2Render(v, depth) {
     return "" + v
 }
 
+// ktLambdaClass (jsrtkotlin.go): the stand-in for a lambda's hidden JVM class,
+// which its toString and javaClass.name share.
+var KT_LAMBDA_CLASS = "$$Lambda"
+
 // k2FnStr is ktFnStr (jsrtkotlin.go): a function value's toString without
 // kotlin-reflect - "function g (Kotlin reflection is not available)", "property
 // v (...)" or "constructor (...)" for a reference, and for a lambda the stable
@@ -2734,7 +2738,7 @@ function k2FnStr(v) {
     if (info === undefined) {
         var n = rtPairGet(k4NameFns, k4NameStrs, v)
         if (typeof n == "string") { return "function " + n + nr }
-        return "$$Lambda@1"
+        return KT_LAMBDA_CLASS + "@1"
     }
     if (info["ctor"] === true) { return "constructor" + nr }
     var nm = info["name"]
@@ -4427,6 +4431,9 @@ function jxkClass(v) {
     }
     var cjc = ktCollJvmClass(v)
     if (cjc != "") { return cjc }
+    if (typeof v == "function") {
+        if (!k4IsRef(ktRefOf(v)) && rtPairGet(k4NameFns, k4NameStrs, v) === undefined) { return KT_LAMBDA_CLASS }
+    }
     var n = k4bSimpleName(v)
     if (sintIs(v) && sintUns(v)) { return "kotlin." + n }
     if (n == "Int") { return "java.lang.Integer" }
@@ -7438,7 +7445,32 @@ function js_ktequals(l, r) {
     return js_kteq(l, r, true)
 }
 // `x is T`, as the extern.
-function js_ktis(v, tname) { return ktIsType(v, tname) }
+function js_ktis(v, tname) {
+    // A nullable type holds null, generic or not (`List<*>?`).
+    if (v === null && tname.length > 0 && tname.charAt(tname.length - 1) == "?") { return true }
+    if (typeof v == "function") {
+        var fi = k4FnTypeIs(v, k4bStripQ(k4bStripAngle(tname)))
+        if (fi !== undefined) { return fi }
+    }
+    return ktIsType(v, tname)
+}
+// ktFnTypeIs (jsrtkotlin.go): `is` against a function type, for a function v -
+// a kotlin.Function, and the FunctionN of its recorded arity. undefined when the
+// type is no function type.
+function k4FnTypeIs(v, bt) {
+    var b = bt
+    if (b.indexOf("kotlin.jvm.functions.") == 0) { b = b.substring(21) }
+    if (b.indexOf("kotlin.") == 0) { b = b.substring(7) }
+    if (b == "Function") { return true }
+    if (b.length < 9 || b.indexOf("Function") != 0) { return undefined }
+    var n = 0
+    for (var i = 8; i < b.length; i++) {
+        var d = b.charCodeAt(i) - 48
+        if (d < 0 || d > 9) { return undefined }
+        n = n * 10 + d
+    }
+    return fnMeta(v, "length") == n
+}
 // js_ktcast (jsrtkotlin.go): `v as T` for a judged T, a ClassCastException when v
 // is not a T. null passes: the emitter has already raised the NullPointerException
 // for a non-null T.
@@ -7788,6 +7820,25 @@ function ktClassLit(name) {
     o["kname"] = name
     if (name === "String") { o["jname"] = "java.lang.String" }
     if (name === "Any") { o["jname"] = "java.lang.Object" }
+    // A primitive array type is its java array class.
+    if (typeof name == "string") {
+        var jt = ktJavaOfType["$" + name]
+        if (typeof jt == "string") {
+            if (jt.charAt(0) == "[") { o["jname"] = jt }
+        }
+    }
+    return o
+}
+
+// ktArrKClass (jsrtkotlin.go): the KClass of the java array class jn, IntArray or
+// Array, which renders and names itself by jn.
+function ktArrKClass(jn) {
+    if (jn.length == 2) {
+        var i = "IJDFCZBS".indexOf(jn.charAt(1))
+        if (i >= 0) { return ktClassLit(ktPrimKNames[i] + "Array") }
+    }
+    var o = ktClassLit("Array")
+    o["jname"] = jn
     return o
 }
 
@@ -7811,6 +7862,7 @@ function ktKClassFq(o) {
     }
     var fq = ktJvmKotlinFq["$" + jn]
     if (fq !== undefined) { return fq }
+    if (jn.charAt(0) == "[") { return "kotlin." + o["kname"] }
     var qn = ""
     var qi = 0
     while (qi < jn.length) {
@@ -7883,6 +7935,7 @@ function ktJavaClass(jc) {
 function ktKClassJava(co, wrapper) {
     if (co["jname"] !== undefined) {
         if (co["anon"] === true) { return ktJavaClass(co["jname"]) }
+        if (co["jname"].charAt(0) == "[") { return ktJavaClass(co["jname"]) }
         return co
     }
     if (!wrapper && co["rbox"] !== true) {
@@ -7918,6 +7971,7 @@ function ktKClassOfJava(jc) {
         i = i + 1
     }
     if (ktJavaOfType["$" + jc["kname"]] === jn) { return ktClassLit(jc["kname"]) }
+    if (jn.charAt(0) == "[") { return ktArrKClass(jn) }
     return jc
 }
 // KClass.javaPrimitiveType (jsrtkotlin.go ktKClassPrim): a primitive type's
@@ -8131,6 +8185,13 @@ function js_ktclasslit(base) {
     if (jc != "") { return ktJavaClass(jc) }
     var c = ktClassOf(base)
     if (c !== undefined) { return ktClassOfDesc(c) }
+    // An array's KClass is IntArray / Array over its java class, a lambda's its
+    // hidden class.
+    var vjc = jxkClass(base)
+    if (typeof vjc == "string") {
+        if (vjc.charAt(0) == "[") { return ktArrKClass(vjc) }
+        if (vjc == KT_LAMBDA_CLASS) { return ktJavaClass(vjc) }
+    }
     return ktClassLit(k4bSimpleName(base))
 }
 
@@ -12849,6 +12910,20 @@ function k6Owner(env, name) {
     while (s !== undefined && s !== null) {
         if (scopeHas(s, name)) { return s }
         s = scopeParent(s)
+    }
+    return undefined
+}
+
+// js_ktlatechk (jsrtkotlin.go): a read of a top-level or local `lateinit var`
+// that found null throws when the binding is the lateinit one, whose scope also
+// binds name$late.
+function js_ktlatechk(env, name) {
+    var s = k6Owner(env, name)
+    if (s !== undefined) {
+        if (scopeHas(s, name + "$late")) {
+            ktRaise("UninitializedPropertyAccessException",
+                "lateinit property " + name + " has not been initialized")
+        }
     }
     return undefined
 }

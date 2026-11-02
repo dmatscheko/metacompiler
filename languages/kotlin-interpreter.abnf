@@ -123,7 +123,11 @@ The entry point is fun main(); self checking programs end with exitProcess(failu
 // that lets a keyword or an otherwise illegal spelling be used as a name) or a plain
 // identifier. Every production below names it KId rather than the shared Id, so the
 // quoted form is accepted everywhere a name may appear.
-KId         = IdBacktick | NotHardKw Id ;
+// The word `it` is noted where it is walked (ktNoteIt), so a lambda without a
+// parameter list knows whether it reads its implicit parameter (ktLamClaimsIt).
+KId         = ItWord | IdBacktick | NotHardKw Id ;
+ItWord      <~~ ktNoteIt(up.start) ~~>
+            = "it" KwEnd ;
 // A zero-width guard that fails when the word at the position is one of Kotlin's HARD
 // keywords - the ones that can never be a bare name (Kotlin makes you write `class`
 // in backticks, which IdBacktick above still accepts). Without it every keyword the
@@ -913,7 +917,8 @@ PlainStmt   = Block | LocalTypeAlias | LocalClass | LocalTypeDecl | LocalExtFun 
 LocalModDecl = ModRun LocalModTarget ;
 // The modifiers are parsed and DROPPED: none of the targets below reads pendingMods, so
 // the run has to be drained here or it would leak into the next declaration that does.
-ModRun      <~~ takeMods() ~~>
+// Only `lateinit` survives, for BareDecl.
+ModRun      <~~ kNoteLate(takeMods()) ~~>
             = ( Modifier | CompanionMod | AnnEnumMod | VarianceMod ) Modifiers ;
 LocalModTarget = LocalExtFun | LocalFun | Destructure | DestructAssign | DelegateDecl | Decl | BareDecl ;
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
@@ -1033,7 +1038,8 @@ DeclTypeName <~~ push({dty: up.in}) ~~> = Type ;
 // wherever a definite assignment follows. It binds the name to null so later reads and
 // the assignment that fills it in both resolve. Tried after Decl, so an initialized
 // declaration is never split at its `=`.
-BareDecl    <~~ ktAt = up.start; push(makeDecl(takeAll())) ~~>
+// A `lateinit var` is one too (kLateDecl).
+BareDecl    <~~ ktAt = up.start; var it = takeAll(); push(kLateDecl(makeDecl(it), it[0], kTakeLate())) ~~>
             = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in) ~~> [ ":" DeclType ] [ ";" ] ;
 RecvFnType  <~~ push({recvFn: true}) ~~>
             = { TypeAnno } [ "suspend" KwEnd ] KId [ SkipAngle ] { "." KId [ SkipAngle ] } RecvFnTail [ "?" ] ;
@@ -1767,7 +1773,7 @@ ThisExpr    <~~ push(makeThisAt(pop())) ~~>
 // it rather than against the callee name the enclosing Call pushed; makeLambda pops it
 // again. Tags run while the parse tree is walked, so the optional prefix needs no
 // rollback care.
-Lambda      <~~ var lam = takeAll(); ktNoteLamIt(lam, up.start); ktNoteBody(up.start, up.pos); push(makeLambda(lam)) ~~>
+Lambda      <~~ var lam = takeAll(); ktNoteLamIt(lam, up.start); ktNoteBody(up.start, up.pos); push(makeLambda(lam, ktLamClaimsIt(lam, up.start, up.pos))) ~~>
             = [ LamLabel ] "{" [ LambdaParams ] { LamStmt } "}" ;
 LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> AtAdjacent "@" ;
 // A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
@@ -1861,7 +1867,7 @@ TplExpr     <~~ push({e: pop()}) ~~>
 // template - and with it the file - is refused, which is the point.
 // NotHardKw is the same guard KId uses; it leaves `this` and `super` alone, so `"$this"`
 // keeps working.
-TplVar      = "$" NotHardKw TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
+TplVar      = "$" NotHardKw TplName <~~ if (up.in == "it") { ktNoteIt(up.start) }; push({e: makeVarRef(up.in)}) ~~> ;
 TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 // A lone `$` - `"$"`, `"cost: 100$"`, `"$.$.asdf"`. Kotlin's own lexer makes a `$` that
 // is not followed by an identifier start or by `{` an ordinary REGULAR_STRING_PART:
@@ -7103,6 +7109,7 @@ NotMemberKw = :script(~~ "pure";
         }
         var cjc = kCollJvmClass(v)
         if (cjc != "") { return cjc }
+        if (typeof v == "function" && fnRefName(v) === undefined) { return kLambdaClass }
         var n = kSimpleName(v)
         if (szIs(v) && v.u) { return "kotlin." + n }
         if (n == "Int") { return "java.lang.Integer" }
@@ -9845,7 +9852,7 @@ NotMemberKw = :script(~~ "pure";
     // Unit). The lambda captures the scope chain of its evaluation (a real closure:
     // later writes through the captured scopes are shared). Without a parameter list
     // the single argument is bound to 'it'.
-    function makeLambda(items) {
+    function makeLambda(items, usesIt) {
         var params = null
         var start = 0
         // The label this lambda ANSWERS TO, so a `return@lbl` aimed at it (from any
@@ -9956,10 +9963,12 @@ NotMemberKw = :script(~~ "pure";
                 scopes = saved
                 return last
             }
-            // A lambda with parameters records its arity, which names its
-            // kotlin.jvm.functions class (jxkElemLib); unset reads as 0. Twin of
-            // makeLambda in kotlin-to-llvm-ir.abnf.
-            return params == null ? lf : fnMetaSet(lf, "", params.length)
+            // A lambda records its arity, which names its kotlin.jvm.functions
+            // class (jxkElemLib) and decides `is FunctionN`: its parameters, or the
+            // implicit `it` it reads; unset reads as 0. Twin of makeLambda in
+            // kotlin-to-llvm-ir.abnf.
+            var arity = params == null ? (usesIt ? 1 : 0) : params.length
+            return arity == 0 ? lf : fnMetaSet(lf, "", arity)
         }
     }
     // A { ... } block in value position (an if / when arm): run its statements in a fresh
@@ -10358,7 +10367,7 @@ NotMemberKw = :script(~~ "pure";
             if (dw > 0 && kIsIntegral(v)) { v = kConv(v, dw, du) }
             else if (df && kIsIntegral(v)) { v = df32 ? kFlo32(kNumD(v)) : kFlo(kNumD(v)) }
             else if (plan != null) { v = kAdoptPlan(v, plan) }
-            declVar(name, recvFn ? kRecvLambda(v) : v)
+            declVar(name, recvFn ? kRecvDecl(v) : v)
         }
     }
     // A lambda-with-receiver value: the wrapper takes the receiver as its FIRST
@@ -10376,6 +10385,12 @@ NotMemberKw = :script(~~ "pure";
     function isRecvFnTy(t) {
         if (t == undefined || t == null || t == "") { return false }
         return t.indexOf(".(") >= 0 && t.indexOf("->") >= 0
+    }
+    // A lambda declared with a receiver type takes the receiver as one more
+    // argument, so its arity (makeLambda) is one more.
+    function kRecvDecl(f) {
+        if (typeof f != "function") { return f }
+        return fnMetaSet(kRecvLambda(f), "", fnMeta(f, "length") + 1)
     }
     function kRecvLambda(f) {
         if (typeof f != "function") { return f }
@@ -10622,6 +10637,9 @@ NotMemberKw = :script(~~ "pure";
     }
     function registerFun(f) {
         var cl = makeFunClosure(f)
+        // Its arity, which `::f is FunctionN` tests (as makeLambda's). Twin of
+        // makeFunStmt in kotlin-to-llvm-ir.abnf.
+        if (f.params.length > 0) { cl = fnMetaSet(cl, "", f.params.length) }
         fnRefFns.push(cl)
         fnRefNames.push(f.name)
         globalScope[f.name] = cl
@@ -12034,7 +12052,7 @@ NotMemberKw = :script(~~ "pure";
             if (v !== null && typeof v == "object") {
                 if (v.__pdeleg === true) { return pdelegGet(v) }
                 if (lex !== null && v.__isclass === true) { return kLexClass(v, name, lex) }
-            }
+            } else if (v === null && kLateNames["$" + name] === true) { kLateCheck(name) }
             return v
         }
     }
@@ -12161,7 +12179,41 @@ NotMemberKw = :script(~~ "pure";
     }
     var topProps = {}
     // A bodiless top-level property: the name exists and reads as null.
-    function registerBareProp(items) { globalScope[items[0]] = null }
+    function registerBareProp(items) {
+        globalScope[items[0]] = null
+        if (hasMod(takeMods(), "lateinit")) { kLateNames["$" + items[0]] = true; globalScope[items[0] + "$late"] = true }
+    }
+    // A top-level or local `lateinit var` binds null, and reading it while it still
+    // holds that null throws UninitializedPropertyAccessException. The scope that binds
+    // it also binds name$late, so kLateCheck can tell the lateinit binding from a
+    // nullable local of the same name shadowing it. kLateNames keeps the test off
+    // every other name's read (makeVarRef). Twin of js_ktlatechk in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    var kLateNames = {}
+    var kPendLate = false
+    function kNoteLate(mods) { kPendLate = hasMod(mods, "lateinit") }
+    function kTakeLate() { var l = kPendLate; kPendLate = false; return l }
+    function kLateDecl(t, name, late) {
+        if (!late) { return t }
+        kLateNames["$" + name] = true
+        return function() {
+            var r = t()
+            if (r != undefined) return r
+            declVar(name + "$late", true)
+        }
+    }
+    function kLateCheck(name) {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (objHasOwn.call(sc[i], name)) {
+                if (objHasOwn.call(sc[i], name + "$late")) {
+                    kThrowExc("UninitializedPropertyAccessException",
+                              "lateinit property " + name + " has not been initialized")
+                }
+                return
+            }
+        }
+    }
     // An EXTENSION property: the getter is registered under the bare name and called
     // with the receiver bound to `this` (see kGetField).
     var extProps = {}
@@ -12505,8 +12557,12 @@ NotMemberKw = :script(~~ "pure";
     var kNoReflect = " (Kotlin reflection is not available)"
     function kFnStr(f) {
         var n = fnRefName(f)
-        return n === undefined ? "$$Lambda@1" : "function " + n + kNoReflect
+        return n === undefined ? kLambdaClass + "@1" : "function " + n + kNoReflect
     }
+    // The stand-in for a lambda's hidden JVM class, AKt$$Lambda/0x...: its stable
+    // part, which the lambda's toString and javaClass.name share. Twin of
+    // ktLambdaClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    var kLambdaClass = "$$Lambda"
     // A reference names a FUNCTION when the receiver's class chain (an unbound one's
     // class) declares a method of the name, and for a builtin receiver when the name
     // is not one of its properties (kRecvProps); anything else is a property.
@@ -12543,6 +12599,24 @@ NotMemberKw = :script(~~ "pure";
     // twin is ktIsTypeName in abnf/jsrtkotlin.go; the two lists MUST stay in step.
     var kTypeNames = {}
     function kIsTypeName(n) { return hasOwn(kTypeNames, n) }
+    // `is` against a function type, for a function v: every function is a
+    // kotlin.Function, and the kotlin.jvm.functions.FunctionN of the arity its
+    // creation recorded (makeLambda); undefined when t is no function type. Twin of
+    // ktFnTypeIs in abnf/jsrtkotlin.go and k4FnTypeIs in kotlin-rt.metajs.
+    function kFnTypeIs(v, t) {
+        var b = t
+        if (b.indexOf("kotlin.jvm.functions.") == 0) { b = b.substring(21) }
+        if (b.indexOf("kotlin.") == 0) { b = b.substring(7) }
+        if (b == "Function") { return true }
+        if (b.length < 9 || b.indexOf("Function") != 0) { return undefined }
+        var n = 0
+        for (var i = 8; i < b.length; i++) {
+            var d = b.charCodeAt(i) - 48
+            if (d < 0 || d > 9) { return undefined }
+            n = n * 10 + d
+        }
+        return fnMeta(v, "length") == n
+    }
     function kInstallTypeNames() {
         var ns = ["String", "CharSequence", "Int", "Long", "Short", "Byte", "UInt", "ULong",
                   "UShort", "UByte", "Double", "Float", "Boolean", "Char", "Any", "Unit",
@@ -12704,7 +12778,22 @@ NotMemberKw = :script(~~ "pure";
     function kKClass(n) {
         if (n == "String") { return {__kclass: true, kname: n, jname: "java.lang.String"} }
         if (n == "Any") { return {__kclass: true, kname: n, jname: "java.lang.Object"} }
+        // A primitive array type is its java array class: IntArray::class renders
+        // "class [I".
+        var jt = anytype
+        jt = kJavaOfType["$" + n]
+        if (typeof jt == "string" && jt.charAt(0) == "[") { return {__kclass: true, kname: n, jname: jt} }
         return {__kclass: true, kname: n}
+    }
+    // The KClass of the java array class jn ([I, [LDog;): IntArray or Array, which
+    // renders and names itself by jn. Twin of ktArrKClass in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kArrKClass(jn) {
+        if (jn.length == 2) {
+            var i = "IJDFCZBS".indexOf(jn.charAt(1))
+            if (i >= 0) { return kKClass(kPrimKNames[i] + "Array") }
+        }
+        return {__kclass: true, kname: "Array", jname: jn}
     }
     // KClass.qualifiedName: a builtin type's is its kotlin name (kotlin.String,
     // kotlin.Int, kotlin.collections.List) - kotlin-stdlib's ClassReference maps the
@@ -12716,6 +12805,7 @@ NotMemberKw = :script(~~ "pure";
         jn = o.jname
         if (jn === undefined) { return kBuiltinFq["$" + o.kname] === true ? "kotlin." + o.kname : o.kname }
         if (kJvmKotlinFq["$" + jn] !== undefined) { return kJvmKotlinFq["$" + jn] }
+        if (jn.charAt(0) == "[") { return "kotlin." + o.kname }
         return jn.split("$").join(".")
     }
     var kJvmKotlinFq = {"$java.lang.String": "kotlin.String", "$java.lang.Object": "kotlin.Any",
@@ -12770,6 +12860,14 @@ NotMemberKw = :script(~~ "pure";
         var jc = kCollJvmClass(v)
         if (jc != "") { return kJavaClass(jc) }
         if (v !== null && typeof v == "object" && v.__class != undefined && v.__class != null) { return kClassOfDesc(v.__class) }
+        // An array's KClass is IntArray / Array over its java class ([LDog;), a
+        // lambda's its hidden class.
+        var vjc = anytype
+        vjc = jxkClass(v)
+        if (typeof vjc == "string") {
+            if (vjc.charAt(0) == "[") { return kArrKClass(vjc) }
+            if (vjc == kLambdaClass) { return kJavaClass(vjc) }
+        }
         return kKClass(kSimpleName(v))
     }
     // `javaClass`, and a collection's KClass: a class literal that also carries the
@@ -12804,7 +12902,9 @@ NotMemberKw = :script(~~ "pure";
     // class. Twin of ktKClassJava in abnf/jsrtkotlin.go and
     // languages/lib/kotlin-rt.metajs.
     function kKClassJava(co, wrapper) {
-        if (co.jname !== undefined) { return co.anon === true ? kJavaClass(co.jname) : co }
+        // An anonymous or array KClass's java class names itself apart: simpleName
+        // "" and Dog[].
+        if (co.jname !== undefined) { return co.anon === true || co.jname.charAt(0) == "[" ? kJavaClass(co.jname) : co }
         if (!wrapper && co.rbox !== true) {
             var p = anytype
             p = kKClassPrim(co)
@@ -12851,6 +12951,7 @@ NotMemberKw = :script(~~ "pure";
             if (jn == "[" + "IJDFCZBS".charAt(i)) { return kClassLitNamed(kPrimKNames[i] + "Array") }
         }
         if (kJavaOfType["$" + jc.kname] === jn) { return kClassLitNamed(jc.kname) }
+        if (jn.charAt(0) == "[") { return kArrKClass(jn) }
         return jc
     }
     // KClass.hashCode is its java object class's (kotlin.jvm.internal.ClassReference),
@@ -13109,6 +13210,7 @@ NotMemberKw = :script(~~ "pure";
         // ::topLevelFun is the function value itself, and KFunction.name is its name.
         if (typeof o == "function") {
             if (name == "name") { return fnRefName(o) }
+            if (name == "javaClass" && fnRefName(o) === undefined) { return kJavaClass(kLambdaClass) }
             return extPropGet(o, name)
         }
         if (kIsPkg(o)) { return kPkgMember(o, name) }
@@ -13627,10 +13729,15 @@ NotMemberKw = :script(~~ "pure";
         var t = resolveAlias(tname.split("<")[0])
         var opt = false
         if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1); opt = true }
-        if (v === null) { return opt }
+        // A generic nullable type (`List<*>?`) carries its `?` after the arguments.
+        if (v === null) { return opt || tname.charAt(tname.length - 1) == "?" }
         if (t == "Any" || t == "Object") { return true }
         // undefined is Unit, an object of no other type.
         if (v === undefined) { return t == "Unit" }
+        if (typeof v == "function") {
+            var fi = kFnTypeIs(v, t)
+            if (fi !== undefined) { return fi }
+        }
         if (t == "Comparable") { return kIsComparable(v) }
         var mk = ktMarkerName(t)
         if (mk != "") {

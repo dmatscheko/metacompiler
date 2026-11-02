@@ -321,8 +321,9 @@ ModWordAhead = :script(~~ "pure";
 // otherwise read as the modifier in front of the declaration `[i] = x` (DPatLead).
 // `lateinit` is the third modifier that CHANGES what is emitted (see DataMod): the
 // property it marks throws on a read before assignment instead of answering null, so
-// PropDecl has to see it. This grammar has no pendingMods list, so it is a single
-// walk-time flag the next property declaration takes.
+// PropDecl and a bare top-level or local declaration (makeBareDecl) have to see it.
+// This grammar has no pendingMods list, so it is a single walk-time flag the next
+// property declaration takes.
 Modifier    = ContextClause | CompanionMod
             | ( DataMod | "inner" ) KwEnd NotColon !"[" NotClassW
             | "lateinit" KwEnd NotColon <~~ noteLateinit() ~~>
@@ -1750,7 +1751,7 @@ ThisExpr    <~~ push(makeThisAt(pop().tlbl)) ~~>
 // A lambda may carry its own LABEL - exec lab@{ ... return@lab } - which becomes the
 // target of a return@lab inside it (instead of the callee's implicit label). LamLabel
 // registers it on the walk-time return-target stack; makeLambda pops it again.
-Lambda      <~~ var lam = takeAll(); ktNoteLamIt(lam, up.start); ktNoteBody(up.start, up.pos); push(makeLambda(lam, up.start)) ~~>
+Lambda      <~~ var lam = takeAll(); ktNoteLamIt(lam, up.start); ktNoteBody(up.start, up.pos); push(makeLambda(lam, up.start, ktLamClaimsIt(lam, up.start, up.pos))) ~~>
             = [ LamLabel ] "{" [ LambdaParams ] { LamStmt } "}" ;
 LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> AtAdjacent "@" ;
 // A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
@@ -1815,7 +1816,7 @@ TplExpr     <~~ push({e: pop()}) ~~>
 // how a keyword-led expression is interpolated. `$` on its own is already ordinary text
 // in TplPlain, so a refused TplVar cannot fall through to TplChunk and the whole string
 // is refused - which is the reject this guard is for. Same spelling as the interpreter.
-TplVar      = "$" NotHardKw TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
+TplVar      = "$" NotHardKw TplName <~~ if (up.in == "it") { ktNoteIt(up.start) }; push({e: makeVarRef(up.in)}) ~~> ;
 TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 // A lone `$` - `"$"`, `"cost: 100$"`, `"$.$.asdf"` - is ordinary string text in Kotlin.
 // Twin of TplDollar in kotlin-interpreter.abnf; see there.
@@ -2390,7 +2391,11 @@ DestructPat <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
 // they still resolve to each other, and no name can collide with a plain identifier.
 // The shared lib/ident.abnf owns the unquoted form; KId is the Kotlin-level token that
 // every production in this grammar refers to.
-KId         = BQId | Id ;
+// The word `it` is noted where it is walked (ktNoteIt), so a lambda without a
+// parameter list knows whether it reads its implicit parameter (ktLamClaimsIt).
+KId         = ItWord | BQId | Id ;
+ItWord      <~~ ktNoteIt(up.start) ~~>
+            = "it" KwEnd ;
 BQId        = "`" :whitespace() BQChar { BQChar } "`" :whitespace(Whitespace) ;
 BQChar      = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x5f" | "\x61"..."\U0010ffff" ;
 
@@ -3106,10 +3111,10 @@ KwContract  = "contract" KwEnd ;
         return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(r1.v, r1.b), llvm.ir.NewIncoming(r2.v, r2.b)])}
     }
     function emitBareGet(b, name) {
-        if (!ktGlobShadow(name)) { return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])} }
+        if (!ktGlobShadow(name)) { return emitLateRead(b, name, b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])) }
         return emitRecvOr(b, name, false,
             function(rb, rv) { return {b: rb, v: callExt(rb, "js_ktfget", [rv, emitStr(rb, name)])} },
-            function(pb) { return {b: pb, v: pb.NewCall(rtKtGet(), [curScopeV, emitStr(pb, name)])} }, null)
+            function(pb) { return emitLateRead(pb, name, pb.NewCall(rtKtGet(), [curScopeV, emitStr(pb, name)])) }, null)
     }
     function emitBareSet(b, name, v, setter) {
         if (!ktGlobShadow(name)) { b.NewCall(setter, [curScopeV, emitStr(b, name), v]); return b }
@@ -4858,7 +4863,7 @@ KwContract  = "contract" KwEnd ;
     // function closed over the current scope (js_closure); the body is a sequence of
     // statements and its value is the last expression (a trailing non-expression
     // yields Unit). Without a parameter list the single argument is bound to 'it'.
-    function makeLambda(items, at) {
+    function makeLambda(items, at, usesIt) {
         var params = ["it"]
         var start = 0
         var rlam = recvLamOf(retLblTop(), at)
@@ -4942,11 +4947,13 @@ KwContract  = "contract" KwEnd ;
             }
             var idx = emitFunc(names, lamBody, withRecv)
             var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
-            // A lambda with parameters records its arity, which names its
-            // kotlin.jvm.functions class (ktaElemLib); unset reads as 0. Twin of
-            // makeLambda in kotlin-interpreter.abnf.
-            if (start == 1 && params.length > 0) {
-                cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, params.length)])
+            // A lambda records its arity, which names its kotlin.jvm.functions class
+            // (ktaElemLib) and decides `is FunctionN`: its parameters, or the
+            // implicit `it` it reads, and a declared receiver; unset reads as 0.
+            // Twin of makeLambda and kRecvDecl in kotlin-interpreter.abnf.
+            var arity = (start == 1 ? params.length : (usesIt ? 1 : 0)) + (withRecv ? 1 : 0)
+            if (arity > 0) {
+                cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, arity)])
             }
             return {b: b, v: cloV}
         }
@@ -6165,12 +6172,32 @@ KwContract  = "contract" KwEnd ;
     // the emitted kt_varset helper would take such a name for a non-local and hunt
     // it up the `this` chain. Swift's port declares an uninitialised `let v: Int` as
     // NULL for the same reason (assertion blk1 of tests/kotlin-test-full.kt).
+    //
+    // A `lateinit var` is such a declaration too, and reading it while it still holds
+    // that null throws UninitializedPropertyAccessException. Its scope also binds
+    // name$late, which tells js_ktlatechk that the binding a null read found is the
+    // lateinit one and not a nullable local shadowing it.
     function makeBareDecl(items) {
         var name = items[0]
+        var late = takeLateinit()
+        if (late) { ktLateNames["$" + name] = true }
         return function(b) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull])
+            if (late) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name + "$late"), hTrue]) }
             return b
         }
+    }
+    // The names some top-level or local `lateinit var` declares. Only a read of one of
+    // them pays for the uninitialized test (emitBareGet), and only when it reads null.
+    var ktLateNames = {}
+    function emitLateRead(b, name, v) {
+        if (ktLateNames["$" + name] != true) { return {b: b, v: v} }
+        var chkB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, v, hNull), chkB, okB)
+        callExt(chkB, "js_ktlatechk", [curScopeV, emitStr(chkB, name)])
+        chkB.NewBr(okB)
+        return {b: okB, v: v}
     }
     // The eight integral types and their {bits, unsigned}. Kotlin has NO implicit
     // numeric conversions, so a declared type can only ever retype an integer
@@ -6832,8 +6859,13 @@ KwContract  = "contract" KwEnd ;
         return function(b) {
             var idx = emitFunc(f.params, f.body, false, false, f.sig)
             defPos(b, f.pos)
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name),
-                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
+            var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
+            // A top-level function records its arity, which `::f is FunctionN` tests
+            // (as makeLambda's). Twin of registerFun in kotlin-interpreter.abnf.
+            if (top && f.params.length > 0) {
+                cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, f.params.length)])
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name), cloV])
             return b
         }
     }
@@ -6907,7 +6939,7 @@ KwContract  = "contract" KwEnd ;
     // Property names declared by some class: an extension property never shadows them.
     function notePropName(name) { classPropNames["$" + name] = true }
     // The `lateinit` modifier of the property declaration being walked. Set by the
-    // Modifier production, taken by PropDecl; see the note there.
+    // Modifier production, taken by PropDecl and makeBareDecl; see the note there.
     var pendLateinit = false
     function noteLateinit() { pendLateinit = true }
     function takeLateinit() { var v = pendLateinit; pendLateinit = false; return v }
