@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1123** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1124** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,14 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endless-range enumerators without a block; Range#%; ArithmeticSequence#hash · P3 · RB · IN PROGRESS (RB worker, round 54) [V]
+### T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-step map/each_with_object, last → FloatDomainError · P3 · RB · OPEN [V]
 
 Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
-- The most important item: converting an endless range to an array raises RangeError "cannot convert endless range to an array" in MRI, which `rescue` can catch. Ours is an uncatchable host failure worded "an endless range". Example: `begin; (1..).to_a; rescue RangeError => e; p e.message; end`.
-- `("a"..).step(2).first(2)` gives ["a", "c"], and `(1..).each_entry.first(2)` (no block) gives [1, 2]. Both abort in our engines.
-- `(1..10) % 3` gives ((1..10).%(3)), since Range#% is step; ours raises NoMethodError.
-- `1.step(10, 3).hash == 1.step(10, 3).hash` is true; ours is false. rubyResponds has no Enumerator::ArithmeticSequence entry.
-- `1.step(Float::INFINITY, 2).first(2)` gives [1.0, 3.0] (blockless: Float values; with a block: Integers). Ours gives [1, 3].
+- The halves disagree: `a = 1.step(10,3); p [a.respond_to?(:first), a.respond_to?(:begin), a.respond_to?(:each)]` gives [true, true, true] in MRI, [false, false, false] in the interpreter and [true, false, true] in llvm.Run/native. Add an "Enumerator::ArithmeticSequence" row to lib/ruby-respond.js / rubyRespondNames, and map the class the same way in both halves.
+- `h = {1.step(10,3) => :a}; p h[1.step(10,3)]` prints :a; ours prints nil. Add an ArithmeticSequence arm to keyEq / keyId, consistent with #hash and #==.
+- With `e = 1.step(Float::INFINITY, 2)`, `e.map.first(1)` gives [1.0] and `e.each_with_object([]).first(1)` gives [[1, []]]; both raise NoMethodError in every engine. The interpreter names the class Enumerator::ArithmeticSequence, the compiled half names it Enumerator.
+- `1.step(Float::INFINITY, 2).last` raises FloatDomainError "Infinity"; ours raises RangeError "cannot get the last element of endless arithmetic sequence" (that is MRI's message for `(1..).step(2).last`).
 
 # JS — JavaScript and TypeScript
 
@@ -1172,6 +1171,7 @@ T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primit
 T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for step — DONE r53 (fd4ce498): Enumerator::ArithmeticSequence (inspect/class/begin/end/step/last/size/==), endless String ranges, Float-range TypeError, each_entry, MRI's split Range#step messages; master-probed vs ruby 2.6
 T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and local resolution; declare -ft; LC_ALL=C case mapping — DONE r37 (2fb2fdcc, 25e42574): arithmetic-text expansion errors abandon the line unprefixed, circular-nameref @a/@A warning counts, circular local nameref reads/scalar stores/unset resolve to the global, declare -ft/-F/-pf, stray UTF-8 continuation bytes in compiled strip/case; paired bench -0.03% after the rt_var-caller fix. LC_ALL=C case mapping NOT done: needs the general locale model (user POLICY decision)
 T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.util classes; RandomAccess — DONE r35 (7f42e176): stale subList index read / for / iterators / indices throw CME (paired bench -0.02%), casts to concrete java.util classes checked with JVM messages, RandomAccess/Cloneable/Serializable markers per JVM class and program supertypes; master-probed vs kotlinc 2.2.21
+T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endless-range enumerators without a block; Range#%; ArithmeticSequence#hash — DONE r54 (1570c52a, 20b5d84f): catchable RangeError for endless to_a/splat, streaming endless String step and blockless each/each_entry, Range#% (tested only after % finds a non-number: paired bench +0.01%), ArithmeticSequence#hash, Float values toward Float::INFINITY; master-probed vs ruby 2.6
 
 # Settled — do not re-open
 
