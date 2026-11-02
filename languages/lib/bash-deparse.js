@@ -996,7 +996,15 @@ function bashDeclOperand(f, arr, quote, elem) {
         j = f.indexOf("]", j)
         if (j < 0) { return "" }
         j = j + 1
-        if (j == f.length) { return (elem && j > i + 2) ? f.slice(0, i) + "[0]" : "" }
+        // SUB is not evaluated. It stays when the written NAME[SUB] reads it back (declare -n
+        // names it when it refuses the operand), else it is spelled 0.
+        if (j == f.length) {
+            if (!elem || j <= i + 2) { return "" }
+            var sub = f.slice(i + 1, j - 1)
+            var s
+            for (s = 0; s < sub.length; s++) { if (" \t\r\n;&|<>()[]'\"\\$`".indexOf(sub.charAt(s)) >= 0) { sub = "0" } }
+            return f.slice(0, i) + "[" + sub + "]"
+        }
     }
     var opLen = (f.charAt(j) == "+" && f.charAt(j + 1) == "=") ? 2 : 1
     if (f.charAt(j) != "=" && opLen == 1) { return "" }

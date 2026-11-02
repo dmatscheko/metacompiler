@@ -922,7 +922,7 @@ RxInBare    <~~ push(makeConst(up.in)) ~~> = !@+"()\n$'\"\\`" ;
 CondParen   = "(" CondOr Linebreak ")" ;
 CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
 CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
-CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
+CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" | "-R" | "-a" | "-g" | "-u" | "-k" | "-O" | "-G" | "-N" ;
 // The right hand side of == / != inside [[ ]] is a PATTERN, and a quoted part of it is
 // literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
 CondBin     <~~ push(mkCondBin(takeAll())) ~~> = NsWord CondBinOp PatWord ;
@@ -3263,6 +3263,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Under -a or -A, NAME=VALUE is NAME[0]=VALUE: the other elements stay, and += appends
         // to element 0 (bash 5.3: `y=(1 2); declare -a y=7` leaves y=(7 2)). Twin of the same
         // rewrite in makeDecl in bash-to-llvm-ir.abnf.
+        var asgsWritten = asgs.slice(0)
         for (i = 0; i < asgs.length; i++) {
             var a0 = asgs[i]
             if (isArray && a0 != null && a0.idxT == null && a0.lit == null) {
@@ -3321,6 +3322,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var declOwn = ""
         // One name: its attributes, then its value (v, or the assignment's own literal).
         var declOne = function(k, v) {
+            // -n of an operand written NAME[SUB] is refused before any other check (bash
+            // 5.3). Twin of declOne in bash-to-llvm-ir.abnf.
+            var aw = asgsWritten[k]
+            if (isRef && kw != "readonly" && (darrs[k] != null || (aw != null && aw.idxT != null && aw.isrc != ""))) {
+                diagErr(kw + ": " + ((aw != null) ? names[k] + "[" + wordJoin(aw.idxT()) + "]" : darrs[k]) + ": reference variable cannot be an array\n")
+                roFail = true
+                return
+            }
             // A nameref cannot be an integer: -n with -i fails, silently, and declares
             // nothing (bash 5.3). Twin of declOne in bash-to-llvm-ir.abnf.
             if (isRef && integer) { roFail = true; return }
@@ -3336,17 +3345,31 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (selfV) { diagErr(kw + ": warning: " + names[k] + ": circular name reference\n") }
             var plainV = asgs[k] == null || (asgs[k].lit == null && asgs[k].idxT == null && asgs[k].op != "+=")
             // A function's own nameref whose chain is circular is looked up twice, each a
-            // warning. Without -n and attributes, a value then goes to the nameref itself, as
-            // the name it refers to (bash 5.3). Twin of rt_decl_circ in bash-rt.c.
-            if (anyRef && plus.indexOf("n") < 0 && attrOn(refVars, names[k]) && localizes() && localHere(names[k]) && plainV && (isRef || flags == "")) {
+            // warning. Without -n, the attributes and the value then go to the nameref itself
+            // (bash 5.3): a scalar value, or what += appends, must name a variable, and an -i
+            // one is not stored (status 1); an array literal, looked up twice more unless -a
+            // or -A is given, makes the nameref an array, which += does not start from the
+            // nameref's value. Twin of the same arm of declOne in bash-to-llvm-ir.abnf.
+            var circOk = asgs[k] == null || asgs[k].idxT == null
+            var cf
+            for (cf = 0; cf < flags.length; cf++) { if ("-irxulctaA".indexOf(flags.charAt(cf)) < 0) { circOk = false } }
+            if (anyRef && plus.indexOf("n") < 0 && attrOn(refVars, names[k]) && localizes() && localHere(names[k]) && (isRef ? plainV : circOk)) {
                 if (refTarget(names[k]) == "") {
                     if (!refQuiet) { diagErr("warning: " + names[k] + ": circular name reference\n") }
                     if (!isRef) {
-                        if (asgs[k] == null) { return }
-                        if (!bashIsRef(v)) { diagErr(kw + ": `" + v + "': invalid variable name for name reference\n"); roFail = true; return }
+                        if (asgs[k] == null && flags == "") { return }
+                        var lit0 = asgs[k] != null && asgs[k].lit != null
+                        if (asgs[k] != null && !lit0 && !bashIsRef(v)) { diagErr(kw + ": `" + v + "': invalid variable name for name reference\n"); roFail = true; return }
+                        if (lit0 && !isArray && !refQuiet) { diagErr("warning: " + names[k] + ": circular name reference\n"); diagErr("warning: " + names[k] + ": circular name reference\n") }
+                        var sa0 = asgs[k]
+                        if (integer && sa0 != null && !lit0) { asgs[k] = null; roFail = true }
+                        if (lit0 && sa0.op == "+=" && !isArr(names[k])) {
+                            asgs[k] = {name: sa0.name, idxT: null, aqT: sa0.aqT, op: "=", valT: sa0.valT, lit: sa0.lit, isrc: sa0.isrc, lbl: sa0.lbl}
+                        }
                         noRef = noRef + 1
-                        declOneN(k, v)
+                        declOneN(k, (asgs[k] == null) ? null : v)
                         noRef = noRef - 1
+                        asgs[k] = sa0
                         return
                     }
                 }
@@ -7808,7 +7831,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // "searchable/executable", which is true of the model's directories and unknowable
         // for anything else; -b, -p, -S, -h, -L, -g, -u, -k, -O, -G, -N and -t are all false,
         // because the model has no block device, no fifo, no socket, no symlink, no owner and
-        // no access time. LIMIT: -o OPTION and -R NAME answer false too.
+        // no access time. -o OPTION is testOpt; -R NAME is "NAME itself is a nameref with a
+        // value" (rt_test_ref in bash-rt.c).
+        if (op == "-o") { return testOpt(s) ? 0 : 1 }
+        if (op == "-R") { var rk = "$" + s; return (attrOn(refVars, s) && hasOwn(varsHas, rk) && varsHas[rk]) ? 0 : 1 }
         if (op == "-d") { return (fsKind(s) == 2) ? 0 : 1 }
         if (op == "-e" || op == "-a" || op == "-r" || op == "-w") { return (fsKind(s) != 0) ? 0 : 1 }
         if (op == "-f") { return (fsKind(s) == 1) ? 0 : 1 }
@@ -7816,6 +7842,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "-x") { return (fsKind(s) == 2) ? 0 : 1 }
         if (op == "-c") { return (fsKind(s) == 3) ? 0 : 1 }
         return 1
+    }
+    // test -o OPTION: whether the set -o option is on. The options this shell cannot change
+    // answer as a script's bash starts them. Twin of rt_test_opt in bash-rt.c.
+    function testOpt(s) {
+        if (s == "errexit") { return optErrExit }
+        if (s == "nounset") { return optNounset }
+        if (s == "pipefail") { return optPipefail }
+        return s == "braceexpand" || s == "hashall" || s == "interactive-comments"
     }
     var testNumOps = {"-eq": "==", "-ne": "!=", "-lt": "<", "-le": "<=", "-gt": ">", "-ge": ">="}
     // An operand of test's -eq ... -ge, which takes bash's legal_number, not arithmetic:
@@ -7857,7 +7891,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // beyond that, expr := and [ -o expr ], and := term [ -a and ], term := { "!" } ( "(" ... ")"
     // | WORD BINOP WORD | UNOP WORD | WORD ). A syntax error is reported unless an operand
     // already was, and stops the evaluation (tst.stop); either makes the status 2. Values are
-    // booleans. Twin of the tc* functions in bash-to-llvm-ir.abnf.
+    // booleans. Twin of the tc* functions in bash-to-llvm-ir.abnf and rt_test in bash-rt.c.
     function tstAt(k) { return (k < tst.n) ? tst.a[k] : "\x00end" }
     function tstSyn(msg) {
         if (!tst.stop && !tst.err) { diagErr(tst.who + ": " + msg + "\n") }

@@ -1212,6 +1212,240 @@ int rt_test_extra(char *who, char *arg)
     return rt_test_syn(who, "too many arguments", "", "");
 }
 
+/* test -o OPTION: whether the set -o option is on. The options this shell
+ * cannot change answer as a script's bash starts them. Twin of testOpt in
+ * bash-interpreter.abnf. */
+int rt_test_opt(char *s)
+{
+    if (rt_streq(s, "errexit") != 0) return opt_errexit;
+    if (rt_streq(s, "nounset") != 0) return opt_nounset;
+    if (rt_streq(s, "pipefail") != 0) return opt_pipefail;
+    return rt_streq(s, "braceexpand") + rt_streq(s, "hashall") + rt_streq(s, "interactive-comments");
+}
+
+/* test -R NAME: NAME itself is a nameref that has a value. */
+int rt_test_ref(char *s)
+{
+    int i;
+    if ((rt_arr_marks(s) & 32) == 0) return 0;
+    i = rt_varslot(s);
+    return (i >= 0 && gvars[i] != &unset_marker[0]) ? 1 : 0;
+}
+
+/* The words test's parser reads as operators. */
+int rt_test_unop(char *s)
+{
+    int c = (int)s[1];
+    if (s[0] != 45 || c == 0 || s[2] != 0) return 0;
+    return rt_haschar("znvefdsrwxhLbcpStgukaGNoRO", c);
+}
+int rt_test_binop(char *s)
+{
+    return rt_inwords(s, "\n=\n==\n!=\n<\n>\n-eq\n-ne\n-lt\n-le\n-gt\n-ge\n-nt\n-ot\n-ef\n");
+}
+/* A computed word the compile-time parse took for an operand: when it is an
+ * operator instead, emitTest runs rt_test over the whole list. */
+int rt_test_word(char *s)
+{
+    if (rt_test_unop(s) != 0 || rt_test_binop(s) != 0) return 1;
+    return (s[0] == 33 || s[0] == 40 || s[0] == 41) && s[1] == 0 ? 1 : 0;
+}
+
+/* A test operand that is a field list counts as one argument only when it has
+ * exactly one field, which is then the operand. Anything else sets test_multi
+ * and emitTest runs rt_test over the fields. */
+int test_multi;
+char *rt_test_one(char *v)
+{
+    if (rt_islist(v) == 0) return v;
+    if (rt_nfields(v) == 1) return rt_fat(v, 1);
+    test_multi = 1;
+    return v;
+}
+
+/* test / [ over an argument list known only at run time: an operator out of an
+ * expansion (`op=-eq; test 1 $op 2`) or a field list (`test "$@"`). The parse
+ * of the emitter's compile-time tc* functions, whose rules are at tstTerm in
+ * bash-interpreter.abnf; booleans are 1 for true. Answers the status. */
+char **ts_a;
+int ts_n;
+int ts_i;
+int ts_stop;
+char *ts_who;
+int ts_is(int k, char *w)
+{
+    return k < ts_n ? rt_streq(ts_a[k], w) : 0;
+}
+int ts_syn(char *pre, char *arg, char *post)
+{
+    if (ts_stop == 0) rt_test_syn(ts_who, pre, arg, post);
+    ts_stop = 1;
+    return 0;
+}
+int ts_advance(int chk)
+{
+    ts_i = ts_i + 1;
+    if (chk != 0 && ts_i >= ts_n) ts_syn("argument expected", "", "");
+    return 0;
+}
+int ts_andor(int k)
+{
+    return ts_is(k, "-a") + ts_is(k, "-o");
+}
+int ts_binary(void)
+{
+    char *l = ts_a[ts_i], *op = ts_a[ts_i + 1], *r = ts_a[ts_i + 2];
+    long il, ir;
+    int c;
+    ts_i = ts_i + 3;
+    if (op[0] != 45) {
+        c = rt_strcmp(l, r);
+        if (op[0] == 60) return c < 0 ? 1 : 0;
+        if (op[0] == 62) return c > 0 ? 1 : 0;
+        return (op[0] == 33) == (c != 0) ? 1 : 0;
+    }
+    /* -nt, -ot and -ef: the file model has no times and no inodes, so false. */
+    if (op[1] == 111 || (op[1] == 110 && op[2] == 116) || (op[1] == 101 && op[2] == 102)) return 0;
+    il = rt_test_int(l, ts_who);
+    ir = rt_test_int(r, ts_who);
+    if (op[1] == 101) return il == ir ? 1 : 0;
+    if (op[1] == 110) return il != ir ? 1 : 0;
+    if (op[1] == 108) return (op[2] == 116 ? il < ir : il <= ir) ? 1 : 0;
+    return (op[2] == 116 ? il > ir : il >= ir) ? 1 : 0;
+}
+int ts_unary(void)
+{
+    int k = ts_i, f;
+    char *op = ts_a[k], *s = ts_a[k + 1];
+    int c = (int)op[1];
+    if (c == 116) {
+        if (ts_n >= 4 && ts_andor(k + 1) != 0) { ts_i = k + 1; return 0; }
+        rt_test_int(s, ts_who);
+        ts_i = k + 2;
+        return 0;
+    }
+    ts_i = k + 2;
+    if (c == 122) return s[0] == 0 ? 1 : 0;
+    if (c == 110) return s[0] != 0 ? 1 : 0;
+    if (c == 118) return rt_vset(s, 0);
+    if (c == 111) return rt_test_opt(s) != 0 ? 1 : 0;
+    if (c == 82) return rt_test_ref(s);
+    f = rt_fskind(s);
+    if (c == 100 || c == 120) return f == 2 ? 1 : 0;
+    if (c == 101 || c == 97 || c == 114 || c == 119) return f != 0 ? 1 : 0;
+    if (c == 102) return f == 1 ? 1 : 0;
+    if (c == 115) return (f == 1 || f == 2) ? 1 : 0;
+    if (c == 99) return f == 3 ? 1 : 0;
+    return 0;
+}
+int ts_two(void)
+{
+    int k = ts_i;
+    if (ts_is(k, "!") != 0) { ts_i = k + 2; return ts_a[k + 1][0] == 0 ? 1 : 0; }
+    if (rt_test_unop(ts_a[k]) != 0) return ts_unary();
+    return ts_syn("", ts_a[k], ": unary operator expected");
+}
+int ts_three(void)
+{
+    int k = ts_i;
+    char *w = ts_a[k + 1];
+    if (rt_test_binop(w) != 0) return ts_binary();
+    if (ts_andor(k + 1) != 0) {
+        ts_i = k + 3;
+        if (w[1] == 97) return (ts_a[k][0] != 0 && ts_a[k + 2][0] != 0) ? 1 : 0;
+        return (ts_a[k][0] != 0 || ts_a[k + 2][0] != 0) ? 1 : 0;
+    }
+    if (ts_is(k, "!") != 0) { ts_advance(1); return 1 - ts_two(); }
+    if (ts_is(k, "(") != 0 && ts_is(k + 2, ")") != 0) { ts_i = k + 3; return w[0] != 0 ? 1 : 0; }
+    return ts_syn("", w, ": binary operator expected");
+}
+int ts_expr(void);
+int ts_posix(int nargs)
+{
+    int k = ts_i, v;
+    if (nargs == 1) { ts_i = k + 1; return ts_a[0][0] != 0 ? 1 : 0; }
+    if (nargs == 2) return ts_two();
+    if (nargs == 3) return ts_three();
+    if (nargs == 4 && ts_is(k, "!") != 0) { ts_advance(1); return 1 - ts_three(); }
+    if (nargs == 4 && ts_is(k, "(") != 0 && ts_is(k + 3, ")") != 0) {
+        ts_advance(1);
+        v = ts_two();
+        ts_advance(0);
+        return v;
+    }
+    return ts_expr();
+}
+int ts_term(void)
+{
+    int neg = 0, r, nargs, depth;
+    if (ts_stop != 0) return 0;
+    if (ts_i >= ts_n) return ts_syn("argument expected", "", "");
+    if (ts_is(ts_i, "!") != 0) {
+        while (ts_is(ts_i, "!") != 0) { ts_advance(1); neg = 1 - neg; }
+        r = ts_term();
+        return neg != 0 ? 1 - r : r;
+    }
+    if (ts_is(ts_i, "(") != 0) {
+        ts_advance(1);
+        if (ts_stop != 0) return 0;
+        nargs = 1;
+        depth = 1;
+        while (ts_i + nargs < ts_n) {
+            if (ts_is(ts_i + nargs, ")") != 0) depth = depth - 1;
+            else if (ts_is(ts_i + nargs, "(") != 0) depth = depth + 1;
+            if (depth == 0) break;
+            nargs = nargs + 1;
+        }
+        r = (ts_i + nargs < ts_n && nargs <= 4) ? ts_posix(nargs) : ts_expr();
+        if (ts_i >= ts_n) ts_syn("`)' expected", "", "");
+        else if (ts_is(ts_i, ")") == 0) ts_syn("`)' expected, found ", ts_a[ts_i], "");
+        ts_i = ts_i + 1;
+        return r;
+    }
+    if (ts_i + 3 <= ts_n && rt_test_binop(ts_a[ts_i + 1]) != 0) return ts_binary();
+    if (ts_i + 2 <= ts_n && rt_test_unop(ts_a[ts_i]) != 0) return ts_unary();
+    ts_i = ts_i + 1;
+    return ts_a[ts_i - 1][0] != 0 ? 1 : 0;
+}
+int ts_and(void)
+{
+    int v = ts_term(), v2;
+    if (ts_is(ts_i, "-a") != 0) { ts_i = ts_i + 1; v2 = ts_and(); return v & v2; }
+    return v;
+}
+int ts_or(void)
+{
+    int v = ts_and(), v2;
+    if (ts_is(ts_i, "-o") != 0) { ts_i = ts_i + 1; v2 = ts_or(); return v | v2; }
+    return v;
+}
+int ts_expr(void)
+{
+    if (ts_i >= ts_n) return ts_syn("argument expected", "", "");
+    return ts_or();
+}
+int rt_test(char *fields, char *who)
+{
+    int n = 0, p = rt_fpos(fields), v;
+    test_multi = 0;
+    if (p < 0) return 1;
+    while (p >= 0) { n = n + 1; p = rt_fnext(fields, p); }
+    ts_a = (char **)rt_bump(n * 8);
+    n = 0;
+    p = rt_fpos(fields);
+    while (p >= 0) { ts_a[n] = rt_fat(fields, p); n = n + 1; p = rt_fnext(fields, p); }
+    ts_n = n;
+    ts_i = 0;
+    ts_stop = 0;
+    ts_who = who;
+    test_err = 0;
+    v = ts_posix(n);
+    if (ts_i < ts_n && ts_stop == 0) rt_test_extra(who, ts_a[ts_i]);
+    v = test_err != 0 ? 2 : 1 - v;
+    test_err = 0;
+    return v;
+}
+
 /* ${v:off:len} with a negative len that ends before off: bash's "substring
  * expression < 0", which abandons the command like an arithmetic error. */
 int rt_suberr(int bad, int len)

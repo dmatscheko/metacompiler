@@ -857,6 +857,11 @@ xsw=xsp; xsp=old; declare -n xsp=$xsw 2>/dev/null
 check nsf3 "$?/$xsp/${xsp@a}" "1/old/"
 xsp=new
 check nsf4 "$xsp/$xsw/${xsp@A}" "new/xsp/xsp='new'"
+# A computed one is refused before a readonly or an array of the name is.
+xsy=xso; declare -r xso=1; xsz=xsa; xsa=(1 2)
+xse=$( { declare -n xso=$xsy; echo "|$?"; declare -n xsa=$xsz; echo "|$?"; } 2>&1 )
+xsf=; while IFS= read -r xsl; do xsf="$xsf${xsl#*: line [0-9]*: };"; done <<< "$xse"
+check nsf5 "$xsf${xsa[*]}" "declare: xso: nameref variable self references not allowed;|1;declare: xsa: nameref variable self references not allowed;|1;1 2"
 
 # ----- a computed nameref: the attributes and the slot of the variable it lands on -----
 declare -i xci=4; declare -u xcu=ab

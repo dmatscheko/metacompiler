@@ -845,7 +845,7 @@ RxInBare    <~~ push(makeConst(up.in)) ~~> = !@+"()\n$'\"\\`" ;
 CondParen   = "(" CondOr Linebreak ")" ;
 CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
 CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
-CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
+CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" | "-R" | "-a" | "-g" | "-u" | "-k" | "-O" | "-G" | "-N" ;
 // The right hand side of == / != inside [[ ]] is a PATTERN, and a quoted part of it is
 // literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
 CondBin     <~~ push(mkCondBin(takeAll())) ~~> = NsWord CondBinOp PatWord ;
@@ -1579,6 +1579,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gArithErr = rtGlobal("arith_err", i32)   // an arithmetic or substring error (rt_arith_fail)
     var gCondErr = rtGlobal("cond_err", i32)   // a [[ ]] that could not be evaluated
     var gTestErr = rtGlobal("test_err", i32)   // a test operand that is no integer (rt_test_int)
+    var gTestMulti = rtGlobal("test_multi", i32)   // a test operand that is not one field (rt_test_one)
 
     // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
     // standard error channel, 2 = discarded. Which channel a redirection routes a command to is
@@ -1900,6 +1901,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a syntax error of test / [, reported unless an operand already was; sets test_err.
     var rtTestSyn = rtDecl("rt_test_syn", false, [1, 1, 1, 1])
     var rtTestExtra = rtDecl("rt_test_extra", false, [1, 1])
+    // i32 rt_test(i8* fields, i8* who): test / [ parsed at run time over a field list.
+    // i8* rt_test_one(i8* v): a field-list operand's one field, or test_multi set.
+    // i32 rt_test_word(i8* s): whether s is a word test's parser reads as an operator.
+    var rtTest = rtDecl("rt_test", false, [1, 1])
+    var rtTestOne = rtDecl("rt_test_one", true, [1])
+    var rtTestWord = rtDecl("rt_test_word", false, [1])
+    // i32 rt_test_opt(i8* s) / rt_test_ref(i8* s): test -o OPTION / -R NAME.
+    var rtTestOpt = rtDecl("rt_test_opt", false, [1])
+    var rtTestRef = rtDecl("rt_test_ref", false, [1])
     // i64 rt_arith(i8* expr): the arithmetic evaluator for an expression that only exists at
     // run time; rt_idiv / rt_ipow are / % and ** with bash's error cases. Any of them can
     // raise arith_err (see languages/lib/bash-rt.c).
@@ -4513,6 +4523,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var declOwn = ""
         // Set while declOne runs again past the -n checks it has emitted.
         var nrefDone = false
+        // Set while declOne runs again past the self-reference check it has emitted.
+        var selfDone = false
         // The value of assignment a, expanded now unless v already holds it.
         var declValue = function(b, a, v) {
             if (v != null) { return {b: b, v: v} }
@@ -4523,54 +4535,113 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: r.b, v: rv}
         }
         var declOne = function(b, j, v) {
-            // -n with -i fails, silently. Twin of declOne in bash-interpreter.abnf.
+            // -n of an operand written NAME[SUB] is refused first; -n with -i fails, silently.
+            // Twin of declOne in bash-interpreter.abnf.
+            var aw = asgsWritten[j]
+            if (isRef && kw != "readonly" && (darrs[j] != null || (aw != null && aw.idxT != null && aw.isrc != ""))) {
+                var shownSub = gepStr(b, kw + ": " + ((aw != null) ? names[j] + "[" : darrs[j]))
+                if (aw != null) {
+                    var sw = evalWord(b, aw.idxT)
+                    b = sw.b
+                    shownSub = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [shownSub, sw.v]), gepStr(b, "]")])
+                }
+                emitDiag(b, b.NewCall(rtStrcat, [shownSub, gepStr(b, ": reference variable cannot be an array\n")]))
+                roFail = true
+                return b
+            }
             if (isRef && integer) { roFail = true; return b }
             var a = asgs[j]
             var localHereJ = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset") && locOwn("$" + names[j])
             // -n with a value that is NAME itself: refused outside a function, where nothing
-            // is declared (a computed value: selfRef in declOneBody); inside one a warning,
-            // before any other check (bash 5.3). Twin of selfV in declOne in
-            // bash-interpreter.abnf.
-            if (isRef && !nrefDone && a != null && a.lit == null && a.idxT == null && a.valT != null) {
+            // is declared; inside one a warning, before any other check (bash 5.3). Twin of
+            // selfV in declOne in bash-interpreter.abnf.
+            if (isRef && !nrefDone && !selfDone && a != null && a.lit == null && a.idxT == null && a.valT != null) {
+                var selfMsg = kw + ": " + names[j] + ": nameref variable self references not allowed\n"
+                var warnMsg = kw + ": warning: " + names[j] + ": circular name reference\n"
                 if (v == null && a.valT.c != undefined) {
                     if (a.valT.c == names[j] && curFrame == null) {
-                        emitDiag(b, gepStr(b, kw + ": " + names[j] + ": nameref variable self references not allowed\n"))
+                        emitDiag(b, gepStr(b, selfMsg))
                         roFail = true
                         return b
                     }
-                    if (a.valT.c == names[j]) { emitDiag(b, gepStr(b, kw + ": warning: " + names[j] + ": circular name reference\n")) }
-                } else if (curFrame != null) {
+                    if (a.valT.c == names[j]) { emitDiag(b, gepStr(b, warnMsg)) }
+                } else {
                     var sr = declValue(b, a, v)
                     b = sr.b
                     v = sr.v
                     var swB = curF.NewBlock(""), sgB = curF.NewBlock("")
                     b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [v, gepStr(b, names[j])]), zero), swB, sgB)
-                    emitDiag(swB, gepStr(swB, kw + ": warning: " + names[j] + ": circular name reference\n"))
-                    swB.NewBr(sgB)
-                    b = sgB
+                    if (curFrame != null) {
+                        emitDiag(swB, gepStr(swB, warnMsg))
+                        swB.NewBr(sgB)
+                        b = sgB
+                    } else {
+                        emitDiag(swB, gepStr(swB, selfMsg))
+                        swB.NewStore(one, refuseP)
+                        var sEnd = curF.NewBlock("")
+                        swB.NewBr(sEnd)
+                        selfDone = true
+                        sgB = declOne(sgB, j, v)
+                        selfDone = false
+                        sgB.NewBr(sEnd)
+                        return sEnd
+                    }
                 }
             }
             // A function's own nameref whose chain, known here, is circular is looked up
-            // twice, each a warning. Without -n and attributes, a value then goes to the
-            // nameref itself, as the name it refers to (rt_decl_circ). Twin of the same arm
-            // of declOne in bash-interpreter.abnf.
+            // twice, each a warning. Without -n, the attributes and the value then go to the
+            // nameref itself (rt_decl_circ): a scalar value, or what += appends, must name a
+            // variable, and an -i one is not stored (status 1); an array literal, looked up
+            // twice more unless -a or -A is given, makes the nameref an array, which += does
+            // not start from the nameref's value. Twin of the same arm of declOne in
+            // bash-interpreter.abnf.
             var plainV = a == null || (a.lit == null && a.idxT == null && a.op != "+=")
-            if (!nrefDone && localHereJ && plus.indexOf("n") < 0 && plainV && (isRef || flags == "") && refLoops(names[j])) {
-                if (isRef || a == null) {
+            var circOk = a == null || a.idxT == null
+            var cf
+            for (cf = 0; cf < flags.length; cf++) { if ("-irxulctaA".indexOf(flags.charAt(cf)) < 0) { circOk = false } }
+            if (!nrefDone && localHereJ && plus.indexOf("n") < 0 && (isRef ? plainV : circOk) && refLoops(names[j])) {
+                if (isRef || (a == null && flags == "")) {
                     b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero])
                     if (!isRef) { return b }
                 } else {
-                    var cr = declValue(b, a, v)
-                    b = cr.b
-                    v = cr.v
-                    var cbad = b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), v, one])
-                    var cBadB = curF.NewBlock(""), cOkB = curF.NewBlock(""), cEnd = curF.NewBlock("")
-                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, cbad, zero), cBadB, cOkB)
-                    cBadB.NewStore(one, refuseP)
-                    cBadB.NewBr(cEnd)
-                    storeVarRaw(cOkB, names[j], v)
-                    cOkB.NewBr(cEnd)
+                    var lit0 = a != null && a.lit != null
+                    var cEnd = null
+                    // A written value that names no variable is refused before any attribute.
+                    var cw = (a == null || lit0 || v != null) ? null : ((a.valT == null) ? "" : a.valT.c)
+                    if (cw != null && cw != undefined && !bashIsRef(cw)) {
+                        b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), gepStr(b, cw), one])
+                        roFail = true
+                        return b
+                    }
+                    if (a != null && !lit0) {
+                        var cr = declValue(b, a, v)
+                        b = cr.b
+                        v = cr.v
+                        var cbad = b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), v, one])
+                        var cBadB = curF.NewBlock(""), cOkB = curF.NewBlock("")
+                        cEnd = curF.NewBlock("")
+                        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, cbad, zero), cBadB, cOkB)
+                        cBadB.NewStore(one, refuseP)
+                        cBadB.NewBr(cEnd)
+                        b = cOkB
+                    } else {
+                        b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero])
+                        if (lit0 && !isArray) { b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), emptyPtr(b), zero]) }
+                    }
+                    if (integer && a != null && !lit0) { asgs[j] = null; roFail = true }
+                    if (lit0 && a.op == "+=") {
+                        var isA0 = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, names[j])), zero)
+                        storeVarRaw(b, names[j], b.NewSelect(isA0, loadVar(b, names[j]), unsetPtr(b)))
+                    }
+                    // The store lands on the nameref itself; its target is unknown after it.
+                    refVars["$" + names[j]] = false
+                    b = declOneBody(b, j, (asgs[j] == null) ? null : v)
+                    // Assigning the literal cleared the binding's marks; the nameref stays.
+                    if (lit0) { b.NewCall(rtNmark, [gepStr(b, names[j]), one]) }
                     refVars["$" + names[j]] = true
+                    asgs[j] = a
+                    if (cEnd == null) { return b }
+                    b.NewBr(cEnd)
                     return cEnd
                 }
             }
@@ -4671,10 +4742,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // return) unless -g is given; `export` and `readonly` always act on the global.
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
             var fresh = localize && curFrame != null && !locOwn("$" + names[j])
-            // A computed value that makes a nameref refer to itself outside a function is
-            // refused when it is stored, and nothing is declared (a literal one: declOne).
-            var selfMsg = kw + ": " + names[j] + ": nameref variable self references not allowed\n"
-            var selfRef = isRef && curFrame == null && asgs[j] != null && !(v == null && asgs[j].valT != null && asgs[j].valT.c != undefined)
             var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
             if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0) && attrOn(roVars, names[j])) {
                 emitDiag(b, gepStr(b, roWho + ((asgs[j] != null && roWho != "" && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n"))
@@ -4777,25 +4844,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var a = asgs[j]
                 if (v != null || a.idxT != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: (v != null) ? null : a.lit, valT: (v != null) ? doneWord(v) : a.valT, isrc: a.isrc, soft: subBadP, xl: true} }
                 if (a.idxT != null) { b.NewCall(rtDeclArr, [gepStr(b, a.name), llvm.constant.NewInt(i32, getVarId(a.name)), localize ? zero : one]) }
-                var prevV = selfRef ? loadVar(b, names[j]) : null
                 // The value's arithmetic errors (-i) carry the keyword; the subscript's not.
                 if (a.lit == null) { b.NewStore(gepStr(b, kw + ": "), gArPfx) }
                 litDecl = true
                 b = emitAssign(b, a, assoc, null)
                 litDecl = false
                 if (a.lit == null) { b.NewStore(emptyPtr(b), gArPfx) }
-                if (selfRef) {
-                    // Refused, the name keeps its value and gets no nameref mark.
-                    var selfB = curF.NewBlock(""), okB = curF.NewBlock(""), joinB = curF.NewBlock("")
-                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [loadVar(b, names[j]), gepStr(b, names[j])]), zero), selfB, okB)
-                    storeVarRaw(selfB, names[j], prevV)
-                    emitDiag(selfB, gepStr(selfB, selfMsg))
-                    selfB.NewStore(one, refuseP)
-                    selfB.NewBr(joinB)
-                    okB.NewCall(rtNmark, [gepStr(okB, names[j]), one])
-                    okB.NewBr(joinB)
-                    b = joinB
-                }
                 // Storing a value that is NAME itself warns once more.
                 if (isRef && curFrame != null) {
                     var warnB = curF.NewBlock(""), goB = curF.NewBlock("")
@@ -4809,7 +4863,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (isRef) {
                 var lt = (asgs[j] != null && v == null && asgs[j].valT != null) ? asgs[j].valT.c : undefined
                 refVars["$" + names[j]] = (lt != undefined && isIdentText(lt)) ? lt : true
-                if (!selfRef) { b.NewCall(rtNmark, [gepStr(b, names[j]), one]) }
+                b.NewCall(rtNmark, [gepStr(b, names[j]), one])
             }
             if (asgs[j] == null && !arrJ && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
             if (refJoin != null) { b.NewBr(refJoin); b = refJoin }
@@ -5270,13 +5324,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var w = mkWord(ns)
         return {s: w.s, f: w.f, c: w.c, lean: w.lean, fn: w.fn, spw: mkWord(sp)}
     }
-    // Evaluate ONE word to a single string: a word that can produce several fields is
-    // flattened (space-joined), which is what every builtin with a fixed argument list wants.
-    function evalWord(b, w) {
+    // {b, v}: the word's value, a field list when w.f holds.
+    function wordFields(b, w) {
         var svq = uqStarEmit
         uqStarEmit = false
         var r = w.fn(b)
         uqStarEmit = svq
+        return r
+    }
+    // Evaluate ONE word to a single string: a word that can produce several fields is
+    // flattened (space-joined), which is what every builtin with a fixed argument list wants.
+    function evalWord(b, w) {
+        var r = wordFields(b, w)
         if (w.f == true) { return {b: r.b, v: wordJoin(r.b, r.v)} }
         return r
     }
@@ -5509,6 +5568,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var isArray = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, arg.c)), zero)
             return boolStatus(b, b.NewSelect(isArray, setElem0, setScalar))
         }
+        if (op == "-o") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtTestOpt, arg.v), zero)) }
+        if (op == "-R") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtTestRef, arg.v), zero)) }
         var k = b.NewCall(rtFskind, arg.v)
         // The model and the predicate table are documented at fsKind in
         // languages/bash-interpreter.abnf, including why a real stat() was declined.
@@ -5525,7 +5586,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A numeric operand of test: read at compile time when the word is a literal decimal
     // number that a double holds exactly, else rt_test_int's (tc.who names the command in
     // its diagnostic, tc.rt records that emitTest must look at test_err).
-    var tc = {who: "test", rt: false, stop: false, a: [], n: 0, i: 0}
+    var tc = {who: "test", rt: false, stop: false, a: [], n: 0, i: 0, dyn: []}
     function testInt(b, w) {
         var t = w.c
         var i = (t != undefined && (t.charAt(0) == "-" || t.charAt(0) == "+")) ? 1 : 0
@@ -5559,11 +5620,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // bash's test.c, parsed at compile time over the argument words tc.a from tc.i: the rules
     // and the order of evaluation are at tstTerm in bash-interpreter.abnf. A word whose text
-    // is known only at run time ("\x00val") is never an operator. Values are i32 statuses
-    // (0 is true). A syntax error is emitted as rt_test_syn and ends the emission (tc.stop).
+    // is known only at run time ("\x00val") is taken for an operand, and tc.dyn lists the ones
+    // the parse looked at: emitTest checks at run time that they are no operator. Values are
+    // i32 statuses (0 is true). A syntax error is emitted as rt_test_syn and ends the emission
+    // (tc.stop).
     function tcTok(k) {
         if (k >= tc.n) { return "\x00end" }
-        if (tc.a[k].c == undefined) { return "\x00val" }
+        if (tc.a[k].c == undefined) {
+            if (tc.dyn.indexOf(k) < 0) { tc.dyn.push(k) }
+            return "\x00val"
+        }
         return tc.a[k].c
     }
     function tcOne(b, k) { return boolStatus(b, isNonEmptyStr(b, tc.a[k].v)) }
@@ -5672,13 +5738,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return tcOne(b, tc.i - 1)
     }
 
+    // The words are parsed at compile time (tc*), and parsed again when the command runs
+    // (rt_test) if a field-list word does not give exactly one field, or a computed word the
+    // compile-time parse took for an operand is an operator.
     function emitTest(b, cmd, args) {
         var a = args
         tc.who = cmd
-        var bbox = {b: b}
         if (cmd == "[") {
             if (a.length == 0 || a[a.length - 1].c != "]") {
                 if (a.length > 0 && a[a.length - 1].c == undefined) { fail("[ whose last word is computed") }
+                var bbox = {b: b}
                 evalArgs(bbox, a)
                 b = emitAbortCheck(bbox.b)
                 emitDiag(b, gepStr(b, "[: missing `]'\n"))
@@ -5687,32 +5756,61 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             a = a.slice(0, a.length - 1)
         }
-        var vals = evalArgs(bbox, a)
-        b = bbox.b
-        if (vals.length == 0) { storeStatusI(b, 1); return b }
-        if (vals.length == 1) {
-            storeStatus(b, boolStatus(b, isNonEmptyStr(b, vals[0].v)))
-            return b
+        if (a.length == 0) { storeStatusI(b, 1); return b }
+        var vals = [], raw = []
+        var multi = false
+        var i
+        for (i = 0; i < a.length; i++) {
+            var r = wordFields(b, a[i])
+            b = r.b
+            raw.push(r.v)
+            var v = r.v
+            if (a[i].f == true) { v = b.NewCall(rtTestOne, r.v); multi = true }
+            vals.push({v: v, c: a[i].c})
         }
         tc.a = vals
         tc.n = vals.length
         tc.i = 0
         tc.rt = false
         tc.stop = false
-        var res = tcPosix(b, vals.length)
-        if (tc.i < tc.n && !tc.stop) {
-            tc.rt = true
-            b.NewCall(rtTestExtra, [gepStr(b, tc.who), vals[tc.i].v])
+        tc.dyn = []
+        var fast = curF.NewBlock("")
+        var res
+        if (vals.length == 1) { res = boolStatus(fast, isNonEmptyStr(fast, vals[0].v)) }
+        else {
+            res = tcPosix(fast, vals.length)
+            if (tc.i < tc.n && !tc.stop) {
+                tc.rt = true
+                fast.NewCall(rtTestExtra, [gepStr(fast, tc.who), vals[tc.i].v])
+            }
         }
         // An operand that is no integer, or a syntax error, makes the status 2.
         if (tc.rt) {
-            res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gTestErr), zero), llvm.constant.NewInt(i32, 2), res)
-            b.NewStore(zero, gTestErr)
+            res = fast.NewSelect(fast.NewICmp(llvm.enum.IPredNE, fast.NewLoad(i32, gTestErr), zero), llvm.constant.NewInt(i32, 2), res)
+            fast.NewStore(zero, gTestErr)
         }
-        storeStatus(b, res)
+        storeStatus(fast, res)
+        var again = multi ? b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gTestMulti), zero) : null
+        for (i = 0; i < tc.dyn.length; i++) {
+            var isOp = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtTestWord, vals[tc.dyn[i]].v), zero)
+            again = (again == null) ? isOp : b.NewOr(again, isOp)
+        }
+        if (again == null) {
+            b.NewBr(fast)
+            b = fast
+        } else {
+            var slow = curF.NewBlock(""), done = curF.NewBlock("")
+            b.NewCondBr(again, slow, fast)
+            var acc = nilList(slow)
+            for (i = 0; i < raw.length; i++) { acc = slow.NewCall(rtCatFields, [acc, raw[i]]) }
+            storeStatus(slow, slow.NewCall(rtTest, [acc, gepStr(slow, tc.who)]))
+            slow.NewBr(done)
+            fast.NewBr(done)
+            b = done
+        }
         // An arithmetic error in a -v subscript abandons the line. Twin of the test arm of
         // runCommand in bash-interpreter.abnf.
-        return emitAbortCheck(b)
+        return (vals.length == 1 && again == null) ? b : emitAbortCheck(b)
     }
 
     // ---- pipelines, subshells, groups, (( )), [[ ]], redirections ----

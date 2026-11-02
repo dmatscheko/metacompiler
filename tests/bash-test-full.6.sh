@@ -105,10 +105,50 @@ s131() {
   e=$(declare -gr s131r=1; s131f() { local -n s131r=s131r; echo "s=$?"; }; s131f 2>&1; s131g() { local s131y=s131y; local -n s131y; echo "s=$?"; }; s131g 2>&1)
   check nrc3 "$(s131s "$e")" 'local: warning: s131r: circular name reference;local: s131r: readonly variable;s=1;s=0;'
 }
+
+# ===== SECTION 132: test with operators known at run time; test -o and -R =====
+# test parses the words an expansion gives, so an operator can come out of a variable or
+# out of "$@", and an unquoted word can give no field or several. -o asks for a set -o
+# option, -R whether a name is itself a nameref that has a value. Every expected value is
+# bash 5.3's.
+s132() {
+  local e op n x y s132v=1
+  op=-eq; e=$(test 1 $op 2; echo -n $?; op=-lt; test 1 $op 2; echo -n $?; op='='; [ a $op a ]; echo -n $?)
+  n='!'; e="$e$([ $n a = b ]; echo -n $?; [ "$n" ]; echo -n $?; set -- '(' a ')'; test "$@"; echo -n $?)"
+  check trt1 "$e" 100000
+  e=$(set -- 1 -eq 2; test "$@"; echo -n $?; set -- 1 -eq 1; [ "$@" ]; echo -n $?; set --; test "$@"; echo -n $?; set -- a = a -a b = c; test "$@"; echo -n $?)
+  x=; y='a b'; e="$e$([ $x ]; echo -n $?; [ $y ] 2>/dev/null; echo -n $?; [ -n $x ]; echo -n $?; IFS=:; x='1:-lt:2'; test $x; echo -n $?)"
+  check trt2 "$e" 10111200
+  s132s() { local l; while IFS= read -r l; do l=${l#*: line }; printf '%s;' "${l#*: }"; done <<< "$1"; }
+  e=$(set -- 1 -eq x; test "$@" 2>&1; echo "|$?"; set -- 1 2 3 4 5; test "$@" 2>&1; echo "|$?"; x=; [ $x = a ] 2>&1; echo "|$?")
+  check trt3 "$(s132s "$e")" 'test: x: integer expected;|2;test: too many arguments;|2;[: =: unary operator expected;|2;'
+  e=$(test -o braceexpand; echo -n $?; [[ -o hashall ]]; echo -n $?; test -o posix; echo -n $?; [ -o nonsense ]; echo -n $?; set -o pipefail; [[ -o pipefail ]]; echo -n $?; set -e; test -o errexit; echo -n $?)
+  check tro1 "$e" 001100
+  e=$(declare -n s132r=s132v s132u; s132f() { local s132r=1; [[ -R s132r ]]; echo -n $?; }; test -R s132r; echo -n $?; [[ -R s132u ]]; echo -n $?; test -R s132v; echo -n $?; s132f; s132u=s132v; [[ -R s132u ]]; echo -n $?)
+  check tro2 "$e" 01110
+}
+
+# ===== SECTION 133: nameref declarations refused or landing on the nameref =====
+# -n of an operand written NAME[SUB] is refused before any other check, a readonly NAME's
+# included. A declaration with attributes, += or an array literal of a function's own
+# circular nameref gives them to the nameref itself. Every expected value is bash 5.3's.
+s133() {
+  local e
+  s133s() { local l; while IFS= read -r l; do l=${l#*: line }; printf '%s;' "${l#*: }"; done <<< "$1"; }
+  e=$(declare -r s133r=1; s133f() { local -n 's133z[1]=s133z'; echo "s=$?"; local -n 's133r[1]=s133r'; echo "s=$?"; declare -n s133a[2] s133b=x; echo "s=$?"; declare -p s133b; }; s133f 2>&1)
+  check nrs1 "$(s133s "$e")" 'local: s133z[1]: reference variable cannot be an array;s=1;local: s133r[1]: reference variable cannot be an array;s=1;declare: s133a[2]: reference variable cannot be an array;s=1;declare -n s133b="x";'
+  e=$(s133f() { local -n s133w=s133w; declare -i s133w=x; echo -n "$? "; declare -p s133w; }; s133f 2>/dev/null)
+  e="$e|$(s133f() { local -n s133w=s133w; declare -r s133w=x; declare -p s133w; local -n s133v=s133v; declare -xu s133v+=y; declare -p s133v; }; s133f 2>/dev/null)"
+  check nrs2 "$e" $'1 declare -in s133w="s133w"|declare -nr s133w="x"\ndeclare -nxu s133v="S133VY"'
+  e=$(s133f() { local -n s133w=s133w; declare s133w=(x y); echo "s=$?"; declare -p s133w; local -n s133v=s133v; declare -r s133v=9; echo "s=$?"; declare -p s133v; }; s133f 2>&1)
+  check nrs3 "$(s133s "$e")" 'local: warning: s133w: circular name reference;warning: s133w: circular name reference;warning: s133w: circular name reference;warning: s133w: circular name reference;warning: s133w: circular name reference;warning: s133w: circular name reference;s=0;declare -an s133w=([0]="x" [1]="y");local: warning: s133v: circular name reference;warning: s133v: circular name reference;warning: s133v: circular name reference;warning: s133v: circular name reference;declare: `9'"'"': invalid variable name for name reference;s=1;declare -n s133v="s133v";'
+}
 # ===== END SECTIONS =====
 
 s129  # SECTION-CALL 129
 s130  # SECTION-CALL 130
 s131  # SECTION-CALL 131
+s132  # SECTION-CALL 132
+s133  # SECTION-CALL 133
 echo "full: $checks checks, $fails failures"
 exit $fails
