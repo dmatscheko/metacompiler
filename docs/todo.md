@@ -107,7 +107,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1161 kotlin: arity and Function-type checks of references to Java statics · P3 · KT · OPEN [V]
+### T-1161 kotlin: arity and Function-type checks of references to Java statics · P3 · KT · IN PROGRESS (KT worker, round 52) [V]
 Found while closing T-1160; oracle kotlinc 2.2.21. All engines.
 - `val m: (Int) -> Int = Math::abs; println(m is Function1<*, *>)` prints false; kotlinc true. The arity of a bound reference on a non-class value comes from `ktBuiltinArity(name)` (0 for abs). Overloaded statics (parseInt with 1/2/4 args) need the expected type, and Go host functions carry no arity — take the arity from the declared function type or the call-site parameter type where one exists; record the rest as a limit.
 
