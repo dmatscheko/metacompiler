@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1165** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1166** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,10 +103,9 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1164 kotlin: java.lang.Long::name in the compiler, function types from collection element types · P3 · KT · IN PROGRESS (KT worker, round 53) [V]
-Found while closing T-1161; oracle kotlinc 2.2.21.
-- Compiler (run and native): `val f = java.lang.Long::signum; println(f(-5L))` fails "js runtime error: method call 'signum' on a number"; kotlinc and the interpreter print -1. In `makeQualRef` a dotted base starting with `java` routes to `makeQualRef("Long", name)`, making an unbound kotlin Long reference instead of the java static. Pre-existing.
-- All engines: an expected function type that comes only from a collection's element type is not applied — `val fs: List<(Int) -> Int> = listOf(Math::abs); fs[0] is Function1<*, *>` prints false (kotlinc true). Push the declared element type into the builder's arguments (the element-adopt path handles only literal element types today).
+### T-1165 kotlin: direct `java.lang.System.x()` calls in the compiler · P3 · KT · OPEN [V]
+Found while closing T-1164; oracle kotlinc 2.2.21.
+- Compiler (run and native): `fun main() { println(java.lang.System.nanoTime() > 0L) }` fails "js runtime error: unknown name: java.lang.System"; kotlinc and the interpreter print true. `ktPkgMember` (jsrtkotlin.go) and its layer-2 twin look up only globals (`ktGlobalFn`); System is not a global — the emitter declares it into scope on demand. `java.lang.Long.signum`, `java.lang.Math.abs`, `java.lang.Integer.signum` direct calls work. Also check `java.lang.System.currentTimeMillis()`, `.identityHashCode(x)` and `java.lang.System.out.println`.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1206,6 +1205,7 @@ T-1160 kotlin: references to Java static members (Math::abs, System::currentTime
 T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` crash, hidden element locals — merged 33646300 (partial): run-time readonly refusals for read/declare/local/unset/printf -v/for/prefix, per-operand prefix declarations, w=k export w through a nameref; hidden NAME[SUB] locals and export w=7 carried to a follow-up; master probe matches bash 5.3
 T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-self ivars, NaN identity — merged d1f0a680 (partial): Float/Rational shift counts and bit index, digits radix, String#byteslice, bare nil?, stream-break count/sum/min_by..., nil-self ivars, Comparable#clamp check, walking upto; NaN identity carried to a follow-up; master four-leg probe matches ruby 2.6
 T-1161 kotlin: arity and Function-type checks of references to Java statics — merged 817db5dc: FunctionN arity of references from declared function types and a measured java-static table; retyping lambdas keep arity; master four-leg probe matches kotlinc 2.2.21
+T-1164 kotlin: java.lang.Long::name in the compiler, function types from collection element types — merged d758f6ce: java.lang-qualified static references in the compiler, function types from collection/map element types, stored references keep identity in the interpreter; master four-leg probe matches kotlinc 2.2.21
 
 # Settled — do not re-open
 
