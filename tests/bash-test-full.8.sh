@@ -307,6 +307,23 @@ s163() {
   e=$( (s163c x; s163c 3; s163d) 2>/dev/null)
   check pao7 "$(s163s "$e")" 's=0;declare -ain w=();s=1;declare -an w=();s=0;declare -Anu w=([0]="X" );'
 }
+# ===== SECTION 164: array declarations through computed namerefs and to array namerefs =====
+s164() {
+  local e
+  s164s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; case $l in *"circular name reference") continue ;; *"not a valid identifier") l="${l%%\`*}NVI" ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s164a() { local -n w=$1; declare -a w=x; echo "s=$?"; declare -p w s164g; }
+  s164b() { local -n w=$1; declare -A w=x; echo "s=$?"; declare -p s164h; }
+  s164c() { local s164v=5; local -n w=$1; declare -ai w=(1+2 3); echo "s=$?"; declare -p s164v; }
+  e=$( (s164a s164g; declare -p s164g; s164b s164h; s164c s164v) 2>&1)
+  check dna1 "$(s164s "$e")" 's=0;declare -n w="s164g";declare -a s164g=([0]="x");declare: s164g: not found;s=0;declare -A s164h=([0]="x" );s=0;declare -ai s164v=([0]="3" [1]="3");'
+  s164d() { local -n w=w; declare -a w=(); declare -a w=3; echo "s=$?"; declare -a w=; echo "s=$?"; local -a w[1]=3+; echo "s=$?"; declare -p w; declare -A w; echo "s=$?"; declare -p w; }
+  s164e() { local -n w=w; declare -a w=x w=3; echo "s=$?"; declare -p w; }
+  e=$( (s164d; s164e) 2>&1)
+  check dna2 "$(s164s "$e")" 'declare: `3'"'"': invalid variable name for name reference;s=1;declare: `'"'"': invalid variable name for name reference;s=1;local: `3+'"'"': invalid variable name for name reference;s=1;declare -an w=();declare: w: cannot convert indexed to associative array;s=1;declare -an w=();declare: NVI;declare: `3'"'"': invalid variable name for name reference;s=1;declare -an w=();'
+  s164f() { local -n w=w; declare -A w=x; declare -A w=3; echo "s=$?"; declare w=y; echo "s=$?"; declare -p w; declare -Ai w+=z; echo "s=$?"; declare -A w[k]=y; echo "s=$?"; declare -p w; declare -a w=y; echo "s=$?"; declare -Ar w=q; declare -p w; }
+  e=$( (s164f) 2>&1)
+  check dna3 "$(s164s "$e")" 'declare: `3'"'"': invalid variable name for name reference;s=1;s=0;declare -An w=([0]="y" );s=0;s=0;declare -Ain w=([0]="0" );declare: w: cannot convert associative to indexed array;s=1;declare -Ainr w=([0]="0" );'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -319,5 +336,6 @@ s160  # SECTION-CALL 160
 s161  # SECTION-CALL 161
 s162  # SECTION-CALL 162
 s163  # SECTION-CALL 163
+s164  # SECTION-CALL 164
 echo "full: $checks checks, $fails failures"
 exit $fails

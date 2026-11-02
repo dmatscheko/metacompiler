@@ -6840,7 +6840,11 @@ int rt_nref_void(char *n)
  * refArrRead in bash-interpreter.abnf. */
 int rt_nref_isarr(char *n, int sub)
 {
-    if (nref_any == 0 || (rt_arr_marks(n) & 32) == 0 || rt_arr_any(n) == 0) return 0;
+    int r;
+    if (nref_any == 0 || (rt_arr_marks(n) & 32) == 0) return 0;
+    /* An empty one is an array too. */
+    r = rt_ar_find(n);
+    if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 4099) == 0)) return 0;
     if (sub == 3) {
         rt_berr("", "", "invalid variable name for name reference");
         arith_err = 1;
@@ -6928,11 +6932,12 @@ int rt_nref_noarr(char *kw, char *nm, int chk)
 }
 
 /* -a or -A of the nameref nm whose value is unset or empty, which refers to
- * nothing, makes it a plain array: the nameref mark goes. */
+ * nothing, makes it a plain array: the nameref mark goes. One that is an array
+ * already stays a nameref. */
 int rt_nref_drop(char *nm)
 {
     int i;
-    if (nref_any == 0 || (rt_arr_marks(nm) & 32) == 0) return 0;
+    if (nref_any == 0 || (rt_arr_marks(nm) & 32) == 0 || rt_nref_isarr(nm, 0) != 0) return 0;
     i = rt_varslot(nm);
     if (i >= 0 && gvars[i] != &unset_marker[0] && gvars[i][0] != 0) return 0;
     return rt_nmark(nm, 0);
@@ -7112,21 +7117,24 @@ int rt_nref_el(char *t, char *n)
  * made unless it is one of the call's, marked with the attributes at & 7
  * (rt_atmark's), a declared array with at & 64 and an associative one with
  * at & 128; 1, or 0 for any other chain. An array of the other kind already is
- * left as it is: 2. */
+ * left as it is: 2. With at & 64 a chain that ends at another variable name
+ * makes that name a local of the call the same way. */
 int rt_nref_hidnew(char *n, int at, int d)
 {
     char *t;
-    int id, r;
+    int id, r, el;
     if (rt_nref_void(n) != 0) return 0;
     nref_quiet = nref_quiet + 1;
     t = rt_nref_end(n);
     nref_quiet = nref_quiet - 1;
-    if (t == 0 || rt_indbr(t) <= 0) return 0;
+    if (t == 0) return 0;
+    el = rt_indbr(t) > 0;
+    if (!el && ((at & 64) == 0 || rt_isname(t) == 0 || rt_strcmp(t, n) == 0)) return 0;
     id = rt_varslot(t);
     if (id < 0) id = rt_varslot_add(t);
     if (id < 0) return 0;
     if (rt_local_here(id, d) == 0) rt_local_new(id, d);
-    nref_hid = 1;
+    if (el) nref_hid = 1;
     r = rt_ar_find(t);
     if ((at & 64) != 0 && r >= 0 && (ar_n[r] != 0 || (ar_mk[r] & 4099) != 0)
         && ((ar_mk[r] & 4096) != 0) != ((at & 128) != 0)) return 2;
@@ -9760,7 +9768,8 @@ char *rt_nref_arr(char *n, int lit, int sub)
     }
     i = rt_varslot_new(t);
     if (lit != 0) {
-        rt_arr_empty(t, 28816);
+        /* A nameref that is an array stays one (mark 32). */
+        rt_arr_empty(t, rt_nref_isarr(t, 0) != 0 ? 28848 : 28816);
         if (i >= 0) gvars[i] = &unset_marker[0];
     } else if (i >= 0) rt_arr_adopt(t, i);
     return t;

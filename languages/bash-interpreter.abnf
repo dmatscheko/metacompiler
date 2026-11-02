@@ -3525,6 +3525,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (selfV) { diagErr(kw + ": warning: " + names[k] + ": circular name reference\n") }
             if (declCircGlob(k, v)) { return }
+            // A function's own nameref that is an array (refIsArr) takes a scalar value as
+            // the name it would refer to (bash 5.3): one that is no name is refused before
+            // anything else, status 1. Otherwise the attributes go to the nameref, which stays
+            // one. An associative one stores the value as element 0 (one written NAME[SUB]
+            // stores nothing); an indexed one's store looks it up by a name bash reads from
+            // freed memory, printed here as `': status 0, or 1 for an operand written
+            // NAME[SUB]. Twin of arrRef in declOne in bash-to-llvm-ir.abnf.
+            if (!isRef && plus.indexOf("n") < 0 && asgs[k] != null && asgs[k].lit == null && localizes() && localHere(names[k]) && refIsArr(names[k])) {
+                if (!bashIsRef(v)) {
+                    diagErr(kw + ": `" + v + "': invalid variable name for name reference\n")
+                    roFail = true
+                    return
+                }
+                var arFail = roFail
+                roFail = false
+                var arA = asgs[k]
+                asgs[k] = null
+                declOneN(k, null)
+                asgs[k] = arA
+                if (!roFail && arrs[arrKey(names[k])].assoc) {
+                    if (aw.idxT == null) { elemSet(names[k], "0", (aw.op == "+=") ? arrGet(names[k], "0") : null, v) }
+                } else if (!roFail) {
+                    diagErr(kw + ": `': not a valid identifier\n")
+                    roFail = aw.idxT != null
+                }
+                roFail = roFail || arFail
+                return
+            }
             var plainV = asgs[k] == null || (asgs[k].lit == null && asgs[k].idxT == null && asgs[k].op != "+=")
             // A function's own nameref whose chain is circular is looked up twice, each a
             // warning. Without -n, the attributes and the value then go to the nameref itself
@@ -3556,7 +3584,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                 ca.lit = true
                                 diagErr(kw + ": `" + v + "': invalid variable name for name reference\n")
                                 roFail = true
-                            } else if (assoc) { declOneN(k, v) }
+                            } else if (assoc) {
+                                // The nameref's value goes: it is an array now.
+                                unsetVar(names[k])
+                                declOneN(k, v)
+                            }
                             else {
                                 var sa1 = asgs[k]
                                 asgs[k] = null
@@ -3715,8 +3747,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // -n declares the reference itself, whatever it referred to before.
             var nk = "$" + names[k]
-            // -a or -A of a nameref that refers to nothing makes it a plain array.
-            if (!isRef && bareArr && attrOn(refVars, names[k])) { refVars[nk] = false }
+            // -a or -A of a nameref that refers to nothing makes it a plain array; one that
+            // is an array already stays a nameref.
+            if (!isRef && bareArr && attrOn(refVars, names[k]) && !isArr(names[k])) { refVars[nk] = false }
             // -n, in bash 5.3's order. An array variable, an array value or -a/-A on a local
             // is refused with "reference variable cannot be an array" (status 1), after a
             // compound value is assigned and a local made an empty array. Then a set variable

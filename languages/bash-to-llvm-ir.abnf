@@ -4777,6 +4777,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var roRtDone = false
         // Set while declOne runs again past the run-time target of a computed nameref.
         var dpreDone = false
+        // Set while declOne runs again past the run-time array nameref test it has emitted.
+        var arrRefDone = false
         // export and readonly of a function's circular local nameref, its chain known here,
         // act on the global variable of the name, after bash's warnings. Twin of
         // declCircGlob in bash-interpreter.abnf, which has the cases.
@@ -4970,6 +4972,64 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 dfB.NewBr(dEnd)
                 return dEnd
             }
+            // A function's own nameref that is an array when this runs (rt_nref_isarr) takes a
+            // scalar value as the name it would refer to: one that is no name is refused before
+            // anything else, status 1. Otherwise the attributes go to the nameref, which stays
+            // one, and unless they were refused an associative one stores the value as element
+            // 0 (NAME[SUB] nothing), an indexed one reports `': status 0, or 1 for an operand
+            // written NAME[SUB]. Twin of the same check in declOne in bash-interpreter.abnf.
+            if (!arrRefDone && !isRef && plus.indexOf("n") < 0 && a != null && a.lit == null && localHereJ && refuseP != null && attrOn(refVars, names[j]) === true) {
+                var arB = curF.NewBlock(""), arBadB = curF.NewBlock(""), arOkB = curF.NewBlock(""), arNoB = curF.NewBlock(""), arEnd = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefIsarr, [gepStr(b, names[j]), zero]), zero), arB, arNoB)
+                // Only this path expands the value here; the other leaves it to declOne.
+                var arv = declValue(arB, a, v)
+                arB = arv.b
+                var av = arv.v
+                arB.NewCondBr(arB.NewICmp(llvm.enum.IPredEQ, arB.NewCall(rtIsAsgRef, av), zero), arBadB, arOkB)
+                emitDiag(arBadB, arBadB.NewCall(rtStrcat, [arBadB.NewCall(rtStrcat, [gepStr(arBadB, kw + ": `"), av]), gepStr(arBadB, "': invalid variable name for name reference\n")]))
+                arBadB.NewStore(one, refuseP)
+                arBadB.NewBr(arEnd)
+                var arPre = arOkB.NewLoad(i32, refuseP)
+                arOkB.NewStore(zero, refuseP)
+                var arAt = caseAtBits(names[j])
+                var arRo = attrOn(roVars, names[j])
+                var arFail = roFail
+                roFail = false
+                refVars["$" + names[j]] = false
+                asgs[j] = null
+                arrRefDone = true
+                arOkB = declOne(arOkB, j, null)
+                arrRefDone = false
+                asgs[j] = a
+                var arRc = roFail ? one : arOkB.NewLoad(i32, refuseP)
+                roFail = arFail
+                var arRefB = curF.NewBlock(""), arChkB = curF.NewBlock(""), arAsB = curF.NewBlock(""), arDgB = curF.NewBlock(""), arJoinB = curF.NewBlock("")
+                arOkB.NewCondBr(arOkB.NewICmp(llvm.enum.IPredEQ, arRc, zero), arChkB, arRefB)
+                arRefB.NewStore(one, refuseP)
+                arRefB.NewBr(arJoinB)
+                arChkB.NewCondBr(arChkB.NewICmp(llvm.enum.IPredNE, arChkB.NewCall(rtIsAssoc, gepStr(arChkB, names[j])), zero), arAsB, arDgB)
+                // Under the attributes the nameref has, lexical or run-time marks (rt_dyn_at).
+                if (aw.idxT == null) {
+                    var asNm = gepStr(arAsB, names[j]), asK = gepStr(arAsB, "0")
+                    var asAt = arAsB.NewOr(llvm.constant.NewInt(i32, elemAttrs(names[j])), arAsB.NewAnd(arAsB.NewCall(rtDynAt, asNm), llvm.constant.NewInt(i32, 7)))
+                    var asV = arAsB.NewCall(rtAttrv, [(a.op == "+=") ? arAsB.NewCall(rtArrGet, [asNm, asK]) : nullStr, av, asAt])
+                    arAsB = emitAbortCheck(arAsB)
+                    arAsB.NewCall(rtArrSet, [asNm, asK, asV])
+                }
+                arAsB.NewStore(arPre, refuseP)
+                arAsB.NewBr(arJoinB)
+                emitDiag(arDgB, gepStr(arDgB, kw + ": `': not a valid identifier\n"))
+                arDgB.NewStore((aw.idxT != null) ? one : arPre, refuseP)
+                arDgB.NewBr(arJoinB)
+                refVars["$" + names[j]] = true
+                arJoinB = roBack(atBack(arJoinB, names[j], arAt), names[j], arRo)
+                arJoinB.NewBr(arEnd)
+                arrRefDone = true
+                arNoB = declOne(arNoB, j, v)
+                arrRefDone = false
+                arNoB.NewBr(arEnd)
+                return arEnd
+            }
             // A function's own nameref whose chain, known here, is circular is looked up
             // twice, each a warning. Without -n, the attributes and the value then go to the
             // nameref itself (rt_decl_circ): a scalar value, or what += appends, must name a
@@ -5141,7 +5201,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var elB = curF.NewBlock("")
                 // -a or -A (with -i, -u, -l, -r, -x) make it a declared array, which an array
                 // literal fills, or a plain value as element 0; one of the other kind already
-                // is refused (rt_nref_hidconv).
+                // is refused (rt_nref_hidconv). They do the same to a chain's end that is
+                // another variable name, made a local of the call.
                 var awH = asgsWritten[j]
                 var hArr = bareArr && refuseP != null && (awH == null || awH.idxT == null) && flags.charAt(0) == "-"
                     && flags.split("-").join("").split("a").join("").split("A").join("").split("i").join("").split("u").join("").split("l").join("").split("r").join("").split("x").join("") == ""
