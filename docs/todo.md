@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1113** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1114** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,24 +69,12 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1104 ruby: interpreter `break` from a block is caught by the nearest call with a block literal (untagged) · P3 · RB · IN PROGRESS (RB worker, round 51) [V]
+### T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (interp); endless Range#each hangs · P3 · RB · OPEN [V]
 
-Only the interpreter is wrong; llvm.Run and native match ruby 2.6.
-
-```ruby
-def b; [1].each { yield }; :b_end; end
-p(b { break 5 })                          # ruby: 5      interp: :b_end
-def c; r = [1, 2].map { |v| yield v }; [:c, r]; end
-p(c { |v| break v * 7 })                  # ruby: 7      interp: [:c, 7]
-```
-
-`break` must end the call that the block was written for: the frame that received the block literal, not the innermost call currently running a block. Tag the break throw with the block's home call (as the compiled legs do) and catch it only there. A break from a proc whose home call has already returned must raise LocalJumpError.
-
-### T-1105 ruby: split tests/ruby-test-full.rb, which is ~0.4% below the -frozen 100M step brake · P3 · RB · IN PROGRESS (RB worker, round 51) [V]
-
-Under the -frozen interpreter the file takes about 99.5–99.7M steps against the 100M brake. Almost any per-call cost added to the interpreter trips it; the r50 worker had to add fast paths to bindParams and blkBind just to stay under it.
-
-Move a block of SECTIONs out into a new tests/ruby-test-full.3.rb, with its SECTION-CALL lines, and wire it up the same way ruby-test-full.2.rb is wired into test.sh --full, gen and native-full. This is a mechanical move: the total assertion count must stay the same, and both halves must agree.
+Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
+- `begin; proc { break 1 }.call; rescue LocalJumpError => e; p e.reason, e.exit_value; end` prints `:break` and `1`. Every engine raises NoMethodError. Add accessors next to StopIteration#result (abnf/jsrt.go, lib/ruby-rt.metajs).
+- `super` with a literal block drops the block in the interpreter: makeSuper passes only the plain arguments. This was seen in the code and has not been probed yet; probe it first.
+- `p((1..Float::INFINITY).each { |i| break i if i * i > 50 })` prints 8. Ours hangs in every leg, and was already hanging before the r51 break rework. Check `(1..)` (2.6 endless range) and `1.step` too.
 
 # JS — JavaScript and TypeScript
 
@@ -1181,6 +1169,8 @@ T-1103 php: htmlspecialchars double_encode / ENT_SUBSTITUTE / HTML5 names; array
 T-1106 kotlin: Set.indices; read-only builder results not frozen against cast mutation; ListBuilder/MapBuilder javaClass — DONE r31 (ed41c693): Set.indices; read-only builder/singleton/Arrays$ArrayList/Empty* collections refuse writes through a cast per JVM class rules; ListBuilder/MapBuilder javaClass; master-probed vs kotlinc 2.2.21
 T-1107 bash: attribute change on a readonly variable; circular-nameref store; declare -n e=a[1] — DONE r35 (8a3f38c8): readonly attribute changes refused, nameref/array interactions per bash, circular nameref store, declare -n w=v[1]; master-probed vs bash 5.3 (stdout+stderr)
 T-1108 bash: bad-substitution message names the whole word; `]` from an expansion inside a subscript; stray `]]` order — DONE r35 (e615484e): bad-substitution names the whole word/dq string, ] from expansions in subscripts, stray ]] order, compiler $() local leak; master-probed
+T-1105 ruby: split tests/ruby-test-full.rb, which is ~0.4% below the -frozen 100M step brake — DONE r51 (1cbfc396): sections 97-121 moved into ruby-test-full.3.rb (wired into --full, native-full, README); main file now passes at 90M steps; counts unchanged
+T-1104 ruby: interpreter `break` from a block is caught by the nearest call with a block literal (untagged) — DONE r51 (2f9bacc6): break ends its block's home call in all engines (tagged home records/tokens), dead home -> LocalJumpError, lambda/->/define_method breaks; master-probed vs ruby 2.6; paired bench -0.04%
 
 # Settled — do not re-open
 
