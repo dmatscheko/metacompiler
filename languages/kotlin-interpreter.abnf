@@ -4359,14 +4359,38 @@ NotMemberKw = :script(~~ "pure";
                                if (n < 0 || n > 65535) { kThrowExc("IllegalArgumentException", "Invalid Char code: " + kstr(code)) }
                                return kChar(n)
                            }}
-    // The range companions' EMPTY is what `x until T.MIN_VALUE` answers (kRangeDec).
-    // Twin of ktTypeObj in abnf/jsrtkotlin.go and js_kttype in
-    // languages/lib/kotlin-rt.metajs.
+    // The range companions' EMPTY is what `x until T.MIN_VALUE` answers (kRangeDec);
+    // `IntRange(a, b)` is the class's constructor, carried as the companion's
+    // `invoke` the way Char's is, with the bounds typed by the element type
+    // (`LongRange(1, 4)`). The progression companions hold fromClosedRange. Twin of
+    // ktTypeObj in abnf/jsrtkotlin.go and js_kttype in languages/lib/kotlin-rt.metajs.
     var kRangeTys = ["Int", "Long", "Char", "UInt", "ULong"]
+    function kRangeCtor(ty) {
+        return function(a, b) { return kRange(kAdoptTy(a, ty), kAdoptTy(b, ty), false) }
+    }
+    // IntProgression.fromClosedRange(start, end, step): a progression from start
+    // towards end, descending for a negative step. The step is a Long for the Long
+    // and ULong progressions and an Int otherwise; its MIN_VALUE is refused because
+    // the progression negates it.
+    function kProgFrom(ty) {
+        var sty = ty == "Long" || ty == "ULong" ? "Long" : "Int"
+        return function(a, b, st) {
+            var s = anytype
+            s = kAdoptTy(st, sty)
+            if (kNum(s) == 0) { kThrowExc("IllegalArgumentException", "Step must be non-zero.") }
+            if (kCmpI("==", s, hostGlobals[sty].MIN_VALUE)) {
+                kThrowExc("IllegalArgumentException", "Step must be greater than " + sty + ".MIN_VALUE to avoid overflow on negation.")
+            }
+            var down = kNum(s) < 0
+            return kRangeStep(kRange(kAdoptTy(a, ty), kAdoptTy(b, ty), down), down ? kArith("-", kAdoptTy(0, sty), s) : s)
+        }
+    }
     for (var kri = 0; kri < kRangeTys.length; kri++) {
+        var krTy = kRangeTys[kri]
         var krMin = anytype
-        krMin = hostGlobals[kRangeTys[kri]].MIN_VALUE
-        hostGlobals[kRangeTys[kri] + "Range"] = {EMPTY: kRangeDec(kRange(krMin, krMin, false))}
+        krMin = hostGlobals[krTy].MIN_VALUE
+        hostGlobals[krTy + "Range"] = {EMPTY: kRangeDec(kRange(krMin, krMin, false)), invoke: kRangeCtor(krTy)}
+        hostGlobals[krTy + "Progression"] = {fromClosedRange: kProgFrom(krTy)}
     }
     // The float companions, boxed so that Double.NaN is a Double rather than an Int:
     // kotlin.Double declares MIN_VALUE as the smallest POSITIVE value, as
@@ -8604,6 +8628,9 @@ NotMemberKw = :script(~~ "pure";
         }
         return out
     }
+    // A runtime companion whose name is also a function: hostGlobals["Char"],
+    // hostGlobals["IntRange"].
+    function kHostInvoke(f) { return f !== null && typeof f == "object" && f.__class == undefined && typeof f.invoke == "function" }
     function mcall(target, name, args, spec) {
         // Both are copied into locals rather than reassigned: a parameter keeps the
         // type of its first call under the frozen engine, and these two legitimately
@@ -8617,6 +8644,7 @@ NotMemberKw = :script(~~ "pure";
         if (kIsPkg(target)) {
             kSetNamed(sp.named)
             var pf = kPkgMember(target, name)
+            if (kHostInvoke(pf)) { return pf.invoke.apply(undefined, args) }
             if (typeof pf != "function") { fail("not a function: " + target.__pkg + "." + name) }
             return pf.apply(undefined, args)
         }
@@ -14505,10 +14533,7 @@ NotMemberKw = :script(~~ "pure";
                 if (kIsRef(f)) { return kRefApply(f, spec.pos) }
                 var inv = lookupMethod(f, "invoke")
                 if (inv != null) { return inv.apply(undefined, concat2impl([f], spec.pos)) }
-                // A runtime companion whose name is also a function (hostGlobals["Char"]).
-                if (f !== null && typeof f == "object" && f.__class == undefined && typeof f.invoke == "function") {
-                    return f.invoke.apply(undefined, spec.pos)
-                }
+                if (kHostInvoke(f)) { return f.invoke.apply(undefined, spec.pos) }
                 fail("call of a non function: " + name)
             }
             kSetNamed(spec.named)

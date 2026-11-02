@@ -2874,6 +2874,9 @@ KwContract  = "contract" KwEnd ;
         "IntArray", "LongArray", "DoubleArray", "FloatArray", "CharArray", "BooleanArray",
         "ByteArray", "ShortArray", "UIntArray", "ULongArray", "UByteArray", "UShortArray"]
     for (var ktTNI = 0; ktTNI < ktTypeNameList.length; ktTNI++) { ktTypeNameSet["$" + ktTypeNameList[ktTNI]] = true }
+    // The builtin companions whose name, called, is their `invoke` (js_kttype).
+    var ktInvokeTypes = {"$Char": true, "$IntRange": true, "$LongRange": true, "$CharRange": true,
+                         "$UIntRange": true, "$ULongRange": true}
     // ----- the four scope-taking helpers that are PURE EXTERN CALLS -----
     //
     // kt_refbase, kt_outer, kt_bareref and kt_dthis need the whole scope chain, which
@@ -5924,9 +5927,10 @@ KwContract  = "contract" KwEnd ;
             // See rtKtGetP's header for why the position, and not the receiver's
             // origin, is what decides.
             var fV = b.NewCall(rtKtGetP(), [curScopeV, emitStr(b, name), hTrue])
-            // `Char(code)` is kotlin's Char FUNCTION and the bare name the companion,
-            // which carries the function as its `invoke` (js_kttype).
-            if (name == "Char" && classNames["$" + name] == undefined && funNames["$" + name] != true) {
+            // `Char(code)` is kotlin's Char FUNCTION and `IntRange(a, b)` a
+            // constructor, while the bare name is the companion, which carries the
+            // function as its `invoke` (js_kttype).
+            if (ktInvokeTypes["$" + name] === true && classNames["$" + name] == undefined && funNames["$" + name] != true) {
                 fV = callExt(b, "js_get", [fV, emitStr(b, "invoke")])
             }
             // A stdlib member name some class also declares is a member of an implicit
@@ -9694,10 +9698,11 @@ KwContract  = "contract" KwEnd ;
         // cannot be written as a plain number at all. The twin is hostGlobals["Int"] etc
         // in kotlin-interpreter.abnf; the objects come from js_kttype
         // (abnf/jsrtkotlin.go). The integral range types are values for the same
-        // reason: their companion's EMPTY.
+        // reason: their companion's EMPTY and fromClosedRange.
         var ktNumTypes = ["Int", "Long", "Byte", "Short", "UInt", "ULong", "UByte", "UShort",
                           "Char", "Double", "Float", "IntRange", "LongRange", "CharRange",
-                          "UIntRange", "ULongRange"]
+                          "UIntRange", "ULongRange", "IntProgression", "LongProgression",
+                          "CharProgression", "UIntProgression", "ULongProgression"]
         for (var kt = 0; kt < ktNumTypes.length; kt++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktNumTypes[kt]),
                                          callExt(b, "js_kttype", [emitStr(b, ktNumTypes[kt])])])

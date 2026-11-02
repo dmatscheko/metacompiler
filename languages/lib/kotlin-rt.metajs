@@ -9658,6 +9658,13 @@ function ktIsPkg(v) {
     return typeof v["__pkg"] == "string"
 }
 
+var K4_TYPE_OBJ_NAMES = {Int: true, Long: true, Byte: true, Short: true, UInt: true, ULong: true,
+                         UByte: true, UShort: true, Char: true, Double: true, Float: true,
+                         IntRange: true, LongRange: true, CharRange: true, UIntRange: true, ULongRange: true,
+                         IntProgression: true, LongProgression: true, CharProgression: true,
+                         UIntProgression: true, ULongProgression: true}
+function k4TypeObjName(name) { return K4_TYPE_OBJ_NAMES[name] === true }
+
 // ktPkgMember (jsrtkotlin.go:5082) descends into a sub-package or answers the
 // global of that name.
 function ktPkgMember(pkg, name) {
@@ -9669,6 +9676,8 @@ function ktPkgMember(pkg, name) {
     if (!rtIsNil(qv)) { return qv }
     var v = ktGlobalFn(name)
     if (!rtIsNil(v)) { return v }
+    // kotlin.Int, kotlin.ranges.IntRange: the companion (ktTypeObjNames).
+    if (k4TypeObjName(name)) { return js_kttype(name) }
     fail("unknown name: " + sub)
     return undefined
 }
@@ -11005,7 +11014,10 @@ function ktSmcall(recv, name, args) {
     // handle and the member is the same global function the bare spelling reaches;
     // a call is a METHOD call in the tree, so it never passes through js_ktfget.
     if (ktIsPkg(rv)) {
-        var pf = ktPkgMember(rv["__pkg"], name)
+        var pf = anytype
+        pf = ktPkgMember(rv["__pkg"], name)
+        // A companion whose name is also a function (kotlin.Char(65)).
+        if (ktIsObj(pf) && k4Fn(pf["invoke"])) { pf = pf["invoke"] }
         if (!k4Fn(pf)) { fail("not a function: " + rv["__pkg"] + "." + name) }
         // A no-argument printer call passes "", as the emitter does for a bare
         // `println()`: the printer itself cannot count its arguments.
@@ -12495,6 +12507,31 @@ function k4CharOf(code) {
     return ktChar(n)
 }
 
+// An integral range bound typed by the element type: `LongRange(1, 4)`.
+function k4AdoptEl(v, el) {
+    if (el == "Int") { return js_ktadopt(v, 32, false) }
+    if (el == "Long") { return js_ktadopt(v, 64, false) }
+    if (el == "UInt") { return js_ktadopt(v, 32, true) }
+    if (el == "ULong") { return js_ktadopt(v, 64, true) }
+    return v
+}
+
+// IntProgression.fromClosedRange (ktTypeObj in jsrtkotlin.go, whose twin in
+// kotlin-interpreter.abnf has the rules).
+function k4ProgFrom(el, a, b, st) {
+    var sty = "Int"
+    if (el == "Long" || el == "ULong") { sty = "Long" }
+    var s = k4AdoptEl(st, sty)
+    if (k1Cmp("==", s, 0)) { ktRaise("IllegalArgumentException", "Step must be non-zero.") }
+    if (k1Cmp("==", s, js_kttype(sty)["MIN_VALUE"])) {
+        ktRaise("IllegalArgumentException", "Step must be greater than " + sty + ".MIN_VALUE to avoid overflow on negation.")
+    }
+    if (k1Cmp("<", s, 0)) {
+        return js_ktrestep(k4RangeMake(k4AdoptEl(a, el), k4AdoptEl(b, el), "downTo"), k1Arith("-", k4AdoptEl(0, sty), s))
+    }
+    return js_ktrestep(k4RangeMake(k4AdoptEl(a, el), k4AdoptEl(b, el), "rangeTo"), s)
+}
+
 // js_kttype (jsrtkotlin.go:901) is ktTypeObj (jsrtkotlin.go:383): the companion of
 // one builtin type. MIN_VALUE / MAX_VALUE are the whole reason a sized integer had
 // to exist - Long.MAX_VALUE cannot be written as a plain number at all.
@@ -12565,10 +12602,17 @@ function js_kttype(name) {
         return o
     }
     // The range companions' EMPTY is what `x until T.MIN_VALUE` answers
-    // (k4RangeDec).
+    // (k4RangeDec); `IntRange(a, b)` is the constructor, carried as `invoke`.
     if (name == "IntRange" || name == "LongRange" || name == "CharRange" || name == "UIntRange" || name == "ULongRange") {
-        var mn = js_kttype(name.substring(0, name.length - 5))["MIN_VALUE"]
+        var el = name.substring(0, name.length - 5)
+        var mn = js_kttype(el)["MIN_VALUE"]
         o["EMPTY"] = k4RangeMake(mn, mn, "until")
+        o["invoke"] = function(a, b) { return k4RangeMake(k4AdoptEl(a, el), k4AdoptEl(b, el), "rangeTo") }
+        return o
+    }
+    if (name == "IntProgression" || name == "LongProgression" || name == "CharProgression" || name == "UIntProgression" || name == "ULongProgression") {
+        var pel = name.substring(0, name.length - 11)
+        o["fromClosedRange"] = function(a, b, st) { return k4ProgFrom(pel, a, b, st) }
         return o
     }
     // The float companions, boxed so that Double.NaN is a Double rather than an

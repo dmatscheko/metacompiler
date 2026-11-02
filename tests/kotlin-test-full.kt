@@ -8613,6 +8613,47 @@ fun s194() {
         kotlin.text.Regex("B", RegexOption.IGNORE_CASE).matches("b"))
 }
 
+// ===== SECTION 195: range constructors, fromClosedRange, qualified companions =====
+// IntRange(a, b), LongRange, CharRange, UIntRange and ULongRange are constructors
+// as well as the companions holding EMPTY; a LongRange's Int arguments are Longs.
+// IntProgression.fromClosedRange(start, end, step) builds a progression, descending
+// for a negative step, refusing a zero step and the step type's MIN_VALUE. The
+// companions are reachable package-qualified (kotlin.ranges.IntRange, kotlin.Int)
+// (kotlinc 2.2.21 on java 24).
+fun s195() {
+    val ns = listOf(1, 3, 9, 2, -3)
+    val r = IntRange(ns[0], ns[1])
+    check("rctor195a", "$r" == "1..3" && r.toList() == listOf(1, 2, 3) && r == (1..3) && (r as Any) is IntRange &&
+        IntRange(ns[1], ns[0]).isEmpty() && "${IntRange(ns[1], ns[0])}" == "3..1" &&
+        kotlin.ranges.IntRange(ns[0], ns[1]).toList() == listOf(1, 2, 3))
+    val l = LongRange(1, 4)
+    val c = CharRange('a', 'c')
+    check("rctor195b", "$l" == "1..4" && l.sum() == 10L && l.first + 1 == 2L && "$c" == "a..c" &&
+        c.toList() == listOf('a', 'b', 'c') && CharRange('c', 'a').isEmpty() && "${UIntRange(1u, 3u)}" == "1..3" &&
+        ULongRange(1uL, 3uL).toList() == listOf(1uL, 2uL, 3uL) && LongRange(Long.MAX_VALUE - 1, Long.MAX_VALUE).count() == 2)
+    val seen = mutableListOf<Int>()
+    for (i in IntRange(ns[3], 4)) seen.add(i)
+    check("rctor195c", seen == listOf(2, 3, 4) && IntRange.EMPTY.isEmpty() && "${kotlin.ranges.IntRange.EMPTY}" == "1..0" &&
+        kotlin.Int.MAX_VALUE == 2147483647 && kotlin.Char(65) == 'A')
+    val p = IntProgression.fromClosedRange(ns[0], ns[2], ns[3])
+    val d = IntProgression.fromClosedRange(ns[2], ns[0], ns[4])
+    check("rprog195d", "$p" == "1..9 step 2" && p.first == 1 && p.last == 9 && p.step == 2 && (p as Any) !is IntRange &&
+        (p as Any) is IntProgression && "$d" == "9 downTo 3 step 3" && d.step == -3 && d.last == 3 && d.toList() == listOf(9, 6, 3) &&
+        "${IntProgression.fromClosedRange(ns[0], ns[2], 1)}" == "1..9 step 1" && IntProgression.fromClosedRange(ns[0], ns[2], 1) == (1..9))
+    check("rprog195e", "${LongProgression.fromClosedRange(1L, 10L, 4L)}" == "1..9 step 4" && LongProgression.fromClosedRange(1, 10, 4).last == 9L &&
+        CharProgression.fromClosedRange('a', 'g', ns[3]).toList() == listOf('a', 'c', 'e', 'g') &&
+        "${UIntProgression.fromClosedRange(1u, 9u, 4)}" == "1..9 step 4" &&
+        ULongProgression.fromClosedRange(9uL, 1uL, -4L).toList() == listOf(9uL, 5uL, 1uL) &&
+        "${kotlin.ranges.IntProgression.fromClosedRange(ns[0], ns[2], 4)}" == "1..9 step 4")
+    val msgs = listOf(
+        runCatching { IntProgression.fromClosedRange(ns[0], ns[2], ns[0] - 1) }.exceptionOrNull()?.message,
+        runCatching { IntProgression.fromClosedRange(ns[0], ns[2], Int.MIN_VALUE) }.exceptionOrNull()?.message,
+        runCatching { LongProgression.fromClosedRange(1L, 9L, Long.MIN_VALUE) }.exceptionOrNull()?.message,
+        runCatching { CharProgression.fromClosedRange('a', 'z', 0) }.exceptionOrNull()?.message)
+    check("rprog195f", msgs == listOf("Step must be non-zero.", "Step must be greater than Int.MIN_VALUE to avoid overflow on negation.",
+        "Step must be greater than Long.MIN_VALUE to avoid overflow on negation.", "Step must be non-zero."))
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -8804,6 +8845,7 @@ fun main() {
     s192() // SECTION-CALL 192
     s193() // SECTION-CALL 193
     s194() // SECTION-CALL 194
+    s195() // SECTION-CALL 195
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

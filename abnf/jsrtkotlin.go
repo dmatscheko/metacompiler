@@ -624,12 +624,63 @@ func ktTypeObj(name string) *jsObject {
 		o.set("SIZE_BYTES", bits/8)
 	case "IntRange", "LongRange", "CharRange", "UIntRange", "ULongRange":
 		// The range companions' EMPTY is what `x until T.MIN_VALUE` answers
-		// (ktRangeOpenEnd). Twin of hostGlobals["IntRange"] in
-		// kotlin-interpreter.abnf and js_kttype in languages/lib/kotlin-rt.metajs.
-		mn := ktTypeObj(strings.TrimSuffix(name, "Range")).props["MIN_VALUE"]
+		// (ktRangeOpenEnd); `IntRange(a, b)` is the constructor, carried as the
+		// companion's `invoke`. Twin of hostGlobals["IntRange"] in
+		// kotlin-interpreter.abnf, which has the rules, and js_kttype in
+		// languages/lib/kotlin-rt.metajs.
+		el := strings.TrimSuffix(name, "Range")
+		mn := ktTypeObj(el).props["MIN_VALUE"]
 		o.set("EMPTY", ktRangeMake(mn, mn, "until"))
+		o.set("invoke", jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return ktRangeMake(rt.ktAdoptArg(args, 0, el), rt.ktAdoptArg(args, 1, el), "rangeTo")
+		}))
+	case "IntProgression", "LongProgression", "CharProgression", "UIntProgression", "ULongProgression":
+		el := strings.TrimSuffix(name, "Progression")
+		sty := "Int"
+		if el == "Long" || el == "ULong" {
+			sty = "Long"
+		}
+		o.set("fromClosedRange", jsHostFunc("fromClosedRange", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			s := giVal(rt, rt.ktAdoptArg(args, 2, sty))
+			if s == 0 {
+				rt.ktRaise("IllegalArgumentException", "Step must be non-zero.")
+			}
+			if sty == "Int" && s == math.MinInt32 || s == math.MinInt64 {
+				rt.ktRaise("IllegalArgumentException", "Step must be greater than "+sty+".MIN_VALUE to avoid overflow on negation.")
+			}
+			dir := "rangeTo"
+			if s < 0 {
+				dir, s = "downTo", -s
+			}
+			rg, _ := ktRangeOf(ktRangeMake(rt.ktAdoptArg(args, 0, el), rt.ktAdoptArg(args, 1, el), dir))
+			rg.st, rg.ls, rg.pg = float64(s), s, true
+			return ktMakeRange(rg)
+		}))
 	}
 	return o
+}
+
+// The names ktTypeObj builds a companion for: the list the compiler grammar binds
+// in program scope (ktNumTypes).
+var ktTypeObjNames = map[string]bool{
+	"Int": true, "Long": true, "Byte": true, "Short": true, "UInt": true, "ULong": true,
+	"UByte": true, "UShort": true, "Char": true, "Double": true, "Float": true,
+	"IntRange": true, "LongRange": true, "CharRange": true, "UIntRange": true, "ULongRange": true,
+	"IntProgression": true, "LongProgression": true, "CharProgression": true,
+	"UIntProgression": true, "ULongProgression": true,
+}
+
+// ktAdoptArg is argument i retyped by the declared type ty (ktAdoptTy), or as it
+// is when ty carries no width.
+func (rt *jsrt) ktAdoptArg(args []interface{}, i int, ty string) interface{} {
+	var v interface{} = jsUndef
+	if i < len(args) {
+		v = args[i]
+	}
+	if a := rt.ktAdoptTy(v, ty); a != nil {
+		return a
+	}
+	return v
 }
 
 // ktLitSfx is the suffix code the two grammars pass to js_ktlit: 0 none, 1 L,
@@ -1933,6 +1984,10 @@ func init() {
 			// never passes through js_ktfget.
 			if p, isPkg := ktIsPkg(recv); isPkg {
 				f := rt.ktPkgMember(p, mname)
+				// A companion whose name is also a function (kotlin.Char(65)).
+				if o, isObj := f.(*jsObject); isObj && isCallable(o.props["invoke"]) {
+					f = o.props["invoke"]
+				}
 				if !isCallable(f) {
 					rt.fail("not a function: %s.%s", p, mname)
 				}
@@ -10724,6 +10779,11 @@ func (rt *jsrt) ktPkgMember(pkg, name string) interface{} {
 	}
 	if v := ktGlobalFn(rt, name); !isUndefOrNull(v) {
 		return v
+	}
+	// kotlin.Int, kotlin.ranges.IntRange: the companion the bare name is bound to
+	// in program scope (js_kttype).
+	if ktTypeObjNames[name] {
+		return ktTypeObj(name)
 	}
 	rt.fail("unknown name: %s", sub)
 	return nil
