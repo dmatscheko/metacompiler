@@ -102,7 +102,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReversed live view; buildList subList writes · P3 · KT · OPEN [V]
+### T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReversed live view; buildList subList writes · P3 · KT · IN PROGRESS (KT worker, round 33) [V]
 
 Oracle: kotlinc 2.2.21.
 - `mutableMapOf("a" to 1).compute("a") { _, v -> (v ?: 0) + 1 }` aborts in every engine with "unknown Map method: compute"; kotlinc gives 2. computeIfPresent and replace (both forms, incl. replace(k, old, new) → Boolean) are missing too. Follow java.util.Map's defaults; a null result removes the key.
@@ -129,7 +129,7 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1114 php: return-type TypeError location; type-string order for callable/iterable/static; arrow-fn return deprecations · P3 · PHP · OPEN [V]
+### T-1114 php: return-type TypeError location; type-string order for callable/iterable/static; arrow-fn return deprecations · P3 · PHP · IN PROGRESS (PHP worker, round 50) [V]
 
 Spec: php-src PHP-8.4, Zend/zend_execute.c (zend_verify_return_error) and zend_compile.c (zend_type_to_string).
 - "Return value must be of type …" must report the line of the return statement. All engines report the caller's line, so each return needs its own site store.
