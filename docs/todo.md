@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1148** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1149** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,19 +69,17 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1145 ruby: uncaught-exception report via $stderr, (1..).take, big Integer#step, compiled for over endless String range, define_method rescue-modifier crash, `{` after a command call parse, warn uplevel limits · P3 · RB · IN PROGRESS (RB worker, round 62) [V]
+### T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.size, Object instance methods + top-level define_method, uncaught-exception backtrace "from" lines · P3 · RB · OPEN [V]
 
-Found while working T-1141. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected unless noted.
+Found while working T-1145. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected.
 
-1. The uncaught-exception report bypasses `$stderr`. MRI writes it through `$stderr.write`; ours prints to fd 2. Repro: `$stderr = obj_with_write; raise "x"`. MRI prints nothing and exits 1. The fix touches js_rtop in the shared abnf/jsrt.go, so run the full matrix.
-2. `(1..).take(2)` raises RangeError "cannot convert endless range to an array". MRI gives `[1, 2]`. Check take_while, first and min(n) on endless ranges too.
-3. `(2**70).step(by: 3).first(2)`: the interpreter raises NoMethodError and the Go twin answers `[b, b]` (imprecise). MRI gives `[b, b+3]`. Check Integer#step / #upto / #downto / #times with big receivers.
-4. Compiled legs only: `for s in ("a"..)` with a break aborts with "cannot take the length of an endless range". The interpreter and MRI walk it.
-5. Interpreter only: top-level `define_method(:dm) { … } rescue p $!` crashes with an engine TypeError ("Value is not an object: null").
-6. Parse: a line starting with `{` right after a command call with arguments (`$stdout.puts "x"` then `{1 => 2}.key(2)` on the next line) is taken as a block, giving "undefined method `key' for nil:NilClass". MRI treats it as a new statement.
-7. Known limits of Kernel#warn `uplevel:`:
-   - `uplevel: 2` or more inside a method or block raises NotImplementedError. Supporting it needs per-call site tracking, so only do it if that can be made cost-neutral.
-   - `uplevel: 1` written inside a rescue clause names the frame's entry line. MRI names the line that raised, because a rescue clause is its own frame.
+1. `Kernel#then` and its alias `yield_self` are missing: `1.then { |x| x + 1 }` raises NoMethodError. MRI 2.6 has both (`1.respond_to?(:then)` is true). Without a block they return an Enumerator whose size is nil (check with the oracle).
+2. `(1..3).take("x")` and `(1..).take("x")` raise TypeError "no implicit conversion of String into Integer" in MRI. Ours answer `[]`. Check Array#take, first and drop with the same arguments.
+3. `(2**70).times.size` is 1180591620717411303424 in MRI; ours give Infinity, because the stream's size cannot hold a big bound.
+4. Object instance methods: `class Object; def zz; 1; end; end` followed by `zz` or `3.zz` defines public Object methods in MRI. Ours raise NoMethodError or NameError. The same applies to a top-level `x = define_method(:dm) { … }`, which returns `:dm` in MRI. This is a larger feature; plan the method-lookup fallback so it adds nothing to the dispatch hot path.
+5. The uncaught-exception report has no backtrace "from" lines. MRI writes "\tfrom file:N:in `meth'\n" for each outer frame. Only do this if the frames can be recovered without a cost on every call (for example from the existing site of the frame's entry). Otherwise record it as a limit in the code.
+
+Not to do: `warn uplevel: N` (N >= 2) inside a method needs per-call site tracking, and the rescue-clause uplevel line is an MRI 2.6 line-table artifact. Both are recorded as limits.
 
 Verify with `tests/probe.sh ruby` on all four legs, and diff the `.err` files.
 
@@ -1221,6 +1219,7 @@ T-1142 kotlin: per-class program-method arity, interpreter named args on builtin
 T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer endless ranges — merged 081928f9 (partial by design: warn uplevel >= 2 inside a method raises NotImplementedError, carried to follow-up): Kernel#warn (IO#puts semantics, options errors, uplevel 0/1 with no per-call cost), warnings + warn through $stderr.write with TypeError on non-writable assignment, big-Integer endless ranges exact (each/for/first/step/lazy/next), endless #last RangeError; 4-leg probe matches ruby 2.6 stdout + stderr; matrix 605/605; bench -0.04%
 T-1143 bash: declaration error prefix rule, compiler run-time-circular and readonly nameref array decls, valueless local nameref subscript store, compiler step cost of comsub+extglob probes — merged 904aa2c2: this_command_name error prefix in both engines, compiler run-time readonly flags (readonly set after function definition), run-time-circular nameref array decls (rt_nref_loops), local -nr w=w; local w=(q) per oracle (ticket expectation was wrong), valueless local nameref subscript store, extglob strip literal-run filter (19-case probe >100M -> <10M steps); 4-leg probe (162 pattern removals + decl diagnostics) matches bash 5.3 stdout + stderr; bash gates green; bench +0.01%
 T-1144 kotlin: compiled named arguments evaluated in parameter order, not source order; qualified-object member references; same-named stdlib parameter order — merged f3844925: compiled named arguments evaluated in source order (slot-0 thunk evaluates in source order only when slots are out of order; positional calls unchanged), qualified object-value references bound (E.X::run, Cm::bite via js_ktbref/js_ktcref), stdlib/class same-name argument order chosen by receiver at run time; 4-leg probe incl. ++i ordering matches kotlinc 2.2.21; kotlin gates green; bench +0.05%
+T-1145 ruby: uncaught-exception report via $stderr, (1..).take, big Integer#step, compiled for over endless String range, define_method rescue-modifier crash, `{` after a command call parse, warn uplevel limits — merged e5203845: uncaught-exception report through $stderr.write in MRI print_errinfo shape (abort probe + launch.json updated), endless-range take/first/min(n) incl. negative-size errors, exact big Integer step/upto/downto/times/Range#step, for over endless String ranges, top-level define_method/alias_method NoMethodError instead of engine crash (full define_method needs Object instance methods: follow-up), block must start on the call's line; item 7 left as limits (uplevel>=2 needs per-call cost; rescue-clause line is an MRI line-table artifact); 4-leg probe matches ruby 2.6; matrix 605/605; bench -0.03%
 
 # Settled — do not re-open
 
