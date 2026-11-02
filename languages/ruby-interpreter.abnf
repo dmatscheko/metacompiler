@@ -5944,6 +5944,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (!rubyEq(l.lo, r.lo)) { return false }
         return rubyEq(l.hi, r.hi)
     }
+    // Range#size (range_size): the element count of a range over Numerics, Float
+    // Infinity for an endless or infinite one, and nil for any other range, which
+    // only #count and for-in walk. Twins: rbRangeSize in lib/ruby-rt.metajs,
+    // rubyRangeSize in abnf/jsrtruby.go.
+    function rangeSize(t) {
+        if (!isNumV(t.lo)) { return null }
+        if (t.hi === null || t.hi === undefined) { return mkFlo(Math.pow(2, 1024)) }
+        if (!isNumV(t.hi)) { return null }
+        if (rangeUnbounded(t)) { return mkFlo(Math.pow(2, 1024)) }
+        var n = 0
+        if (isFlo(t.lo)) { n = rbnFloatStepSize(t.lo.f, toF(t.hi), 1, t.excl === true) }
+        else { n = rangeToA(t).length }
+        return n - n === 0 ? n : mkFlo(n)
+    }
     // The methods of a Range; iteration and the Enumerable methods go through the
     // materialized array, membership stays lazy (an endless range has no array).
     function rangeMethod(t, name, args, blk) {
@@ -5964,6 +5978,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "each_entry" && blk != null) { name = "each" }
         // An endless String range walks String#succ until a break ends it.
         var strOpen = typeof t.lo == "string" && (t.hi === null || t.hi === undefined)
+        if (name == "size" && args.length == 0 && blk == null) { return rangeSize(t) }
         if (strOpen && name == "each" && blk != null) {
             var sc = t.lo
             while (true) {
@@ -5975,8 +5990,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // has no Array, so its block methods (rbaRangeStreams), a blockless #each
         // or #each_entry, first(n) and each_slice / each_cons run on an Enumerator
         // that makes one value at a time, which a break, a hit or first(n) ends.
-        // Twins: rbRangeMethod, rubyRangeMethod.
-        if (strOpen || rangeUnbounded(t)) {
+        // A Float range cannot be walked, but without a block it answers the same
+        // Enumerators, whose #size is counted and whose iteration raises the walk's
+        // TypeError. Twins: rbRangeMethod, rubyRangeMethod.
+        if (strOpen || rangeUnbounded(t) || (blk == null && isFlo(t.lo))) {
             if (blk != null && rbaRangeStreams(name)) {
                 var sv = anytype
                 sv = mcall(lazyCopy(rangeLazy(t), null, false, "#<Enumerator: " + rinspect(t) + ":each>"), name, args, blk)
@@ -5992,7 +6009,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 || (rbaUnsizedOp(name) && args.length == 0))) {
                 return lazyMethod(lazyCopy(rangeLazy(t), null, false, rinspect(t)), name, args, null)
             }
-            if (name == "size" && args.length == 0) { return strOpen ? null : mkFlo(Math.pow(2, 1024)) }
             if (strOpen && name == "first" && args.length > 0) { return lazyFirst(rangeLazy(t), Math.trunc(toF(args[0]))) }
             if (rbaSliceOp(name) != "" && args.length > 0 && Math.trunc(toF(args[0])) > 0) {
                 var rsn = Math.trunc(toF(args[0]))
@@ -6001,6 +6017,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (blk == null) { return ue }
                 mcall(ue, "each", [], blk)
                 return null
+            }
+            // The other sized Enumerators of a Float range: every iteration raises
+            // before the method's own work, so the range's values stand in for it,
+            // and the "each" source's hi carries the method's size - cycle's is
+            // Infinity, or n times its count.
+            if (blk == null && isFlo(t.lo) && rbaEnumDefers(name, args.length)) {
+                var fe = lazyCopy(rangeLazy(t), null, false, "#<Enumerator: " + rinspect(t) + ":" + name + inspectArgs(args) + ">")
+                if (name == "cycle" && args.length > 0) { fe.hi = fe.hi * Math.max(0, Math.trunc(toF(args[0]))) }
+                else if (name == "cycle" && fe.hi > 0) { fe.hi = Math.pow(2, 1024) }
+                return fe
             }
         }
         if (name == "to_a" || name == "entries" || name == "to_ary") {
@@ -6039,7 +6065,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // is 1 and (1..).max raises; materializing first would never end.
         if (t.hi === null || t.hi === undefined || t.lo === null || t.lo === undefined) {
             if (name == "min") { return t.lo }
-            if (name == "size" || name == "length" || name == "count") {
+            if (name == "length" || name == "count") {
                 fail("cannot take the length of an endless range")
             }
         }
@@ -6061,15 +6087,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (args.length == 0 && blk == null) {
             // A Float range cannot be walked but has a size: the count of the
             // values lo, lo + 1, ... (rubyRangeLen in abnf/jsrt.go).
-            if (isFlo(t.lo) && (name == "size" || name == "length" || name == "count")) {
+            if (isFlo(t.lo) && (name == "length" || name == "count")) {
                 return rbnFloatStepSize(t.lo.f, toF(t.hi), 1, t.excl === true)
             }
             var ra = anytype
             ra = rangeToA(t)
-            // #size, #length and #count all answer the ELEMENT COUNT, and that is
-            // a DELIBERATE divergence - see the twin in languages/lib/ruby-rt.metajs for why
-            // splitting them is not worth it.
-            if (name == "size" || name == "length" || name == "count") { return ra.length }
+            if (name == "length" || name == "count") { return ra.length }
             if (name == "min") { return ra.length == 0 ? null : ra[0] }
             if (name == "max") { return ra.length == 0 ? null : ra[ra.length - 1] }
         }
@@ -9470,7 +9493,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // abnf/jsrtruby.go, rbNumMore in lib/ruby-rt.metajs.
     function numMore(t, name, args) {
         var isI = typeof t == "number" || isBig(t)
-        if (name == "dup" || name == "clone") { return t }
+        if (name == "dup" || name == "clone" || name == "+@") { return t }
+        // The unary operators reached by name (send, method): -@ on every
+        // Numeric, ~ on an Integer only.
+        if (name == "-@") { return rneg(t) }
+        if (name == "~" && isI) { return bitNotOf(t) }
         if (name == "nonzero?") { return numEq(t, 0) ? null : t }
         if (isCpx(t)) {
             var cd = args[0]
@@ -10532,7 +10559,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, rsText(target.vals[ii]), keyOut(target.keys[ii])) }
             return iv
         }
-        if (name == "key") {
+        // Hash#index is MRI 2.6's deprecated alias of #key, which warns on every
+        // call. Twin of js_rhidxwarn in abnf/jsrtruby.go and lib/ruby-rt.metajs.
+        if (name == "index" && rbSitePos >= 0) { eprint(c.file + ":" + c.lineOf(rbSitePos) + ": warning: Hash#index is deprecated; use Hash#key\n") }
+        if (name == "key" || name == "index") {
             for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return keyOut(target.keys[ky]) } }
             return null
         }

@@ -103,8 +103,8 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		return jsHUndefined
 	}
 
-	// A bare `.length` / `.size`: a String, Array, Hash, Enumerator or Range counts
-	// through js_pylen, anything else (a Symbol, MatchData, a user object) is the
+	// A bare `.length` / `.size`: a String, Array, Hash or Enumerator counts
+	// through js_pylen, a Range answers Range#size, anything else (a Symbol, MatchData, a user object) is the
 	// method call. Twin of rlen in ruby-interpreter.abnf.
 	pylen := m["js_pylen"]
 	m["js_rlen"] = func(a []uint64) uint64 {
@@ -117,6 +117,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 				}
 			}
 		}
+		if r, isRng := rubyIsRange(v); isRng {
+			return w(rt.rubyRangeSize(r))
+		}
 		counted := false
 		switch t := v.(type) {
 		case *jsRStr:
@@ -128,17 +131,11 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			counted = true
 		default:
 			_, _, isDict := dictParts(v)
-			rng, isRng := rubyIsRange(v)
-			// An endless String range's #size is nil: rubyRangeMethod answers it.
-			if isRng {
-				_, loStr := rng.props["begin"].(string)
-				isRng = !loStr || !isUndefOrNull(rng.props["end"])
-			}
 			// The #size of an Enumerator over a user #each (deferred or
 			// to_enum's) or of a blockless find / take_while ... is nil, an
 			// ArithmeticSequence's may be Infinity, and a Lazy or stream
 			// Enumerator counts through its ops: rubyEnumMethod answers them.
-			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rco"] != true &&
+			counted = isDict || (rubyIsEnum(v) && v.(*jsObject).props["__rco"] != true &&
 				v.(*jsObject).props["__rlazy"] != true && rubyAseqOf(v) == nil && !rubyEnumNoSize(v.(*jsObject)))
 		}
 		if counted {
@@ -2191,8 +2188,8 @@ var rubyRespondNames = map[string][]string{
 		"respond_to?", "tap", "to_s"},
 	"private": {"format", "lambda", "loop", "p", "print", "printf", "proc", "puts", "raise",
 		"rand", "require", "sprintf"},
-	"Integer": {"%", "&", "*", "**", "+", "+@", "-", "-@", "/", "<", "<=", "<=>", ">", ">=",
-		"[]", "^", "abs", "abs2", "allbits?", "angle", "anybits?", "arg", "bit_length", "ceil",
+	"Integer": {"%", "&", "*", "**", "+", "+@", "-", "-@", "/", "<", "<<", "<=", "<=>", ">", ">=",
+		">>", "[]", "^", "abs", "abs2", "allbits?", "angle", "anybits?", "arg", "bit_length", "ceil",
 		"chr", "clone", "coerce", "conj", "conjugate", "denominator", "digits", "div", "divmod",
 		"dup", "eql?", "equal?", "even?", "fdiv", "finite?", "floor", "frozen?", "gcd", "gcdlcm",
 		"i", "imag", "imaginary", "infinite?", "instance_of?", "instance_variables", "integer?",
@@ -2200,7 +2197,7 @@ var rubyRespondNames = map[string][]string{
 		"nonzero?", "numerator", "odd?", "ord", "phase", "polar", "positive?", "pow", "pred",
 		"public_send", "quo", "rationalize", "real", "real?", "rect", "rectangular", "remainder",
 		"round", "send", "size", "succ", "to_c", "to_f", "to_i", "to_int", "to_r", "truncate",
-		"zero?", "|"},
+		"zero?", "|", "~"},
 	"Float": {"%", "*", "**", "+", "+@", "-", "-@", "/", "<", "<=", "<=>", ">", ">=", "abs",
 		"abs2", "angle", "arg", "ceil", "clone", "coerce", "conj", "conjugate", "denominator",
 		"div", "divmod", "dup", "eql?", "equal?", "fdiv", "finite?", "floor", "frozen?", "i",
@@ -2260,7 +2257,7 @@ var rubyRespondNames = map[string][]string{
 		"drop_while", "dup", "each", "each_cons", "each_key", "each_pair", "each_slice",
 		"each_value", "each_with_index", "each_with_object", "empty?", "entries", "equal?",
 		"fetch", "filter", "filter!", "find", "find_index", "first", "flat_map", "freeze",
-		"frozen?", "grep", "grep_v", "group_by", "has_key?", "include?", "inject", "instance_of?",
+		"frozen?", "grep", "grep_v", "group_by", "has_key?", "include?", "index", "inject", "instance_of?",
 		"instance_variables", "invert", "is_a?", "itself", "keep_if", "key", "key?", "keys",
 		"kind_of?", "length", "map", "max", "max_by", "member?", "merge", "merge!", "min", "min_by",
 		"minmax", "minmax_by", "nil?", "none?", "one?", "partition", "public_send", "reduce", "reject",
@@ -2357,7 +2354,7 @@ var rubyArityNames = map[string][]string{
 		"!=", "==", "===", "<<", "delete", "include?", "drop", "each_cons", "each_slice",
 		"each_with_object", "grep", "grep_v", "member?", "take", "with_object"},
 	"Integer -1": {"chr", "digits", "pow", "inspect", "to_s"},
-	"Integer 1":  {"[]", "allbits?", "anybits?", "gcd", "gcdlcm", "lcm", "modulo", "nobits?"},
+	"Integer 1":  {">>", "[]", "allbits?", "anybits?", "gcd", "gcdlcm", "lcm", "modulo", "nobits?"},
 	"Float 1":    {"modulo"},
 	"String -1": {"capitalize", "center", "chomp", "chomp!", "concat", "delete", "delete!",
 		"downcase", "each_line", "encode", "end_with?", "index", "lines", "ljust", "prepend", "rindex",
@@ -2373,7 +2370,7 @@ var rubyArityNames = map[string][]string{
 	"Array 0":                           {"reverse_each"},
 	"Array 1":                           {"assoc", "combination", "delete_at"},
 	"Hash -1":                           {"default", "each_with_index", "fetch", "merge", "merge!", "update", "values_at"},
-	"Hash 1":                            {"[]", "assoc", "has_key?", "key", "key?"},
+	"Hash 1":                            {"[]", "assoc", "has_key?", "index", "key", "key?"},
 	"Range -1":                          {"each_with_index", "step"},
 	"Range 0":                           {"entries"},
 	"Range 1":                           {"cover?"},
@@ -2416,12 +2413,12 @@ func rubyBuiltinArity(cls, name string) int {
 // Twin of rbOwnRows in languages/lib/ruby-respond.js; ruby_respond_test.go keeps
 // the two equal.
 var rubyOwnNames = map[string][]string{
-	"Integer": {"%", "&", "*", "**", "+", "-", "-@", "/", "<", "<=", "<=>", "==", "===", ">",
-		">=", "[]", "^", "abs", "allbits?", "anybits?", "bit_length", "ceil", "chr", "coerce",
+	"Integer": {"%", "&", "*", "**", "+", "-", "-@", "/", "<", "<<", "<=", "<=>", "==", "===", ">",
+		">=", ">>", "[]", "^", "abs", "allbits?", "anybits?", "bit_length", "ceil", "chr", "coerce",
 		"denominator", "digits", "div", "divmod", "even?", "fdiv", "floor", "gcd", "gcdlcm",
 		"inspect", "integer?", "lcm", "magnitude", "modulo", "next", "nobits?", "numerator",
 		"odd?", "ord", "pow", "pred", "rationalize", "remainder", "round", "size", "succ",
-		"to_f", "to_i", "to_int", "to_r", "to_s", "truncate", "|"},
+		"to_f", "to_i", "to_int", "to_r", "to_s", "truncate", "|", "~"},
 	"Float": {"%", "*", "**", "+", "-", "-@", "/", "<", "<=", "<=>", "==", "===", ">", ">=",
 		"abs", "angle", "arg", "ceil", "coerce", "denominator", "divmod", "eql?", "fdiv",
 		"finite?", "floor", "hash", "infinite?", "inspect", "magnitude", "modulo", "nan?",
@@ -2462,7 +2459,7 @@ var rubyOwnNames = map[string][]string{
 		"uniq!", "unshift", "values_at", "zip", "|"},
 	"Hash": {"<", "<=", "==", ">", ">=", "[]", "any?", "assoc", "clear", "default", "delete",
 		"delete_if", "each", "each_key", "each_pair", "each_value", "empty?", "fetch", "filter",
-		"filter!", "has_key?", "hash", "include?", "inspect", "invert", "keep_if", "key", "key?",
+		"filter!", "has_key?", "hash", "include?", "index", "inspect", "invert", "keep_if", "key", "key?",
 		"keys", "length", "member?", "merge", "merge!", "reject", "reject!", "select", "select!", "size",
 		"to_a", "to_h", "to_s", "transform_keys", "transform_values", "update", "values",
 		"values_at"},
@@ -3771,8 +3768,14 @@ func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (int
 	ti, isI := rubyIntBig(t)
 	sign := func(v interface{}) int { c, _ := rt.rubySpaceship(v, 0.0); return c }
 	switch name {
-	case "dup", "clone":
+	case "dup", "clone", "+@":
 		return t, true
+	case "-@":
+		return rt.rubyNeg(t), true
+	case "~":
+		if isI {
+			return rt.rubyBitNot(t), true
+		}
 	case "nonzero?":
 		if rt.rubyEq(t, 0.0) {
 			return jsNull, true
@@ -3979,6 +3982,36 @@ func rubyIntBig(v interface{}) (*big.Int, bool) {
 		return rubyBigOf(v)
 	}
 	return nil, false
+}
+
+// rubyRangeSize is Range#size (range_size): the element count of a range over
+// Numerics, Float Infinity for an endless or infinite one, and nil for any other
+// range, which only #count and for-in (rubyRangeLen) walk. Twin of rangeSize in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyRangeSize(r *jsObject) interface{} {
+	if !rubyIsNum(r.props["begin"]) {
+		return jsNull
+	}
+	if isUndefOrNull(r.props["end"]) {
+		return jsFlo{f: math.Inf(1)}
+	}
+	if !rubyIsNum(r.props["end"]) {
+		return jsNull
+	}
+	if n := rt.rubyRangeLen(r); !math.IsInf(n, 0) {
+		return n
+	}
+	return jsFlo{f: math.Inf(1)}
+}
+
+// rubyBitNot is ~x, which is -(x+1) at any size and math/big's Not exactly. Past
+// 2^53 the double cannot hold the +1, so ~9007199254740992 goes through the big
+// path to answer -9007199254740993. Twin of bitNotOf in ruby-interpreter.abnf.
+func (rt *jsrt) rubyBitNot(v interface{}) interface{} {
+	if b, ok := rubyBigOf(v); ok && b.CmpAbs(rubyBigMax) >= 0 {
+		return rt.rubyBigNarrow(new(big.Int).Not(b))
+	}
+	return -rubyToF(v) - 1
 }
 
 // rubyBitLen is Integer#bit_length: the bits of x, or of ~x for a negative x.
@@ -4887,6 +4920,23 @@ func init() {
 				return a[0]
 			}
 			return w(&jsRStr{s: rt.rubyStr(u(a[0]))})
+		}
+		// Hash#index is MRI 2.6's deprecated alias of #key, and every call warns
+		// "FILE:LINE: warning: Hash#index is deprecated; use Hash#key". The
+		// emitter calls this before each `.index(...)` call with the running
+		// statement's site (rb.site, "FILE:LINE:in `WHO'"), since only the module
+		// knows it. Twin of js_rhidxwarn in lib/ruby-rt.metajs; the interpreter
+		// half warns in its Hash#index arm.
+		m["js_rhidxwarn"] = func(a []uint64) uint64 {
+			if _, _, isDict := dictParts(u(a[0])); !isDict {
+				return w(jsUndef)
+			}
+			site := rt.rubyStr(u(a[1]))
+			if at := strings.LastIndex(site, ":in `"); at >= 0 {
+				site = site[:at]
+			}
+			fmt.Fprint(warnWriter, site+": warning: Hash#index is deprecated; use Hash#key\n")
+			return w(jsUndef)
 		}
 		// Unary plus: the identity on a number, String#+@ on a String.
 		m["js_rpos"] = func(a []uint64) uint64 {

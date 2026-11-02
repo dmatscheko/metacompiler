@@ -4916,12 +4916,6 @@ function rbClassOfSelf(self) {
 
 // ===================================================== ranges ===============
 
-// TWO DELIBERATE DIVERGENCES FROM MRI LIVE HERE (ruby 2.6.10); they are what
-// materializing means:
-//   * a FLOAT range iterates: `(1.5..3.5).to_a' is [1.5, 2.5, 3.5] where MRI raises
-//     TypeError ("can't iterate from Float"). rbRangeAt / rbRangeLen use the
-//     SAME arithmetic, so for-in and to_a at least agree with each other.
-//   * `("a".."e").size' is 5 where MRI answers nil - see the Range method table.
 // rubyRangeArr materializes lo..hi (excl: the three-dot form) as an array. The
 // step caps keep a nonsensical range from hanging the program - the same two
 // constants the Go twin uses.
@@ -5021,6 +5015,18 @@ function rbRangeLen(r) {
     if (n < 0) { return 0 }
     return n
 }
+// Range#size (range_size): the element count of a range over Numerics, Float
+// Infinity for an endless or infinite one, and nil for any other range - where
+// for-in's trip count (rbRangeLen) still counts ("a".."c"). Twin of rangeSize in
+// ruby-interpreter.abnf.
+function rbRangeSize(r) {
+    if (!rbIsNum(r["begin"])) { return null }
+    if (rtIsNil(r["end"])) { return rbMkFlo(Math.pow(2, 1024)) }
+    if (!rbIsNum(r["end"])) { return null }
+    var n = rbRangeLen(r)
+    if (n - n != 0) { return rbMkFlo(n) }
+    return n
+}
 function rbRangeAt(r, i) {
     if (!rbRangeNumeric(r)) {
         var a = rbRangeToArr(r)
@@ -5060,6 +5066,7 @@ function rbRangeMethod(t, name, args) {
     // An endless String range walks String#succ until a break ends it, and it
     // streams as an unbounded Integer range does. Twin of the arms in rangeMethod.
     var strOpen = typeof t["begin"] == "string" && rtIsNil(t["end"])
+    if (name == "size" && npos == 0 && blk === null) { return rbRangeSize(t) }
     if (strOpen && name == "each" && blk !== null) {
         var sc = t["begin"]
         while (true) {
@@ -5067,7 +5074,10 @@ function rbRangeMethod(t, name, args) {
             sc = rbsSucc(sc)
         }
     }
-    if (strOpen || rbRangeUnbounded(t)) {
+    // A Float range cannot be walked, but without a block it answers the same
+    // one-value-at-a-time Enumerators, whose #size is counted and whose iteration
+    // raises the walk's TypeError.
+    if (strOpen || rbRangeUnbounded(t) || (blk === null && rbIsFlo(t["begin"]))) {
         if (blk !== null && rbaRangeStreams(name)) {
             var sv = rbLazyMethod(rbLazyCopy(rbRangeLazy(t), null, false, "#<Enumerator: " + rbInspect(t) + ":each>"), name, args)
             if (name == "each") { return t }
@@ -5080,10 +5090,6 @@ function rbRangeMethod(t, name, args) {
             || (rbaUnsizedOp(name) && npos == 0))) {
             return rbLazyMethod(rbLazyCopy(rbRangeLazy(t), null, false, rbInspect(t)), name, args)
         }
-        if (name == "size" && npos == 0) {
-            if (strOpen) { return null }
-            return rbMkFlo(Math.pow(2, 1024))
-        }
         if (strOpen && name == "first" && npos > 0) { return rbLazyFirst(rbRangeLazy(t), Math.trunc(rbToF(args[0]))) }
         var rsn = Math.trunc(rbToF(rbArgAt(args, 0)))
         if (rbaSliceOp(name) != "" && npos > 0 && rsn > 0) {
@@ -5092,6 +5098,16 @@ function rbRangeMethod(t, name, args) {
             if (blk === null) { return ue }
             rbLazyMethod(ue, "each", [js_rblkwrap(blk)])
             return null
+        }
+        // The other sized Enumerators of a Float range: every iteration raises
+        // before the method's own work, so the range's values stand in for it,
+        // and the "each" source's hi carries the method's size - cycle's is
+        // Infinity, or n times its count.
+        if (blk === null && rbIsFlo(t["begin"]) && rbaEnumDefers(name, npos)) {
+            var fe = rbLazyCopy(rbRangeLazy(t), null, false, "#<Enumerator: " + rbInspect(t) + ":" + name + rbInspectArgs(args, npos) + ">")
+            if (name == "cycle" && npos > 0) { fe["hi"] = rbToF(fe["hi"]) * Math.max(0, Math.trunc(rbToF(args[0]))) }
+            else if (name == "cycle" && rbToF(fe["hi"]) > 0) { fe["hi"] = Math.pow(2, 1024) }
+            return fe
         }
     }
     // Membership stays LAZY - it is the one part that an endless range can answer,
@@ -5153,7 +5169,7 @@ function rbRangeMethod(t, name, args) {
     // one can be answered; MRI agrees that (1..).min is 1 and (1..).max raises.
     if (endless) {
         if (name == "min") { return t["begin"] }
-        if (name == "size" || name == "length" || name == "count") {
+        if (name == "length" || name == "count") {
             fail("cannot take the length of an endless range")
         }
     }
@@ -5173,15 +5189,7 @@ function rbRangeMethod(t, name, args) {
         return rbBin("-", rhi, 1)
     }
     if (npos == 0 && blk === null) {
-        // #size, #length and #count all answer the ELEMENT COUNT, and that is a
-        // DELIBERATE divergence. MRI's Range#size is nil for a non-numeric range
-        // (`("a".."e").size' is nil) while #count is 5 - but ruby-to-llvm-ir.abnf
-        // lowers every bare `.size' / `.length' straight to js_pylen (the smcall /
-        // field arms), so it never reaches this table, and js_pylen is ALSO what
-        // for-in asks for its trip count. Splitting them would mean taking `.size'
-        // off that lowering in every ruby program, which is a far larger change
-        // than the answer is worth. All three engines agree.
-        if (name == "size" || name == "length" || name == "count") { return rbRangeLen(t) }
+        if (name == "length" || name == "count") { return rbRangeLen(t) }
     }
     var av = rbDelegArr(rbRangeToArr(t), t, name, args)
     // #each answers the RECEIVER in MRI, and the receiver is the range.
@@ -6291,7 +6299,9 @@ function rbNumMore(t, name, args) {
     var n = rbNPos(args)
     var a0 = rbPosAt(args, n, 0)
     var isI = typeof t == "number" || rbIsBig(t)
-    if (name == "dup" || name == "clone") { return t }
+    if (name == "dup" || name == "clone" || name == "+@") { return t }
+    if (name == "-@") { return rbNeg(t) }
+    if (name == "~" && isI) { return js_rbnot(t) }
     if (name == "nonzero?") {
         if (rbEq(t, 0)) { return null }
         return t
@@ -7767,7 +7777,7 @@ function rbHashMethod(o, keys, vals, name, args) {
         }
         return iv
     }
-    if (name == "key") {
+    if (name == "key" || name == "index") {
         while (i < vals.length) {
             if (rbEq(vals[i], rbArgAt(args, 0))) { return rbKeyOut(keys[i]) }
             i = i + 1
@@ -10040,8 +10050,7 @@ function js_rlen(v, name) {
     // materializing, because for-in asks for it once and then indexes. See
     // js_pyget.
     if (rbIsRange(v)) {
-        // An endless String range's #size is nil.
-        if (name !== null && typeof v["begin"] == "string" && rtIsNil(v["end"])) { return null }
+        if (name !== null) { return rbRangeSize(v) }
         return rbRangeLen(v)
     }
     if (rtTag(v, "__rstr")) { return rbCharCount(v["__s"]) }
@@ -10099,6 +10108,17 @@ function js_rbxor(l, r) {
 function js_rshl(l, r) { return rbBin("<<", l, r) }
 function js_rshr(l, r) { return rbBin(">>", l, r) }
 function js_rneg(v) { return rbNeg(v) }
+// Hash#index is MRI 2.6's deprecated alias of #key, which warns at its call site.
+// Twin of js_rhidxwarn in abnf/jsrtruby.go, which states the rule.
+function js_rhidxwarn(recv, site) {
+    if (!rbIsDict(recv)) { return undefined }
+    var s = rbStr(site)
+    var at = s.length - 5
+    while (at >= 0 && s.slice(at, at + 5) != ":in `") { at = at - 1 }
+    if (at >= 0) { s = s.slice(0, at) }
+    eprint(s + ": warning: Hash#index is deprecated; use Hash#key\n")
+    return undefined
+}
 // ~x is -(x+1) at any size, which is one negate and one decrement on the box.
 function js_rbnot(v) {
     // Past 2^53 the double cannot hold the +1 (~9007199254740992 must be

@@ -2804,6 +2804,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         b.NewStore(sv.p, gRbSite)
         b.NewStore(sv.n, gRbSiteLen)
     }
+    // Hash#index warns at its call site, which only the module knows: an explicit
+    // `.index(...)' call hands js_rhidxwarn the running site first.
+    function emitHidxWarn(b, recvV, name) {
+        if (name != "index") { return }
+        var sv = rbSiteLoad(b)
+        callExt(b, "js_rhidxwarn", [recvV, callExt(b, "js_str_mem", [sv.p, sv.n])])
+    }
     // An exception the runtime raised takes its first backtrace frame where it is
     // caught: js_rsite combines the running site, still the raising statement's,
     // with the builtin method the exception names. Emitted at the entry of every
@@ -3653,6 +3660,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     } else {
                         var ea = emitArgs(b, unwrapArgs(s.args))
                         b = ea.b
+                        emitHidxWarn(b, cur, s.name)
                         cur = callExt(b, "js_rxmcall", [cur, emitMKey(b, cur, s.name, false), ea.v])
                     }
                 } else if (s.kind == "smcall" || s.kind == "sfield") {
@@ -3668,6 +3676,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (s.kind == "smcall") {
                         var sea = emitArgs(callBk, unwrapArgs(s.args))
                         callBk = sea.b
+                        emitHidxWarn(callBk, cur, s.name)
                         snRes = callExt(callBk, "js_rxmcall", [cur, emitMKey(callBk, cur, s.name, false), sea.v])
                     } else if (s.name == "length" || s.name == "size") {
                         snRes = callExt(callBk, "js_rlen", [cur, emitMKey(callBk, cur, s.name, false)])

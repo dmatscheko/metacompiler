@@ -2692,6 +2692,56 @@ def s181
         r.to_a == [1, 2, 3] && { r => 1 }[v[0]..v[2]] == 1 && (v[4]..v[5]).freeze.frozen?)
 end
 
+# ===== SECTION 182: unary operators by name, Integer shifts, Hash#index, Float range Enumerators, Range#size =====
+# -@ / +@ on every Numeric and ~ on an Integer are methods that send, public_send
+# and method reach by name; Integer responds to << >> ~ and its Method of one
+# runs it. MRI 2.6's Hash#index is #key (and warns on stderr). A Float range
+# cannot be walked, but its blockless #each and Enumerable methods answer an
+# Enumerator sized from the range that raises only when iterated. Range#size is
+# nil for a non-numeric range, whose #count and for-in still walk it, and Float
+# Infinity for an endless or infinite one. /usr/bin/ruby 2.6 settles each.
+def s182err
+  yield
+rescue => e
+  "#{e.class} #{e.message}"
+end
+def s182
+  v = [5, 5.5, 2**70, Rational(1, 2), 1.0, 3.0, "a", "c", 1, nil, Float::INFINITY, 2]
+  n = v[0]
+  check("un182a", n.send(:-@) == -5 && n.send(:+@) == 5 && n.send(:~) == -6 && v[1].send(:-@) == -5.5 &&
+        v[1].public_send(:+@) == 5.5 && n.method(:-@).call == -5 && n.method(:~).call == -6 && v[2].send(:~) == -(2**70) - 1 &&
+        v[2].send(:-@) == -(2**70) && v[3].send(:-@) == Rational(-1, 2) && n.__send__(:-@).class == Integer &&
+        s182err { v[1].send(:~) }.start_with?("NoMethodError undefined method `~' for 5.5"))
+  check("un182b", n.respond_to?(:<<) && n.respond_to?(:>>) && n.respond_to?(:~) && v[2].respond_to?(:~) && !v[1].respond_to?(:~) &&
+        !v[1].respond_to?(:<<) && n.method(:<<).call(1) == 10 && n.method(:>>).call(1) == 2 && n.method(:>>).arity == 1 &&
+        n.method(:~).arity == 0 && n.method(:<<).owner == Integer &&
+        Integer.instance_methods(false).select { |m| [:<<, :>>, :~].include?(m) }.sort == [:<<, :>>, :~])
+  h = {a: v[8], b: v[11]}
+  check("hi182c", h.index(v[11]) == :b && h.index(v[0]).nil? && h&.index(v[8]) == :a && h.respond_to?(:index) &&
+        h.method(:index).arity == 1 && Hash.instance_methods(false).include?(:index))
+  r = (v[4]..v[5])
+  x = (v[4]...v[5])
+  check("fr182d", r.each.size == 3 && r.map.size == 3 && r.each_slice(v[11]).size == 2 && r.each_cons(v[11]).size == 2 &&
+        x.each.size == 2 && r.select.size == 3 && r.sort_by.size == 3 && r.group_by.size == 3 && r.find.size.nil? &&
+        r.cycle.size == v[10] && r.cycle(v[11]).size == 6 && (v[5]..v[4]).cycle.size == 0 && r.each_with_index.size == 3 &&
+        r.each.inspect == "#<Enumerator: 1.0..3.0:each>" && r.each_slice(v[11]).inspect == "#<Enumerator: 1.0..3.0:each_slice(2)>" &&
+        r.cycle(v[11]).inspect == "#<Enumerator: 1.0..3.0:cycle(2)>" && r.map.inspect == "#<Enumerator: 1.0..3.0:map>")
+  made = []
+  check("fr182e", s182err { e = r.each; made << e.size; e.to_a } == "TypeError can't iterate from Float" &&
+        s182err { e = r.map; made << e.size; e.next } == "TypeError can't iterate from Float" &&
+        s182err { e = r.sort_by; made << e.size; e.each { |y| y } } == "TypeError can't iterate from Float" &&
+        s182err { e = r.each_slice(v[11]); made << e.size; e.first } == "TypeError can't iterate from Float" &&
+        s182err { r.each { |y| y } } == "TypeError can't iterate from Float" && made == [3, 3, 3, 2])
+  s = (v[6]..v[7])
+  check("rs182f", s.size.nil? && s.send(:size).nil? && s.count == 3 && (v[6]..v[9]).size.nil? && (v[4]..v[9]).size == v[10] &&
+        (v[4]..v[9]).size.class == Float && (v[8]..v[9]).size == v[10] && (v[8]..v[9]).size.class == Float &&
+        (v[8]..v[10]).size == v[10] && (v[4]..v[10]).size == v[10] && r.size == 3 && (v[8]..v[0]).size == 5 &&
+        s&.size.nil? && (v[4]..v[9]).each.size == v[10])
+  fo = []
+  for y in s do fo << y end
+  check("rs182g", fo == ["a", "b", "c"] && [*s] == ["a", "b", "c"] && s.to_a.size == 3 && s.each.size.nil? && s.size.nil?)
+end
+
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -2753,5 +2803,6 @@ s178() # SECTION-CALL 178
 s179() # SECTION-CALL 179
 s180() # SECTION-CALL 180
 s181() # SECTION-CALL 181
+s182() # SECTION-CALL 182
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

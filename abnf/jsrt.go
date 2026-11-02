@@ -7648,13 +7648,20 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	// streams as an unbounded Integer range does. Twin of the arms in rangeMethod.
 	lo, strOpen := t.props["begin"].(string)
 	strOpen = strOpen && isUndefOrNull(t.props["end"])
+	if name == "size" && len(pos) == 0 && blk == nil {
+		return rt.rubyRangeSize(t)
+	}
 	if strOpen && name == "each" && blk != nil {
 		for {
 			rt.call(blk, jsUndef, []interface{}{lo})
 			lo = rubyStrSucc(lo)
 		}
 	}
-	if strOpen || rubyRangeUnbounded(t) {
+	// A Float range cannot be walked, but without a block it answers the same
+	// Enumerators, whose #size is counted and whose iteration raises the walk's
+	// TypeError.
+	_, floLo := t.props["begin"].(jsFlo)
+	if strOpen || rubyRangeUnbounded(t) || (blk == nil && floLo) {
 		if blk != nil && rubyRangeStreams(name) {
 			en := rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, "#<Enumerator: "+rt.rubyInspect(t)+":each>")
 			if sv := rt.rubyLazyMethod(en, name, args); name != "each" {
@@ -7669,12 +7676,6 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 			(rubyUnsizedOp(name) && len(pos) == 0)) {
 			return rt.rubyLazyMethod(rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, rt.rubyInspect(t)), name, args)
 		}
-		if name == "size" && len(pos) == 0 {
-			if strOpen {
-				return jsNull
-			}
-			return jsFlo{f: math.Inf(1)}
-		}
 		if strOpen && name == "first" && len(pos) > 0 {
 			return &jsArray{elems: rt.rubyLazyFirst(rt.rubyRangeLazy(t).(*jsObject), int(math.Trunc(rubyToF(pos[0]))))}
 		}
@@ -7686,6 +7687,19 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 			}
 			rt.rubyMethod(ue, "each", []interface{}{rubyBlkWrap(blk)})
 			return jsNull
+		}
+		// The other sized Enumerators of a Float range: every iteration raises
+		// before the method's own work, so the range's values stand in for it,
+		// and the "each" source's hi carries the method's size - cycle's is
+		// Infinity, or n times its count.
+		if blk == nil && floLo && rubyEnumDefers(name, len(pos)) {
+			fe := rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, "#<Enumerator: "+rt.rubyInspect(t)+":"+name+rt.rubyInspectArgs(pos)+">")
+			if hi := rubyToF(fe.props["hi"]); name == "cycle" && len(pos) > 0 {
+				fe.set("hi", hi*math.Max(0, math.Trunc(rubyToF(pos[0]))))
+			} else if name == "cycle" && hi > 0 {
+				fe.set("hi", math.Inf(1))
+			}
+			return fe
 		}
 	}
 	switch name {
@@ -7772,7 +7786,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		switch name {
 		case "min":
 			return t.props["begin"]
-		case "size", "length", "count":
+		case "length", "count":
 			rt.fail("cannot take the length of an endless range")
 		}
 	}
@@ -7800,10 +7814,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	}
 	if len(pos) == 0 && blk == nil {
 		switch name {
-		// #size, #length and #count all answer the ELEMENT COUNT, and that is a
-		// DELIBERATE divergence - see the twin in languages/lib/ruby-rt.metajs
-		// for why splitting them is not worth it.
-		case "size", "length", "count":
+		case "length", "count":
 			return rt.rubyRangeLen(t)
 		}
 	}
@@ -13046,7 +13057,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			ovals.elems = append(ovals.elems, rt.rubyKeyOut(keys.elems[i]))
 		}
 		return out, true
-	case "key":
+	case "key", "index":
 		for i := range vals.elems {
 			if rt.rubyEq(vals.elems[i], argAt(pos, 0)) {
 				return rt.rubyKeyOut(keys.elems[i]), true
@@ -16498,15 +16509,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_rshl": func(a []uint64) uint64 { return w(rt.rubyBin("<<", u(a[0]), u(a[1]))) },
 		"js_rshr": func(a []uint64) uint64 { return w(rt.rubyBin(">>", u(a[0]), u(a[1]))) },
 		"js_rneg": func(a []uint64) uint64 { return w(rt.rubyNeg(u(a[0]))) },
-		// ~x is -(x+1) at any size, which math/big's Not is exactly.
-		"js_rbnot": func(a []uint64) uint64 {
-			// Past 2^53 the double cannot hold the +1, so ~9007199254740992 must
-			// go through the big path to answer -9007199254740993.
-			if b, ok := rubyBigOf(u(a[0])); ok && b.CmpAbs(rubyBigMax) >= 0 {
-				return w(rt.rubyBigNarrow(new(big.Int).Not(b)))
-			}
-			return w(-rubyToF(u(a[0])) - 1)
-		},
+		"js_rbnot": func(a []uint64) uint64 { return w(rt.rubyBitNot(u(a[0]))) },
 		"js_req": func(a []uint64) uint64 { return w(rt.rubyEqOp(u(a[0]), u(a[1]))) },
 		"js_rne": func(a []uint64) uint64 { return boolH(!rt.rubyEq(u(a[0]), u(a[1]))) },
 		// < > <= >= between two MODULES is the ancestry relation, not a value
