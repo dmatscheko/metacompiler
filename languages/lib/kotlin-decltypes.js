@@ -151,9 +151,19 @@ function ktArrBuilderClass(name, raw) {
     var e = ktArrElemJvm(args[0])
     return e == "" ? "" : "[" + e
 }
-// The JVM descriptor of an array element type: L<class>; for Any, a builtin value
-// type or a collection interface (ktCastLang), [<descriptor> for an Array of one;
-// "" for any other type (a type parameter, a program type).
+// The JVM class a declared type `Array<T>` fixes for the array a declaration binds:
+// Kotlin infers the builder's T from it (val d: Array<Animal> = arrayOf(Dog()) is
+// an Array<Animal>), and Array is invariant, so any other value already has it.
+// "" for any other declared type. Read once every type has been seen.
+function ktDeclArrClass(dt) {
+    var t = (dt.length > 0 && dt.charAt(dt.length - 1) == "?") ? dt.substring(0, dt.length - 1) : dt
+    if (t.substring(0, 6) != "Array<") { return "" }
+    return ktArrBuilderClass("Array", t.substring(5))
+}
+// The JVM descriptor of an array element type: L<class>; for a type the program
+// declares (ktProgBin), Any, a builtin value type or a collection interface
+// (ktCastLang), [<descriptor> for an Array of one; "" for any other type (a type
+// parameter, a projection). Read once every type has been seen.
 function ktArrElemJvm(t) {
     var s = (t.length > 0 && t.charAt(t.length - 1) == "?") ? t.substring(0, t.length - 1) : t
     if (s.substring(0, 6) == "Array<" && s.charAt(s.length - 1) == ">") {
@@ -162,6 +172,8 @@ function ktArrElemJvm(t) {
     }
     var lt = s.indexOf("<")
     var base = lt < 0 ? s : s.substring(0, lt)
+    var pb = ktProgBin(base)
+    if (pb != "") { return "L" + pb + ";" }
     if (base == "Any") { return "Ljava.lang.Object;" }
     var jc = ktCastLang["$" + base]
     return jc == undefined ? "" : "L" + jc + ";"
@@ -566,12 +578,50 @@ function ktExtKinds(ty) {
 // ktClassExt), each noted from its declaration's text after keyword kw
 // (`interfaceShape{...}`, `objectOrigin{...}`, `enumclassColor{...}`).
 var ktDeclTypeNames = {}
-function ktNoteTypeName(txt, kw) {
+var ktTypeExt = {}
+var ktTypeExtNames = []
+function ktNoteTypeName(txt, kw, from, to) {
     var i = txt.indexOf(kw)
     if (i < 0) { return }
     var j = i + kw.length
     while (j < txt.length && ktIdChar(txt.charAt(j))) { j++ }
-    if (j > i + kw.length) { ktDeclTypeNames["$" + txt.substring(i + kw.length, j)] = true }
+    if (j == i + kw.length) { return }
+    var name = txt.substring(i + kw.length, j)
+    ktDeclTypeNames["$" + name] = true
+    if (ktTypeExt["$" + name] == undefined) { ktTypeExtNames.push(name) }
+    ktTypeExt["$" + name] = {from: from, to: to}
+}
+// The JVM binary name of a type the program declares, written t (`Inner`,
+// `Outer.Inner`): its enclosing type declarations and itself joined by `$`
+// (Outer$Inner), read off the declarations' extents; "" for any other type.
+function ktProgBin(t) {
+    var segs = t.split(".")
+    var e = ktDeclExt(segs[0])
+    if (e == undefined) { return "" }
+    var out = segs.join("$")
+    var outer = ktOuterDecl(e)
+    while (outer != "") {
+        out = outer + "$" + out
+        outer = ktOuterDecl(ktDeclExt(outer))
+    }
+    return out
+}
+function ktDeclExt(name) {
+    var e = ktClassExt["$" + name]
+    return e != undefined ? e : ktTypeExt["$" + name]
+}
+// The innermost type declaration whose extent strictly holds extent e, or "".
+function ktOuterDecl(e) {
+    var best = ""
+    var size = 0
+    var n = ktClassNames.length
+    for (var i = 0; i < n + ktTypeExtNames.length; i++) {
+        var name = i < n ? ktClassNames[i] : ktTypeExtNames[i - n]
+        var o = ktDeclExt(name)
+        if (o.from <= e.from && e.to <= o.to && o.to - o.from > e.to - e.from &&
+            (best == "" || o.to - o.from < size)) { best = name; size = o.to - o.from }
+    }
+    return best
 }
 // The declared type of property `name` of class `cls`; for a class not known here,
 // the name's type when every declaration of it agrees, else "".

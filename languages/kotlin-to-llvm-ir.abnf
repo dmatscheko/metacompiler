@@ -2152,7 +2152,7 @@ InterfaceCtor <~~ push(notImplStmt("interface", up.pos)) ~~>
 // ClassDecl records `data`/`value`, so makeInterfaceStmt can tell the two apart -
 // an ordinary interface with one abstract member is NOT convertible, which is
 // Kotlin's rule. The twin of IfaceKw/buildInterface in kotlin-interpreter.abnf.
-InterfaceReal <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "interface"); push(makeInterfaceStmt(takeAll())) ~~>
+InterfaceReal <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "interface", up.start, up.pos); push(makeInterfaceStmt(takeAll())) ~~>
             = [ KwFun <~~ push({samfun: true}) ~~> ] KwInterface KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Supers ] [ WhereClause ] ( "{" { Member } "}" | !"{" ) ;
 InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
             = [ KwFun ] KwInterface KId [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ] ;
@@ -2162,7 +2162,7 @@ InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
 // literal), or no body at all (a bodiless object), falls back to ObjectSkip
 // (notImplemented), so the widened surface still parses.
 ObjectDecl  = ObjectCtor | ObjectReal | ObjectNoBody | ObjectSkip ;
-ObjectReal  <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "object"); push(makeObjectStmt(takeAll())) ~~>
+ObjectReal  <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "object", up.start, up.pos); push(makeObjectStmt(takeAll())) ~~>
             = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] "{" { Member } "}" ;
 // object Foo(a: Int) / object Foo private () / object Foo<T, R>: an object declaration
 // may not HAVE a primary constructor or type parameters, but that is a semantic rule -
@@ -2179,7 +2179,7 @@ ObjectCtor  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
 // A BODILESS object declaration (object Zero : Expr) is a genuine singleton too - the
 // common shape of a sealed hierarchy's "no payload" case. The !"{" lookahead keeps it
 // from stealing an object whose body does not parse; that one still falls to ObjectSkip.
-ObjectNoBody <~~ ktNoteTypeName(up.in, "object"); push(makeObjectStmt(takeAll())) ~~>
+ObjectNoBody <~~ ktNoteTypeName(up.in, "object", up.start, up.pos); push(makeObjectStmt(takeAll())) ~~>
             = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] !"{" ;
 // An object declaration may not DECLARE type parameters, but Kotlin parses them and
 // then reports the error semantically - psi/recovery/objects/declarations/TypeParameterss.kt
@@ -2196,7 +2196,7 @@ ObjectSkip  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
 // (when (this) { A -> ... }). An entry with its own body, and a body outside the member
 // subset, fall back to EnumSkip.
 EnumClass   = EnumReal | EnumSkip ;
-EnumReal    <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "class"); push(makeEnumStmt(takeAll())) ~~>
+EnumReal    <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "class", up.start, up.pos); push(makeEnumStmt(takeAll())) ~~>
             = KwEnum KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] [ CtorParams ] [ ":" Supers ]
               "{" [ EnumEntry { "," EnumEntry } [ "," ] ] [ ";" { Member } ] "}" ;
 // An entry may carry its OWN CLASS BODY - `LOW(1) { override fun label() = "low" }` -
@@ -5467,14 +5467,15 @@ KwContract  = "contract" KwEnd ;
         var bty = (classNames["$" + name] == undefined && funNames["$" + name] != true) ? ktBuilderType(name, targs) : ""
         var direct = makeCallBody(name, args)
         // An Array builder's explicit element type fixes its JVM class
-        // (ktArrBuilderClass). Twin of makeCall in kotlin-interpreter.abnf.
-        var ajc = (classNames["$" + name] == undefined && funNames["$" + name] != true && at == 2) ?
-            ktArrBuilderClass(name, items[1].targs) : ""
-        if (ajc != "") {
+        // (ktArrBuilderClass), read at emit time because the type may be declared
+        // later in the file. Twin of makeCall in kotlin-interpreter.abnf.
+        if (classNames["$" + name] == undefined && funNames["$" + name] != true && at == 2 && ktArrBuilders["$" + name] == true) {
             var built = direct
+            var araw = items[1].targs
             direct = function(b) {
                 var ra = built(b)
-                return {b: ra.b, v: callExt(ra.b, "js_ktarrclassed", [ra.v, emitStr(ra.b, ajc)])}
+                var ajc = ktArrBuilderClass(name, araw)
+                return ajc == "" ? ra : {b: ra.b, v: callExt(ra.b, "js_ktarrclassed", [ra.v, emitStr(ra.b, ajc)])}
             }
         }
         // The callee's reified type arguments, and a generic's literals retyped by its
@@ -6180,7 +6181,7 @@ KwContract  = "contract" KwEnd ;
         var name = items[0]
         var typed = items[1] != undefined && items[1].dtype != undefined
         var dt = typed ? items[1].dtype : ""
-        var init = items[typed ? 2 : 1]
+        var init = ktArrTagThunk(items[typed ? 2 : 1], dt)
         if (typed && isRecvFnType(dt)) { recvLambdaNames["$" + name] = true }
         // A declared collection type retypes the elements of what it holds (a builder
         // call's literals, or a generic call's result - `xs.map { 0 }`), and a declared
@@ -6963,7 +6964,18 @@ KwContract  = "contract" KwEnd ;
         // backing field so an implicit `name = ...` in a method resolves to this.name and
         // reads before assignment are defined. Default it to null (identical to `= null`).
         if (items[at] == undefined) { return {prop: items[0], init: makeConst(null), ty: ty, li: li} }
-        return {prop: items[0], init: ktAdoptThunk(items[at], ty), ty: ty, li: li}
+        return {prop: items[0], init: ktArrTagThunk(ktAdoptThunk(items[at], ty), ty), ty: ty, li: li}
+    }
+    // An initializer of a declared Array<T> tags the array with the JVM class T fixes
+    // (ktDeclArrClass), read at emit time, once every type has been seen. Twin of
+    // kArrTagThunk in kotlin-interpreter.abnf.
+    function ktArrTagThunk(t, ty) {
+        if (ty == undefined || ty.indexOf("Array<") < 0 || typeof t != "function") { return t }
+        return function(b) {
+            var r = t(b)
+            var ajc = ktDeclArrClass(ty)
+            return ajc == "" ? r : {b: r.b, v: callExt(r.b, "js_ktarrclassed", [r.v, emitStr(r.b, ajc)])}
+        }
     }
     // Wrap a property initializer so its value adopts the declared type, the way a
     // local's does. Returns the thunk unchanged when the type carries no width, so a
@@ -8980,6 +8992,10 @@ KwContract  = "contract" KwEnd ;
         }
         var mname = items[at].smname
         var args = items.slice(at + 1)
+        // A member of kotlin.Any is answered by the built-in root when no class on the
+        // chain declares it (js_ktsuperany), including in a class with no superclass.
+        var anyMember = (args.length == 0 && (mname == "toString" || mname == "hashCode")) ||
+                        (args.length == 1 && mname == "equals")
         return function(b) {
             var target = superTargetName(qual)
             if (target == null) {
@@ -8988,14 +9004,19 @@ KwContract  = "contract" KwEnd ;
                 // degrades to Unit and the override's own body still runs. Arguments are
                 // still evaluated, for their side effects.
                 if (superExternal(qual)) { var xa = emitArgs(b, args); return {b: xa.b, v: hUndef} }
-                notImpl("super call (" + superFailWhat(qual) + ")", pos)
-                return {b: b, v: hUndef}
+                // The root is Any, or a builtin Throwable this half emits no descriptor
+                // for, whose toString js_ktsuperany answers through ktBaseStr.
+                if (!anyMember || qual != null ||
+                    (emitSuperRaw != null && excBuiltins["$" + baseTypeName(stripWs(emitSuperRaw))] != true)) {
+                    notImpl("super call (" + superFailWhat(qual) + ")", pos)
+                    return {b: b, v: hUndef}
+                }
             }
-            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
+            var supV = (target == null) ? hNull : callExt(b, "js_scope_get", [curScopeV, emitStr(b, target)])
             var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
             var ea = emitArgs(b, args)
             b = ea.b
-            return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, mname), ea.v])}
+            return {b: b, v: callExt(b, anyMember ? "js_ktsuperany" : "js_supercall", [supV, thisV, emitStr(b, mname), ea.v])}
         }
     }
     // super.x: the same walk, for a PROPERTY read. js_ktsupget runs an accessor found

@@ -7806,6 +7806,57 @@ fun s176() {
 }
 
 
+// ===== SECTION 177: super to kotlin.Any, ::top references, Array<ProgramClass> class names, extension references =====
+// A super.toString() / equals() / hashCode() that no class above the caller declares
+// reaches kotlin.Any - also from a class with no superclass - and an enum's reaches
+// Enum.toString (the name), a Throwable's Throwable.toString. `::top` of a top-level
+// property is a KProperty0 that reads and writes the variable. An Array whose
+// element type is a class the program declares has that class's JVM name, from a
+// type argument, a declared type or a shared element class. A reference to an
+// extension function is a function reference.
+open class B177
+class X177 : B177() { override fun toString() = "X:" + super.toString() }
+class E177 {
+    override fun hashCode() = super.hashCode() + 1
+    override fun equals(other: Any?) = super.equals(other)
+    override fun toString() = "E:" + super.toString()
+}
+enum class C177 { RED; override fun toString() = "c:" + super.toString() }
+class T177(m: String) : Exception(m) { override fun toString() = "T/" + super.toString() }
+open class A177
+class D177 : A177()
+class O177 { class N177 }
+class H177 { val a: Array<A177> = arrayOf(D177()) }
+class Bx177(val v: Int)
+fun Bx177.ext177() = v + 1
+val top177 = 5
+var cnt177 = 1
+
+fun s177() {
+    val x = X177()
+    check("sup177a", x.toString() == "X:X177@" + Integer.toHexString(x.hashCode()))
+    val e = E177()
+    val h = e.hashCode()
+    check("sup177b", e.toString() == "E:E177@" + Integer.toHexString(h) && e == e && !e.equals(E177()) && e.hashCode() == h)
+    check("sup177c", C177.RED.toString() == "c:RED" && T177("m").toString() == "T/T177: m")
+    val nr = " (Kotlin reflection is not available)"
+    val r = ::cnt177
+    cnt177 = 7
+    val got = r.get()
+    r.set(9)
+    check("ref177d", (::top177).toString() == "property top177" + nr && ::top177.name == "top177" && ::top177.get() == 5 &&
+        (::top177)() == 5 && got == 7 && cnt177 == 9 && ::cnt177 == ::cnt177 && "${::top177}" == "property top177" + nr)
+    val b = Bx177(1)
+    check("ref177e", (b::ext177).toString() == "function ext177" + nr && (Bx177::ext177).toString() == "function ext177" + nr &&
+        (b::v).toString() == "property v" + nr && (Bx177::ext177)(b) == 2 && (b::ext177)() == 2)
+    val d: Array<A177> = arrayOf(D177())
+    check("arr177f", arrayOf<A177>(D177()).javaClass.name == "[LA177;" && d.javaClass.name == "[LA177;" &&
+        d.copyOf().javaClass.name == "[LA177;" && arrayOf(D177()).javaClass.name == "[LD177;" &&
+        arrayOf<O177.N177>().javaClass.name == "[LO177\$N177;" && H177().a.javaClass.name == "[LA177;" &&
+        arrayOfNulls<A177>(1).javaClass.name == "[LA177;" && arrayOf(D177(), null).javaClass.name == "[LD177;")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7979,6 +8030,7 @@ fun main() {
     s174() // SECTION-CALL 174
     s175() // SECTION-CALL 175
     s176() // SECTION-CALL 176
+    s177() // SECTION-CALL 177
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

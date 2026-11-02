@@ -2208,7 +2208,7 @@ DiscardExpr <~~ pop() ~~> = Expression ;
 // lookup walks the parent chain (clsFind). The body is optional, so a marker interface
 // (interface State) and a `sealed interface Expr` parse too.
 Interface   = InterfaceReal | InterfaceSkip ;
-InterfaceReal <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "interface"); buildInterface(takeAll()) ~~>
+InterfaceReal <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "interface", up.start, up.pos); buildInterface(takeAll()) ~~>
             = IfaceKw <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ CtorParamsSkip ] [ ":" SuperList ] [ WhereClause ] [ "{" { Member } "}" ] ;
 InterfaceSkip <~~ takeAll(); takeMods(); notImpl("interface", up.pos); push({nname: "", nval: null, inner: false}) ~~>
@@ -2221,7 +2221,7 @@ InterfaceSkip <~~ takeAll(); takeMods(); notImpl("interface", up.pos); push({nna
 // choice never re-enters an alternative that already matched, so the wider shape has
 // to be offered before the narrow one rather than after it.
 ObjectDecl  = ObjectExotic | ObjectReal | ObjectSkip ;
-ObjectReal  <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "object"); buildObject(takeAll()) ~~>
+ObjectReal  <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "object", up.start, up.pos); buildObject(takeAll()) ~~>
             = KwObject <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~>
               [ ":" SuperList ] [ "{" { Member } "}" ] ;
 // An object header carrying type parameters and/or a constructor - shapes Kotlin's
@@ -2252,10 +2252,10 @@ ObjectSkip  <~~ takeAll(); takeMods(); notImpl("object declaration", up.pos); pu
 // stealing a bodied enum whose body the member grammar cannot cover: that one has to
 // reach EnumSkip, which consumes the body as a block.
 EnumClass   = EnumReal | EnumBare | EnumSkip ;
-EnumReal    <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "class"); buildEnum(takeAll()) ~~>
+EnumReal    <~~ ktNoteBody(up.start, up.pos); ktNoteTypeName(up.in, "class", up.start, up.pos); buildEnum(takeAll()) ~~>
             = KwEnum KwClass <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ PrimaryCtor ] [ ":" SuperList ] "{" [ EnumEntries ] [ ";" { Member } ] "}" ;
-EnumBare    <~~ ktNoteTypeName(up.in, "class"); buildEnum(takeAll()) ~~>
+EnumBare    <~~ ktNoteTypeName(up.in, "class", up.start, up.pos); buildEnum(takeAll()) ~~>
             = KwEnum KwClass <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ PrimaryCtor ] [ ":" SuperList ] NotBrace ;
 // The fallback for an enum whose entries or members are outside the subset. It skips
@@ -3057,6 +3057,19 @@ NotMemberKw = :script(~~ "pure";
     // js_ktadoptfn in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kAdoptFn(f, rty) {
         return function() { return kAdoptTy(f.apply(undefined, arguments), rty) }
+    }
+    // An initializer of a declared Array<T> tags the array with the JVM class T fixes
+    // (ktDeclArrClass), read on the first run, once every type has been seen. Twin of
+    // ktArrTagThunk in kotlin-to-llvm-ir.abnf.
+    function kArrTagThunk(t, dt) {
+        if (dt == undefined || dt == null || dt.indexOf("Array<") < 0 || typeof t != "function") { return t }
+        var ajc = anytype
+        ajc = null
+        return function() {
+            var a = t()
+            if (ajc === null) { ajc = ktDeclArrClass(dt) }
+            return ajc != "" && Array.isArray(a) && arrKind(a) == 1 ? kArrClassed(a, ajc) : a
+        }
     }
     // Wrap an initializer thunk so its value adopts the declared type.
     function kAdoptThunk(t, dt) {
@@ -5698,8 +5711,7 @@ NotMemberKw = :script(~~ "pure";
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
             var ts = clsFind(v.__class, "toString")
             if (typeof ts == "function") { return ts.apply(undefined, [v]) }
-            // An enum entry prints its NAME (java.lang.Enum.toString), not Name@1.
-            if (clsIsEnum(v.__class) && typeof v.name == "string") { return v.name }
+            if (v.__class.__dataProps == null) { return kBaseStr(v) }
             var g = dataMember(v, "toString", [], {pos: [], named: null})
             if (g != null) { return g.v }
         }
@@ -8737,7 +8749,11 @@ NotMemberKw = :script(~~ "pure";
             var sm = clsFind(target.cls, name)
             if (typeof sm != "function") {
                 if (target.sext == true) { kSetNamed(sp.named); return undefined }
+                // kotlin.Any's members, when no class on the chain declares them. Twin
+                // of js_ktsuperany in jsrtkotlin.go and kotlin-rt.metajs.
                 if (name == "hashCode" && args.length == 0) { return kAnyHash(target.self.__class) }
+                if (name == "toString" && args.length == 0) { return kBaseStr(target.self) }
+                if (name == "equals" && args.length == 1) { return target.self === args[0] }
                 fail("no super method " + "'" + name + "'" + superOf(target))
             }
             kSetNamed(sp.named)
@@ -8758,7 +8774,7 @@ NotMemberKw = :script(~~ "pure";
             // "reference v", as in the compiled half.
             if (name == "toString" && args.length == 0) { return kstr(target) }
             if (target.kbound === false) { fail("method ." + name + "() of an unbound callable reference ::" + target.pname) }
-            return mcall(kGetField(target.obj, target.pname), name, args, spec)
+            return mcall(kRefRead(target.obj, target.pname), name, args, spec)
         }
         // A class literal, `x::class` / `Type::class`.
         if (target.__kclass === true) {
@@ -9142,6 +9158,13 @@ NotMemberKw = :script(~~ "pure";
             out += dp[i] + "=" + kstr2(kfield(target, dp[i]))
         }
         return out + ")"
+    }
+    // The toString a class inherits from the built-in root of its chain, which is also
+    // what `super.toString()` reaches when no class above the caller declares one: an
+    // enum entry prints its NAME (java.lang.Enum.toString), anything else the default.
+    function kBaseStr(target) {
+        if (clsIsEnum(target.__class) && typeof target.name == "string") { return target.name }
+        return defaultToString(target)
     }
     // java.lang.Object#toString, the binary class name, "@" and hashCode() in
     // unsigned hex - so a class that overrides only hashCode prints through it -
@@ -10249,7 +10272,7 @@ NotMemberKw = :script(~~ "pure";
             }
             i = 2
         }
-        var init = items[i]
+        var init = kArrTagThunk(items[i], dty)
         // A declared collection type retypes the elements of what it holds (a builder
         // call's literals, or a generic call's result - `xs.map { 0 }`), and a declared
         // function type the function's results.
@@ -11793,6 +11816,8 @@ NotMemberKw = :script(~~ "pure";
         if (r.init == null) {
             r.init = makeConst(null)
             if (r.getter != undefined) { r.hasField = false }
+        } else {
+            r.init = kArrTagThunk(r.init, r.ty)
         }
         var plty = r.ty != "" ? "" : ktStaticTy(r.itxt)
         ktNoteDecl(r.prop, r.ty, plty)
@@ -12271,7 +12296,15 @@ NotMemberKw = :script(~~ "pure";
         return function() {
             var sc = scopes
             var ho = objHasOwn
-            for (var i = sc.length - 1; i >= 0; i--) { if (ho.call(sc[i], name)) { return kCtorRefOf(vr()) } }
+            for (var i = sc.length - 1; i >= 0; i--) {
+                if (ho.call(sc[i], name)) {
+                    var raw = sc[i][name]
+                    if (typeof raw != "function" && !(raw !== null && typeof raw == "object" && raw.__isclass === true)) {
+                        return propRefOf(kVarHolder(sc[i], name), name)
+                    }
+                    return kCtorRefOf(vr())
+                }
+            }
             var chain = findThisChain()
             for (var ci = 0; ci < chain.length; ci++) {
                 var r = chain[ci]
@@ -12283,6 +12316,28 @@ NotMemberKw = :script(~~ "pure";
             }
             return kCtorRefOf(vr())
         }
+    }
+    // The receiver of `::top` for a top-level property: a record naming the scope that
+    // binds it, read and written through by kRefRead / kRefSet, so the reference sees
+    // every later assignment. Kept in that scope under name$kref, so two references
+    // to one property are equal. Twin of ktVarHolder in abnf/jsrtkotlin.go.
+    function kVarHolder(sc, name) {
+        var key = name + "$kref"
+        if (hasOwn(sc, key)) { return sc[key] }
+        var h = {__ktvs: sc}
+        scopePut(sc, key, h)
+        return h
+    }
+    function kIsVarHolder(o) { return o !== null && typeof o == "object" && o.__ktvs !== undefined }
+    // A reference's property READ: the binding of a kVarHolder (through a delegate
+    // box), else the receiver's field.
+    function kRefRead(obj, name) {
+        if (kIsVarHolder(obj)) {
+            var v = anytype
+            v = obj.__ktvs[name]
+            return isPDeleg(v) ? pdelegGet(v) : v
+        }
+        return kGetField(obj, name)
     }
     // `::Box` names a CONSTRUCTOR, not the class descriptor: it is callable, it can be
     // passed where a lambda is expected, and Kotlin gives it the name "<init>". A bare
@@ -12385,9 +12440,20 @@ NotMemberKw = :script(~~ "pure";
         var cls = anytype
         cls = r.kcls
         if (r.kbound && r.obj !== null && typeof r.obj == "object") { cls = r.obj.__class }
-        var isFn = (cls !== undefined && cls !== null) ? typeof clsFind(cls, r.pname) == "function"
-                                                         : kRecvProps["$" + r.pname] !== true
+        var isFn = (cls !== undefined && cls !== null) ? (typeof clsFind(cls, r.pname) == "function" || kRefExtFn(r, cls))
+                                                         : (!kIsVarHolder(r.obj) && kRecvProps["$" + r.pname] !== true)
         return (isFn ? "function " : "property ") + r.pname + kNoReflect
+    }
+    // Whether a reference on a class receiver resolves to an extension FUNCTION, by the
+    // resolution the call makes (extFor); an unbound one tests a bare instance of its
+    // class. A member property the receiver has wins. Twin of ktRefExtFn in
+    // abnf/jsrtkotlin.go.
+    function kRefExtFn(r, cls) {
+        if (r.kbound && r.obj !== null && typeof r.obj == "object") {
+            if (hasOwn(r.obj, r.pname)) { return false }
+            return extFor(r.pname, r.obj) != null
+        }
+        return extFor(r.pname, {__class: cls}) != null
     }
     // The names Kotlin declares as TYPES rather than values. A `::` in front of one of
     // them is an UNBOUND reference (String::length, Int::class) even where the runtime
@@ -12410,11 +12476,17 @@ NotMemberKw = :script(~~ "pure";
     function kRefRecv(r, args) { return r.kbound ? r.obj : (args.length > 0 ? args[0] : null) }
     function kRefRest(r, args) { return r.kbound ? args : args.slice(1) }
     // KProperty.get: the property READ, never the method.
-    function kRefGet(r, args) { return kGetField(kRefRecv(r, args), r.pname) }
+    function kRefGet(r, args) { return kRefRead(kRefRecv(r, args), r.pname) }
     function kRefSet(r, args) {
         var recv = kRefRecv(r, args)
         var rest = kRefRest(r, args)
-        kSetField(recv, r.pname, rest.length > 0 ? rest[0] : null)
+        var nv = rest.length > 0 ? rest[0] : null
+        if (kIsVarHolder(recv)) {
+            var cur = recv.__ktvs[r.pname]
+            if (isPDeleg(cur)) { pdelegSet(cur, nv) } else { scopePut(recv.__ktvs, r.pname, nv) }
+            return
+        }
+        kSetField(recv, r.pname, nv)
     }
     // KFunction.invoke / KProperty.invoke - and the same thing a reference does when it
     // is passed where a lambda is expected (list.map(Box::v)).
@@ -12424,6 +12496,7 @@ NotMemberKw = :script(~~ "pure";
         if (r.kctor === true) { return kNew(r.obj, {pos: args, named: null}) }
         var recv = anytype // Any receiver type reaches a reference.
         recv = kRefRecv(r, args)
+        if (kIsVarHolder(recv)) { return kRefRead(recv, r.pname) }
         if (lookupMethod(recv, r.pname) != null) { return mcall(recv, r.pname, kRefRest(r, args)) }
         // A member the receiver really HAS wins over a same-named extension, which is
         // Kotlin's rule for the call too.
@@ -13095,12 +13168,12 @@ NotMemberKw = :script(~~ "pure";
         if (o.__propref === true) {
             if (name == "isInitialized") {
                 var pv = anytype
-                pv = kfield(o.obj, o.pname)
+                pv = kIsVarHolder(o.obj) ? o.obj.__ktvs[o.pname] : kfield(o.obj, o.pname)
                 return pv !== undefined && pv !== null
             }
             if (name == "name") { return o.pname }
             if (o.kbound === false) { fail("member ." + name + " of an unbound callable reference ::" + o.pname) }
-            return kGetField(o.obj, o.pname)
+            return kRefRead(o.obj, o.pname)
         }
         // KClass: simpleName / qualifiedName (a top-level class in the default package
         // has no package prefix, so the two agree; see kKClassFq) and .java, which is
@@ -13793,13 +13866,17 @@ NotMemberKw = :script(~~ "pure";
             }
         }
         // An Array builder's explicit element type fixes its JVM class
-        // (ktArrBuilderClass). Twin of makeCall in kotlin-to-llvm-ir.abnf.
-        var ajc = ktArrBuilderClass(name, start == 2 ? items[1].targs : undefined)
-        if (ajc != "") {
+        // (ktArrBuilderClass), read on the first run because the type may be declared
+        // later in the file. Twin of makeCall in kotlin-to-llvm-ir.abnf.
+        if (start == 2 && ktArrBuilders["$" + name] == true) {
             var built = body
+            var araw = items[1].targs
+            var ajc = anytype
+            ajc = null
             body = function() {
                 var a = built()
-                return Array.isArray(a) && arrKind(a) == 1 ? kArrClassed(a, ajc) : a
+                if (ajc === null) { ajc = ktArrBuilderClass(name, araw) }
+                return ajc != "" && Array.isArray(a) && arrKind(a) == 1 ? kArrClassed(a, ajc) : a
             }
         }
         // A builder call's elements retyped by its explicit type arguments

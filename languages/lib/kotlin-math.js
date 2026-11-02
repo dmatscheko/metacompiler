@@ -826,14 +826,17 @@ function ktaResultKind(recv, name) {
 }
 
 // An Array<T>'s class, [L<T>; - T read off the elements' classes (a static type
-// argument is not kept): a java.lang class every non-null element shares, else
-// java.lang.Object.
+// argument is not kept): a java.lang class or a class the program declares (a
+// binary name in the default package: no dot, and not the <object> of an
+// anonymous one) every non-null element shares, else java.lang.Object.
 function ktaRefClass(classes) {
     var c = ""
     var i = 0
     while (i < classes.length) {
         var e = classes[i]
-        if (e.length < 11 || e.substring(0, 10) != "java.lang.") { return "[Ljava.lang.Object;" }
+        if (typeof e != "string") { return "[Ljava.lang.Object;" }
+        var prog = e.length > 0 && e.charAt(0) != "<" && e.indexOf(".") < 0
+        if (!prog && (e.length < 11 || e.substring(0, 10) != "java.lang.")) { return "[Ljava.lang.Object;" }
         if (c != "" && c != e) { return "[Ljava.lang.Object;" }
         c = e
         i = i + 1

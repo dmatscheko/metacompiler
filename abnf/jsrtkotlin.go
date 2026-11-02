@@ -2265,9 +2265,25 @@ func init() {
 		// The reference machinery reaches fields through exactly the externs the
 		// emitted code uses, and its two side tables are per-runtime.
 		ktRefRead = func(recv interface{}, name string) interface{} {
+			if vs, isVar := ktVarScope(recv); isVar {
+				v, _ := vs.get(name)
+				if box, isBox := ktPDeleg(v); isBox {
+					return u(m["js_ktdget"]([]uint64{w(box.props["d"]), w(box.props["owner"]), w(box.props["pname"])}))
+				}
+				return v
+			}
 			return u(m["js_ktfget"]([]uint64{w(recv), rt.wrapStr(name)}))
 		}
 		ktRefWrite = func(recv interface{}, name string, v interface{}) {
+			if vs, isVar := ktVarScope(recv); isVar {
+				cur, _ := vs.get(name)
+				if box, isBox := ktPDeleg(cur); isBox {
+					m["js_ktdset"]([]uint64{w(box.props["d"]), w(box.props["owner"]), w(box.props["pname"]), w(v)})
+				} else {
+					vs.put(name, v)
+				}
+				return
+			}
 			rt.setMember(recv, name, v)
 		}
 		ktRefs = map[*hostFunc]*ktRefInfo{}
@@ -2342,6 +2358,8 @@ func init() {
 				if v, ok := s.get(name); ok {
 					if isCallable(v) {
 						ktFuncNames[v] = name
+					} else if o, isObj := v.(*jsObject); !isObj || o.props["__isclass"] != true {
+						return w(rt.ktMakeRef(&ktRefInfo{recv: ktVarHolder(s, name), name: name, bound: true}))
 					}
 					return m["js_ktctorref"]([]uint64{w(v)})
 				}
@@ -2515,6 +2533,48 @@ func init() {
 				}
 			}
 			return w(jsNull)
+		}
+
+		// js_ktsuperany(super class or null, this, "m", args) is `super.m()` for a
+		// member of kotlin.Any (toString, equals, hashCode): js_supercall's walk, and
+		// on a miss the built-in root's own member rather than a failure. The class
+		// may have no superclass at all, which is Any. hashCode is the identity
+		// stand-in emitAnyHashFunc installs; toString calls the VIRTUAL hashCode, as
+		// java.lang.Object#toString does. Twin of the __superref arm of mcall in
+		// kotlin-interpreter.abnf.
+		m["js_ktsuperany"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[2]))
+			args := u(a[3]).(*jsArray).elems
+			self := u(a[1])
+			for cls := u(a[0]); cls != nil; {
+				clsObj, isObj := cls.(*jsObject)
+				if !isObj {
+					break
+				}
+				if mth, found := clsObj.props[name]; found && isCallable(mth) {
+					return w(rt.call(mth, jsUndef, append([]interface{}{self}, args...)))
+				}
+				cls = clsObj.props["__super"]
+			}
+			o, _ := self.(*jsObject)
+			var cls *jsObject
+			if o != nil {
+				cls, _ = o.props["__class"].(*jsObject)
+			}
+			switch {
+			case name == "equals" && len(args) == 1:
+				return w(self == args[0])
+			case name == "hashCode" && cls != nil:
+				if n, ok := cls.props["__name"].(string); ok {
+					return w(float64(ktStrHash(rt, n)))
+				}
+			case name == "toString" && cls != nil:
+				if s, ok := rt.ktBaseStr(o, cls); ok {
+					return w(s)
+				}
+			}
+			rt.fail("unknown super method '%s'", name)
+			return jsHUndefined
 		}
 
 		// js_ktsupset(super class, this, "x", v) is `super.x = v`. A setter found on
@@ -4484,14 +4544,41 @@ func ktFnStr(v interface{}) string {
 	if o, isObj := info.recv.(*jsObject); isObj && info.bound {
 		cls = o.props["__class"]
 	}
-	isFn := !ktRecvProp(info.name)
+	_, isVar := ktVarScope(info.recv)
+	isFn := !isVar && !ktRecvProp(info.name)
 	if cls != nil {
-		isFn = ktClsFind(cls, info.name) != nil
+		isFn = ktClsFind(cls, info.name) != nil || ktRefExtFn(info, cls)
 	}
 	if isFn {
 		return "function " + info.name + ktNoReflect
 	}
 	return "property " + info.name + ktNoReflect
+}
+
+// ktRefExtFn reports whether a reference on a class receiver resolves to one of
+// its extension FUNCTIONS, by the selection ktRefApply makes; an unbound one tests
+// a bare instance of its class. A member property the receiver has wins.
+func ktRefExtFn(info *ktRefInfo, cls interface{}) bool {
+	xs, isArr := info.ext.(*jsArray)
+	if !isArr {
+		return false
+	}
+	recv := info.recv
+	if o, isObj := recv.(*jsObject); isObj && info.bound {
+		if _, own := o.props[info.name]; own {
+			return false
+		}
+	} else {
+		shell := newJSObject()
+		shell.set("__class", cls)
+		recv = shell
+	}
+	for i := 0; i+1 < len(xs.elems); i += 2 {
+		if ty, _ := xs.elems[i].(string); ty == "" || ktIsType(recv, ty) {
+			return true
+		}
+	}
+	return false
 }
 
 // ktpObj renders the object shapes the Kotlin compiler grammar builds. It reports
@@ -4576,6 +4663,13 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 	if mth, ok := ktpFindMember(o, "toString"); ok {
 		return rt.ktpRender(rt.call(mth, jsUndef, []interface{}{o}), depth+1), true
 	}
+	return rt.ktBaseStr(o, cls)
+}
+
+// ktBaseStr is the toString a program class inherits from the built-in root of its
+// chain, which is also what `super.toString()` reaches when no program class above
+// the caller declares one (js_ktsuperany).
+func (rt *jsrt) ktBaseStr(o, cls *jsObject) (string, bool) {
 	// An enum entry prints its NAME (java.lang.Enum.toString); both halves store it
 	// on the entry as `name`.
 	if ktpIsEnum(cls) {
@@ -11382,12 +11476,15 @@ func ktaKindOf(elem string) int {
 }
 
 // ktaRefClass is an Array<T>'s class, [L<T>; - T read off the elements' classes (a
-// static type argument is not kept): a java.lang class every non-null element
-// shares, else java.lang.Object.
+// static type argument is not kept): a java.lang class or a class the program
+// declares (a binary name in the default package: no dot, and not the <object>
+// of an anonymous one) every non-null element shares, else java.lang.Object.
+// Twin of ktaRefClass in kotlin-math.js.
 func ktaRefClass(classes []string) string {
 	c := ""
 	for _, e := range classes {
-		if !strings.HasPrefix(e, "java.lang.") || (c != "" && c != e) {
+		prog := e != "" && e[0] != '<' && !strings.Contains(e, ".")
+		if !(prog || strings.HasPrefix(e, "java.lang.")) || (c != "" && c != e) {
 			return "[Ljava.lang.Object;"
 		}
 		c = e
@@ -12055,6 +12152,30 @@ func (rt *jsrt) ktMakeRef(info *ktRefInfo) interface{} {
 	}
 	ktRefs[hf] = info
 	return hf
+}
+
+// ktVarHolder is the receiver of `::top` for a top-level property: an object
+// naming the scope that binds it, which ktRefRead / ktRefWrite read and write
+// through, so the reference sees every later assignment. It is kept in that scope
+// under name$kref, so two references to one property are equal. Twin of
+// kVarHolder in kotlin-interpreter.abnf and k4bVarHolder in kotlin-rt.metajs.
+func ktVarHolder(s *jsScope, name string) *jsObject {
+	if h, ok := s.get(name + "$kref"); ok {
+		return h.(*jsObject)
+	}
+	h := newJSObject()
+	h.set("__ktvs", s)
+	s.put(name+"$kref", h)
+	return h
+}
+
+// ktVarScope is the scope a ktVarHolder names.
+func ktVarScope(recv interface{}) (*jsScope, bool) {
+	if o, isObj := recv.(*jsObject); isObj {
+		vs, isVar := o.props["__ktvs"].(*jsScope)
+		return vs, isVar
+	}
+	return nil, false
 }
 
 func ktRefRecv(info *ktRefInfo, args []interface{}) interface{} {

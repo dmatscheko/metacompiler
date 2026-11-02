@@ -2743,10 +2743,30 @@ function k2FnStr(v) {
     if (info["bound"] === true) {
         if (ktIsObj(rv)) { cls = rv["__class"] }
     }
-    var isFn = !k4RecvProp(nm)
-    if (ktIsObj(cls)) { isFn = ktClsFind(cls, nm) !== undefined }
+    var isFn = !k6IsVarHolder(rv) && !k4RecvProp(nm)
+    if (ktIsObj(cls)) { isFn = ktClsFind(cls, nm) !== undefined || k2RefExtFn(info, cls) }
     if (isFn) { return "function " + nm + nr }
     return "property " + nm + nr
+}
+
+// k2RefExtFn is ktRefExtFn (jsrtkotlin.go): whether a reference on a class
+// receiver resolves to one of its extension functions.
+function k2RefExtFn(info, cls) {
+    var ext = info["ext"]
+    if (!ktIsArr(ext)) { return false }
+    var recv = info["recv"]
+    if (info["bound"] === true && ktIsObj(recv)) {
+        if (recv[info["name"]] !== undefined) { return false }
+    } else {
+        recv = {}
+        recv["__class"] = cls
+    }
+    var i = 0
+    while (i + 1 < ext.length) {
+        if (ext[i] == "" || ktIsType(recv, ext[i])) { return true }
+        i = i + 2
+    }
+    return false
 }
 
 // k2Obj is ktpObj (jsrtkotlin.go:2657): the object shapes the Kotlin compiler
@@ -2824,6 +2844,12 @@ function k2Obj(o, depth) {
     // memberCall follows.
     var mth = k2FindMember(o, "toString")
     if (mth !== undefined) { return k2Render(mth.apply(undefined, [o]), depth + 1) }
+    return ktBaseStr(o, cls)
+}
+
+// ktBaseStr (jsrtkotlin.go's ktBaseStr) is the toString a program class inherits
+// from the built-in root of its chain; undefined when there is none.
+function ktBaseStr(o, cls) {
     // An enum entry prints its NAME (java.lang.Enum.toString); both halves store
     // it on the entry as `name`.
     if (k2IsEnum(cls)) {
@@ -7613,6 +7639,7 @@ function ktRefApply(info, args) {
 // exactly the field paths the emitted code uses; SECTION 4a's ktRecvMember is
 // that function.
 function ktRefRead(recv, name) {
+    if (k6IsVarHolder(recv)) { return k6VarRead(recv, name) }
     var v = anytype
     v = ktRecvMember(recv, name, false)
     if (ktMiss(v)) { return undefined }
@@ -8133,6 +8160,30 @@ function js_ktsupget(sup, self, name) {
         if (self[name + "$f"] !== undefined) { return self[name + "$f"] }
     }
     return null
+}
+
+// js_ktsuperany(super class or null, this, "m", args) is `super.m()` for a member
+// of kotlin.Any: js_supercall's walk, and on a miss the built-in root's member.
+// Twin of js_ktsuperany in jsrtkotlin.go.
+function js_ktsuperany(sup, self, name, args) {
+    var m = rtFindMethod(sup, name)
+    if (typeof m == "function") { return rtkCall(m, self, rtPrepend(self, args)) }
+    if (name == "equals") { if (args.length == 1) { return self === args[0] } }
+    if (ktIsObj(self)) {
+        var cls = self["__class"]
+        if (ktIsObj(cls)) {
+            if (name == "hashCode") {
+                var cn = cls["__name"]
+                if (typeof cn == "string") { return k0StrHash(cn) }
+            }
+            if (name == "toString") {
+                var s = ktBaseStr(self, cls)
+                if (s !== undefined) { return s }
+            }
+        }
+    }
+    fail("unknown super method '" + name + "'")
+    return undefined
 }
 
 // js_ktsupset(super class, this, "x", v) is `super.x = v`. A setter found on the
@@ -10456,10 +10507,11 @@ function ktSmcall(recv, name, args) {
     var info = ktRefOf(rv)
     if (k4IsRef(info)) {
         if (name == "invoke") { return ktRefApply(info, as) }
-        if (name == "get") { return js_ktfget(k4RefRecv(info, as), info["name"]) }
+        if (name == "get") { return k6RefGet(k4RefRecv(info, as), info["name"]) }
         if (name == "set") {
             var rest = k4RefRest(info, as)
             var wrecv = k4RefRecv(info, as)
+            if (k6IsVarHolder(wrecv)) { return k6VarWrite(wrecv, info["name"], k4At(rest, 0)) }
             wrecv[info["name"]] = k4At(rest, 0)
             return undefined
         }
@@ -10468,7 +10520,7 @@ function ktSmcall(recv, name, args) {
         if (info["bound"] !== true) {
             fail("method ." + name + "() of an unbound callable reference ::" + info["name"])
         }
-        rv = js_ktfget(info["recv"], info["name"])
+        rv = k6RefGet(info["recv"], info["name"])
     }
 
     // A KClass receiver.
@@ -11645,7 +11697,7 @@ function js_ktfget(o, name) {
         if (info["bound"] !== true) {
             fail("member ." + name + " of an unbound callable reference ::" + info["name"])
         }
-        return js_ktfget(info["recv"], info["name"])
+        return k6RefGet(info["recv"], info["name"])
     }
     // ::topLevelFun is the closure itself, and KFunction.name is the name the
     // reference site spelled - recorded by js_ktnameval, since a closure carries
@@ -13158,7 +13210,12 @@ function ktTypeMarker(name) {
 function js_ktbareref(env, name) {
     var v = anytype
     v = k6Find(env, name)
-    if (!ktMiss(v)) { return js_ktctorref(js_ktnameval(v, name)) }
+    if (!ktMiss(v)) {
+        if (!ktIsFn(v) && !(ktIsObj(v) && v["__isclass"] === true)) {
+            return ktMakeRef(k4bRefInfo(k6VarHolder(k6Owner(env, name), name), name, true, false, "", undefined))
+        }
+        return js_ktctorref(js_ktnameval(v, name))
+    }
     var s = anytype
     s = env
     while (s !== undefined && s !== null) {
@@ -13172,6 +13229,43 @@ function js_ktbareref(env, name) {
         s = scopeParent(s)
     }
     return js_ktctorref(js_ktnameval(js_ktget(env, name, false), name))
+}
+
+// ktVarHolder (jsrtkotlin.go): the receiver of `::top` for a top-level
+// property, naming the scope that binds it; kept there under name$kref.
+function k6VarHolder(s, name) {
+    if (scopeHas(s, name + "$kref")) { return scopeGet(s, name + "$kref") }
+    var h = {}
+    h["__ktvs"] = s
+    scopeDecl(s, name + "$kref", h)
+    return h
+}
+
+// Whether a reference receiver is a k6VarHolder.
+function k6IsVarHolder(recv) {
+    if (!ktIsObj(recv)) { return false }
+    return recv["__ktvs"] !== undefined
+}
+
+// KProperty0.get / set of a k6VarHolder: the binding, through a delegate box.
+function k6VarRead(h, name) { return k6DelegRead(scopeGet(h["__ktvs"], name)) }
+function k6VarWrite(h, name, v) {
+    var cur = anytype
+    cur = scopeGet(h["__ktvs"], name)
+    if (ktIsObj(cur)) {
+        if (cur["__pdeleg"] !== undefined) {
+            js_ktdset(cur["d"], cur["owner"], cur["pname"], v)
+            return undefined
+        }
+    }
+    scopeDecl(h["__ktvs"], name, v)
+    return undefined
+}
+
+// A reference's property read: js_ktfget, or the binding of a k6VarHolder.
+function k6RefGet(recv, name) {
+    if (k6IsVarHolder(recv)) { return k6VarRead(recv, name) }
+    return js_ktfget(recv, name)
 }
 
 // jsrtkotlin.go:1895's js_ktdthis: the thisRef a delegated property is declared
