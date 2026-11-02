@@ -324,6 +324,48 @@ s164() {
   e=$( (s164f) 2>&1)
   check dna3 "$(s164s "$e")" 'declare: `3'"'"': invalid variable name for name reference;s=1;s=0;declare -An w=([0]="y" );s=0;s=0;declare -Ain w=([0]="0" );declare: w: cannot convert associative to indexed array;s=1;declare -Ainr w=([0]="0" );'
 }
+# ===== SECTION 165: a function's declaration through its own nameref =====
+# A function's local, declare or typeset through its own nameref to a local of the same
+# function acts on that local, and a refusal names the nameref. To any other variable it
+# makes a new local of the target's name, which may hide a caller's local, a readonly one
+# included, but not a readonly global: that is refused naming the target. Every expected
+# value is bash 5.3's.
+s165() {
+  local e
+  s165s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s165a() { local -A g=([k]=v); local -n w=g; declare -a w=x; echo "s=$?"; local -a w=(x); echo "s=$?"; declare -p g; }
+  s165b() { local -r g1=1; local -n w=g1; declare w=2; echo "s=$? $g1"; local w=3; echo "s=$?"; typeset w=4; echo "s=$?"; }
+  e=$( (s165a; s165b) 2>&1)
+  check nlt1 "$(s165s "$e")" 'declare: w: cannot convert associative to indexed array;s=1;w: cannot convert associative to indexed array;local: w: cannot convert associative to indexed array;s=1;declare -A g=([k]="v" );declare: w: readonly variable;s=1 1;local: w: readonly variable;s=1;typeset: w: readonly variable;s=1;'
+  s165c() { local -r s165l=1; local -A s165m=([k]=v); s165d; echo "c=$s165l ${s165m[k]}"; }
+  s165d() { local -n w=s165l v=s165m; declare w=2; echo "s=$? $w"; declare -p s165l; declare -r v; declare -a v=x; echo "s=$?"; declare -p s165m; }
+  s165f() { local -n w=s165G; declare w=2; echo "s=$? $s165G"; local w; echo "s=$?"; }
+  s165g() { local -r s165x=1; s165h; echo "g=$s165x"; }
+  s165h() { local s165x=2; echo "s=$? $s165x"; declare s165y; declare -r s165x; declare -p s165x; }
+  e=$( (s165c; readonly s165G=1; s165f; s165g) 2>&1)
+  check nlt2 "$(s165s "$e")" 's=0 2;declare -- s165l="2";declare: v: readonly variable;s=1;declare -ar s165m;c=1 v;declare: s165G: readonly variable;s=1 1;local: s165G: readonly variable;s=1;s=0 2;declare -r s165x="2";g=1;'
+}
+# ===== SECTION 166: a circular nameref that is an associative array =====
+# A function's circular nameref given -A and a value names no variable bash can follow:
+# its value and elements read as unset, every store to it or through it is dropped with
+# status 0 (a default included, which still expands), read and mapfile consume their
+# records, test -v finds nothing, ${!REF} is an invalid indirect expansion and `unset`
+# unsets the nameref itself. One that is an indexed array is never set for -v and its
+# ${!REF} is empty. Every expected value is bash 5.3's.
+s166() {
+  local e
+  s166s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; case $l in *"circular name reference") continue ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s166a() { local -n w=w; declare -A w=x; w=([k]=3); echo "s=$?"; w[j]=4; w=y; w+=z; w+=([m]=1); w[j]+=5; (( w[k] = 7 )); let 'w[q]=1'; echo "s=$?"; declare -p w; }
+  s166b() { local -n w=w; declare -A w=x; echo "<$w> <${w[0]}> <${w[k]:=v}> <${w:=v}> <${w-u}> <${w[k]-u}> <${w[*]-u}> <${#w[@]}> <${!w[@]}> <$(( w + 1 ))>"; [[ -v w ]]; echo "v=$?"; [[ -v w[0] ]]; echo "v=$?"; declare -p w; }
+  e=$( (s166a; s166b) 2>&1)
+  check anr1 "$(s166s "$e")" 's=0;s=0;declare -An w=([0]="x" );<> <> <v> <v> <u> <u> <u> <0> <> <1>;v=1;v=1;declare -An w=([0]="x" );'
+  s166c() { local -n w=w; declare -A w=x; { mapfile -n1 w; echo "s=$?"; read -a w; echo "s=$?"; read w; echo "s=$?"; printf -v 'w[k]' %s p; echo "s=$?"; read x; echo "x=$x"; } <<< $'a\nb\nc\nd'; for w in p q; do echo "<$w>"; done; declare -p w; unset 'w[0]'; declare -p w; unset w; echo "s=$?"; declare -p w; w=5; declare -p w; }
+  s166d() { local -n w=w; declare -A w=x; echo "<${!w}>"; echo no; }
+  s166e() { local -n w=w; declare -A w=x; echo "<${w[@]:=z}>"; echo no; }
+  s166f() { local -n w=w; declare w=(x y); [[ -v w ]]; echo "v=$?"; test -v 'w[0]'; echo "v=$?"; echo "<${!w}>"; }
+  e=$( (s166c) 2>&1; (s166d) 2>&1; echo "s=$?"; (s166e) 2>&1; echo "s=$?"; (s166f) 2>&1)
+  check anr2 "$(s166s "$e")" 's=0;s=0;s=0;s=0;x=d;<>;<>;declare -An w=([0]="x" );declare -An w=([0]="x" );s=0;declare -- w;declare -- w="5";w: invalid indirect expansion;s=1;w[@]: bad array subscript;s=2;v=1;v=1;<>;'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -337,5 +379,7 @@ s161  # SECTION-CALL 161
 s162  # SECTION-CALL 162
 s163  # SECTION-CALL 163
 s164  # SECTION-CALL 164
+s165  # SECTION-CALL 165
+s166  # SECTION-CALL 166
 echo "full: $checks checks, $fails failures"
 exit $fails

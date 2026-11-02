@@ -2836,8 +2836,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = 0; i < items.length; i++) { its0.push(items[i]) }
             return function() {
                 if (!anyRef || noRef > 0 || !attrOn(refVars, pn)) { return plain() }
-                if (isArr(pn)) { return refArrRead(hasIdx || lenp, lenp) }
-                var rn = refTarget(pn)
+                // One that is an associative array reads the never-set variable "", and a
+                // default given it is stored nowhere (paramCore's refVoid).
+                var vd = isArr(pn) && arrs[arrKey(pn)].assoc
+                if (isArr(pn) && !vd) { return refArrRead(hasIdx || lenp, lenp) }
+                var rn = vd ? "" : refTarget(pn)
                 if (rn == pn) { return plain() }
                 // A subscript applies to a variable named NAME[SUB] itself, which never
                 // exists (bash 5.3: declare -n e=a[1]; ${e[0]} is empty): "", never set,
@@ -2846,18 +2849,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // the keys (${#REF[@]}, ${!REF[@]}). Twin of rt_nref_elems.
                 // @a and @A look the chain up twice more, and warn each time (bash 5.3: three
                 // warnings for ${REF@a}, four for ${REF[@]@a}).
-                if (rn == "" && xfAttr && !refQuiet) {
+                if (rn == "" && xfAttr && !refQuiet && !vd) {
                     diagErr("warning: " + pn + ": circular name reference\n")
                     diagErr("warning: " + pn + ": circular name reference\n")
                 }
-                var rcirc = (rn == "") ? pn : ""
+                var rcirc = (rn == "" && !vd) ? pn : ""
                 if (hasIdx && rn.indexOf("[") > 0 && !hidLocal(rn)) { rn = "" }
-                else if (hasIdx && rn == "" && !lenp && !indp && !refQuiet) { diagErr("warning: " + pn + ": circular name reference\n") }
-                var gn = (rn == "") ? refGlobal(pn) : ""
+                else if (hasIdx && rn == "" && !lenp && !indp && !refQuiet && !vd) { diagErr("warning: " + pn + ": circular name reference\n") }
+                var gn = (rn == "" && !vd) ? refGlobal(pn) : ""
                 if (gn != "") { rn = gn }
-                var rk = ((rcirc != "") ? "%" : "$") + rn
+                var rk = (vd ? "!" : ((rcirc != "") ? "%" : "$")) + rn
                 if (!hasOwn(byRef, rk)) {
-                    var its = [{refPn: pn, refCirc: rcirc}]
+                    var its = [{refPn: pn, refCirc: rcirc, refVoid: vd}]
                     var q
                     for (q = 0; q < its0.length; q++) {
                         if (typeof its0[q] != "function" && its0[q].pname != undefined) { its.push({pname: rn}) } else { its.push(its0[q]) }
@@ -2923,9 +2926,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hasIdx = false
         var errName = null
         // Through a nameref (mkParamExp): the name as written, and that name again when its
-        // chain is circular, else "".
+        // chain is circular, else "". refVoid: a default is stored nowhere (refIsAs).
         var refPn = ""
         var refCirc = ""
+        var refVoid = false
         var idxAll = anytype
         idxAll = null
         var idxAq = null
@@ -2934,7 +2938,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (typeof it == "function") { args.push(it); wordT = it }
             else if (it.qname != undefined) { errName = it.qname }
-            else if (it.refPn != undefined) { refPn = it.refPn; refCirc = it.refCirc }
+            else if (it.refPn != undefined) { refPn = it.refPn; refCirc = it.refCirc; refVoid = it.refVoid }
             else if (it.hasIdx != undefined) { hasIdx = true; idxAll = idxAllItem(it); idxAq = idxAqItem(it) }
             else if (it.lenp != undefined) { lenp = true }
             else if (it.badsub != undefined) { badsub = it.badsub; badRc = it.rec }
@@ -3151,7 +3155,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var sub = readIdx()
                 var qn = (errName != null) ? errName : (isPosName(name) ? name : ((refPn != "") ? refPn : name) + "[" + sub + "]")
                 if (isWhole(sub)) { return listOpValue(name, sub, idxOp, idxWordT, qn, refCirc) }
-                return elemOpValue(name, sub, idxOp, idxWordT, qn, refPn, refCirc)
+                return elemOpValue(name, sub, idxOp, idxWordT, qn, refPn, refCirc, refVoid)
             }
         }
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
@@ -3159,6 +3163,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // ${!REF} of a nameref answers the name its chain ends at (rt_nref_name).
         if (pe == "ind") { return function() {
             if (anyRef && attrOn(refVars, name)) {
+                // One that is an array is "", or for an associative one that error. Twin of
+                // rt_nref_name.
+                if (refIsArr(name)) {
+                    if (refIsAs(name)) { diagErr(name + ": invalid indirect expansion\n"); arithErr = true }
+                    return ""
+                }
                 noRef = noRef + 1
                 var rv = getVarVal(name)
                 noRef = noRef - 1
@@ -3251,7 +3261,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // A readonly NAME abandons the line with status 2 (bash 5.3), as an
                     // expansion error does.
                     if (tn != null && roRefusedV(tn, "m", "")) { storeFail(); return "" }
-                    if (tn != null) { d = storeAttr(tn, d, false) }
+                    if (tn != null && !refVoid) { d = storeAttr(tn, d, false) }
                     return d
                 }
                 return v
@@ -3844,9 +3854,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
             if (listPre) { roWho = tcWho() }
             // Refused through a nameref, a declaration names it, except that a function's
-            // `local` or `declare` of its own local nameref names the target (bash 5.3).
-            var shown = (declOwn != "" && !localize) ? declOwn : names[k]
-            if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0 || roAttr) && attrOn(roVars, names[k])) {
+            // `local` or `declare` making a new local of the target names the target (bash 5.3).
+            var shown = (declOwn != "" && !(localize && fresh)) ? declOwn : names[k]
+            // A new local may shadow a caller's readonly local, not a readonly global (bash
+            // 5.3's make_local_variable). Twin of roFresh in bash-to-llvm-ir.abnf.
+            var roIn = attrOn(roVars, names[k]) && !(fresh && globalEntry(names[k]) != null)
+            if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0 || roAttr) && roIn) {
                 // A literal is checked while the words expand (bash 5.3): under an option that
                 // changes an attribute, or for a function's local, by a declaration reporting
                 // after thisCmd, which abandons the line at top level and for export and
@@ -5092,8 +5105,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ${a[k]-default} and its three siblings: the scalar arms with "is it set" asked of
     // the ELEMENT.
-    // Through a nameref, ref is the name as written and circ that name for a circular chain.
-    function elemOpValue(name, sub, op, wordT, qn, ref, circ) {
+    // Through a nameref, ref is the name as written and circ that name for a circular chain;
+    // vd: a default is stored nowhere (refIsAs).
+    function elemOpValue(name, sub, op, wordT, qn, ref, circ, vd) {
         var v = scGet(name, sub)
         if (op == "") { return v }
         var colon = (op.charAt(0) == ":")
@@ -5105,6 +5119,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The default is stored, and expands, under the array's attributes.
             // Read through a nameref that is an array, no element is set.
             if (refIsArr(name)) { refArrBad(); return "" }
+            if (vd) { return blank ? dfltWord(wordT) : v }
             // The store looks a circular chain up twice more, as NAME[SUB]=WORD does; it names
             // the nameref when it is refused, and makes a set scalar element 0.
             if (blank && circ != "" && !refQuiet) {
@@ -5364,7 +5379,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkVarRef(name) {
         if (name == "*") { return function() { return starJoin(posParams) } }
         return function() {
-            if (anyRef && refIsArr(name)) { return refArrRead(false, false) }
+            if (anyRef && refIsArr(name)) { return refIsAs(name) ? "" : refArrRead(false, false) }
             return getVarVal(name)
         }
     }
@@ -5915,7 +5930,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arSet(name, key, s) {
         // An element store reports refArrBad's error and goes on (bash 5.3).
         if (refIsArr(name)) {
-            if (key != null) { diagErr(arPfx + "`': not a valid identifier\n") }
+            if (key != null && !refIsAs(name)) { diagErr(arPfx + "`': not a valid identifier\n") }
             return
         }
         if (anyRef && attrOn(refVars, name) && refTarget(name) == "") {
@@ -7001,7 +7016,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // emitAssign.
     function runAssign(a, assoc, decl) {
         if (!decl && a.circ != true && refIsArr(a.name)) {
-            if (a.idxT != null || a.lit != null) { refArrBad() }
+            if ((a.idxT != null || a.lit != null) && !refIsAs(a.name)) { refArrBad() }
             return
         }
         if (!decl && anyRef && refVoidElem(a)) { return }
@@ -7084,7 +7099,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function runAssignV(a, assoc, v, decl) {
         // A declaration's scalar value is reported, and its status stays 0 (bash 5.3).
         if (a.lit == null && refIsArr(a.name)) {
-            if (a.idxT != null) { refArrBad() } else if (decl) { diagErr(arPfx + "`': not a valid identifier\n") }
+            if (a.idxT != null) { if (!refIsAs(a.name)) { refArrBad() } } else if (decl) { diagErr(arPfx + "`': not a valid identifier\n") }
             return
         }
         if (!decl && anyRef && refVoidElem(a)) { return }
@@ -7130,8 +7145,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // variable bash can follow (bash 5.3): a store to it changes nothing, and an element or
     // array literal store is refused as one to the name "" (refArrBad), which abandons the
     // line or fails the builtin that stored. A declaration's literal is the nameref's own.
-    // bash names the bytes of its array's header instead of "". Twin of rt_nref_isarr.
+    // bash names the bytes of its array's header instead of "". One that is an associative
+    // array refuses nothing (refIsAs): it reads as unset, a store to it or through it is
+    // dropped, status 0, and `unset` of it unsets it as -n does. Twin of rt_nref_isarr.
     function refIsArr(name) { return anyRef && noRef == 0 && attrOn(refVars, name) && isArr(name) }
+    function refIsAs(name) { return refIsArr(name) && arrs[arrKey(name)].assoc }
     // A read of one: its elements, and their count or its length (whole), read as unset; its
     // value names no variable, which abandons the line with status 1.
     function refArrRead(whole, lenp) {
@@ -7189,7 +7207,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (anyRef) {
             var bn = isElemRef(name) ? splitSubscript(name).name : name
             if (refIsArr(bn)) {
-                if (bn != name) { refArrBad() }
+                if (bn != name && !refIsAs(bn)) { refArrBad() }
                 return ""
             }
         }
@@ -8098,11 +8116,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o.c != null && (qn == null || qn <= 0)) { diagErr(who + ": " + o.c + ": invalid callback quantum\n"); return 1 }
         if (!isIdentText(nm)) { diagErr(who + ": `" + nm + "': not a valid identifier\n"); return 1 }
         if (roRefused(nm, "", "c", "")) { return 1 }
-        if (refIsArr(nm)) { diagErr(who + ": `': not a valid identifier\n"); return 1 }
-        nm = refArrStore(nm)
-        if (assocFact(nm, false)) { diagErr(who + ": " + nm + ": not an indexed array\n"); return 1 }
-        if (o.O == null) { unsetVar(nm); arrNew(nm, false) } else { arrAdopt(nm); arrEnsure(nm, false) }
-        arrs[arrKey(nm)].lit = true
+        // Through a nameref that is an associative array the records are read and stored
+        // nowhere (vd). Twin of rt_mf_begin.
+        var vd = refIsAs(nm)
+        if (refIsArr(nm) && !vd) { diagErr(who + ": `': not a valid identifier\n"); return 1 }
+        if (!vd) {
+            nm = refArrStore(nm)
+            if (assocFact(nm, false)) { diagErr(who + ": " + nm + ": not an indexed array\n"); return 1 }
+            if (o.O == null) { unsetVar(nm); arrNew(nm, false) } else { arrAdopt(nm); arrEnsure(nm, false) }
+            arrs[arrKey(nm)].lit = true
+        }
         var dlm = (o.d == null) ? "\n" : o.d.charAt(0)
         var k
         for (k = 0; k < ((skp == null) ? 0 : skp); k++) { if (mfRecord(dlm, false) == null) { k = skp } }
@@ -8123,7 +8146,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 posParams = svPos
                 if (typeof cr == "object") { arPfx = svp; return cr }
             }
-            if (!elemSet(nm, numToStr(idx), null, line)) { break }
+            if (!vd && !elemSet(nm, numToStr(idx), null, line)) { break }
             idx = idx + 1
         }
         arPfx = svp
@@ -8212,7 +8235,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rec = readRec(o.raw, o.dlm, o.nch)
         if (badArr) { return 1 }
         if (arrName != null && roRefused(arrName, "", "c", "")) { return 1 }
-        if (arrName != null && refIsArr(arrName)) { diagErr("read: `': not a valid identifier\n"); return 1 }
+        if (arrName != null && refIsArr(arrName) && !refIsAs(arrName)) { diagErr("read: `': not a valid identifier\n"); return 1 }
+        if (arrName != null && refIsAs(arrName)) { return rec.eof ? 1 : 0 }
         if (arrName != null) { arrName = refArrStore(arrName) }
         if (arrName == null && names.length == 0 && roRefused("REPLY", "", "m", "")) { return 2 }
         var st = rec.eof ? 1 : 0
@@ -8525,8 +8549,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // associative one); NAME[@] / NAME[*] of a variable that
             // is no associative array asks whether it has any element (bash: get_array_value
             // with AV_ALLOWALL is non-NULL), while for an associative one @ and * are plain
-            // keys. Twin of rt_vset in bash-rt.c.
+            // keys. A nameref that is an array is never set (refIsArr). Twin of rt_vset in
+            // bash-rt.c.
             var sp = splitSubscript(s)
+            if (refIsArr(sp.name)) { return 1 }
             if (sp.key == null) {
                 var vn = anyRef ? refTarget(s) : s
                 if (vn == "") { return 1 }
@@ -8823,20 +8849,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (; ui < args.length; ui++) {
                 if (uf) { if (isFunc(args[ui])) { setFunc(args[ui], null, null, null) }; continue }
                 var sp = splitSubscript(args[ui])
-                // Through a nameref that is an array it finds nothing to unset.
-                if (!un && refIsArr(sp.name)) { continue }
+                // Through a nameref that is an array it finds nothing to unset, except that one
+                // that is an associative array is itself unset, as by -n (rt_unset_ref).
+                var unAs = !un && sp.key == null && refIsAs(sp.name)
+                if (!un && refIsArr(sp.name) && !unAs) { continue }
                 // Without -n, unset acts on the variable a nameref names; through a circular
                 // chain on the nameref itself, as -n does, after bash 5.3 looked the chain up
                 // twice (two warnings).
-                var unRef = un
+                var unRef = un || unAs
                 // A hidden local stays declared.
                 var unHid = false
-                if (anyRef && sp.key == null && !un) {
+                if (anyRef && sp.key == null && !unRef) {
                     var ut = refTarget(sp.name)
                     unHid = ut != sp.name && hidLocal(ut)
                     if (ut == "") { unRef = true; refTarget(sp.name) } else if (unHid) { sp = {name: ut, key: null} } else { sp = splitSubscript(ut) }
                 }
-                else if (anyRef && !un) {
+                else if (anyRef && !unRef) {
                     var ue = refTarget(sp.name)
                     sp = {name: (ue != sp.name && hidLocal(ue)) ? ue : splitSubscript(ue).name, key: sp.key}
                 }
@@ -10124,7 +10152,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k
             for (k = 0; k < vals.length; k++) {
                 // A nameref control variable is made to refer to each word in turn, unless its
-                // chain is circular, when the word is stored (storeAttr, refGlobStore).
+                // chain is circular, when the word is stored (storeAttr, refGlobStore). One that
+                // is an associative array stores nothing (refIsAs).
+                var fVoid = refIsAs(fname)
                 var fRef = anyRef && attrOn(refVars, fname) && refGlobal(fname) == ""
                 if (fRef) { noRef = noRef + 1 }
                 // A readonly name - the nameref's own readonly for one - ends the loop at its
@@ -10134,7 +10164,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     setStatus(1)
                     return 1
                 }
-                storeAttr(fname, vals[k], false)
+                if (!fVoid) { storeAttr(fname, vals[k], false) }
                 if (fRef) { noRef = noRef - 1 }
                 // A word that names no variable ends the loop, status 1.
                 if (fRef && takeSubBad()) { setStatus(1); return 1 }

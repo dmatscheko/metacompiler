@@ -2817,13 +2817,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             b = atJ
                         }
                         // The blank arm the subscript selects is stored (rt_sub_dflt), unless
-                        // through a nameref that is an array (rt_nref_isarr). Twin of
-                        // elemOpValue in bash-interpreter.abnf.
+                        // through a nameref that is an array (rt_nref_isarr); a whole one that
+                        // is an associative array reads "", whose subscript @ is bad. Twin of
+                        // elemOpValue and listDefault in bash-interpreter.abnf.
                         var stB = curF.NewBlock(""), sjB = curF.NewBlock("")
                         b.NewCondBr(b.NewSelect(whole, blankL, blankE), stB, sjB)
                         if (attrOn(refVars, name)) {
                             var rsB = curF.NewBlock("")
-                            stB.NewCondBr(stB.NewICmp(llvm.enum.IPredNE, stB.NewCall(rtNrefIsarr, [gepStr(stB, name), one]), zero), sjB, rsB)
+                            var sdArr = stB.NewICmp(llvm.enum.IPredNE, stB.NewCall(rtNrefIsarr, [gepStr(stB, name), one]), zero)
+                            var sdAsW = stB.NewAnd(whole, stB.NewICmp(llvm.enum.IPredNE, stB.NewCall(rtIsAssoc, gepStr(stB, name)), zero))
+                            stB.NewCondBr(stB.NewAnd(sdArr, stB.NewXor(sdAsW, llvm.constant.NewInt(llvm.types.I1, 1))), sjB, rsB)
                             stB = rsB
                         }
                         var sdAt = roStore(name) ? llvm.constant.NewInt(i32, 8) : (attrOn(refVars, name) ? refAttrs(stB, gepStr(stB, name), true) : zero)
@@ -5387,7 +5390,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!roRtDone && (roChg || (curFrame != null && !global && kw != "export" && kw != "readonly" && !bashDeclQuery(flags))) && !attrOn(roVars, names[j]) && roRtMay(names[j])) {
                 var roB = curF.NewBlock(""), rnB = curF.NewBlock(""), reB = curF.NewBlock("")
                 var roOwn = !roChg && locOwn("$" + names[j])
-                b.NewCondBr(roOwn ? b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, noLocal(names[j])), zero) : roRtC(b, names[j]), roB, rnB)
+                var roC = roOwn ? b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, noLocal(names[j])), zero) : roRtC(b, names[j])
+                // A new local may shadow a caller's readonly local, not a readonly global (bash
+                // 5.3's make_local_variable). Twin of roIn in bash-interpreter.abnf.
+                var roFresh = fresh ? b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtLocalAny, llvm.constant.NewInt(i32, getVarId(names[j]))), zero) : null
+                b.NewCondBr(roFresh != null ? b.NewAnd(roC, roFresh) : roC, roB, rnB)
                 // A function's declaration there makes no local, which later code asks.
                 if (curFrame != null && !global && (kw == "local" || kw == "declare" || kw == "typeset")) { roB.NewStore(one, noLocal(names[j])) }
                 // The self reference warning above is emitted already, once for both paths.
@@ -5414,7 +5421,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (a != null && a.lit != null && !listPre) { return roLitRefuse(b, j, roLoc) }
                 if (listPre) {
                     b.NewCall(rtBerr, [tcWho(b), gepStr(b, names[j]), gepStr(b, "readonly variable")])
-                } else { emitDiag(b, gepStr(b, roW + ((a != null && declOwn != "" && !roLoc) ? declOwn : names[j]) + ": readonly variable\n")) }
+                } else { emitDiag(b, gepStr(b, roW + ((a != null && declOwn != "" && !(roLoc && fresh)) ? declOwn : names[j]) + ": readonly variable\n")) }
                 if (bareArr && !listPre && localHereJ) { b = roArrLocal(b, names[j]) }
                 roFail = true
                 return b
@@ -5479,8 +5486,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0 || roAttr) && attrOn(roVars, names[j])) {
                 if (asgs[j] != null && asgs[j].lit != null && !listPre) { return roLitRefuse(b, j, localize) }
                 // Through a nameref it names that, except that a function's `local` or
-                // `declare` of its own local nameref names the target (bash 5.3).
-                emitDiag(b, gepStr(b, roWho + ((asgs[j] != null && roWho != "" && declOwn != "" && !localize) ? declOwn : names[j]) + ": readonly variable\n"))
+                // `declare` making a new local of the target names the target (bash 5.3).
+                emitDiag(b, gepStr(b, roWho + ((asgs[j] != null && roWho != "" && declOwn != "" && !(localize && fresh)) ? declOwn : names[j]) + ": readonly variable\n"))
                 // export still exports it (bash 5.3: readonly z=1; export z=2 leaves -rx).
                 if (kw == "export" && xCode > 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), one]) }
                 if (bareArr && !listPre && localize && !fresh) { b = roArrLocal(b, names[j]) }
@@ -7644,9 +7651,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             rroB.NewBr(merge)
             b = rgoB
         }
+        // One that is an associative array stores nothing (raSkip).
+        var raSkip = null
         if (arrName != null && attrOn(refVars, arrName)) {
-            var raBad = curF.NewBlock(""), raGo = curF.NewBlock("")
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefIsarr, [gepStr(b, arrName), zero]), zero), raBad, raGo)
+            var raArr = curF.NewBlock(""), raBad = curF.NewBlock(""), raGo = curF.NewBlock("")
+            raSkip = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefIsarr, [gepStr(b, arrName), zero]), zero), raArr, raGo)
+            raArr.NewCondBr(raArr.NewICmp(llvm.enum.IPredNE, raArr.NewCall(rtIsAssoc, gepStr(raArr, arrName)), zero), raSkip, raBad)
             emitDiag(raBad, gepStr(raBad, "read: `': not a valid identifier\n"))
             storeStatusI(raBad, 1)
             raBad.NewBr(merge)
@@ -7666,6 +7677,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b.NewStore(emptyPtr(b), gArPfx)
                 b = emitAbortCheck(b)
             }
+        }
+        if (raSkip != null) {
+            b.NewBr(raSkip)
+            b = raSkip
         }
         if (rawReply) { storeVar(b, "REPLY", b.NewCall(rtGetField, [b.NewCall(rtRdFields, [line, emptyPtr(b), q, one]), zero])) }
         // An -i name's arithmetic error abandons the line: the names after it keep their values.

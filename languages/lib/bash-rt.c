@@ -6400,23 +6400,29 @@ int rt_mf_begin(char *who, char *nm, char *dlm, char *cnt, char *org, char *skp,
         rt_berr("", nm, "readonly variable");
         return 1;
     }
+    /* Through a nameref that is an associative array the records are read and
+     * stored nowhere (mf_nm 0). */
     if (rt_nref_isarr(nm, 0) != 0) {
-        rt_berr(who, "`'", "not a valid identifier");
-        return 1;
+        if (rt_isassoc(nm) == 0) {
+            rt_berr(who, "`'", "not a valid identifier");
+            return 1;
+        }
+        nm = 0;
+    } else {
+        nm = rt_nref_arrstore(nm);
+        if (rt_isassoc(nm) != 0) {
+            rt_berr(who, nm, "not an indexed array");
+            return 1;
+        }
+        id = rt_varslot(nm);
+        if (org == 0) {
+            rt_arr_clear(nm);
+            if (id >= 0) gvars[id] = &unset_marker[0];
+        } else if (id >= 0) {
+            rt_arr_adopt(nm, id);
+        }
+        rt_arr_mark(nm);
     }
-    nm = rt_nref_arrstore(nm);
-    if (rt_isassoc(nm) != 0) {
-        rt_berr(who, nm, "not an indexed array");
-        return 1;
-    }
-    id = rt_varslot(nm);
-    if (org == 0) {
-        rt_arr_clear(nm);
-        if (id >= 0) gvars[id] = &unset_marker[0];
-    } else if (id >= 0) {
-        rt_arr_adopt(nm, id);
-    }
-    rt_arr_mark(nm);
     mf_nm = nm;
     mf_dlm = dlm != 0 ? (int)(unsigned char)dlm[0] : 10;
     mf_trim = trim;
@@ -6527,7 +6533,7 @@ int rt_mf_store(void)
         ar_pfx_s = sv;
     }
     if (arith_err != 0) return 0;
-    rt_arr_iset(mf_nm, rt_int2str(mf_idx), v);
+    if (mf_nm != 0) rt_arr_iset(mf_nm, rt_int2str(mf_idx), v);
     mf_idx = mf_idx + 1;
     return 0;
 }
@@ -6836,8 +6842,9 @@ int rt_nref_void(char *n)
  * nothing, and an element store (sub 1) is refused as one to the name "" -
  * "not a valid identifier", arith_err and sub_bad; sub 2 reports it alone, as
  * arithmetic does. A read of its value (sub 3) is refused as naming no variable,
- * with arith_err, which abandons the line. Twin of refIsArr, refArrBad and
- * refArrRead in bash-interpreter.abnf. */
+ * with arith_err, which abandons the line. One that is an associative array
+ * refuses nothing: its value reads as unset and every store is dropped. Twin of
+ * refIsArr, refArrBad and refArrRead in bash-interpreter.abnf. */
 int rt_nref_isarr(char *n, int sub)
 {
     int r;
@@ -6845,6 +6852,7 @@ int rt_nref_isarr(char *n, int sub)
     /* An empty one is an array too. */
     r = rt_ar_find(n);
     if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 4099) == 0)) return 0;
+    if ((ar_mk[r] & 4096) != 0) return 1;
     if (sub == 3) {
         rt_berr("", "", "invalid variable name for name reference");
         arith_err = 1;
@@ -7245,12 +7253,20 @@ int rt_nref_dpost(char *n, int at, int x)
  * declaration refused is no nameref when it runs: ${!REF} is then the
  * indirection through its value, and ${REF@A} (own) names n itself. For an
  * @-transform (own 2) a circular chain names no variable, "", silently: reading
- * the value through n is what warns. */
+ * the value through n is what warns. ${!REF} of a nameref that is an array
+ * (rt_nref_isarr) is "", or the invalid indirect expansion for an associative
+ * one. */
 char *rt_nref_name(char *n, int own)
 {
     int i = rt_varslot(n);
     char *v = i >= 0 ? gvars[i] : &unset_marker[0];
     char *e;
+    if (own == 0 && rt_nref_isarr(n, 0) != 0) {
+        if (rt_isassoc(n) == 0) return empty;
+        rt_berr("", n, "invalid indirect expansion");
+        arith_err = 1;
+        return empty;
+    }
     if (v == &unset_marker[0] || v[0] == 0) return v;
     nref_quiet = 1;
     e = rt_nref_end(n);
@@ -7273,12 +7289,14 @@ char *rt_nref_name(char *n, int own)
  * bash-interpreter.abnf. */
 int rt_unset_ref(char *n, int ro)
 {
-    char *e;
+    char *e = 0;
     int i;
-    if (rt_nref_isarr(n, 0) != 0) return 0;
-    e = rt_nref_end(n);
+    /* One that is an associative array is unset itself, as by unset -n. */
+    int as = rt_nref_isarr(n, 0);
+    if (as != 0 && rt_isassoc(n) == 0) return 0;
+    if (as == 0) e = rt_nref_end(n);
     if (e == 0) {
-        rt_nref_end(n);
+        if (as == 0) rt_nref_end(n);
         rt_arr_clear(n);
         rt_unset_name(n);
         if ((ro & 16) != 0) rt_arr_smark(n);
@@ -10020,13 +10038,14 @@ int rt_sub_dflt(char *nm, char *k, char *v, int whole, char *as, int at)
  * [[ -v ]], cond, as a word) and evaluated as rt_arr_keyar does, except that
  * NAME[@] / NAME[*] of no associative array asks whether it has any element.
  * NAME is read through its nameref chain, and one ending at NAME[SUB] is no
- * variable: 0. Twin of the -v arm of testUnary in
- * bash-interpreter.abnf. */
+ * variable: 0, as is a nameref that is an array (rt_nref_isarr). Twin of the -v
+ * arm of testUnary in bash-interpreter.abnf. */
 int rt_vset(char *s, int cond)
 {
     int i = rt_indbr(s);
     char *sub;
     char *nm;
+    if (rt_nref_isarr(i > 0 ? rt_substr(s, 0, i) : s, 0) != 0) return 0;
     if (i > 0) {
         nm = rt_nref_end(rt_substr(s, 0, i));
         if (nm == 0) return 0;
@@ -10052,7 +10071,7 @@ int rt_vset(char *s, int cond)
 
 /* `unset WORD` where the word came out of an expansion: NAME[SUB] removes the
  * element (rt_arr_unset), NAME the variable and its array; through a nameref
- * that is an array, nothing (rt_nref_isarr). The answer is the status. */
+ * that is an indexed array, nothing (rt_nref_isarr). The answer is the status. */
 int rt_unset_name(char *n)
 {
     int len = rt_strlen(n);
@@ -10066,7 +10085,11 @@ int rt_unset_name(char *n)
             return rt_arr_unset(nm, rt_substr(n, i + 1, len - i - 2));
         }
     }
-    if (rt_nref_isarr(n, 0) != 0) return 0;
+    if (rt_nref_isarr(n, 0) != 0) {
+        if (rt_isassoc(n) == 0) return 0;
+        /* One that is an associative array is unset itself (rt_unset_ref). */
+        rt_arr_clear(n);
+    }
     rt_setvar_byname(n, &unset_marker[0], 0, 0);
     rt_arr_clear(n);
     rt_xmark(n, 0);
