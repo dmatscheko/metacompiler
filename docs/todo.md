@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1159** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1160** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -138,15 +138,11 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1156 bash: run-time readonly through namerefs, element-nameref declarations, eval refusals · P3 · SH · IN PROGRESS (SH worker, round 49) [V]
-Found while closing T-1152; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- Compiler: `f1() { local -n w=$1; readonly w; }; s1=4; f1 s1; s1=5; echo "a $? $s1"` — oracle refuses (`s1: readonly variable`, the rest of the line is abandoned); run/native print `a 0 5`. `declare -p` shows the run-time mark 32768, but a later by-name store does not consult it (the lexical-limit trade-off; find a cost-neutral way, e.g. only for names a computed nameref could reach).
-- Compiler: `w=q declare -p w` through a circular nameref prints one warning too few and shows `declare -nx w="q"`; oracle: two warnings then `declare -x w="q"`.
-- Compiler: `declare -r w` in a function through a computed nameref to `arr[2]` shows `-nr` on the nameref; oracle leaves `declare -n`.
-- Both engines, top level: `declare -n r='arr[2]'; export r=5` — oracle prints "export: `arr[2]': not a valid identifier" and still stores; the interpreter adds -x to arr, the compiler omits the message.
-- Compiler, top level: `declare -i r=3` through an element nameref marks the nameref (`-in`) instead of making arr `-ai`.
-- Compiler: run-time arithmetic through a nameref (`ar_store`) passes at=0, so it is never refused; computed `eval "$s"` (`rt_eval_assign`) likewise ignores a readonly reached through a nameref.
-- Both engines: after `local -n w=''` is refused, `declare -p w` prints `declare: w: not found`; oracle `declare -- w`.
+### T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` crash, hidden element locals · P3 · SH · OPEN [V]
+Found while closing T-1156; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Compiler: after `f1(){ local -n w=$1; readonly w; }; s=4; f1 s`, these are not refused (oracle refuses each, status 1, value stays 4; the interpreter is right): `read s <<< 9`, `declare s=5`, a function's `local s=6`, `unset s`, `printf -v s %s 7`, `for s in 1 2`, prefix `s=9 true`. Each path decides readonly at compile time; give each the run-time `rt_ro_name`/`rt_dyn_at` branch `roRtTest` has, emitted only when refAnywhere × roNames says it can matter.
+- `h(){ local -n w=x; w=k export w; echo "y $?"; declare -p x w; }; ( h )` — interpreter dies with `TypeError: Cannot read property 'length' of undefined at isFields`; compiler prints `declare -x x="k"` / `declare -nx w="x"`; oracle `y 0`, `declare -- x="1"`... (verify exact oracle text), `declare -n w="x"`.
+- Both engines: in a function, `local -n w=$1; declare -r w` with $1=`arr[2]` — bash makes a hidden local named `arr[2]`: a later `readonly w` prints `arr[2]: readonly variable` and `export w=5` is refused with status 1. Ours treats the declaration as doing nothing. Emulate or record as a limit.
 
 # C — C subset
 
@@ -1209,6 +1205,7 @@ T-1154 kotlin: `===` identity beyond arrays, array toString/contentHashCode, nam
 T-1152 bash: circular/computed nameref stores, readonly and attribute leftovers — merged 723b3b69: readonly/element stores through circular and computed namerefs, prefix/read/mapfile/for/eval refusals, ${w[i]:=} through circular refs; rt_prefix_ref slot guard added after master security review; master probe matches bash 5.3 except a run-time-readonly store (filed)
 T-1153 ruby: big-Integer ranges, NaN vs bignum, Object-method self, float counts — merged 3c7ad439: big-Integer upto/downto/step walks with exact sizes, NaN vs bignum relations, nil self in Object methods, Enumerable#first cap, C-long count args; master four-leg probe matches ruby 2.6
 T-1155 kotlin: Char/Boolean array element types, sum() result type, emptyList and ::f identity — merged 72874b1a: char/boolean array element types, sum() result types, empty-collection singletons, ::f reference identity; master four-leg probe matches kotlinc 2.2.21
+T-1156 bash: run-time readonly through namerefs, element-nameref declarations, eval refusals — merged 8558cf43: run-time readonly through computed namerefs for plain/arith/eval stores, prefix declarations through circular refs, element-nameref declare/export, local -n ''; eval refusal fixed after master send-back; master probes match bash 5.3
 
 # Settled — do not re-open
 
