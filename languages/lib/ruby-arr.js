@@ -295,6 +295,36 @@ function rbaLazyKeyed(name) {
         || name == "sort_by" || name == "group_by" || name == "partition" || name == "to_h"
 }
 
+// inject / reduce / min / max / minmax given a block (min / max without a count)
+// on a Lazy fold one value at a time, each step the Array method over what has
+// been folded so far and the value - inject over [v] from the accumulator, min /
+// max over [best, v], minmax as both - so the block sees each value as it is made
+// and a `break` in it ends an endless source as it does in MRI. apply(list,
+// name, args) runs the Array method with the caller's block. Go twin:
+// rubyLazyFold in abnf/jsrtrubystr.go.
+function rbaLazyFolds(name, npos) {
+    return name == "inject" || name == "reduce" || ((name == "min" || name == "max" || name == "minmax") && npos == 0)
+}
+function rbaLazyFold(lz, name, args, call, test, eql, drive, apply) {
+    var acc = []
+    if ((name == "inject" || name == "reduce") && args.length > 0) { acc.push(args[0]) }
+    rbaLazyFirst(lz, -1, call, test, eql, drive, function(v, m) {
+        if (acc.length == 0) {
+            if (name == "minmax") { acc.push([v, v]) } else { acc.push(v) }
+        } else if (name == "minmax") {
+            acc[0] = [apply([acc[0][0], v], "min", []), apply([acc[0][1], v], "max", [])]
+        } else if (name == "min" || name == "max") {
+            acc[0] = apply([acc[0], v], name, [])
+        } else {
+            acc[0] = apply([v], name, [acc[0]])
+        }
+        return false
+    })
+    if (acc.length > 0) { return acc[0] }
+    if (name == "minmax") { return [null, null] }
+    return null
+}
+
 // find / detect / include? / member? / find_index / any? / all? / none? on a
 // Lazy: the run ends at the first value hit(v, m) accepts, so an endless source
 // still answers. [index, value] of that value, or [] when none was accepted.

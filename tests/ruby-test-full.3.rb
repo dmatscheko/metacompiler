@@ -1268,6 +1268,71 @@ def s185
         (1..4).each.count(&:even?) == 2 && (1..4).each.sum { |x| x * 2 } == 20 && [3, 1, 2].each.sort_by { |x| -x } == [3, 2, 1])
 end
 
+# ===== SECTION 186: include into Object, implicit-self builtins, folds on endless Enumerators, instance_eval =====
+# A module included into Object reaches every value. Inside a method added to a
+# builtin class a bare builtin name - even?, times with a block, sub(...) - is a
+# call on self, and respond_to? answers those names. inject / reduce and min /
+# max / minmax with a block, and one?, take an endless Enumerator one value at a
+# time, so a break in the block ends them. instance_eval / instance_exec run the
+# block with self the receiver and a Proc's argument rules. /usr/bin/ruby 2.6
+# settles each.
+module S186M
+  def s186om; :om; end
+end
+class Object
+  include S186M
+end
+class Integer
+  def s186e; [frozen?, even?, odd?, pow(2), gcd(6)]; end
+  def s186t; r = []; times { |i| r << i }; r; end
+end
+class String
+  def s186s; [sub("a", "b"), match?(/b/), scan(/a/), gsub("a") { "c" }]; end
+end
+class Array
+  def s186a; [at(1), dig(0), find_all { |x| x > 1 }]; end
+end
+class S186P
+  def initialize; @a = 3; end
+  def pub; :pub; end
+  def twice(x); x * 2; end
+  def inner; [1].map { |q| instance_eval { @a + q } }; end
+  private def hid; :hid; end
+end
+def s186ret(o); o.instance_eval { return 11 }; 12; end
+def s186
+  check("ic186a", 5.s186om == :om && "x".s186om == :om && nil.s186om == :om && S186P.new.s186om == :om &&
+        [1].s186om == :om && 5.respond_to?(:s186om))
+  check("is186b", 4.s186e == [true, true, false, 16, 2] && 3.s186t == [0, 1, 2] &&
+        "aba".s186s == ["bba", true, ["a", "a"], "cbc"] && [1, 2, 3].s186a == [2, 1, [2, 3]] &&
+        4.respond_to?(:times) && 4.respond_to?(:upto) && "s".respond_to?(:gsub) && "s".respond_to?(:match?) &&
+        [].respond_to?(:dig) && {}.respond_to?(:store) && (1..2).respond_to?(:to_h) && 1.5.respond_to?(:clamp))
+  e = (1..Float::INFINITY).each
+  check("lz186c", e.inject { |a, x| break a if x > 4; a + x } == 10 && e.reduce(0) { |a, x| break a if x > 3; a + x } == 6 &&
+        e.max { break :mx } == :mx && e.min { break :mn } == :mn && e.minmax { break :mm } == :mm &&
+        e.one? { |x| break :one if x > 2; false } == :one && e.one? { |x| x > 2 } == false && e.one?(3..4) == false &&
+        e.max { |a, b| break [a, b] if a > 3; a <=> b } == [4, 3] && 1.step.inject { |a, x| break a if x > 5; a * x } == 120 &&
+        e.lazy.map { |x| x * 2 }.inject { |a, x| break a if x > 8; a + x } == 20)
+  f = (1..5).each
+  check("lz186d", f.inject { |a, x| a + x } == 15 && f.inject(10) { |a, x| a + x } == 25 && f.reduce(:+) == 15 &&
+        f.max { |a, b| a <=> b } == 5 && f.min { |a, b| a <=> b } == 1 && f.minmax { |a, b| b <=> a } == [5, 1] &&
+        f.max(2) { |a, b| a <=> b } == [5, 4] && f.one? { |x| x == 3 } && !f.one?(2..3) && [].each.inject { |a, x| a + x }.nil? &&
+        [].each.minmax { |a, b| a <=> b } == [nil, nil] && [[1, 2], [3, 4]].each.inject { |a, x| a + x } == [1, 2, 3, 4] &&
+        {a: 1, b: 2}.each.max { |a, b| a[1] <=> b[1] } == [:b, 2])
+  o = S186P.new
+  x = 5
+  o.instance_eval { x += @a }
+  check("ie186e", o.instance_eval { @a } == 3 && o.instance_eval { self.class } == S186P && o.instance_exec(4) { |y| @a + y } == 7 &&
+        o.instance_eval { [pub, twice(2), hid] } == [:pub, 4, :hid] && o.instance_exec { |p, q| [p, q] } == [nil, nil] &&
+        o.instance_exec([5, 6]) { |p, q| [p, q] } == [5, 6] && o.instance_eval { |s| s.equal?(o) } &&
+        o.instance_eval { break 7; 8 } == 7 && s186ret(o) == 11 && o.inner == [4] && x == 8 &&
+        nil.instance_eval { self }.nil? && 5.instance_exec(2) { |y| self * y } == 10 && "abc".instance_eval { size } == 3 &&
+        ({k: 1}.instance_exec(:k) { |k| fetch(k) }) == 1 && S186P.instance_eval { name } == "S186P")
+  q = S186P.new
+  q.instance_eval { @b = 9 }
+  check("ie186f", q.instance_variable_get(:@b) == 9 && (o.instance_eval { raise "boom" } rescue $!.message) == "boom")
+end
+
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1300,5 +1365,6 @@ s125() # SECTION-CALL 125
 s126() # SECTION-CALL 126
 s184() # SECTION-CALL 184
 s185() # SECTION-CALL 185
+s186() # SECTION-CALL 186
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

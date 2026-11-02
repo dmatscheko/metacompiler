@@ -7539,18 +7539,24 @@ function rbLazyMethod(t, name, args) {
         return rbLazyEachVal(t)
     }
     if (((name == "find" || name == "detect" || name == "find_index") && blk !== null) || name == "include?"
-        || name == "member?" || (name == "find_index" && nPos > 0) || name == "any?" || name == "all?" || name == "none?") {
+        || name == "member?" || (name == "find_index" && nPos > 0) || name == "any?" || name == "all?" || name == "none?"
+        || name == "one?") {
         var sx = rbArgAt(args, 0)
         var seq = name == "include?" || name == "member?" || (name == "find_index" && blk === null)
         var sall = name == "all?"
+        // one? is settled by its SECOND hit.
+        var hits1 = [0]
         var hit = rbLazyScan(t, function(v, m) {
             var r = false
             if (seq) { r = rbEq(v, sx) }
             else if (blk !== null) { r = rbTruthy(rbLazyCall(blk, v, m)) }
             else if (nPos > 0) { r = rbTruthy(js_rxwhen(sx, v)) }
             else { r = rbTruthy(v) }
-            return r != sall
+            if (name != "one?") { return r != sall }
+            if (r) { hits1[0] = hits1[0] + 1 }
+            return hits1[0] > 1
         })
+        if (name == "one?") { return hits1[0] == 1 }
         if (name == "find" || name == "detect") {
             if (hit.length > 0) { return hit[1] }
             return null
@@ -7575,6 +7581,14 @@ function rbLazyMethod(t, name, args) {
         var kargs = rbPosArgs(args)
         kargs.push(js_rblkwrap(function() { ki[0] = ki[0] + 1; return kk[ki[0] - 1] }))
         return rbArrayMethod(kv, name, kargs)
+    }
+    if (rbaLazyFolds(name, nPos) && blk !== null) {
+        var fblk = args[nPos]
+        return rbaLazyFold(t, name, rbPosArgs(args), rbLazyCall, rbTruthy, rbEql, rbLazyDrive, function(l, n, a) {
+            var fa = a.slice(0)
+            fa.push(fblk)
+            return rbArrayMethod(l, n, fa)
+        })
     }
     if (rbaLazyEager(name)) { return rbArrayMethod(rbLazyFirst(t, -1), name, args) }
     if (name == "dup" || name == "clone") {
@@ -9634,6 +9648,21 @@ function rbMethod(target, name, args) {
     if ((name == "itself" || name == "tap") && rbFindMethod(target, name) === undefined) {
         if (name == "tap") { rbCall1(rbBlockOf(args), target) }
         return target
+    }
+    // Object#instance_eval / #instance_exec: a literal block (marked __rself) takes
+    // the receiver as self; instance_eval hands it the receiver too. A Proc value
+    // keeps the self it was written with. Twin of the arm in mcall of
+    // ruby-interpreter.abnf.
+    if ((name == "instance_eval" || name == "instance_exec") && rbBlockOf(args) !== null && rbFindMethod(target, name) === undefined) {
+        // A bare name in the block may be a builtin receiver's method.
+        if (!rbUserObj(target) && !(rbIsObj(target) && target["__isclass"] === true)) { rbBuiltinExtOn = true }
+        var iea = []
+        if (name == "instance_eval") { iea.push(target) } else { iea = rbPosArgs(args) }
+        if (args[args.length - 1]["__rself"] !== true) { return rbBlockOf(args).apply(undefined, iea) }
+        var ies = [target]
+        var iei = 0
+        while (iei < iea.length) { ies.push(iea[iei]); iei = iei + 1 }
+        return rbBlockOf(args).apply(undefined, ies)
     }
     // Kernel#then / #yield_self. Twin of the arm in ruby-interpreter.abnf.
     if ((name == "then" || name == "yield_self") && rbFindMethod(target, name) === undefined) {
@@ -12766,6 +12795,15 @@ function js_rfn(scope, name) {
         if (rbRestricted(fself["__class"], n)) { fk = "$q$" + n }
         var fm = rbFindMethod(fself, fk)
         if (fm !== undefined) { return rbBindMethod(fself, fk, fm) }
+    }
+    // A builtin self's own method, as js_rlvar answers it.
+    if (rbBuiltinExtOn && rbRespondClass(fself) != "" && js_rrespond(fself, [n]) === true) {
+        return function() {
+            var fa = []
+            var fi = 0
+            while (fi < arguments.length) { fa.push(arguments[fi]); fi = fi + 1 }
+            return js_rxmcall(fself, n, fa)
+        }
     }
     var fom = anytype
     fom = rbObjectExt(n)

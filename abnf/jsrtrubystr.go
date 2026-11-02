@@ -576,10 +576,13 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		return rubyLazyEachVal(t)
 	}
 	if ((name == "find" || name == "detect" || name == "find_index") && blk != nil) || name == "include?" ||
-		name == "member?" || (name == "find_index" && len(pos) > 0) || name == "any?" || name == "all?" || name == "none?" {
+		name == "member?" || (name == "find_index" && len(pos) > 0) || name == "any?" || name == "all?" || name == "none?" ||
+		name == "one?" {
 		sx := argAt(pos, 0)
 		seq := name == "include?" || name == "member?" || (name == "find_index" && blk == nil)
 		sall := name == "all?"
+		// one? is settled by its SECOND hit.
+		hits1 := 0
 		idx, val, ok := rt.rubyLazyScan(t, func(v interface{}, m bool) bool {
 			var r bool
 			switch {
@@ -592,9 +595,17 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			default:
 				r = rubyTruthy(v)
 			}
-			return r != sall
+			if name != "one?" {
+				return r != sall
+			}
+			if r {
+				hits1++
+			}
+			return hits1 > 1
 		})
 		switch name {
+		case "one?":
+			return hits1 == 1
 		case "find", "detect":
 			if ok {
 				return val
@@ -624,6 +635,9 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			return kk[ki-1]
 		}}
 		return rt.rubyArrayMethod(kv, name, append(append([]interface{}{}, pos...), rubyBlkWrap(memo)))
+	}
+	if rubyLazyFolds(name, len(pos)) && blk != nil {
+		return rt.rubyLazyFold(t, name, pos, args[len(pos)])
 	}
 	if rubyLazyEager(name) {
 		return rt.rubyArrayMethod(&jsArray{elems: rt.rubyLazyFirst(t, -1)}, name, args)
@@ -843,6 +857,51 @@ func rubyLazyEager(name string) bool {
 		return true
 	}
 	return false
+}
+
+// rubyLazyFolds: name folds a Lazy one value at a time. Twin of rbaLazyFolds in
+// lib/ruby-arr.js, which states the rule.
+func rubyLazyFolds(name string, npos int) bool {
+	return name == "inject" || name == "reduce" || ((name == "min" || name == "max" || name == "minmax") && npos == 0)
+}
+
+// rubyLazyFold is rbaLazyFold in lib/ruby-arr.js; blkArg is the caller's block
+// argument, handed on to each Array method step.
+func (rt *jsrt) rubyLazyFold(t *jsObject, name string, pos []interface{}, blkArg interface{}) interface{} {
+	apply := func(nm string, args []interface{}, elems ...interface{}) interface{} {
+		return rt.rubyArrayMethod(&jsArray{elems: elems}, nm, append(args, blkArg))
+	}
+	var acc interface{}
+	have := false
+	if (name == "inject" || name == "reduce") && len(pos) > 0 {
+		acc, have = pos[0], true
+	}
+	rt.rubyLazyPull(t, -1, func(v interface{}, m bool) bool {
+		switch {
+		case !have:
+			if name == "minmax" {
+				acc = &jsArray{elems: []interface{}{v, v}}
+			} else {
+				acc = v
+			}
+			have = true
+		case name == "minmax":
+			mm := acc.(*jsArray).elems
+			acc = &jsArray{elems: []interface{}{apply("min", nil, mm[0], v), apply("max", nil, mm[1], v)}}
+		case name == "min" || name == "max":
+			acc = apply(name, nil, acc, v)
+		default:
+			acc = apply(name, []interface{}{acc}, v)
+		}
+		return false
+	})
+	if have {
+		return acc
+	}
+	if name == "minmax" {
+		return &jsArray{elems: []interface{}{jsNull, jsNull}}
+	}
+	return jsNull
 }
 
 // rubyLazyKeyed: name calls its block once per value, in order, so a Lazy runs

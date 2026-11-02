@@ -11504,6 +11504,26 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			return target
 		}
+	// Object#instance_eval / #instance_exec: a literal block (marked __rself) takes
+	// the receiver as self; instance_eval hands it the receiver too. A Proc value
+	// keeps the self it was written with. Twin of the arm in mcall of
+	// ruby-interpreter.abnf.
+	case "instance_eval", "instance_exec":
+		if pos, blk := rubyBlockArgs(args); blk != nil {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				if _, isCls := rubyIsClassObj(target); !rubyUserObj(target) && !isCls {
+					rt.rubyBuiltinExt = true
+				}
+				ia := pos
+				if name == "instance_eval" {
+					ia = []interface{}{target}
+				}
+				if _, lit := args[len(args)-1].(*jsObject).props["__rself"]; lit {
+					return rt.call(blk, jsUndef, append([]interface{}{target}, ia...))
+				}
+				return rt.call(blk, jsUndef, ia)
+			}
+		}
 	// Kernel#then / #yield_self. Twin of the arm in ruby-interpreter.abnf.
 	case "then", "yield_self":
 		if _, hasOwn := rubyFindMethod(target, name); !hasOwn {

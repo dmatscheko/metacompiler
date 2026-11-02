@@ -10226,6 +10226,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return name == "hash" ? valHash(target) : objectId(target)
         }
         if (name == "tap") { blockCall(blk, [target]); return target }
+        // Object#instance_eval / #instance_exec run the block with self the receiver
+        // and a Proc's argument rules; instance_eval hands it the receiver. Twins:
+        // rubyMethod in abnf/jsrt.go, rbMethod in lib/ruby-rt.metajs.
+        if ((name == "instance_eval" || name == "instance_exec") && blk != null && !(isUserObj(target) && singRespond(target, name))) {
+            // A bare name in the block may be a builtin receiver's method.
+            if (!isUserObj(target)) { builtinReopened = true }
+            blkSelfFor = wrapCore(blk)
+            blkSelf = target
+            blkSelfProc = true
+            var ier = anytype
+            try { ier = blockCall(blk, name == "instance_eval" ? [target] : args) } finally { blkSelfProc = false }
+            return ier
+        }
         // Kernel#then / #yield_self answer the block's value; without a block, an
         // Enumerator over the receiver whose #each answers it. Twins: rubyMethod in
         // abnf/jsrt.go, rbMethod in lib/ruby-rt.metajs.
@@ -11627,19 +11640,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The Enumerable methods that can stop early end the run at the value that
         // settles them; the rest run it to the end and answer over the Array.
         if (((name == "find" || name == "detect" || name == "find_index") && blk != null) || name == "include?"
-            || name == "member?" || (name == "find_index" && args.length > 0) || name == "any?" || name == "all?" || name == "none?") {
+            || name == "member?" || (name == "find_index" && args.length > 0) || name == "any?" || name == "all?" || name == "none?"
+            || name == "one?") {
             var sx = anytype
             sx = args.length > 0 ? args[0] : null
             var seq = name == "include?" || name == "member?" || (name == "find_index" && blk == null)
             var sall = name == "all?"
+            // one? is settled by its SECOND hit.
+            var hits1 = [0]
             var hit = lazyScan(t, function(v, m) {
                 var r = anytype
                 if (seq) { r = rubyEq(v, sx) }
                 else if (blk != null) { r = lazyCall(blk, v, m) }
                 else if (args.length > 0) { r = caseEq(sx, v) }
                 else { r = v }
-                return rtest(r) != sall
+                if (name != "one?") { return rtest(r) != sall }
+                if (rtest(r)) { hits1[0] = hits1[0] + 1 }
+                return hits1[0] > 1
             })
+            if (name == "one?") { return hits1[0] == 1 }
             if (name == "find" || name == "detect") { return hit.length > 0 ? hit[1] : null }
             if (name == "find_index") { return hit.length > 0 ? hit[0] : null }
             if (name == "all?" || name == "none?") { return hit.length == 0 }
@@ -11655,6 +11674,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             })
             var ki = [0]
             return arrayMethod(kv, name, args, function() { ki[0] = ki[0] + 1; return kk[ki[0] - 1] })
+        }
+        if (rbaLazyFolds(name, args.length) && blk != null) {
+            return rbaLazyFold(t, name, args, lazyCall, rtest, valEql, lazyDrive, function(l, n, a) { return arrayMethod(l, n, a, blk) })
         }
         if (rbaLazyEager(name)) { return arrayMethod(lazyFirst(t, -1), name, args, blk) }
         if (name == "dup" || name == "clone") {
@@ -13183,7 +13205,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // A define_method body runs instance_exec-style (self is the receiver)
                 // and binds its arguments as a method does: counted, never spread.
                 var dm = blkSelfFor === f
-                if (dm) { lamArity(args, params) }
+                var dmProc = dm && blkSelfProc
+                if (dm && !dmProc) { lamArity(args, params) }
                 // A single array argument spreads over the block's parameters
                 // (`hash.each { |k, v| }`, `[[1, 2]].each { |a, b| }`).
                 else if (splats && blkSplatsArg(args)) { args = args[0] }
@@ -13197,6 +13220,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 scopes = captured.slice(0)
                 if (dm) {
                     blkSelfFor = null
+                    blkSelfProc = false
                     scopes.push({self: blkSelf})
                 }
                 scopes.push(frameScope())
@@ -13294,6 +13318,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     blkSelfFor = null
     var blkSelf = anytype
     blkSelf = null
+    // Whether it binds its arguments as a Proc does (instance_eval) rather than as a method.
+    var blkSelfProc = false
     // blockCall runs one block invocation and turns a `redo` into a re-run.
     // Proc#>> (g after f) and Proc#<< (f after g); g is anything with #call. The
     // composition is a lambda when f is. Twins: rubyProcCompose in
@@ -13868,7 +13894,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
                          "singleton_methods", "define_singleton_method", "define_method", "frozen?", "nil?", "equal?",
-                         "instance_variables", "to_enum", "enum_for"]
+                         "instance_variables", "to_enum", "enum_for", "instance_eval", "instance_exec"]
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-to-llvm-ir.abnf.
     var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?", "nil?", "to_enum", "enum_for"]
@@ -15115,7 +15141,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function objectExt(name) {
         if (!builtinReopened) { return undefined }
         var om = anytype
-        om = lookupOwn(hostGlobals["Object"], name)
+        om = lookupMethod(hostGlobals["Object"], name)
         return typeof om == "function" ? om : undefined
     }
     // respond_to?(n, include_all) of an Object method: a private one only with
@@ -17026,6 +17052,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // abnf/jsrtruby.go, js_rinclude in lib/ruby-rt.metajs. Each module's #included
     // runs as it goes in, and again for a module already there, as MRI's does.
     function includeInto(c, mods) {
+        // A builtin class without a builtin mixin (Object, Integer, ...) has no list yet.
+        if (c.__mixins == undefined) { c.__mixins = [] }
         for (var i = mods.length - 1; i >= 0; i--) {
             var m = mods[i]
             if (!mixinListHas(c.__mixins, m)) {

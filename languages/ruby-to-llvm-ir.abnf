@@ -2638,6 +2638,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var curBlkHome = null
     var curBlkLocal = false
     var nextBlkLocal = false
+    // The next emitFunc in the method convention binds its arguments as a block
+    // does (instance_eval / instance_exec: a Proc's rules, not a method's).
+    var nextProcBind = false
     var blkBrkName = "__blkbrk"
     // `return' inside a block returns from the ENCLOSING METHOD, not from the block
     // (that is `next'), and it does so through the block, the iterating call and any
@@ -3972,15 +3975,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The block's PARAMETER SHAPE is known right here, at the literal, which is
         // the one place it is free.
         // blkMethT emits the same block in the METHOD convention (the receiver is
-        // argument 0 and binds self), for a define_method body (dmArgs).
+        // argument 0 and binds self), for a define_method body (dmArgs); blkSelfT
+        // too, binding the rest as a block does, for instance_eval.
+        var methT = function(b) {
+            var idx = emitFunc(params, bodyStmt, true, false, true)
+            return {b: b, v: emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)}
+        }
         return {blkKinds: paramKinds(params), blkSplat: blkAutoSplat(params), blkFrom: from, blkTo: to, blkT: function(b) {
             curBlkDepth++
             var idx = emitFunc(params, bodyStmt, false, false, true)
             curBlkDepth--
             return {b: b, v: emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)}
-        }, blkMethT: function(b) {
-            var idx = emitFunc(params, bodyStmt, true, false, true)
-            return {b: b, v: emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)}
+        }, blkMethT: methT, blkSelfT: function(b) {
+            nextProcBind = true
+            return methT(b)
         }}
     }
     // The members a literal `Struct.new(:x, "y", keyword_init: true)' declares, read
@@ -4011,6 +4019,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Twin of blockMethodDef in ruby-interpreter.abnf.
     function isDmName(nm) { return nm == "define_method" || nm == "define_singleton_method" }
     function isEvalName(nm) { return nm == "class_eval" || nm == "module_eval" || nm == "class_exec" || nm == "module_exec" }
+    // instance_eval / instance_exec run their literal block with self the receiver,
+    // so it is emitted in the method convention as well. Twin of the instance_eval
+    // arm of mcall in ruby-interpreter.abnf.
+    function isIEvalName(nm) { return nm == "instance_eval" || nm == "instance_exec" }
     // The literal block of class_eval and its kin runs in the method convention
     // too, self being the module, and a def emitted inside it (curEvalDef) is an
     // instance method of the module, defined at run time through define_method.
@@ -4061,7 +4073,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return eo
         }
-        var dm = isDmName(name)
+        var dm = isDmName(name) || isIEvalName(name)
         if (!dm && (name == "send" || name == "__send__" || name == "public_send")) {
             var at = txt.indexOf(name) + name.length
             if (txt.charAt(at) == "(") { at++ }
@@ -4077,11 +4089,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var a = args[i]
             if (a != null && a != undefined && typeof a != "function" && a.blkMethT != undefined) {
                 lit = true
-                if (dm) { out.push({blkKinds: a.blkKinds, blkSplat: a.blkSplat, blkT: a.blkMethT, blkSelf: true}) }
+                if (dm) { out.push({blkKinds: a.blkKinds, blkSplat: a.blkSplat, blkT: isIEvalName(name) ? a.blkSelfT : a.blkMethT, blkSelf: true}) }
                 else { out.push({blkKinds: a.blkKinds, blkSplat: a.blkSplat, blkT: a.blkT, blkMethT: a.blkMethT, twinCall: name}) }
             } else { out.push(a) }
         }
-        if (dm) {
+        if (dm && !isIEvalName(name)) {
             rubyDynDefs = true
             if (!lit) { dmTakesValue = true }
         }
@@ -5923,7 +5935,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
                          "singleton_methods", "define_singleton_method", "define_method", "frozen?", "nil?", "equal?",
-                         "instance_variables", "to_enum", "enum_for"]
+                         "instance_variables", "to_enum", "enum_for", "instance_eval", "instance_exec"]
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-interpreter.abnf.
     var bareSelfCallNames = ["instance_variables", "singleton_methods", "frozen?", "nil?", "to_enum", "enum_for"]
@@ -5934,7 +5946,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the class, one of the Object methods above, or - where self IS the class (its
     // body, a `def self.m') - a class method, the class's own or an inherited one.
     function selfCallOf(name) {
-        if (selfMethod(curClsName, name) || isSelfCall(name)) { return true }
+        if (selfMethod(curClsName, name) || isSelfCall(name) || builtinSelfMethod(curClsName, name)) { return true }
         // In a class_eval block self is the module, and include / extend act on it.
         if (curEvalDef && (name == "include" || name == "extend") && rubyAllMethods["$" + name] !== true && !knownLocal(name)) { return true }
         if (!curSelfIsCls) { return false }
@@ -6075,7 +6087,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // emitted as one js_arg (a block: js_rblockarg) per index, because
         // js_rposbind's answer is then provably args[off + k] for every k and the
         // call would allocate one Array per invocation for nothing.
-        var simple = !wantsKw
+        // js_rblockarg counts from argument 0, so a block whose receiver is argument
+        // 0 (an instance_eval block, off 1) always takes js_rposbind.
+        var simple = !wantsKw && !(isBlock === true && off > 0)
         for (i = 0; i < kinds.length; i++) { if (kinds.charAt(i) != "0") { simple = false } }
         var splats = isBlock === true && blkAutoSplat(params)
         var bindV = null
@@ -6246,6 +6260,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ..." and this model does not, so a site there is left unset. Without it the
     // running site is the caller's.
     function emitFunc(params, bodyStmt, isMethod, isCtl, isBlock, declBlk, sitePos) {
+        var procBind = nextProcBind
+        nextProcBind = false
         funcCount++
         var idx = funcCount
         var savedTag = curFTag
@@ -6348,7 +6364,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A block in the method convention is a define_method body (blkMethT, the
         // method twin), which binds its arguments as a method does: counted, never
         // spread. Twin of the dm check in makeBlock of ruby-interpreter.abnf.
-        b = emitParams(b, f.Params[1], params, off, isBlock === true && isMethod !== true)
+        b = emitParams(b, f.Params[1], params, off, isBlock === true && (isMethod !== true || procBind))
         // The prologue that frameLocalNew fills is left open until the body is
         // emitted; it runs once per call, before any `redo' target.
         var preB = null
