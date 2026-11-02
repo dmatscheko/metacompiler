@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1154 kotlin: `===` identity beyond arrays, array toString/contentHashCode, named spread, vararg element type · P3 · KT · OPEN [V]
+### T-1154 kotlin: `===` identity beyond arrays, array toString/contentHashCode, named spread, vararg element type · P3 · KT · IN PROGRESS (KT worker, round 48) [V]
 Found while closing T-1151; oracle kotlinc 2.2.21.
 - Both grammars lower `===` to `==`: `data class P(val x: Int); P(1) === P(1)`, lists and Pairs still compare structurally (kotlinc: false). Needs an identity extern; keep `m.keys === ks` (section 147) true. All engines.
 - `intArrayOf(1,2).toString()` prints `[1, 2]`; kotlinc prints `[I@<hash>` (assert as a relation). `contentHashCode()` is missing in all engines ("unknown list method"); kotlinc prints 994 for `intArrayOf(1,2)`.
