@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1119** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1120** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -107,12 +107,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primitive asList cast · P3 · KT · IN PROGRESS (KT worker, round 34) [V]
+### T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.util classes; RandomAccess · P3 · KT · OPEN [V]
 
 Oracle: kotlinc 2.2.21.
-- subList must be a live view: `val ml = mutableListOf(1,2,3,4); ml.subList(0,2).clear(); println(ml)` prints `[3, 4]`; every engine prints `[1, 2, 3, 4]`. Reuse the `__lnk` view link from asList/asReversed, carrying an offset and length. A structural change to the parent invalidates the sublist (ConcurrentModificationException on its next use).
-- `mutableListOf(1,2).replaceAll { it + 1 }` gives `[2, 3]`, and `mutableMapOf("a" to 1).replaceAll { _, v -> v * 2 }` gives `{a=2}`. Both abort with "unknown … method: replaceAll". Add them to the builtin member table, which has three copies.
-- `intArrayOf(1,2).asList() as MutableList<Int>` throws ClassCastException in kotlinc. Ours allows the cast, and set then writes through.
+- After a structural change to the parent, `s[0]` and `for (x in s)` on a stale subList must throw ConcurrentModificationException. Ours returns the old element / iterates the old window. Adding the check to layer 2's `js_ktindex` would put an `arrProps` host call on the hottest path, so first add a cheap "has props" test to the index-read fast path, then measure with tests/bench.sh kotlin --paired. All three engines must agree.
+- Casts to concrete java.util classes are unchecked. `intArrayOf(1,2).asList() as java.util.ArrayList<Int>` must throw ClassCastException; ours lets it through. Check `as ArrayList`, `as LinkedHashMap`, `as HashSet` etc. against the runtime's JVM class names (`__jc` / kind table).
+- `intArrayOf(1).asList() is RandomAccess` is true; ours says false. Look for other marker interfaces that are cheap to answer from the class table.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1170,6 +1170,7 @@ T-1114 php: return-type TypeError location; type-string order for callable/itera
 T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReversed live view; buildList subList writes — DONE r33 (bc89fc12): Map compute/computeIfPresent/replace per java.util.Map, asList (Arrays$ArrayList, primitive asList classes) and asReversed as live two-way views, buildList subList stays sealed; master-probed incl. views of views
 T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-word bad substitution; circular-nameref ${#r[@]} warnings — DONE r36 (4746419a): declare -c/-t, linear star-led prefix/suffix strip in bash-rt.c (full.5 temp-dir steps 84M->59M), case/[[ ]] expansion errors abandon the command, circular-nameref warning counts; master-probed (174-line strip matrix vs bash 5.3)
 T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (interp); endless Range#each hangs — DONE r52 (78148037): LocalJumpError#reason/#exit_value, super with a literal block / &nil / implicit block in both engines, endless Integer ranges and Numeric#step (nil/INF limit, to:/by:) via lazy one-value enumerators; master-probed vs ruby 2.6
+T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primitive asList cast — DONE r34 (847bd188): subList as a live two-way window on the __lnk mechanism (structural parent change -> CME on next use), List/Map replaceAll, primitive asList read-only (CCE on cast); master-probed vs kotlinc 2.2.21. Stale index-read/for CME left (hot path) -> follow-up
 
 # Settled — do not re-open
 
