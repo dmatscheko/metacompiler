@@ -343,6 +343,7 @@ int rt_vset(char *s, int cond);
 int rt_sub_empty(char *nm, char *k, char *lbl);
 int rt_eval_assign(char *s);
 int rt_decl_word(char *w, int d, int x, int at, char *who);
+int rt_sub_close(char *w, int j);
 char *rt_decl_name(char *w);
 int rt_xmark(char *nm, int on);
 char *rt_xletters(char *nm, char *at);
@@ -9620,6 +9621,21 @@ int rt_decl_lit(char *nm, int id, char *v, int app, int at, int as)
     return arith_err != 0 ? 3 : 0;
 }
 
+/* The index of the "]" that closes the "[" at w[j], brackets inside counted; -1
+ * for none. Twin of bashSubClose in lib/bash-deparse.js. */
+int rt_sub_close(char *w, int j)
+{
+    int depth = 0;
+    for (; w[j] != 0; j = j + 1) {
+        if (w[j] == 91) depth = depth + 1;
+        else if (w[j] == 93) {
+            depth = depth - 1;
+            if (depth == 0) return j;
+        }
+    }
+    return -1;
+}
+
 /* One operand of a declaration that came out of an expansion (`local "$1"`,
  * `declare $v='x y'`): NAME, NAME=VALUE, NAME+=VALUE or NAME[SUB]= / +=, the
  * value taken as it is, or NAME[SUB] alone, which declare, typeset and local
@@ -9664,8 +9680,8 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
     }
     j = i;
     if (w[j] == 91) {
-        while (w[j] != 0 && w[j] != 93) j = j + 1;
-        if (w[j] == 0) return 1;
+        j = rt_sub_close(w, j);
+        if (j < 0) return 1;
         j = j + 1;
         if (w[j] == 0 && (j == i + 2 || who[0] == 0 || rt_streq(who, "readonly") != 0)) return 1;
         if (who[0] == 0 || rt_streq(who, "readonly") != 0) {

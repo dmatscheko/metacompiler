@@ -941,7 +941,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             var op = bashDeclOperand(f, arr, quote, !xr)
             if (op == "") { bad.push("`" + f + "': not a valid identifier"); continue }
             var br = f.indexOf("[")
-            var cl = (br > 0) ? f.indexOf("]", br) : -1
+            var cl = (br > 0) ? bashSubClose(f, br) : -1
             if (nref && cl == f.length - 1 && op != f) { bad.push(f + ": reference variable cannot be an array"); continue }
             if (cl > br + 1 && cl + 1 < f.length && bashSubQuoted(f.slice(br + 1, cl))) {
                 var kind = assoc ? "A" : kindOf(f.slice(0, br))
@@ -1014,6 +1014,16 @@ function bashDeclFlagText(f) {
     for (i = 1; i < f.length; i++) { if ("aAirxulgnpfF".indexOf(f.charAt(i)) < 0) { return false } }
     return true
 }
+// The index of the "]" that closes the "[" at f[j], brackets inside counted; -1 for none.
+// Twin of rt_sub_close in lib/bash-rt.c.
+function bashSubClose(f, j) {
+    var depth = 0
+    for (; j < f.length; j++) {
+        if (f.charAt(j) == "[") { depth = depth + 1 }
+        else if (f.charAt(j) == "]") { depth = depth - 1; if (depth == 0) { return j } }
+    }
+    return -1
+}
 // One operand field as declaration text; "" when it is no operand. elem: NAME[SUB] alone is one.
 function bashDeclOperand(f, arr, quote, elem) {
     var i = 0
@@ -1026,7 +1036,7 @@ function bashDeclOperand(f, arr, quote, elem) {
     if (i == f.length) { return f }
     var j = i
     if (f.charAt(j) == "[") {
-        j = f.indexOf("]", j)
+        j = bashSubClose(f, j)
         if (j < 0) { return "" }
         j = j + 1
         // SUB is not evaluated. It stays when the written NAME[SUB] reads it back (declare -n

@@ -199,6 +199,22 @@ s135() {
   e=$(s135g() { local -n s135q=s135q; declare s135q=(x y); (( s135q[1]=7 )); echo "s=$?"; let 's135q[0]=4'; echo "s=$?"; declare s135q[1]=z; echo "s=$?"; unset 's135q[1]' s135q; echo "s=$?"; read -a s135q <<< 'a b'; echo "s=$?"; declare s135q+=(z); declare -p s135q; }; s135g 2>/dev/null)
   check alm9 "$e" $'s=0\ns=0\ns=1\ns=0\ns=1\ndeclare -an s135q=([0]="x" [1]="y" [2]="z")'
 }
+# ===== SECTION 136: declaration operands with brackets in the subscript =====
+# The subscript of a declaration operand that is one word ends at the "]" that closes its
+# "[", brackets inside it counted. Every expected value is bash 5.3's.
+s136() {
+  local e v
+  s136s() { local l; while IFS= read -r l; do l=${l#*: line }; printf '%s;' "${l#*: }"; done <<< "$1"; }
+  e=$( { declare -n 's136a[c6[x y]]'; echo "s=$?"; declare 's136a[a[1]]=x'; echo "s=$?"; declare -p s136a; } 2>&1)
+  check dsb1 "$(s136s "$e")" 'declare: s136a[c6[x y]]: reference variable cannot be an array;s=1;s=0;declare -a s136a=([0]="x");'
+  e=$(s136f() { local -n 's136b[c6[x y]]'; echo "s=$?"; local 's136c[b[2]]=y'; declare -p s136c; }; s136f 2>&1)
+  check dsb2 "$(s136s "$e")" 'local: s136b[c6[x y]]: reference variable cannot be an array;s=1;declare -a s136c=([0]="y");'
+  e=$( { declare -a 's136d[a[1]]=(p q)'; declare 's136e[a[1]'; echo "s=$?"; declare 's136e[a]b]=x'; echo "s=$?"; declare -p s136d; } 2>&1)
+  check dsb3 "$(s136s "$e")" 'declare: `s136e[a[1]'"'"': not a valid identifier;s=1;declare: `s136e[a]b]=x'"'"': not a valid identifier;s=1;declare -a s136d=([0]="p" [1]="q");'
+  v='s136g[x[1]]'
+  e=$( { declare "$v"; declare -p s136g; v='s136h[a[1]]+=x'; declare "$v"; declare -p s136h; export "$v"; echo "s=$?"; } 2>&1)
+  check dsb4 "$(s136s "$e")" 'declare -a s136g;declare -a s136h=([0]="x");export: `s136h[a[1]]'"'"': not a valid identifier;s=1;'
+}
 # ===== END SECTIONS =====
 
 s129  # SECTION-CALL 129
@@ -208,5 +224,6 @@ s132  # SECTION-CALL 132
 s133  # SECTION-CALL 133
 s134  # SECTION-CALL 134
 s135  # SECTION-CALL 135
+s136  # SECTION-CALL 136
 echo "full: $checks checks, $fails failures"
 exit $fails
