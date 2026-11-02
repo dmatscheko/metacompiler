@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1177** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1178** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,11 +128,13 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1176 bash: computed `unset $v` (compiler), declaration builtins on a circular assoc nameref, `${e[0]:=v}` through a NAME[SUB] nameref · P3 · SH · IN PROGRESS (SH worker, round 56) [V]
-Found while closing T-1175; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- Compiler only (run and native), `unset $v` computed from a word goes through `rt_unset_name`: `f(){ local x=1; v=x; unset $v; declare -p x; }` — oracle `declare -- x`, ours "x: not found"; with `local -n r=q; v=r; unset $v` the oracle keeps `declare -n r="q"`, ours prints `declare -- r="q"` (the nameref dropped).
-- Both engines (pre-existing on main), a circular nameref that is an associative array (`local -n w=w; declare -A w=x`): `export w=1`, `export w`, `readonly w=2`, `declare -g w=5` are no-ops with status 0 in the oracle; the interpreter reports "export: `1': not a valid identifier", status 1; the compiler turns `readonly w=2` into `declare -r w`. `readonly w` gives ": readonly variable" with status 0 in the oracle (deterministic over repeated runs).
-- All engines: `a=(p q); declare -n e=a[1]; echo "${e[0]:=v}"` — oracle "`a[1]': not a valid identifier" and the line is abandoned; ours store into a hidden variable named "" and print v (a later `${e[0]-u}` reads v).
+### T-1177 bash: `unset -n` on a non-nameref, unset of a caller's prefix binding (interp), `${1:=x}`, stores after readonly on a circular assoc nameref · P3 · SH · OPEN [V]
+Found while closing T-1176; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- All engines: `unset -n` on a non-nameref is a no-op in bash 5.3 — `x=1; unset -n x; echo ${x-U}` gives `1` (ours `U`); same for a function local (`declare -- y="1"`).
+- Interpreter only: `in4(){ unset x4; declare -p x4; }; o4(){ x4=1 in4; echo "o4:${x4-U}"; }; x4=G; o4` — oracle `declare -- x4="G"` and `o4:G`; interp `declare -n x4="G"` and `o4:U` (literal and computed unset). The compiler is right.
+- All engines: `${1:=x}` — oracle "$1: cannot assign in this way", line abandoned, status 1; the interpreter prints an empty line and goes on with 0, the compiler prints nothing for the echo and goes on with 0. Also check `${@:=x}`, `${#:=x}`, `${?:=x}`.
+- All engines, after `readonly w` on a circular associative-array nameref (`local -n w=w; declare -A w=x`): `w=3`, `w+=3`, `${w:=6}` print ": readonly variable" and abandon the top-level line; `read w`, `printf -v w`, `(( w = 4 ))`, `let w=5`, `for w in ...` print it with status 1; `w[k]=1`, `w=(a)`, `mapfile w`, `read -a w`, prefix `w=3 cmd` stay silent with 0; `readonly -p` lists a `declare -r ` entry with an empty name. Ours drop all of these silently with 0.
+- Indexed-array variant (`local -n w=w; declare -a w=x`): oracle `export w=1` and `readonly w` silent with 0 and `declare -p w` gives `declare -an w=()`; ours print "export: `1'/`': not a valid identifier" with 1, and `readonly w` gives `-anr`. Later oracle refusals name freed-memory bytes — assert only the deterministic first operations.
 
 # C — C subset
 
@@ -1214,6 +1216,7 @@ T-1171 kotlin: range type constructors (IntRange, LongRange, CharRange) — merg
 T-1174 kotlin: javaClass of a range's Long bound — merged a1eba73b: range/progression first/last/step typed primitive, Long progression step is a Long; master four-leg probe matches kotlinc 2.2.21; no new defects
 T-1172 bash: -a declarations through namerefs to unset globals, second operand after a circular nameref became an array — merged 138aab5e: -a/-A declarations through namerefs to unset globals become call-local arrays (compiler), values given to an array nameref are checked as nameref names (both engines); master probe matches bash 5.3
 T-1175 bash: nameref refusals naming the target, readonly through a callee's nameref, array assignment to a circular assoc nameref — merged d924ee3e: make_local_variable rule for declarations through a function's nameref (refusals name the nameref; a callee may hide a caller's readonly local, not a readonly global), circular associative array namerefs drop stores and read unset; master probe matches bash 5.3
+T-1176 bash: computed `unset $v` (compiler), declaration builtins on a circular assoc nameref, `${e[0]:=v}` through a NAME[SUB] nameref — merged 79c58121: computed unset $v in the compiler (rt_unset_word; also literal unset through a nameref), export/readonly on a circular assoc nameref, ${e[0]:=v} through a NAME[SUB] nameref; master probe matches bash 5.3; bench +0.15% on non-hot paths (master re-check blocked by a stale bench lock)
 
 # Settled — do not re-open
 
