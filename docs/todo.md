@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1129** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1130** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -110,15 +110,17 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1125 kotlin: program-class toString/hashCode agreement; synchronized; Integer.toHexString; data-class hashCode with Unit; printing a function value · P3 · KT · IN PROGRESS (KT worker, round 37) [V]
+### T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::topVal reference, Array<ProgramClass> JVM name, extension-function references · P3 · KT · OPEN [V]
 
-Oracle: kotlinc 2.2.21.
-- In every program class, toString and hashCode must agree: for `class Foo`, `f.toString() == "Foo@" + f.hashCode().toString(16)` is true. Ours prints `Foo@1` but hashes the class name to 70822, in all engines. Pick one per-object identity number and use it in both.
-- `synchronized(lock) { ... }` runs the block and returns its value; the interpreter and llvm.Run fail with "unknown name: synchronized".
-- `Integer.toHexString(x)` (and the java.lang.Integer/Long statics in common use: toBinaryString, parseInt, MAX_VALUE) fails with "unknown name: Integer".
-- A data class's generated hashCode still treats a Unit property as null (compiler, around line 7715).
-- `println(f)` for a function value prints JS source in the interpreter; kotlinc prints the function type, for example `() -> kotlin.Unit` for a lambda. Check what each kind of function value prints.
-- Array copies (copyOf, plus) lose an explicit element-type class; on the JVM they keep it.
+Found while working T-1125. The oracle is kotlinc 2.2.21 (stdlib only, no kotlin-reflect).
+
+1. `super.toString()` and `super.equals()` that reach kotlin.Any fail in every engine. The interpreter says "no super method 'toString'"; the compiled side says "unknown super method". Example: `class X2 : B() { override fun toString() = "X:" + super.toString() }`, where B does not override toString. The oracle prints `X:X@<hash>`; ours should print `X:X@<our hashCode in hex>`.
+2. `super.m()` in a class with no declared superclass is a compiler notImpl: "super call (no superclass declared)". For example `class E { override fun hashCode() = super.hashCode() + 1 }`. The interpreter already runs it.
+3. `println(::top)` for a top-level `val top = 5` prints 5. The oracle prints `property top (Kotlin reflection is not available)`. The bare-reference path returns the value for any binding that is not callable.
+4. An Array of a program class reports `[Ljava.lang.Object;`. The oracle gives `[LAnimal;` for `arrayOf<Animal>(Dog())`, for `val d: Array<Animal> = arrayOf(Dog())` and for their copies. ktArrElemJvm skips program types.
+5. A reference to an extension function (`b::ext`, `Box::ext`) prints as `property ext`. The oracle prints `function ext (Kotlin reflection is not available)`. The function-or-property decision only looks at the class chain.
+
+Item 1 may need the shared js_supercall (jsrt.go / runtime.metajs). If so, prefer a Kotlin-only extern.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1186,6 +1188,7 @@ T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/Sin
 T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-step map/each_with_object, last → FloatDomainError — DONE r55 (fcfc144c): ArithmeticSequence respond_to?/own methods in both halves, Hash key via eql? parts, blockless map/with_object/each_with_object on endless streams, #last per MRI (FloatDomainError/ZeroDivisionError/RangeError); paired bench 0.00%; master-probed vs ruby 2.6
 T-1124 bash: test/[ -eq "integer expected"; compiled circular nameref loses -i; compiled `type` refuses unprintable bodies — merged f8f91736: test/[ integer-expected status 2 (digits fast path), compiled circular nameref keeps -i, lazy compiled type; local -i n; local -n n documented LIMIT; SECTION 129 in new bash-test-full.6.sh; 4-leg probe + stderr match bash 5.3; full matrix 605/605; bench -0.63%
 T-1126 ruby: Hash Array keys use eql? (not ==); endless Range blockless enumerators; Infinity #size of endless streams; method(:x).owner — merged 42ac0d48: eql?-based Hash keys/set ops (deep eql in all 3 engines, Float key index), endless-range blockless enumerators + to_enum streaming, Infinity/nil stream sizes (each_slice FloatDomainError per MRI), Method#owner + public_methods(false) via own-method rows; 4-leg probe matches ruby 2.6; matrix 605/605; bench -0.01%
+T-1125 kotlin: program-class toString/hashCode agreement; synchronized; Integer.toHexString; data-class hashCode with Unit; printing a function value — merged f8958f7a: Object#toString = binary name@hex(hashCode) via overrides (kotlin.Any hashCode only on chain root, super.hashCode works), synchronized{}, Integer/Long statics, Unit hash consistency, function-value printing (refs match oracle; lambdas print $$Lambda@1 stand-in by design), typed array copies + array+x stays an array; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench +0.01%
 
 # Settled — do not re-open
 
