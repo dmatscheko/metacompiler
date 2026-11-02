@@ -4736,6 +4736,21 @@ KwContract  = "contract" KwEnd ;
             txt = "this." + txt
             raw = "this." + raw
         }
+        // `java.lang.System` is System: a program-scope binding declared on demand
+        // (buildMain), not a global the `java` package handle can reach.
+        var sysLead = ktLeadName(txt) == "System"
+        if (items.length > 3 && ktLeadName(txt) == "java" && items[1].kind == "field" && items[1].name == "lang" &&
+            items[2].kind == "field" && items[2].name == "System" && items[1].safe != true && items[2].safe != true) {
+            items = [makeVarRef("System")].concat(items.slice(3))
+            if (txt.substring(0, 16) == "java.lang.System") { txt = txt.substring(10) }
+            sysLead = true
+        }
+        // `System.out.println()` takes the native no-argument path of a bare println()
+        // (makeCallBody).
+        if (sysLead && items.length == 3 && items[1].kind == "field" && items[1].name == "out" && items[1].safe != true &&
+            items[2].kind == "mcall" && (items[2].name == "println" || items[2].name == "print")) {
+            items[2].sysOut = true
+        }
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -4819,6 +4834,11 @@ KwContract  = "contract" KwEnd ;
                 // the __class chain and calls it first, so an override still wins;
                 // going through js_mcall instead would abort on a list and on an
                 // instance without one.
+                if (s.sysOut == true && s.args.length == 0 && ktNativeBuild && classNames["$System"] == undefined) {
+                    var soA = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [soA, emitStr(b, "")])
+                    return {b: b, v: callExt(b, "js_call", [callExt(b, "js_ktfget", [cur, emitStr(b, s.name)]), hUndef, soA])}
+                }
                 if (s.name == "toString" && s.args.length == 0) {
                     return {b: b, v: callExt(b, "js_ktstr", [cur])}
                 }
@@ -8717,6 +8737,8 @@ KwContract  = "contract" KwEnd ;
     // of the program shadows has the arity ktJavaStaticArity measures. Twin of
     // makePropRef in kotlin-interpreter.abnf.
     function makeQualRef(baseName, name) {
+        // A member of `java.lang.System` (`java.lang.System.out::println`) is one of System.
+        if (baseName.substring(0, 17) == "java.lang.System.") { baseName = baseName.substring(10) }
         var t = ktQualRefThunk(baseName, name)
         var ja = name == "class" ? -1 : ktJavaStaticArity(baseName, name)
         if (ja < 0) { return t }
@@ -9602,6 +9624,12 @@ KwContract  = "contract" KwEnd ;
                 return deadBlock()
             }, false)
             callExt(b, "js_set", [sysV, emitStr(b, "identityHashCode"), callExt(b, "js_closure", [handle(idhF), curScopeV])])
+            // System.out: Kotlin's println / print (see below), as statics.
+            var outV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [outV, emitStr(b, "__kjstatic"), hTrue])
+            callExt(b, "js_set", [outV, emitStr(b, "println"), callExt(b, "js_ktprint", [])])
+            callExt(b, "js_set", [outV, emitStr(b, "print"), callExt(b, "js_ktwrite", [])])
+            callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
         }
         // println / print: Kotlin's OWN rendering, not the shared println host

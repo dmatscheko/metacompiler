@@ -4290,7 +4290,11 @@ NotMemberKw = :script(~~ "pure";
         identityHashCode: function(v) {
             if (v !== null && typeof v == "object" && v.__class != undefined) { return kAnyHash(v.__class) }
             return kHash(v)
-        }
+        },
+        // System.out is the stream Kotlin's println / print write to, so its members
+        // are those functions; __kjstatic keeps `System.out::println` a one-argument
+        // reference.
+        out: {__kjstatic: true, println: hostGlobals["println"], print: hostGlobals["print"]}
     }
     // Kotlin's number types as VALUES, for their COMPANION CONSTANTS. Long.MAX_VALUE
     // cannot be written as a plain number at all - which is the whole reason a sized

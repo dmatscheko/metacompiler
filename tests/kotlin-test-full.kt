@@ -8526,6 +8526,23 @@ fun s191() {
         rl[0] === r && rl.contains(r) && rl.indexOf(r) == 0)
 }
 
+// ===== SECTION 192: java.lang.System calls, System.out =====
+// `java.lang.System.f()` is `System.f()`. System.out is the stream Kotlin's println
+// and print write to; `System.out.println()` writes only the line terminator.
+class P192
+fun s192() {
+    val t0 = java.lang.System.nanoTime()
+    val p = P192()
+    check("jlsys192a", java.lang.System.currentTimeMillis() > 0L && java.lang.System.nanoTime() >= t0 &&
+        java.lang.System.identityHashCode(p) == System.identityHashCode(p) && java.lang.System.identityHashCode(null) == 0)
+    System.out.print("out192:")
+    java.lang.System.out.print(1.5)
+    System.out.println()
+    java.lang.System.out.println(listOf('c', 2))
+    listOf(3).forEach(System.out::println)
+    listOf(4).forEach(java.lang.System.out::println)
+    check("sysout192b", System.out.println("ok192") == Unit)
+}
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8715,6 +8732,7 @@ fun main() {
     s189() // SECTION-CALL 189
     s190() // SECTION-CALL 190
     s191() // SECTION-CALL 191
+    s192() // SECTION-CALL 192
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
