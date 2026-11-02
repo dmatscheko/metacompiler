@@ -104,7 +104,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/SingletonList); emptyArray class · P3 · KT · OPEN [V]
+### T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/SingletonList); emptyArray class · P3 · KT · IN PROGRESS (KT worker, round 36) [V]
 
 Oracle: kotlinc 2.2.21. All three engines differ:
 - `(Unit as Any).toString()` prints `kotlin.Unit`. Ours throws "NullPointerException: null cannot be cast to non-null type kotlin.Any"; Unit must not count as null in casts.
@@ -137,7 +137,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local -n drops -i; compiled declare -f listing · P3 · SH · OPEN [V]
+### T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local -n drops -i; compiled declare -f listing · P3 · SH · IN PROGRESS (SH worker, round 38) [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
 - Through a circular local nameref (`f(){ local -n a=a; ...; }`), an element store `a[1]=Q` warns twice and stores to the global a. An array literal `a=(n m)` warns once and replaces the global. `(( l = 5 ))` and `let l+=1` each miss one "circular" warning. Interpreter only: `${l:=DEF}` misses the max-depth warning.
