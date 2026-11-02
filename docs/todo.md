@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1117** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1118** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -134,14 +134,15 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-word bad substitution; circular-nameref ${#r[@]} warnings · P3 · SH · IN PROGRESS (SH worker, round 36) [V]
+### T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and local resolution; declare -ft; LC_ALL=C case mapping · P3 · SH · OPEN [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
-- `declare -c` (capcase, new in bash 5.3: first letter upper, rest lower) is rejected as an invalid option; bash accepts it. Check `declare -p` output and how it interacts with -u/-l.
-- `declare -t` (trace attribute) is unsupported. It has no visible effect without DEBUG/RETURN traps, but it must be accepted and shown by `declare -p` as `-t`.
-- Compiled runtime: prefix/suffix removal with a leading `*` (`${l#*pat}`, `${l%%*pat}`) takes about 1M IR steps on a ~150-character line, probably quadratic. Because of this, the step cost of bash-test-full.5 depends on the script path (57M from tests/, 84M from a temp dir). Make the matcher linear (or near it) in bash-rt.c, then re-measure. This is an algorithmic fix to our runtime, not an optimizer pass.
-- `( case a${#x-a}b in x) ;; esac ); echo "3=$?"`: bash prints `3=1`; both our engines skip the rest of the line.
-- `${#ref[@]}` through a circular nameref: bash warns twice, we warn once.
+- `(( $((1/0)) ))` and `(( ${#x-a} ))`: bash abandons the command and prints the inner message without the "((: " prefix. Both our engines continue with status 1 and add the prefix.
+- Through a circular nameref, `${p@a}` / `${p@A}` warn 3 times (4 for `[@]`) in bash; we warn once (twice).
+- `l=G; f(){ local -n l=l; echo ${#l[@]} $l; }; f`: bash resolves the circular local to the global and prints "1 G"; we print "0 ". With `local -n l; l=l`, only our interpreter warns.
+- `declare -ft` (function trace attribute) is still "not supported".
+- Under LC_ALL=C, case mapping (-u/-l/-c, ${x^^}) must leave non-ASCII bytes alone; our engines map é as UTF-8.
+- Compiled engine only: stray UTF-8 continuation bytes in a strip (rt_isbound) differ from the interpreter and the oracle. This predates r36.
 
 # C — C subset
 
@@ -1162,6 +1163,7 @@ T-1110 php: microtime() missing; native uncaught "Call to undefined function" pr
 T-1111 kotlin: MutableMap putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll value; shuffle(Random); view and iterator classes — DONE r32 (a87b38bb): Map putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll per java.util.Map, kotlin's real XorWowRandom (seeded output now matches kotlinc; old xorshift never did), shuffle/shuffled, view/iterator class names, sealed-view writes throw; master-probed
 T-1114 php: return-type TypeError location; type-string order for callable/iterable/static; arrow-fn return deprecations — DONE r50 (98fb26a4): return-type TypeError at the return statement (closing brace when none), zend_type_to_string order (classes first; iterable=Traversable|array; static resolved), arrow-fn/by-ref return deprecations; master-probed
 T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReversed live view; buildList subList writes — DONE r33 (bc89fc12): Map compute/computeIfPresent/replace per java.util.Map, asList (Arrays$ArrayList, primitive asList classes) and asReversed as live two-way views, buildList subList stays sealed; master-probed incl. views of views
+T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-word bad substitution; circular-nameref ${#r[@]} warnings — DONE r36 (4746419a): declare -c/-t, linear star-led prefix/suffix strip in bash-rt.c (full.5 temp-dir steps 84M->59M), case/[[ ]] expansion errors abandon the command, circular-nameref warning counts; master-probed (174-line strip matrix vs bash 5.3)
 
 # Settled — do not re-open
 
