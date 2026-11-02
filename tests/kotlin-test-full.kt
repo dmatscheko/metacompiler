@@ -8405,6 +8405,53 @@ fun s188() {
     check("mref188f", !k.same() && k.eq() && k.self() == k.self() && k.self() != K188().self() && k.self() == k::m)
 }
 
+// ===== SECTION 189: per-scope vararg references, identity hashes =====
+// `::name` resolves to the innermost declaration of the name, so whether the
+// reference takes the vararg array is decided per scope: a local vararg function
+// beside a same-named plain one elsewhere, and a local plain function shadowing a
+// top-level vararg one. System.identityHashCode is Object.hashCode's identity hash
+// whatever the class overrides (0 for null); an Array's hashCode() is that identity
+// hash too, not its contents'. Identity hashes are asserted as relations only. In
+// this value model instances of one class share an identity stand-in, and each
+// `::f` site is not its own class as in kotlinc, so `::f.javaClass == ::f.javaClass`
+// is true here and false there.
+fun h189(vararg xs: Int) = xs.size * 100
+fun k189(x: Int) = x + 1
+fun va189(): String {
+    fun loc189(vararg xs: Int) = xs.size * 10
+    fun h189(x: Int) = x * 2
+    fun k189(vararg xs: Int) = xs.size * 1000
+    return "" + (::loc189)(intArrayOf(4, 5, 6)) + "," + (::h189)(21) + "," + (::k189)(intArrayOf(1, 2))
+}
+fun vb189(): String {
+    fun loc189(x: Int) = x
+    var r = "" + loc189(1) + "," + (::loc189)(7) + "," + (::h189)(intArrayOf(1, 2, 3)) + "," + (::k189)(5)
+    if (r.length > 0) {
+        fun loc189(vararg ys: Int) = ys.sum()
+        r += "," + (::loc189)(intArrayOf(3, 4))
+    }
+    return r + "," + (::loc189)(8)
+}
+class P189
+class Q189
+class H189 { override fun hashCode() = 42 }
+data class D189(val x: Int)
+
+fun s189() {
+    check("vscope189a", va189() == "30,42,2000" && vb189() == "1,7,300,6,7,8")
+    val p = P189()
+    val d = D189(1)
+    check("idhash189b", System.identityHashCode(p) == System.identityHashCode(p) && System.identityHashCode(p) == p.hashCode() &&
+        System.identityHashCode(p) != System.identityHashCode(Q189()) && System.identityHashCode(null) == 0 &&
+        System.identityHashCode(d) == System.identityHashCode(d) && System.identityHashCode(H189()) != 42 &&
+        System.identityHashCode(Any()) != System.identityHashCode(p))
+    val a = intArrayOf(1)
+    val o = arrayOf("x")
+    check("arrhash189c", System.identityHashCode(a) == a.hashCode() && a.hashCode() == a.hashCode() &&
+        listOf(a).hashCode() == 31 + a.hashCode() && System.identityHashCode(o) == o.hashCode() &&
+        listOf(o).hashCode() == 31 + o.hashCode())
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8591,6 +8638,7 @@ fun main() {
     s186() // SECTION-CALL 186
     s187() // SECTION-CALL 187
     s188() // SECTION-CALL 188
+    s189() // SECTION-CALL 189
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

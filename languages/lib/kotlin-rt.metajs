@@ -5639,7 +5639,9 @@ function ktSeqMethodK(arr, name, args, kind) {
         return pre + body + post
     }
     if (name == "hashCode") {
+        // An Array hashes by identity (ktElemHash); a List is
         // java.util.AbstractList.hashCode: 31 * acc + element.
+        if (ktIsJvmArr(arr)) { return ktElemHash(arr) }
         n = 1
         for (i = 0; i < es.length; i = i + 1) {
             n = k3I32(31 * n + k3I32(ktElemHash(es[i])))
@@ -10060,6 +10062,20 @@ function k4MathProp(o, name) {
 function js_ktclock(kind, us) {
     if (kind == 0) { return k1Conv(Math.floor(us / 1000), 64, 0) }
     return k1Arith("*", k1Conv(us, 64, 0), k1Conv(1000, 64, 0))
+}
+
+// js_ktidhash(v) is System.identityHashCode. Twin of ktIdHash in
+// abnf/jsrtkotlin.go.
+function js_ktidhash(v) {
+    if (ktIsObj(v)) {
+        var cls = v["__class"]
+        if (ktIsObj(cls)) {
+            var cn = cls["__name"]
+            if (cls !== ktAnyDesc() && typeof cn == "string") { return k0StrHash(cn) }
+            return 1
+        }
+    }
+    return ktElemHash(v)
 }
 
 // ktSeqCap (jsrtkotlin.go:5471) is how far an EAGER generateSequence walks an

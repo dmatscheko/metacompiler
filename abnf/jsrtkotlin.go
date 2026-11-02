@@ -2566,6 +2566,8 @@ func init() {
 		}
 		// js_ktclock(kind, us) is System.currentTimeMillis (0) / nanoTime (1); see ktClock.
 		m["js_ktclock"] = func(a []uint64) uint64 { return w(rt.ktClock(int(giFloat(rt, u(a[0]))), u(a[1]))) }
+		// js_ktidhash(v) is System.identityHashCode; see ktIdHash.
+		m["js_ktidhash"] = func(a []uint64) uint64 { return w(float64(ktIdHash(rt, u(a[0])))) }
 
 		// js_ktpropset(this, "x", v) stores ONE property initializer. It is not js_set,
 		// because a property a SUBCLASS overrides with accessors has a js_defprop pair
@@ -6984,7 +6986,11 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		sb.WriteString(post)
 		return sb.String(), true
 	case "hashCode":
+		// An Array hashes by identity (ktElemHash); a List is
 		// java.util.AbstractList.hashCode: 31 * acc + element.
+		if ktIsJvmArr(o) {
+			return float64(int32(ktElemHash(rt, o))), true
+		}
 		var h int32 = 1
 		for _, e := range es {
 			h = 31*h + int32(ktElemHash(rt, e))
@@ -7707,6 +7713,23 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 		}
 	}
 	return 1
+}
+
+// ktIdHash is System.identityHashCode: Object.hashCode's identity hash whatever
+// the class overrides. A class instance answers the stand-in ktElemHash's tail
+// gives one without an override, and a value without identity in this value
+// model its own hash. Twin of hostGlobals["System"] in kotlin-interpreter.abnf and
+// js_ktidhash in kotlin-rt.metajs.
+func ktIdHash(rt *jsrt, v interface{}) int32 {
+	if o, ok := v.(*jsObject); ok {
+		if cls, _ := o.props["__class"].(*jsObject); cls != nil {
+			if n, ok := cls.props["__name"].(string); ok && cls != ktAnyDesc() {
+				return ktStrHash(rt, n)
+			}
+			return 1
+		}
+	}
+	return int32(ktElemHash(rt, v))
 }
 
 // ktSetMethod is the Set member surface. Only the members whose ANSWER is a Set,

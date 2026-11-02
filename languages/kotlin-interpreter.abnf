@@ -4267,9 +4267,17 @@ NotMemberKw = :script(~~ "pure";
     // currentTimeMillis in milliseconds, nanoTime in nanoseconds (an arbitrary origin
     // in Java; only differences mean anything). Twin of ktClock in
     // abnf/jsrtktmath.go and js_ktclock in languages/lib/kotlin-rt.metajs.
+    // identityHashCode is Object.hashCode's identity hash whatever the class
+    // overrides: a class instance answers kAnyHash's stand-in, null 0, and a value
+    // without identity in this value model its own hash. Twin of ktIdHash in
+    // abnf/jsrtkotlin.go and js_ktidhash in languages/lib/kotlin-rt.metajs.
     hostGlobals["System"] = {
         currentTimeMillis: function() { return kConv(Math.floor(clockMicros() / 1000), 64, false) },
-        nanoTime: function() { return kArith("*", kConv(clockMicros(), 64, false), kConv(1000, 64, false)) }
+        nanoTime: function() { return kArith("*", kConv(clockMicros(), 64, false), kConv(1000, 64, false)) },
+        identityHashCode: function(v) {
+            if (v !== null && typeof v == "object" && v.__class != undefined) { return kAnyHash(v.__class) }
+            return kHash(v)
+        }
     }
     // Kotlin's number types as VALUES, for their COMPANION CONSTANTS. Long.MAX_VALUE
     // cannot be written as a plain number at all - which is the whole reason a sized

@@ -7022,23 +7022,27 @@ KwContract  = "contract" KwEnd ;
         funNames["$" + f.name] = true
         if (top) { topFunNames["$" + f.name] = true; topDeclList.push(f.name) }
         var va = f.sig.varargAt >= 0 && f.sig.vlate != true
-        if (!va) { plainFunNames["$" + f.name] = true }
+        if (va) { varargFunNames["$" + f.name] = true }
         return function(b) {
-            b = emitFunDecl(b, f, top, f.name, f.sig)
             // A reference to a function whose LAST parameter is a vararg is a
             // KFunction whose parameter IS the array, which is the binding a late
             // vararg's signature (vlate) already makes: so a referenced one is also
             // emitted with that signature, under name$vref, and `::name` answers it
-            // (vrefName). Twin of kVarargRefParams in kotlin-interpreter.abnf.
-            if (va && bareRefNames["$" + f.name] == true && plainFunNames["$" + f.name] != true) {
+            // (vrefName). A plain function of such a name binds name$vref to itself
+            // unless its own scope already holds a vararg one, so `::name` finds the
+            // innermost scope declaring the name, and there the vararg function.
+            // Twin of kVarargRefParams / makeBareRef in kotlin-interpreter.abnf.
+            var vref = vrefName(f.name)
+            b = emitFunDecl(b, f, top, f.name, f.sig, vref && !va)
+            if (vref && va) {
                 var s = f.sig
                 b = emitFunDecl(b, f, top, f.name + "$vref",
-                                {params: s.params, defs: s.defs, tys: s.tys, varargAt: s.varargAt, vlate: true, rty: s.rty})
+                                {params: s.params, defs: s.defs, tys: s.tys, varargAt: s.varargAt, vlate: true, rty: s.rty}, false)
             }
             return b
         }
     }
-    function emitFunDecl(b, f, top, key, sig) {
+    function emitFunDecl(b, f, top, key, sig, plainVref) {
         var idx = emitFunc(f.params, f.body, false, false, sig)
         defPos(b, f.pos)
         var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
@@ -7048,15 +7052,20 @@ KwContract  = "contract" KwEnd ;
             cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, f.params.length)])
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, key), cloV])
+        if (plainVref) {
+            var vkV = emitStr(b, key + "$vref")
+            var ownV = callExt(b, "js_scope_own", [curScopeV, vkV])
+            var hasV = truthy(b, callExt(b, "js_sne", [ownV, hUndef]))
+            callExt(b, "js_scope_decl", [curScopeV, vkV, b.NewSelect(hasV, ownV, cloV)])
+        }
         return b
     }
-    // The names a bare `::name` spells, and the names some function without a
-    // trailing vararg declares: `::name` answers name$vref only for a name every
-    // declaration of which has one.
+    // The names a bare `::name` spells, and the names some function with a trailing
+    // vararg declares: `::name` answers name$vref for a name that is both.
     var bareRefNames = {}
-    var plainFunNames = {}
+    var varargFunNames = {}
     function vrefName(name) {
-        return bareRefNames["$" + name] == true && plainFunNames["$" + name] != true && funNames["$" + name] == true
+        return bareRefNames["$" + name] == true && varargFunNames["$" + name] == true
     }
     // A top-level extension function: an IR function with the receiver in the
     // instance slot (isInstance binds args[0] to `this`), declared as "ext$name" and
@@ -9553,8 +9562,9 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, odn), callExt(b, "js_ktglobal", [emitStr(b, odn), hFalse])])
             }
         }
-        // java.lang.System's two clocks, declared only for a program that names System
-        // and does not declare it. Each member is a closure over js_ktclock(kind, us).
+        // java.lang.System's two clocks and identityHashCode, declared only for a
+        // program that names System and does not declare it. Each clock is a closure
+        // over js_ktclock(kind, us), identityHashCode one over js_ktidhash.
         if (ktVarSeen["$System"] == true && classNames["$System"] == undefined) {
             var sysV = callExt(b, "js_obj_new", [])
             var clocks = ["currentTimeMillis", "nanoTime"]
@@ -9562,6 +9572,11 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_set", [sysV, emitStr(b, clocks[ck]),
                                       callExt(b, "js_closure", [handle(emitClockFunc(ck)), curScopeV])])
             }
+            var idhF = emitFunc(["v"], function(bb) {
+                bb.NewRet(callExt(bb, "js_ktidhash", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "v")])]))
+                return deadBlock()
+            }, false)
+            callExt(b, "js_set", [sysV, emitStr(b, "identityHashCode"), callExt(b, "js_closure", [handle(idhF), curScopeV])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
         }
         // println / print: Kotlin's OWN rendering, not the shared println host
