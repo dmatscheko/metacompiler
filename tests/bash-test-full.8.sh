@@ -159,11 +159,46 @@ s157() {
   e='s157r=2'; eval "$e" 2>/dev/null || s157o="$s157o n $?"
   check crn9 "$s157o" ' k 1 l 0 m 0 1 3 n 1'
 }
+# ===== SECTION 158: stores refused by a readonly known only when they run, prefix declarations =====
+# read, declare, local, unset, printf -v, for and a prefix assignment each refuse a variable
+# made readonly through a function's nameref, or by a function defined after them; a bare
+# `local` of a function's own readonly local is no error. Before a declaration builtin, a
+# refused readonly prefix name leaves only its own operand as written, and through a nameref
+# the binding exports the variable it names, while export and readonly drop the nameref
+# operand. Every expected value is bash 5.3's.
+s158() {
+  local e
+  s158s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s158a() { local -n w=$1; readonly w; }
+  e=$( (s158x=4; s158a s158x; read s158x <<< 9; echo "a $? $s158x"; declare s158x=5; echo "b $? $s158x"
+        s158b() { local s158x=6; echo "c $? $s158x"; }; s158b; unset s158x; echo "d $? $s158x"
+        printf -v s158x %s 7; echo "e $? $s158x"; for s158x in 1; do echo no; done; echo "f $? $s158x"
+        s158x=9 true; echo "g $? $s158x") 2>&1)
+  check cro1 "$(s158s "$e")" 's158x: readonly variable;a 1 4;declare: s158x: readonly variable;b 1 4;local: s158x: readonly variable;c 1 4;unset: s158x: cannot unset: readonly variable;d 1 4;s158x: readonly variable;e 1 4;s158x: readonly variable;f 1 4;s158x: readonly variable;g 0 4;'
+  s158c() { read s158y <<< 9; echo "h $? $s158y"; read -a s158y <<< 8; echo "i $? $s158y"; unset s158y; echo "j $? $s158y"; printf -v 's158y[1]' %s 7; echo "k $?"; }
+  s158d() { for s158y in 1; do echo no; done; echo "l $? $s158y"; s158y=9 true; echo "m $? $s158y"; }
+  e=$( (s158y=4; readonly s158y; s158c; s158d) 2>&1)
+  check cro2 "$(s158s "$e")" 's158y: readonly variable;h 1 4;s158y: readonly variable;i 1 4;unset: s158y: cannot unset: readonly variable;j 1 4;s158y: readonly variable;k 1;s158y: readonly variable;l 1 4;s158y: readonly variable;m 0 4;'
+  s158e() { local v=1; s158f; local v; echo "n $? $v"; declare v; echo "o $? $v"; }
+  s158f() { readonly v; }
+  e=$( (s158e) 2>&1)
+  check cro3 "$(s158s "$e")" 'n 0 1;o 0 1;'
+  s158g() { s158z=8 t=3 local t; echo "p $? [$t]"; s158z=8 t=5 declare t; echo "q $? [$t]"; s158z=9 u=2 local s158z u; echo "r $? [$u]"; }
+  e=$( (s158z=4; readonly s158z; s158g; s158z=9 t=1 export s158z t; echo "s $? [$t]"; declare -p s158z t) 2>&1)
+  check cro4 "$(s158s "$e")" 's158z: readonly variable;p 0 [3];s158z: readonly variable;q 0 [5];s158z: readonly variable;local: s158z: readonly variable;r 1 [2];s158z: readonly variable;s 0 [1];declare -rx s158z="4";declare -x t="1";'
+  s158h() { local -n w=s158q; w=k export w; echo "t $?"; declare -p s158q w; }
+  s158i() { local -n w=s158q; w=k readonly w; echo "u $?"; declare -p s158q; }
+  s158j() { local -n w=s158q; w=k declare w; echo "v $?"; declare -p s158q w; }
+  s158k() { local -n w=s158q; w=k local -r w; echo "w $?"; declare -p s158q; }
+  e=$( (s158q=1; s158h; s158i; s158j; s158k; declare -n g=s158q; g=k declare -x g; declare -p s158q g) 2>&1)
+  check cro5 "$(s158s "$e")" 't 0;declare -- s158q="1";declare -n w="s158q";u 0;declare -- s158q="1";v 0;declare -x s158q="k";declare -n w="s158q";w 0;declare -rx s158q="k";declare -x s158q="k";declare -n g="s158q";'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
 s155  # SECTION-CALL 155
 s156  # SECTION-CALL 156
 s157  # SECTION-CALL 157
+s158  # SECTION-CALL 158
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -7250,6 +7250,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A binding of the temporary environment is exported while the command runs.
             exVars["$" + nm] = true
             saved[saved.length - 1].nv = v
+            saved[saved.length - 1].an = asgs[k].aname
             touchVar(nm); vars["$" + nm] = v; varsHas["$" + nm] = true
         }
         return saved
@@ -9646,9 +9647,42 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             } else { taken.push(decl[i]) }
         }
         var plain = makeDecl(decl, reds, ln)
-        var bound = makeDecl(taken, reds, ln)
+        // The listed prefix names (lp), and the declaration for each way they stand (variantFor
+        // a string with one letter per name): b takes its prefix value; w is as written, for a
+        // name refused as readonly; d is dropped. export and readonly are special builtins: a
+        // prefix assignment through a nameref is bash's temporary variable of the name it
+        // names, which takes the attribute and is gone after the builtin, so a bare operand
+        // naming that nameref does nothing. null when only dropped operands were given. Twin
+        // of makePrefixDecl in bash-to-llvm-ir.abnf.
+        var lp = []
+        for (i = 1; i < decl.length; i++) {
+            var lnm = decl[i].dname
+            if (lnm != undefined && prefixHas(asgs, lnm) && lp.indexOf(lnm) < 0) { lp.push(lnm) }
+        }
+        var variants = {}
+        var variantFor = function(st) {
+            if (hasOwn(variants, "$" + st)) { return variants["$" + st] }
+            var vi = [decl[0]]
+            var ops = false, drop = false
+            var q
+            for (q = 1; q < decl.length; q++) {
+                var c = (decl[q].dname != undefined && lp.indexOf(decl[q].dname) >= 0) ? st.charAt(lp.indexOf(decl[q].dname)) : ""
+                if (c == "d") { drop = true; continue }
+                vi.push((c == "w") ? decl[q] : taken[q])
+                if (decl[q].dflag == undefined) { ops = true }
+            }
+            variants["$" + st] = (drop && !ops) ? null : makeDecl(vi, reds, ln)
+            return variants["$" + st]
+        }
+        var allB = ""
+        for (i = 0; i < lp.length; i++) { allB = allB + "b" }
+        variantFor(allB)
         return function() {
             vars["$LINENO"] = lnAt(ln)
+            // A nameref's binding hides it while the prefix stands (applyPrefix).
+            var isRef = []
+            var j
+            for (j = 0; j < lp.length; j++) { isRef.push(attrOn(refVars, lp[j]) == true) }
             var saved = applyPrefix(asgs, true, false)
             var ab = takeAbort()
             if (ab != null) { restorePrefix(saved); return ab }
@@ -9662,20 +9696,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 restorePrefix(saved)
                 return r
             }
-            for (k = 0; k < saved.length; k++) { cell["$" + saved[k].name] = saved[k].nv }
+            for (k = 0; k < asgs.length; k++) { cell["$" + asgs[k].aname] = null }
+            for (k = 0; k < saved.length; k++) { cell["$" + saved[k].an] = saved[k].nv }
             restorePrefix(saved)
-            // A refused (readonly) prefix name leaves the declaration as written.
-            if (saved.length < asgs.length) { return plain() }
+            // A refused (readonly) prefix name, which has no value, stays as written.
+            var how = ""
+            for (k = 0; k < lp.length; k++) {
+                if ((kw == "export" || kw == "readonly") && isRef[k]) { how = how + "d" }
+                else if (cell["$" + lp[k]] == null) { how = how + "w" }
+                else { how = how + "b" }
+            }
+            var d = variantFor(how)
+            if (d == null) { setStatus(0); return 0 }
             var st = anytype
-            st = bound()
-            for (k = 0; k < saved.length; k++) { if (unset.indexOf("x") < 0 && prefixListed(decl, saved[k].name)) { exVars["$" + saved[k].name] = true } }
+            st = d()
+            // A name that takes its prefix value is exported, through a nameref the variable
+            // it names (saved[k].name).
+            for (k = 0; k < saved.length; k++) {
+                var p = lp.indexOf(saved[k].an)
+                if (unset.indexOf("x") < 0 && p >= 0 && how.charAt(p) == "b") { exVars["$" + saved[k].name] = true }
+            }
             return st
         }
-    }
-    function prefixListed(decl, nm) {
-        var k
-        for (k = 1; k < decl.length; k++) { if (decl[k].dname == nm) { return true } }
-        return false
     }
     function prefixHas(asgs, nm) {
         var k
