@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1106** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1107** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,15 +114,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1099 kotlin: class-property value read inside a builtin receiver returns a host function (compiled legs) · P3 · KT · IN PROGRESS (KT worker, round 30) [V]
+### T-1106 kotlin: Set.indices; read-only builder results not frozen against cast mutation; ListBuilder/MapBuilder javaClass · P3 · KT · OPEN [V]
 
-The interpreter matches kotlinc; llvm.Run and native do not. For `class K { val log = "L"; val items = "I"; val push = "P"; fun go() = with(listOf(9)) { log + items + push } }`, `K().go()` should print `LIP`. llvm.Run prints `[function]IP` and native prints `[function]I[function]`.
-
-The `kt_ktgetp` fast path probes the name on the list through `kt_fprobe` / `js_ktfget`, which returns the runtime's own method value. A bare property read should consult the builtin member table only for real Kotlin members of that kind, and only properties: `size`, `length`, `indices`, `lastIndex`, and so on. Mind the lookup's speed; it is the hottest name lookup (run tests/bench.sh kotlin --paired).
-
-### T-1100 kotlin: buildSet { } (and buildSet(capacity)) · P3 · KT · IN PROGRESS (KT worker, round 30) [V]
-
-`buildSet { add(3); add(size) }` prints `[3, 1]` under kotlinc 2.2.21. All three of our engines fail with "unknown name: buildSet". Model it on buildList: a MutableSet receiver that keeps insertion order (LinkedHashSet) and returns a read-only Set.
+Oracle: kotlinc 2.2.21. All three engines differ:
+- `println(setOf(4,5,6).indices)` prints `0..2`; ours prints `kotlin.Unit`. The property table already lists S for indices, so only the field read is missing.
+- Casting a read-only result to a mutable type and then mutating it throws UnsupportedOperationException. Examples: `(buildSet{..} as MutableSet<Int>).add(9)`, the same for buildList and buildMap results, `(setOf(1) as MutableSet<Int>).add(2)`, `(listOf(1) as MutableList<Int>).add(2)`. Ours mutates. Check each case against kotlinc first: listOf of several elements is an Arrays$ArrayList (set works, add throws), and emptyList is EmptyList.
+- `buildList{}.javaClass.name` is `kotlin.collections.builders.ListBuilder`, and for buildMap it is `MapBuilder`; ours prints java.util.ArrayList / LinkedHashMap. A list array cannot carry a `__jc` tag.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1191,6 +1188,8 @@ T-1095 php: ENT_* constants undefined (htmlspecialchars($s, ENT_QUOTES) fatals) 
 T-1091 ruby: compiled block splat param `|m, *a|` does not auto-splat a single array arg — DONE r50 (c83e6cb4): block auto-splat by MRI parameter shape, loose block binding, groups, |x,|, block-locals, lambdas never spread; master-probed vs ruby 2.6
 T-1092 ruby: `for x in obj` over any object with #each (user Enumerable) — DONE r50 (7dcfb202): for over any #each object (suspended run, break runs ensure, loop value), redo in for/while/until; master-probed
 T-1086 ruby: deferred Enumerator size after forcing; with_index value on to_enum; top-level to_enum — DONE r50 (c9434a56): user-#each Enumerator size nil, to_enum.with_index, receiver-less to_enum/enum_for; master-probed
+T-1099 kotlin: class-property value read inside a builtin receiver returns a host function (compiled legs) — DONE r30 (85e28ad6): bare name in value position reads only builtin properties (ktBuiltinProps), miss path skips stdlib globals; master-probed vs kotlinc 2.2.21
+T-1100 kotlin: buildSet { } (and buildSet(capacity)) — DONE r30 (3c71c232): buildSet { } / buildSet(cap) { } (SetBuilder); master-probed
 
 # Settled — do not re-open
 
