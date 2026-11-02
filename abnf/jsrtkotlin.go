@@ -1297,13 +1297,21 @@ func init() {
 		// kotlin-interpreter.abnf). Anything but an array never changes under a
 		// loop. js_ktwatch(src, it) is the array those two read: the map's own key
 		// array for a map or a map's view, the list or set a view or withIndex()
-		// reads (ktViewOwner), else the iterated it. Twins in
+		// reads (ktViewOwner), else the iterated it. A stale subList throws from
+		// iterator() (js_ktwatch) and from every next() (js_ktforok). Twins in
 		// languages/lib/kotlin-rt.metajs.
 		m["js_ktwatch"] = func(a []uint64) uint64 {
-			if wa := ktWatched(u(a[0])); wa != nil {
-				return w(wa)
+			wa := ktWatched(u(a[0]))
+			if wa == nil {
+				wa, _ = u(a[1]).(*jsArray)
+				if wa == nil {
+					return a[1]
+				}
 			}
-			return a[1]
+			if wa.props != nil {
+				rt.ktLinkCheck(wa)
+			}
+			return w(wa)
 		}
 		m["js_ktmod"] = func(a []uint64) uint64 {
 			if o, ok := u(a[0]).(*jsArray); ok {
@@ -1316,7 +1324,13 @@ func init() {
 			if !ok {
 				return boolH(true)
 			}
-			return boolH(float64(len(o.elems)) == rt.toNumber(u(a[1])) && float64(o.mod) == rt.toNumber(u(a[2])))
+			if float64(len(o.elems)) != rt.toNumber(u(a[1])) || float64(o.mod) != rt.toNumber(u(a[2])) {
+				return boolH(false)
+			}
+			if o.props != nil {
+				rt.ktLinkCheck(o)
+			}
+			return boolH(true)
 		}
 		m["js_ktforset"] = func(a []uint64) uint64 {
 			o, _ := ktViewOwner(u(a[0]))
@@ -1589,6 +1603,11 @@ func init() {
 		}
 		m["js_ktis"] = func(a []uint64) uint64 {
 			v := u(a[0])
+			if mk := ktMarkerName(ktTypeBase(rt.toString(u(a[1])))); mk != "" {
+				if is, ok := ktMarkerIs(v, mk); ok {
+					return boolH(is)
+				}
+			}
 			switch v.(type) {
 			case jsGInt, jsJFlo, float64:
 			default:
@@ -3363,8 +3382,10 @@ func init() {
 				n := len(arr.elems)
 				switch name {
 				case "indices":
+					rt.ktLinkCheck(arr)
 					return w(ktMakeRange(ktRange{from: 0, to: float64(n - 1), st: 1}))
 				case "lastIndex":
+					rt.ktLinkCheck(arr)
 					return w(float64(n - 1))
 				}
 			}
@@ -3443,6 +3464,11 @@ func init() {
 				i := jsToInt(rt.toNumber(u(a[1])))
 				if n := len(arr.elems); i < 0 || i >= n {
 					rt.ktIndexOob("IndexOutOfBoundsException", i, n)
+				}
+				// A stale subList's get checks the index, then throws
+				// ConcurrentModificationException.
+				if arr.props != nil {
+					rt.ktLinkCheck(arr)
 				}
 			}
 			// Kotlin's StringBuilder is a CharSequence, so sb[i] indexes like a
@@ -9276,8 +9302,9 @@ func ktIterStart(o *jsArray, kind string) *ktIterChk {
 // ktIterMore: whether element i of o is taken. Unchanged, while i is below the
 // size; changed, a set's iterator throws ConcurrentModificationException when
 // the element just taken was not the last of the n it started with, a list's
-// (hasNext() is `i != size`) when i is not the current size. Twin of kForNext
-// in kotlin-interpreter.abnf and k4IterMore in languages/lib/kotlin-rt.metajs.
+// (hasNext() is `i != size`) when i is not the current size. A stale subList's
+// next() throws too. Twin of kForNext in kotlin-interpreter.abnf and k4IterMore
+// in languages/lib/kotlin-rt.metajs.
 func (rt *jsrt) ktIterMore(c *ktIterChk, o *jsArray, i int) bool {
 	if c != nil && (len(c.w.elems) != c.n || c.w.mod != c.m) {
 		if (c.set && i < c.n) || (!c.set && i != len(c.w.elems)) {
@@ -9285,7 +9312,13 @@ func (rt *jsrt) ktIterMore(c *ktIterChk, o *jsArray, i int) bool {
 		}
 		return false
 	}
-	return i < len(o.elems)
+	if i >= len(o.elems) {
+		return false
+	}
+	if c != nil && c.w.props != nil {
+		rt.ktLinkCheck(c.w)
+	}
+	return true
 }
 
 // ktIterPrev: the same check for a List's reverse walk (listIterator(size)):
@@ -9384,6 +9417,76 @@ func ktJvmIsA(jc, t string) (is bool, ok bool) {
 		return jc == "java.util."+t, true
 	}
 	return false, false
+}
+
+// ktMarkerName and ktJvmMarker are twins of ktMarkerName and ktJvmMarker in
+// languages/lib/kotlin-math.js, which has the rules.
+func ktMarkerName(t string) string {
+	switch t {
+	case "RandomAccess", "java.util.RandomAccess", "kotlin.collections.RandomAccess":
+		return "RandomAccess"
+	case "Cloneable", "kotlin.Cloneable", "java.lang.Cloneable":
+		return "Cloneable"
+	case "Serializable", "java.io.Serializable":
+		return "Serializable"
+	}
+	return ""
+}
+
+func ktJvmMarker(jc, m string) bool {
+	const u, kc = "java.util.", "kotlin.collections."
+	switch m {
+	case "":
+		return false
+	case "RandomAccess":
+		switch jc {
+		case u + "ArrayList", u + "Arrays$ArrayList", u + "Collections$SingletonList", u + "ArrayList$SubList",
+			u + "AbstractList$RandomAccessSubList", kc + "EmptyList", kc + "AbstractList$SubList":
+			return true
+		}
+		return strings.HasPrefix(jc, kc+"builders.ListBuilder") || strings.HasPrefix(jc, ktaAsListPfx)
+	}
+	cl := strings.HasPrefix(jc, "[")
+	switch jc {
+	case u + "ArrayList", u + "ArrayDeque", u + "LinkedList", u + "HashSet", u + "LinkedHashSet", u + "TreeSet",
+		u + "HashMap", u + "LinkedHashMap", u + "TreeMap":
+		cl = true
+	}
+	if cl || m == "Cloneable" {
+		return cl
+	}
+	if b, isLang := strings.CutPrefix(jc, "java.lang."); isLang {
+		switch b {
+		case "String", "Integer", "Long", "Short", "Byte", "Double", "Float", "Character", "Boolean", "StringBuilder":
+			return true
+		}
+		return false
+	}
+	switch jc {
+	case u + "Arrays$ArrayList", u + "PriorityQueue", kc + "EmptyList", kc + "EmptySet", kc + "EmptyMap",
+		kc + "builders.ListBuilder", kc + "builders.ListBuilder$BuilderSubList", kc + "builders.SetBuilder",
+		kc + "builders.MapBuilder", "kotlin.Pair", "kotlin.Triple", "kotlin.text.Regex":
+		return true
+	}
+	return strings.HasPrefix(jc, u+"Collections$Singleton")
+}
+
+// ktMarkerIs is `v is M` for a marker interface M (ktMarkerName), answered from
+// v's JVM class (ktJvmMarker), or for a class instance from the supertypes its
+// class names (ktDescMark), every Throwable being Serializable; ok is false for
+// null. Twin of kMarkerIs in kotlin-interpreter.abnf and k4MarkerIs in
+// languages/lib/kotlin-rt.metajs.
+func ktMarkerIs(v interface{}, m string) (is bool, ok bool) {
+	if isUndefOrNull(v) {
+		return false, false
+	}
+	jc, _ := ktJvmClass(v).(string)
+	if o, isObj := v.(*jsObject); isObj {
+		if cls, isCls := o.props["__class"].(*jsObject); isCls {
+			return ktJvmMarker(jc, m) || ktDescMark(cls, "__"+m, 0) || m == "Serializable" && ktIsType(v, "Throwable"), true
+		}
+	}
+	return ktJvmMarker(jc, m), true
 }
 
 // ktIsBuiltinRecv reports a receiver whose members come from the runtime rather
@@ -10860,19 +10963,25 @@ func ktIsCmp(v interface{}) bool {
 		return true
 	case *jsObject:
 		cls, _ := o.props["__class"].(*jsObject)
-		return ktDescCmp(cls, 0)
+		return ktDescMark(cls, "__cmp", 0)
 	}
 	return false
 }
 
-func ktDescCmp(c *jsObject, depth int) bool {
+// ktDescMark is whether the class descriptor c, its __super chain or an
+// interface in __ifaces along them carries the emitter's mark for a library
+// interface it names: __cmp for Comparable, __Serializable / __Cloneable /
+// __RandomAccess for a marker interface. An enum is Comparable and Serializable.
+// Twin of kClsMark in kotlin-interpreter.abnf and ktDescMark in
+// languages/lib/kotlin-rt.metajs.
+func ktDescMark(c *jsObject, key string, depth int) bool {
 	for guard := 0; c != nil && guard < 64; guard++ {
-		if c.props["__isenum"] == true || c.props["__cmp"] == true {
+		if c.props[key] == true || c.props["__isenum"] == true && (key == "__cmp" || key == "__Serializable") {
 			return true
 		}
 		if ifs, ok := c.props["__ifaces"].(*jsArray); ok && depth < 64 {
 			for _, e := range ifs.elems {
-				if ic, isObj := e.(*jsObject); isObj && ktDescCmp(ic, depth+1) {
+				if ic, isObj := e.(*jsObject); isObj && ktDescMark(ic, key, depth+1) {
 					return true
 				}
 			}

@@ -3931,7 +3931,7 @@ KwContract  = "contract" KwEnd ;
         if (dot >= 0) { seg = path.substring(dot + 1, path.length) }
         var jcs = ktJavaClassImport(path)
         for (var ji = 0; ji < jcs.length; ji++) { ktImportBinds.push([alias != "" ? alias : jcs[ji][0], jcs[ji][1]]) }
-        if (jcs.length == 0) { resolveImport(path, pos) }
+        if (jcs.length == 0 && !ktJavaTypeImport(path)) { resolveImport(path, pos) }
         noteImportName(seg)
         noteImportName(alias)
     }
@@ -4387,21 +4387,12 @@ KwContract  = "contract" KwEnd ;
         return makeIsCheck(operand, m)
     }
     // x as T: js_ktcast throws ClassCastException when x is not a T, judged for the
-    // builtin value types, the collection interfaces and for a class or interface
-    // the program declares (known at emission, after the walk); any other T is
-    // unchecked, as an erased cast is.
+    // builtin value types, the collection interfaces (ktCastLang), for a class or
+    // interface the program declares (known at emission, after the walk) and for
+    // the concrete java.util collections and the marker interfaces
+    // (ktJvmCastDest); any other T is unchecked, as an erased cast is.
     // A null is checked here: the NullPointerException for a non-null T that
     // ktNullCastType names. Twin of makeCast in kotlin-interpreter.abnf.
-    var ktCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
-                      "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
-                      "$Float": "java.lang.Float", "$Char": "java.lang.Character",
-                      "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number",
-                      "$Comparable": "java.lang.Comparable",
-                      "$List": "java.util.List", "$MutableList": "java.util.List",
-                      "$Set": "java.util.Set", "$MutableSet": "java.util.Set",
-                      "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
-                      "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
-                      "$Iterable": "java.lang.Iterable", "$MutableIterable": "java.lang.Iterable"}
     function makeCast(operand, tname) {
         var base = tname
         var lt = base.indexOf("<")
@@ -4426,6 +4417,7 @@ KwContract  = "contract" KwEnd ;
                         break
                     }
                 }
+                if (dest == "") { dest = ktJvmCastDest(base) }
             }
             var nullName = opt ? "" : ktNullCastType(tname, dest)
             var cb = r.b
@@ -5289,10 +5281,14 @@ KwContract  = "contract" KwEnd ;
             // The alias-and-path-reduced name: an interface reached through a typealias
             // or written as a dotted path is still bound under its simple name.
             var kn = resolvedTypeName(supers[k].name)
-            // kotlin.Comparable has no descriptor here; __cmp is what js_ktis reads for
-            // `is Comparable` (ktIsCmp, abnf/jsrtkotlin.go).
-            if (kn == null && baseTypeName(stripWs(supers[k].name)) == "Comparable") {
+            // kotlin.Comparable and the marker interfaces have no descriptor here; the
+            // mark __cmp / __Serializable / ... is what js_ktis reads for `is
+            // Comparable` / `is Serializable` (ktDescMark, abnf/jsrtkotlin.go).
+            var lib = kn == null ? baseTypeName(stripWs(supers[k].name)) : ""
+            if (lib == "Comparable") {
                 callExt(b, "js_set", [clsV, emitStr(b, "__cmp"), hTrue])
+            } else if (lib == "Serializable" || lib == "Cloneable" || lib == "RandomAccess") {
+                callExt(b, "js_set", [clsV, emitStr(b, "__" + lib), hTrue])
             }
             if (k == pk) { continue }
             if (kn == null) { kn = supers[k].name }

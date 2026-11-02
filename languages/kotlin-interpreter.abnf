@@ -3998,7 +3998,8 @@ NotMemberKw = :script(~~ "pure";
     }
     // x as T: a ClassCastException when x is not a T, judged for the builtin value
     // types, the collection interfaces (a checkcast to java.util.List, ...: `is`'s
-    // own test) and for a class or interface the program declares; any other T (a type
+    // own test), the concrete java.util collections and the marker interfaces
+    // (ktJvmCastDest) and for a class or interface the program declares; any other T (a type
     // parameter, a library type) is unchecked, as an erased cast is. null passes a
     // nullable T and is a NullPointerException for a non-null one ktNullCastType
     // names, which is the check kotlinc emits. Twin of makeCast in
@@ -4036,16 +4037,6 @@ NotMemberKw = :script(~~ "pure";
         if (base.indexOf("Mutable") != 0 || kCollIsType(v, base.substring(7)) !== true) { return msg }
         return jxkClass(v) + " cannot be cast to kotlin.collections." + base
     }
-    var kCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
-                     "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
-                     "$Float": "java.lang.Float", "$Char": "java.lang.Character",
-                     "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number",
-                     "$Comparable": "java.lang.Comparable",
-                     "$List": "java.util.List", "$MutableList": "java.util.List",
-                     "$Set": "java.util.Set", "$MutableSet": "java.util.Set",
-                     "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
-                     "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
-                     "$Iterable": "java.lang.Iterable", "$MutableIterable": "java.lang.Iterable"}
     // T without its nullability mark and its type arguments.
     function kCastBase(t) {
         var b = t
@@ -4055,7 +4046,7 @@ NotMemberKw = :script(~~ "pure";
         return b
     }
     function kCastDest(b) {
-        var l = kCastLang["$" + b]
+        var l = ktCastLang["$" + b]
         if (l != undefined) { return l }
         // A nested type written qualified (`as Outer.Inner`) is found through its
         // owner; any other is bound under its simple name.
@@ -4063,7 +4054,7 @@ NotMemberKw = :script(~~ "pure";
         var d = anytype
         d = kQualDesc(b)
         if (d === undefined) { d = hasOwn(globalScope, sn) ? globalScope[sn] : undefined }
-        if (d === null || d === undefined || typeof d != "object" || d.__isclass !== true) { return "" }
+        if (d === null || d === undefined || typeof d != "object" || d.__isclass !== true) { return ktJvmCastDest(b) }
         // A builtin throwable's binary name is package-qualified and is not judged; the
         // program's own types live in the default package, a nested one as Outer$Inner.
         var bn = anytype
@@ -4691,6 +4682,8 @@ NotMemberKw = :script(~~ "pure";
         var o = kViewOwner(subj)
         var w = src
         if (kIsMap(o)) { w = o.keys } else if (o !== subj) { w = kIsSet(o) ? o.keys : o }
+        // A stale subList throws from iterator() and from every next().
+        if (arrProps(w) !== undefined) { kLinkCheck(w) }
         return {w: w, n: w.length, m: arrMod(w), set: kIterIsSet(o)}
     }
     function kForNext(src, i, n0) {
@@ -4699,6 +4692,7 @@ NotMemberKw = :script(~~ "pure";
             if (n0.set ? i < n0.n : i !== n0.w.length) { kThrowExc("ConcurrentModificationException", null) }
             if (n0.set) { return false }
         }
+        if (n0 !== null && i < src.length && arrProps(n0.w) !== undefined) { kLinkCheck(n0.w) }
         return more
     }
     // Whether a java.util iterator over v prefetches its next node: a map's and a
@@ -10715,7 +10709,7 @@ NotMemberKw = :script(~~ "pure";
         // Twin of ktImportBinds in kotlin-to-llvm-ir.abnf.
         var jcs = ktJavaClassImport(path)
         for (var ji = 0; ji < jcs.length; ji++) { hostGlobals[alias != "" ? alias : jcs[ji][0]] = hostGlobals[jcs[ji][1]] }
-        if (jcs.length == 0) { resolveImport(path, pos) }
+        if (jcs.length == 0 && !ktJavaTypeImport(path)) { resolveImport(path, pos) }
         noteImportName(seg)
         noteImportName(alias)
     }
@@ -12928,10 +12922,8 @@ NotMemberKw = :script(~~ "pure";
             if (jp != null) { return jp.v }
         }
         if (Array.isArray(o)) {
-            if (name == "size") {
-                kLinkCheck(o)
-                return o.length
-            }
+            if (name == "size" || name == "lastIndex" || name == "indices") { kLinkCheck(o) }
+            if (name == "size") { return o.length }
             var ax = anytype
             ax = kIdxExt(o, name)
             if (ax !== undefined) { return ax }
@@ -13272,6 +13264,9 @@ NotMemberKw = :script(~~ "pure";
         if (Array.isArray(o)) {
             var ai = kNum(i)
             if (ai < 0 || ai >= o.length) { kIndexOob("IndexOutOfBoundsException", ai, o.length) }
+            // A stale subList's get checks the index, then throws. Twin of
+            // js_ktindex in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+            if (arrProps(o) !== undefined) { kLinkCheck(o) }
             return o[ai]
         }
         if (isRange(o)) { return rangeList(o)[kNum(i)] }
@@ -13342,6 +13337,17 @@ NotMemberKw = :script(~~ "pure";
             t == "TreeMap" || t == "PriorityQueue" || t == "LinkedList") { return jc == "java.util." + t }
         return undefined
     }
+    // `v is M` for a marker interface M (ktMarkerName), answered from v's JVM class
+    // (ktJvmMarker), or for a class instance from the supertypes its class names
+    // (kClsMark), every Throwable being Serializable. Twin of ktMarkerIs in
+    // abnf/jsrtkotlin.go and k4MarkerIs in languages/lib/kotlin-rt.metajs.
+    function kMarkerIs(v, m) {
+        var jm = ktJvmMarker(jxkClass(v), m)
+        if (typeof v == "object" && !Array.isArray(v) && v.__class != undefined && v.__class != null) {
+            return jm || kClsMark(v.__class, m, 0) || m == "Serializable" && kIsType(v, "Throwable")
+        }
+        return jm
+    }
     // Extends the shared rtIsType with the parent chain (so an interface matches), type
     // ALIASES, Char/range boxes, and the reified type parameters of the running call.
     function kIsType(v, tname) {
@@ -13351,6 +13357,11 @@ NotMemberKw = :script(~~ "pure";
         if (v === null || v === undefined) { return opt }
         if (t == "Any" || t == "Object") { return true }
         if (t == "Comparable") { return kIsComparable(v) }
+        var mk = ktMarkerName(t)
+        if (mk != "") {
+            var mi = kMarkerIs(v, mk)
+            if (mi !== undefined) { return mi }
+        }
         // Every enum class extends kotlin.Enum; an entry's class carries __isenum.
         // Twin of ktIsEnumEntry in abnf/jsrtkotlin.go and ktIsType in kotlin-rt.metajs.
         if (t == "Enum" && typeof v == "object" && v.__class != undefined && v.__class != null &&
@@ -13460,18 +13471,23 @@ NotMemberKw = :script(~~ "pure";
     function kIsComparable(v) {
         if (typeof v == "string" || typeof v == "boolean" || typeof v == "number") { return true }
         if (kIsChar(v) || szIs(v) || kIsFlo(v)) { return true }
-        if (typeof v == "object" && v.__class != undefined && v.__class != null) { return kClsCmp(v.__class, 0) }
+        if (typeof v == "object" && v.__class != undefined && v.__class != null) { return kClsMark(v.__class, "Comparable", 0) }
         return false
     }
-    function kClsCmp(cls, depth) {
-        if (cls.__isenum === true) { return true }
+    // Whether class cls names the library interface m - Comparable or a marker
+    // interface (ktMarkerName) - among its supertypes, directly or through a parent;
+    // an enum is Comparable and Serializable. Twin of ktDescMark in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kClsMark(cls, m, depth) {
+        if (cls.__isenum === true && (m == "Comparable" || m == "Serializable")) { return true }
         var specs = cls.__parentSpecs
         if (specs == undefined || depth > 32) { return false }
         for (var i = 0; i < specs.length; i++) {
-            if (resolvedTypeName(specs[i].name) == "Comparable") { return true }
+            var sn = resolvedTypeName(specs[i].name)
+            if (sn == m || ktMarkerName(sn) == m) { return true }
         }
         var ps = resolveParents(cls)
-        for (var j = 0; j < ps.length; j++) { if (kClsCmp(ps[j], depth + 1)) { return true } }
+        for (var j = 0; j < ps.length; j++) { if (kClsMark(ps[j], m, depth + 1)) { return true } }
         return false
     }
 

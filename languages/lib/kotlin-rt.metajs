@@ -6527,17 +6527,22 @@ function js_ktmore(a, i) {
 }
 // js_ktmod / js_ktforok / js_ktforset (jsrtkotlin.go): a `for` loop's modification
 // count at its start, whether it may take its next element - size and count
-// unchanged - and whether its source is a set.
+// unchanged - and whether its source is a set. A stale subList throws from
+// iterator() (js_ktwatch) and from every next() (js_ktforok).
 function js_ktmod(a) { return arrMod(a) }
 function js_ktwatch(src, it) {
-    var wa = k4Watched(src)
-    if (wa === undefined) { return it }
+    var wa = anytype
+    wa = k4Watched(src)
+    if (wa === undefined) { wa = it }
+    if (arrProps(wa) !== undefined) { k4LinkCheck(wa) }
     return wa
 }
 function js_ktforok(a, n0, m0) {
     if (!ktIsArr(a)) { return true }
     if (a.length != n0) { return false }
-    return arrModIs(a, m0)
+    if (!arrModIs(a, m0)) { return false }
+    if (arrProps(a) !== undefined) { k4LinkCheck(a) }
+    return true
 }
 function js_ktforset(s) { return k4IterIsSet(k4ViewOwner(s)) }
 // ktIterIsSet / ktViewOf / ktViewOwner / ktWatched (jsrtkotlin.go), which have
@@ -6628,6 +6633,9 @@ function k4IterMore(c, es, i) {
             if (c["set"] === true) { bad = i < c["n"] } else { bad = i != wa.length }
             if (bad) { ktRaise("ConcurrentModificationException", null) }
             return false
+        }
+        if (i < es.length) {
+            if (arrProps(wa) !== undefined) { k4LinkCheck(wa) }
         }
     }
     return i < es.length
@@ -7024,6 +7032,11 @@ function ktIsType(v, tname) {
     if (typeof v != "number") {
         var bt = k4bStripQ(k4bStripAngle(tname))
         if (bt == "Comparable") { return ktIsCmp(v) }
+        var mk = ktMarkerName(bt)
+        if (mk != "") {
+            var mi = k4MarkerIs(v, mk)
+            if (mi !== undefined) { return mi }
+        }
         // Every enum class extends kotlin.Enum; an entry's descriptor carries __isenum.
         if (bt == "Enum" && ktIsObj(v) && ktIsObj(v["__class"]) && v["__class"]["__isenum"] === true) { return true }
         // A PROGRESSION is an IntRange / CharRange / IntProgression and NOT a
@@ -7059,6 +7072,8 @@ function ktIsType(v, tname) {
     }
     var t = k4bStripQ(k4bStripAngle(tname))
     if (t == "Any" || t == "Comparable") { return true }
+    var nm = ktMarkerName(t)
+    if (nm != "") { return ktJvmMarker(jxkClass(v), nm) }
     if (sintIs(v)) {
         // The four unsigned types are not kotlin.Number.
         if (t == "Number") {
@@ -7082,23 +7097,44 @@ function ktIsType(v, tname) {
     return t == "Number" || t == "Int"
 }
 
+// ktMarkerIs (jsrtkotlin.go): `v is M` for a marker interface M (ktMarkerName),
+// from v's JVM class, or for a class instance from the supertypes its class
+// names (ktDescMark), every Throwable being Serializable; undefined for null.
+function k4MarkerIs(v, m) {
+    if (rtIsNil(v)) { return undefined }
+    var jm = ktJvmMarker(jxkClass(v), m)
+    if (ktIsObj(v) && ktIsObj(v["__class"])) {
+        if (jm) { return true }
+        if (ktDescMark(v["__class"], "__" + m, 0)) { return true }
+        if (m == "Serializable") { return ktIsType(v, "Throwable") }
+        return false
+    }
+    return jm
+}
+
 // ktIsCmp is ktIsCmp (jsrtkotlin.go): `is Comparable` for a value that is not a
 // number - Char, String, Boolean, an enum entry, or an instance of a class whose
 // descriptor chain carries the emitter's __cmp mark.
 function ktIsCmp(v) {
     if (typeof v == "string" || typeof v == "boolean" || ktIsChar(v)) { return true }
-    if (ktIsObj(v)) { return ktDescCmp(v["__class"], 0) }
+    if (ktIsObj(v)) { return ktDescMark(v["__class"], "__cmp", 0) }
     return false
 }
-function ktDescCmp(c, depth) {
+// ktDescMark (jsrtkotlin.go): whether the descriptor chain carries the emitter's
+// mark key for a library interface (__cmp, __Serializable, ...); an enum is
+// Comparable and Serializable.
+function ktDescMark(c, key, depth) {
     var guard = 0
     while (c !== null && c !== undefined && typeof c == "object" && guard < 64) {
-        if (c["__isenum"] === true || c["__cmp"] === true) { return true }
+        if (c[key] === true) { return true }
+        if (c["__isenum"] === true) {
+            if (key == "__cmp" || key == "__Serializable") { return true }
+        }
         var ifs = c["__ifaces"]
         if (Array.isArray(ifs) && depth < 64) {
             var i = 0
             while (i < ifs.length) {
-                if (ktDescCmp(ifs[i], depth + 1)) { return true }
+                if (ktDescMark(ifs[i], key, depth + 1)) { return true }
                 i = i + 1
             }
         }
@@ -11607,8 +11643,14 @@ function js_ktfget(o, name) {
         if (name == "lastIndex") { return ktRangeList(o).length - 1 }
     }
     if (ktIsArr(o) && rtIsNil(r)) {
-        if (name == "indices") { return k4Indices(o["length"]) }
-        if (name == "lastIndex") { return o["length"] - 1 }
+        if (name == "indices") {
+            k4LinkCheck(o)
+            return k4Indices(o["length"])
+        }
+        if (name == "lastIndex") {
+            k4LinkCheck(o)
+            return o["length"] - 1
+        }
     }
     if (name == "indices" && ktIsSet(o) && rtIsNil(r)) { return k4Indices(ktSetElems(o).length) }
     if (typeof o == "string" && rtIsNil(r)) {
@@ -11673,6 +11715,9 @@ function js_ktindex(o, k) {
     if (ktIsObj(o) && o["__set"] !== true && typeof o["length"] == "number") {
         var av = o[k4Int(k)]
         if (av === undefined) { return ktArrMiss(o, k) }
+        // A stale subList's get checks the index, then throws (k4LinkCheck). Only
+        // a list with props can be linked.
+        if (arrProps(o) !== undefined) { k4LinkCheck(o) }
         return av
     }
     // Kotlin's StringBuilder is a CharSequence, so sb[i] indexes like a String and

@@ -2176,6 +2176,13 @@ function ktJavaClassImport(path) {
     }
     return out
 }
+// The java.* interfaces an import may name that the runtime judges by name only
+// (ktJvmCastDest): the import binds nothing, since a type test reads the name.
+function ktJavaTypeImport(path) {
+    return path == "java.io.Serializable" || path == "java.util.RandomAccess" || path == "java.lang.Cloneable" ||
+        path == "java.util.SortedSet" || path == "java.util.NavigableSet" || path == "java.util.SortedMap" ||
+        path == "java.util.NavigableMap"
+}
 
 // The type kotlinc's null-cast message names - "null cannot be cast to non-null type
 // kotlin.collections.List<kotlin.Int>" for `null as List<Int>`: the written type with
@@ -2190,7 +2197,7 @@ function ktFqAdd(pkg, names) {
 ktFqAdd("kotlin.", ["Any", "Unit", "String", "CharSequence", "Int", "Long", "Short", "Byte",
                     "Double", "Float", "Char", "Boolean", "Number", "Comparable", "Array",
                     "IntArray", "LongArray", "ShortArray", "ByteArray", "DoubleArray", "FloatArray",
-                    "CharArray", "BooleanArray", "Pair", "Triple"])
+                    "CharArray", "BooleanArray", "Pair", "Triple", "Cloneable"])
 ktFqAdd("kotlin.collections.", ["List", "MutableList", "Set", "MutableSet", "Map", "MutableMap",
                                 "Collection", "MutableCollection", "Iterable", "MutableIterable",
                                 "Iterator", "MutableIterator"])
@@ -2227,3 +2234,33 @@ function ktFqTArgs(s, lt) {
     return "<" + out.join(", ") + ">"
 }
 function ktIsUpper(c) { return c >= "A" && c <= "Z" }
+
+// ----- `x as T`: the JVM class the checkcast names -----
+// A builtin value type or a collection interface: its JVM class.
+var ktCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
+                  "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
+                  "$Float": "java.lang.Float", "$Char": "java.lang.Character",
+                  "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number",
+                  "$Comparable": "java.lang.Comparable",
+                  "$List": "java.util.List", "$MutableList": "java.util.List",
+                  "$Set": "java.util.Set", "$MutableSet": "java.util.Set",
+                  "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
+                  "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
+                  "$Iterable": "java.lang.Iterable", "$MutableIterable": "java.lang.Iterable"}
+// A concrete java.util collection class (kotlin.collections' ArrayList, HashSet,
+// LinkedHashSet, HashMap and LinkedHashMap are typealiases to them; a bare
+// ArrayDeque is kotlin.collections' own) or a JVM marker interface: its JVM class,
+// "" for any other t. The runtime's `is` judges exactly these names (ktJvmIsA,
+// ktMarkerName).
+function ktJvmCastDest(t) {
+    var q = t.indexOf("java.util.") == 0
+    var s = t
+    if (q) { s = t.substring(10) } else if (t.indexOf("kotlin.collections.") == 0) { s = t.substring(19) }
+    if (s == "ArrayDeque") { return q ? "java.util.ArrayDeque" : "kotlin.collections.ArrayDeque" }
+    if (s == "ArrayList" || s == "HashSet" || s == "LinkedHashSet" || s == "HashMap" || s == "LinkedHashMap" ||
+        s == "TreeSet" || s == "TreeMap" || s == "PriorityQueue" || s == "LinkedList" || s == "SortedSet" ||
+        s == "NavigableSet" || s == "SortedMap" || s == "NavigableMap" || s == "RandomAccess") { return "java.util." + s }
+    if (t == "Cloneable" || t == "kotlin.Cloneable" || t == "java.lang.Cloneable") { return "java.lang.Cloneable" }
+    if (t == "Serializable" || t == "java.io.Serializable") { return "java.io.Serializable" }
+    return ""
+}

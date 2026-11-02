@@ -7615,6 +7615,69 @@ fun s173() {
         doubleArrayOf(1.0).asList() !is MutableCollection<*> && arrayOf(n[1]).asList() is MutableList<*> && ia.toList() == listOf(1, 2, 3))
 }
 
+// ===== SECTION 174: a stale subList's reads, casts to concrete collections, marker interfaces =====
+// A structurally changed list makes its subList's get, iterator and next() throw
+// ConcurrentModificationException (an index is checked first). A cast to a concrete
+// java.util class (ArrayList, LinkedHashMap, HashSet, ...) is a checkcast on the JVM
+// class. RandomAccess, Cloneable and Serializable are answered from the JVM class,
+// and for a program class from the supertypes it names.
+class Ser174 : java.io.Serializable
+open class Cl174 : Cloneable
+class Sub174 : Cl174()
+interface ISer174 : java.io.Serializable
+class Via174 : ISer174
+class Plain174
+enum class En174 { A }
+
+fun s174() {
+    val n = listOf(0, 1, 2, 3, 4, 5, 6, 7)
+    val m = mutableListOf(n[1], n[2], n[3], n[4])
+    val s = m.subList(n[1], n[3])
+    val e = m.subList(n[1], n[1])
+    val ss = s.subList(n[0], n[1])
+    m.add(n[5])
+    var sum = 0
+    check("cme174a", cme173 { s[0] } == "CMEnull" && cme173 { for (x in s) sum += x } == "CMEnull" &&
+        cme173 { for (x in e) sum += x } == "CMEnull" && cme173 { ss[0] } == "CMEnull" &&
+        cme173 { s.indices } == "CMEnull" && cme173 { s.lastIndex } == "CMEnull" && sum == 0 &&
+        (try { s[n[7]] } catch (x: IndexOutOfBoundsException) { "oob" }) == "oob")
+    val m2 = mutableListOf(n[1], n[2], n[3], n[4])
+    val s2 = m2.subList(n[0], n[3])
+    val m3 = mutableListOf(n[1], n[2], n[3], n[4])
+    val s3 = m3.subList(n[0], n[3])
+    val m4 = mutableListOf(n[1], n[2], n[3])
+    val s4 = m4.subList(n[0], n[2])
+    m4[0] = n[6]
+    check("cme174b", cme173 { for (x in s2) { sum += x; if (x == 1) m2.add(9) } } == "CMEnull" && sum == 1 &&
+        cme173 { s3.forEach { sum += it; if (it == 1) m3.removeAt(3) } } == "CMEnull" && sum == 2 &&
+        s4[0] == 6 && s4.sum() == 8)
+    val il = intArrayOf(n[1], n[2]).asList()
+    check("cast174c", uoe170 { il as java.util.ArrayList<Int> } == "C:class kotlin.collections.ArraysKt___ArraysJvmKt\$asList\$3 " +
+        "cannot be cast to class java.util.ArrayList (kotlin.collections.ArraysKt___ArraysJvmKt\$asList\$3 is in unnamed " +
+        "module of loader 'app'; java.util.ArrayList is in module java.base of loader 'bootstrap')" &&
+        uoe170 { listOf(n[1], n[2]) as ArrayList<Int> }.startsWith("C:class java.util.Arrays\$ArrayList cannot be cast to class java.util.ArrayList") &&
+        uoe170 { mapOf(n[1] to n[2]) as LinkedHashMap<Int, Int> }.startsWith("C:class java.util.Collections\$SingletonMap cannot") &&
+        uoe170 { hashMapOf(n[1] to n[2]) as LinkedHashMap<Int, Int> }.startsWith("C:class java.util.HashMap cannot") &&
+        uoe170 { hashSetOf(n[1]) as LinkedHashSet<Int> }.startsWith("C:class java.util.HashSet cannot") &&
+        uoe170 { mutableListOf(n[1]) as ArrayDeque<Int> }.endsWith("kotlin.collections.ArrayDeque is in unnamed module of loader 'app')") &&
+        (setOf(n[1], n[2]) as HashSet<Int>).size == 2 && (mutableMapOf(n[1] to n[2]) as HashMap<Int, Int>)[1] == 2 &&
+        (mutableListOf(n[1]) as? ArrayList<Int>)?.size == 1 && (listOf(n[1]) as? ArrayList<Int>) == null)
+    val nul: Any? = if (n[0] == 0) null else 1
+    check("cast174d", uoe170 { "x" as Cloneable }.startsWith("C:class java.lang.String cannot be cast to class java.lang.Cloneable") &&
+        uoe170 { ArrayDeque<Int>() as RandomAccess }.startsWith("C:class kotlin.collections.ArrayDeque cannot be cast to class java.util.RandomAccess") &&
+        uoe170 { Plain174() as java.io.Serializable }.startsWith("C:class Plain174 cannot") &&
+        (Sub174() as Cloneable) is Sub174 && (n[1] as java.io.Serializable) == 1 &&
+        (try { nul as ArrayList<Int> } catch (x: NullPointerException) { x.message }) == "null cannot be cast to non-null type java.util.ArrayList<kotlin.Int>" &&
+        (try { nul as Cloneable } catch (x: NullPointerException) { x.message }) == "null cannot be cast to non-null type kotlin.Cloneable")
+    val vs = listOf<Any>(il, listOf(n[1], n[2]), mutableListOf(n[1]), emptyList<Int>(), mutableListOf(n[1], n[2]).subList(0, 1),
+        ArrayDeque<Int>(), java.util.LinkedList<Int>(), listOf(n[1], n[2]).asReversed(), setOf(n[1], n[2]), hashMapOf(n[1] to n[2]),
+        mapOf(n[1] to n[2]), intArrayOf(n[1]), "s", n[1], 1u, n[1] to n[2], Ser174(), Sub174(), Via174(), Plain174(), En174.A,
+        IllegalStateException("x"), mapOf(n[1] to n[2], n[3] to n[4]).keys, buildList { add(n[1]) })
+    val marks = vs.joinToString("") { v -> (if (v is RandomAccess) "R" else "-") + (if (v is Cloneable) "C" else "-") +
+        (if (v is java.io.Serializable) "S" else "-") + " " }
+    check("mark174e", marks == "R-- R-S RCS R-S R-- --- -CS --- -CS -CS --S -CS --S --S --- --S --S -C- --S --- --S --S --- R-S ")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -7786,6 +7849,7 @@ fun main() {
     s171() // SECTION-CALL 171
     s172() // SECTION-CALL 172
     s173() // SECTION-CALL 173
+    s174() // SECTION-CALL 174
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

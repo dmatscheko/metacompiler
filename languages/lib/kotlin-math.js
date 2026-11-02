@@ -517,6 +517,50 @@ function ktRoJvmClass(jc) {
         jc == "kotlin.collections.ReversedListReadOnly" || jc == "kotlin.collections.AbstractList$SubList"
 }
 
+// The JVM marker interface a type name denotes - java.util.RandomAccess (also
+// kotlin.collections'), java.lang.Cloneable (kotlin.Cloneable) or
+// java.io.Serializable - by its simple name, "" for any other name. Go twin:
+// ktMarkerName in abnf/jsrtkotlin.go.
+function ktMarkerName(t) {
+    if (t == "RandomAccess" || t == "java.util.RandomAccess" || t == "kotlin.collections.RandomAccess") { return "RandomAccess" }
+    if (t == "Cloneable" || t == "kotlin.Cloneable" || t == "java.lang.Cloneable") { return "Cloneable" }
+    if (t == "Serializable" || t == "java.io.Serializable") { return "Serializable" }
+    return ""
+}
+// Whether JVM class jc implements marker m (ktMarkerName), for the classes this
+// runtime hands out. The random-access lists are the array-backed ones and their
+// subLists. Every array and every java.util collection that is neither a view nor
+// an immutable singleton is Cloneable and Serializable; kotlin's singletons and
+// builders, java's singletons, a PriorityQueue, the boxed primitives, String,
+// StringBuilder, Pair, Triple and Regex are Serializable only; a view (a subList,
+// a map's keys or values, an asReversed, a primitive array's asList) is neither.
+// Go twin: ktJvmMarker in abnf/jsrtkotlin.go.
+function ktJvmMarker(jc, m) {
+    var u = "java.util."
+    var kc = "kotlin.collections."
+    if (m == "RandomAccess") {
+        return jc == u + "ArrayList" || jc == u + "Arrays$ArrayList" || jc == u + "Collections$SingletonList" ||
+            jc == u + "ArrayList$SubList" || jc == u + "AbstractList$RandomAccessSubList" ||
+            jc == kc + "EmptyList" || jc == kc + "AbstractList$SubList" ||
+            jc.indexOf(kc + "builders.ListBuilder") == 0 || jc.indexOf(ktaAsListPfx) == 0
+    }
+    if (m == "") { return false }
+    var cl = jc.charAt(0) == "[" || jc == u + "ArrayList" || jc == u + "ArrayDeque" || jc == u + "LinkedList" ||
+        jc == u + "HashSet" || jc == u + "LinkedHashSet" || jc == u + "TreeSet" ||
+        jc == u + "HashMap" || jc == u + "LinkedHashMap" || jc == u + "TreeMap"
+    if (cl || m == "Cloneable") { return cl }
+    if (jc.indexOf("java.lang.") == 0) {
+        var b = jc.substring(10)
+        return b == "String" || b == "Integer" || b == "Long" || b == "Short" || b == "Byte" || b == "Double" ||
+            b == "Float" || b == "Character" || b == "Boolean" || b == "StringBuilder"
+    }
+    return jc == u + "Arrays$ArrayList" || jc.indexOf(u + "Collections$Singleton") == 0 || jc == u + "PriorityQueue" ||
+        jc == kc + "EmptyList" || jc == kc + "EmptySet" || jc == kc + "EmptyMap" ||
+        jc == kc + "builders.ListBuilder" || jc == kc + "builders.ListBuilder$BuilderSubList" ||
+        jc == kc + "builders.SetBuilder" || jc == kc + "builders.MapBuilder" ||
+        jc == "kotlin.Pair" || jc == "kotlin.Triple" || jc == "kotlin.text.Regex"
+}
+
 // A live list view - an Array's asList, a List's asReversed, a subList - is a list
 // of its own, linked both ways to the list it reads: each side's props __lnk lists
 // {a: the other list, rev: whether it reads it reversed, sl: null, or a subList's
