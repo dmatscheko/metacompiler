@@ -243,6 +243,31 @@ s160() {
   e=$( (v='+x=3'; declare $v s160e; echo "h $?"; export $v s160e=2; echo "i $?"; v='-y=3 s160g'; declare -x $v; echo "j $?"; declare '-%' s160h; echo "k $?"; declare -p s160e s160g s160h) 2>&1)
   check ivo4 "$(s160s "$e")" 'declare: +=: invalid option;declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...];h 2;export: `+x=3'"'"': not a valid identifier;i 1;declare: -y: invalid option;declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...];j 2;declare: -%: invalid option;declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...];k 2;declare -x s160e="2";declare: s160g: not found;declare: s160h: not found;'
 }
+# ===== SECTION 161: a callee through its caller's local nameref =====
+# A name is looked up through the calling functions, so a function called while its caller's
+# `local -n w=x` is in effect reads and stores x through w: assignments, +=, arithmetic,
+# expansions with operators, read, printf -v, unset, a for loop (which retargets w, and stops
+# at a word that names no variable) and a hidden NAME[SUB] local the caller made; a local of
+# its own hides it. Every expected value is bash 5.3's.
+s161() {
+  local e
+  s161s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s161f() { local -n w=$1; shift; "$@"; }
+  s161a() { w=8; w+=1; (( w += 1 )); echo "$w ${#w} ${w:-d} ${w/8/Y} $(( w + 1 ))"; }
+  s161b() { read -r w <<< "rd"; echo "r=$w"; printf -v w '%s' pf; echo "p=$w"; }
+  s161c() { unset w; echo "u=${w-gone}"; }
+  s161d() { for w in 1 2; do :; done; echo "l=$w"; }
+  s161e() { local w=own; echo "own=$w"; }
+  s161g() { w=(p q); w+=(z); echo "${w[*]} ${#w[@]}"; }
+  e=$( (s161x=1; s161f s161x s161a; echo "x=$s161x"; s161f s161x s161b; echo "x=$s161x"; s161f s161x s161c; echo "x=${s161x-gone}") 2>&1)
+  check cnr1 "$(s161s "$e")" '82 2 82 Y2 83;x=82;r=rd;p=pf;x=pf;u=gone;x=gone;'
+  e=$( (s161x=xv; s161f s161x s161d; echo "x=$s161x"; s161f s161x s161e; echo "x=$s161x"; unset s161x; s161f s161x s161g; echo "x=${s161x[*]}") 2>&1)
+  check cnr2 "$(s161s "$e")" '`1'"'"': not a valid identifier;l=xv;x=xv;own=own;x=xv;p q z 3;x=p q z;'
+  s161h() { local -n w=$1; declare w; w=5; s161i; echo "h: $w ${s161y[*]}"; }
+  s161i() { echo "i: $w"; w=7; w+=1; (( w += 1 )); echo "i2: $w"; }
+  e=$( (s161y=(a b c); s161h 's161y[1]'; echo "${s161y[*]}"; s161f 's161y[2]' s161i; echo "${s161y[*]}") 2>&1)
+  check cnr3 "$(s161s "$e")" 'i: 5;i2: 72;h: 72 a b c;a b c;i: c;i2: 72;a b 72;'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -252,5 +277,6 @@ s157  # SECTION-CALL 157
 s158  # SECTION-CALL 158
 s159  # SECTION-CALL 159
 s160  # SECTION-CALL 160
+s161  # SECTION-CALL 161
 echo "full: $checks checks, $fails failures"
 exit $fails

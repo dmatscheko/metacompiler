@@ -1715,6 +1715,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1, 0, 0])
     var rtNrefBase = rtDecl("rt_nref_base", true, [1])
     var gNrefGbase = rtGlobal("nref_gbase", i32)
+    // A name's run-time marks (32: a nameref, rt_nmark), asked only once nref_any is set.
+    var gNrefAny = rtGlobal("nref_any", i32)
+    var rtArrMarks = rtDecl("rt_arr_marks", false, [1])
     var rtNrefElems = rtDecl("rt_nref_elems", true, [1, 0])
     var rtNrefEnd = rtDecl("rt_nref_end", true, [1])
     var rtNrefUnglob = rtDecl("rt_nref_unglob", false, [])
@@ -2381,7 +2384,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `cell.tg`), and the subscripted path for the positional parameters, an associative
     // array and any other NAME[SUB], whose name and subscript come from the target (cell.nm,
     // cell.sub). A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-interpreter.abnf.
+    // ${...}, through a caller's nameref where one may stand (refMayThunk).
     function mkParamExp(items) {
+        var t = mkParamExpAt(items)
+        var i
+        for (i = 0; i < items.length; i++) {
+            if (typeof items[i] != "function" && items[i].pname != undefined) { t.fn = refMayThunk(items[i].pname, t.fn) }
+        }
+        return t
+    }
+    function mkParamExpAt(items) {
         var name = "", indp = false, hasIdx = false, bare = true, pfx = false, lenp = false, xfAttr = false
         var idxIt = null
         var wordObjs = []
@@ -3062,7 +3074,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // f: an unquoted $* under a null IFS is a field list (starArg).
         if (name == "*") { return {f: true, fn: function(b) { return {b: b, v: starParams(b)} }, c: undefined} }
         var multi = (name == "@")
-        return {f: multi, lean: true, vref: true, fn: function(b) { return {b: b, v: varString(b, name)} }, c: undefined}
+        return {f: multi, lean: true, vref: true, fn: refMayThunk(name, function(b) { return {b: b, v: varString(b, name)} }), c: undefined}
     }
     function mkArith(intThunk) {
         return {lean: true, fn: function(b) { var r = intThunk(b); return {b: r.b, v: r.b.NewCall(rtInt2str, r.v)} }, c: undefined}
@@ -3454,21 +3466,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (it.lhs != undefined) { lhs = it } else { iop = it.iop; pre = it.pre }
         }
-        return function(b) {
+        return refMayThunk(lhs.lhs, function(b) {
             var rk = arLhsKey(b, lhs)
             b = rk.b
             var v = arLhsGet(b, lhs.lhs, rk)
             var nv = (iop == "++") ? b.NewAdd(v, one64) : b.NewSub(v, one64)
             b = arLhsSet(b, lhs.lhs, rk, nv)
             return {b: b, v: (pre == 1) ? nv : v}
-        }
+        })
     }
     function mkArAssign(items, at) {
         var lhs = items[0]
         var aop = items[1].aop
         var t = items[2]
         var rc = arRecLa(at)
-        return function(b) {
+        return refMayThunk(lhs.lhs, function(b) {
             var rk = arLhsKey(b, lhs)
             b = rk.b
             // Plain = does not read the target: `x=q; (( x = 5 ))` is no recursion error.
@@ -3483,7 +3495,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             b = arLhsSet(b, lhs.lhs, rk, nv)
             return {b: b, v: nv}
-        }
+        })
     }
     // c ? a : b evaluates ONE arm: `k == 1 ? k++ : k--` changes k once.
     function mkArCond(items) {
@@ -3527,7 +3539,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (attrOn(refVars, name)) { return b.NewCall(rtGetRef, [gepStr(b, name), one]) }
         return varString(b, name)
     }
-    function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtArith, arString(b, name))} } }
+    function mkArVar(name) { return refMayThunk(name, function(b) { return {b: b, v: b.NewCall(rtArith, arString(b, name))} }) }
     // NAME[SUB]: items = [{lhs}, subscriptWord]. Twin of mkArLhs / mkArElem in
     // bash-interpreter.abnf.
     function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1], aq: items[2].aqa} }
@@ -4426,8 +4438,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     emitAbortCheck(rr.ro).NewBr(rr.ok)
                     b = rr.ok
                 }
-                b = refRoAbort(b, as[k].name, (as[k].lit != null) ? "c" : ((as[k].idxT != null) ? "cc" : "m"))
-                b = emitAssign(b, as[k], false, mk)
+                var ak = as[k]
+                var asOne = function(bb) {
+                    bb = refRoAbort(bb, ak.name, (ak.lit != null) ? "c" : ((ak.idxT != null) ? "cc" : "m"))
+                    return emitAssign(bb, ak, false, mk)
+                }
+                b = refMay(ak.name) ? viaRefMay(b, ak.name, false, asOne) : asOne(b)
             }
             asgKept = kept
             if (!subs) { storeStatusI(b, 0) }
@@ -6200,6 +6216,50 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < subIds.length; i++) { if (subIds[i] == curFrame.locs[key]) { return true } }
         return false
     }
+    // A CALLER'S NAMEREF. bash looks a name up through the calling functions, so `w=8` in g
+    // stores through f's `local -n w=x` while f calls g. Code inside a function that uses a
+    // name some declaration makes a nameref (refAnywhere), with no nameref or local of that
+    // name known here, asks its run-time mark (viaRefMay); any other name is emitted as
+    // before, so a program without such a name pays nothing.
+    var refMayIn = {}
+    function refMay(name) {
+        return curFrame != null && hasOwn(refAnywhere, "$" + name) && !attrOn(refVars, name)
+            && !attrOn(refMayIn, name) && refAlias(name) == null && !locOwn("$" + name)
+    }
+    // The test of NAME's run-time nameref mark: {ref, plain}, the blocks it goes on to.
+    function refMayTest(b, name) {
+        var chkB = curF.NewBlock(""), refB = curF.NewBlock(""), plainB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gNrefAny), zero), chkB, plainB)
+        var mk = chkB.NewAnd(chkB.NewCall(rtArrMarks, gepStr(chkB, name)), llvm.constant.NewInt(i32, 32))
+        chkB.NewCondBr(chkB.NewICmp(llvm.enum.IPredNE, mk, zero), refB, plainB)
+        return {ref: refB, plain: plainB}
+    }
+    // emit(b) twice, picked by NAME's nameref mark when it runs: as through a nameref whose
+    // target is known only then (refVars), and as written. emit answers {b, v} when val,
+    // else a block.
+    function viaRefMay(b, name, val, emit) {
+        var t = refMayTest(b, name)
+        var refB = t.ref, plainB = t.plain, joinB = curF.NewBlock("")
+        var key = "$" + name
+        refMayIn[key] = true
+        refVars[key] = true
+        var r1 = emit(refB)
+        refVars[key] = false
+        var r2 = emit(plainB)
+        refMayIn[key] = false
+        if (!val) {
+            r1.NewBr(joinB)
+            r2.NewBr(joinB)
+            return joinB
+        }
+        r1.b.NewBr(joinB)
+        r2.b.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(r1.v, r1.b), llvm.ir.NewIncoming(r2.v, r2.b)])}
+    }
+    // A word or arithmetic thunk t of NAME, run through viaRefMay where refMay says so.
+    function refMayThunk(name, t) {
+        return function(b) { return refMay(name) ? viaRefMay(b, name, true, t) : t(b) }
+    }
     // The lexical state of one name - its attributes and whether it is a local of the
     // function being compiled - to put back after emitting a path that may never run.
     function attrSnap(name) {
@@ -7362,7 +7422,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(zero, subP)
         if (dest != null) {
             b.NewStore(gepStr(b, "printf: "), gArPfx)
-            b = emitAssign(b, namedAsg(dest, b.NewCall(rtPfValue, out), subP), false, mk)
+            var pfAsg = namedAsg(dest, b.NewCall(rtPfValue, out), subP)
+            var pfOne = function(bb) { return emitAssign(bb, pfAsg, false, mk) }
+            b = refMay(dest) ? viaRefMay(b, dest, false, pfOne) : pfOne(b)
             b.NewStore(emptyPtr(b), gArPfx)
         } else {
             // A computed name is stored by name at run time (rt_setvar_byname, as a builtin).
@@ -7508,8 +7570,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 rrk.ro.NewBr(merge)
                 b = rrk.ok
             }
-            b = emitAssign(b, namedAsg(names[k], fvs[k], subP), false, mk1)
-            if (names[k].indexOf("[") < 0 && !attrOn(refVars, names[k])) { continue }
+            var rdAsg = namedAsg(names[k], fvs[k], subP)
+            var rdOne = function(bb) { return emitAssign(bb, rdAsg, false, mk1) }
+            var rdMay = refMay(names[k])
+            b = rdMay ? viaRefMay(b, names[k], false, rdOne) : rdOne(b)
+            if (names[k].indexOf("[") < 0 && !attrOn(refVars, names[k]) && !rdMay) { continue }
             var refB = curF.NewBlock(""), goB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, subP), zero), refB, goB)
             refB.NewStore(emptyPtr(refB), gArPfx)
@@ -8552,6 +8617,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         ust = b.NewOr(ust, b.NewCall(rtUnsetRef, [urf, b.NewOr(refAttrs(b, urf, true), llvm.constant.NewInt(i32, uOwn))]))
                         continue
                     }
+                    // A caller's nameref (refMay), when this runs, as the arm above.
+                    var umB = null, umSt = null
+                    if (sp0.key == null && !un && refMay(sp0.name)) {
+                        var umt = refMayTest(b, sp0.name)
+                        umB = umt.ref
+                        var umf = gepStr(umB, sp0.name)
+                        umSt = umB.NewOr(ust, umB.NewCall(rtUnsetRef, [umf, refAttrs(umB, umf, true)]))
+                        b = umt.plain
+                    }
                     // One readonly only when this runs is refused there (roRtC).
                     var uroB = null
                     if (sp0.key == null && !attrOn(roVars, sp0.name) && !attrOn(refVars, sp0.name) && roRtMay(sp0.name)) {
@@ -8618,6 +8692,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         uroB.NewBr(urjB)
                         ust = urjB.NewPhi([llvm.ir.NewIncoming(ust, b), llvm.ir.NewIncoming(one, uroB)])
                         b = urjB
+                    }
+                    if (umB != null) {
+                        var umjB = curF.NewBlock("")
+                        b.NewBr(umjB)
+                        umB.NewBr(umjB)
+                        ust = umjB.NewPhi([llvm.ir.NewIncoming(ust, b), llvm.ir.NewIncoming(umSt, umB)])
+                        b = umjB
                     }
                 }
                 storeStatus(b, ust)
@@ -9783,15 +9864,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 body = frr.ok
             }
             // A nameref control variable refers to each word in turn: the store is its own.
-            var body2 = body
-            if (attrOn(refVars, fname)) {
+            var forStore = function(body) {
+                if (!attrOn(refVars, fname)) { return emitStoreAttr(body, fname, body.NewCall(rtFAt, [list, i])) }
                 refVars["$" + fname] = true
                 // A word that names no variable ends the loop, status 1 (rt_nref_self_bad).
                 // Through a chain that closes on a local the word is stored (rt_nref_fstore),
                 // unless the variable it lands on is readonly (refAttrs), which ends the loop.
                 var fv = body.NewCall(rtFAt, [list, i])
                 var fown = curF.NewBlock(""), fstB = curF.NewBlock(""), froB = curF.NewBlock("")
-                body2 = curF.NewBlock("")
+                var body2 = curF.NewBlock("")
                 var fnv = gepStr(body, fname)
                 var fat = (roNames.length > 0) ? refAttrs(body, fnv, true) : zero
                 var fg = body.NewCall(rtNrefFstore, [fnv, fv, fat])
@@ -9809,8 +9890,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeVarRaw(fset, fname, fv)
                 heapPin(fset)
                 fset.NewBr(body2)
+                return body2
             }
-            else { body2 = emitStoreAttr(body, fname, body.NewCall(rtFAt, [list, i])) }
+            var body2 = refMay(fname) ? viaRefMay(body, fname, false, forStore) : forStore(body)
             body2.NewStore(zero, tcSlot)
             loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})
             var bb = bodyT(body2)
