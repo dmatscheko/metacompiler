@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1116** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1117** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -102,13 +102,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReversed live view; buildList subList writes · P3 · KT · IN PROGRESS (KT worker, round 33) [V]
+### T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primitive asList cast · P3 · KT · OPEN [V]
 
 Oracle: kotlinc 2.2.21.
-- `mutableMapOf("a" to 1).compute("a") { _, v -> (v ?: 0) + 1 }` aborts in every engine with "unknown Map method: compute"; kotlinc gives 2. computeIfPresent and replace (both forms, incl. replace(k, old, new) → Boolean) are missing too. Follow java.util.Map's defaults; a null result removes the key.
-- `arrayOf(1, 2).asList().javaClass.name` must be java.util.Arrays$ArrayList, and the list must write through to the array (`set` changes the array).
-- `asReversed()` must be a live view: `val rv = ml.asReversed(); ml.add(4); println(rv)` prints [4, 3, 2, 1]. Ours makes a copy, [3, 2, 1].
-- A sealed buildList's subList is a mutable copy, so writes through it do not throw as BuilderSubList's do. Probe this first; it comes from reading the code.
+- subList must be a live view: `val ml = mutableListOf(1,2,3,4); ml.subList(0,2).clear(); println(ml)` prints `[3, 4]`; every engine prints `[1, 2, 3, 4]`. Reuse the `__lnk` view link from asList/asReversed, carrying an offset and length. A structural change to the parent invalidates the sublist (ConcurrentModificationException on its next use).
+- `mutableListOf(1,2).replaceAll { it + 1 }` gives `[2, 3]`, and `mutableMapOf("a" to 1).replaceAll { _, v -> v * 2 }` gives `{a=2}`. Both abort with "unknown … method: replaceAll". Add them to the builtin member table, which has three copies.
+- `intArrayOf(1,2).asList() as MutableList<Int>` throws ClassCastException in kotlinc. Ours allows the cast, and set then writes through.
 
 # GO — Go  (oracle: `go run`)
 
@@ -128,13 +127,6 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
-
-### T-1114 php: return-type TypeError location; type-string order for callable/iterable/static; arrow-fn return deprecations · P3 · PHP · IN PROGRESS (PHP worker, round 50) [V]
-
-Spec: php-src PHP-8.4, Zend/zend_execute.c (zend_verify_return_error) and zend_compile.c (zend_type_to_string).
-- "Return value must be of type …" must report the line of the return statement. All engines report the caller's line, so each return needs its own site store.
-- phsTypeText/phpTypeText treat callable, iterable and static as class names, which puts type strings in the wrong order and case. php-src prints "Foo|callable" where we print "callable|Foo". Follow zend_type_to_string's order: class names first, then the builtin types in its fixed order.
-- The callable deprecations on a return statement are not raised for arrow functions or by-reference returns.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1168,6 +1160,8 @@ T-1104 ruby: interpreter `break` from a block is caught by the nearest call with
 T-1109 php: user-function argument TypeError location/trace; callable in unions, return types, variadics — DONE r49 (2a328aac): argument TypeError/ArgumentCountError at the declaration line (incl. generators) with 'and defined', trace shows passed args, callable in unions/return types/variadics via zend_is_callable; master-probed
 T-1110 php: microtime() missing; native uncaught "Call to undefined function" prints "in :0" — DONE r49 (66c9347e): microtime() per microtime.c, undefined-function Error at its call in run and native; plus e8b64ac3 warnings test exits 0/1 (raw fail count collided with timeout's 124 in --cross)
 T-1111 kotlin: MutableMap putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll value; shuffle(Random); view and iterator classes — DONE r32 (a87b38bb): Map putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll per java.util.Map, kotlin's real XorWowRandom (seeded output now matches kotlinc; old xorshift never did), shuffle/shuffled, view/iterator class names, sealed-view writes throw; master-probed
+T-1114 php: return-type TypeError location; type-string order for callable/iterable/static; arrow-fn return deprecations — DONE r50 (98fb26a4): return-type TypeError at the return statement (closing brace when none), zend_type_to_string order (classes first; iterable=Traversable|array; static resolved), arrow-fn/by-ref return deprecations; master-probed
+T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReversed live view; buildList subList writes — DONE r33 (bc89fc12): Map compute/computeIfPresent/replace per java.util.Map, asList (Arrays$ArrayList, primitive asList classes) and asReversed as live two-way views, buildList subList stays sealed; master-probed incl. views of views
 
 # Settled — do not re-open
 
