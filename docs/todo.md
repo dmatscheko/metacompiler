@@ -111,7 +111,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1147 kotlin: non-last vararg parameters, same-named nested class/object across owners (compiled), nested-object bound-ref arity (interp) · P2 · KT · OPEN [V]
+### T-1147 kotlin: non-last vararg parameters, same-named nested class/object across owners (compiled), nested-object bound-ref arity (interp) · P2 · KT · IN PROGRESS (KT worker, round 45) [V]
 
 Found while working T-1144. The oracle is kotlinc 2.2.21 (stdlib only). Items 1 and 2 give wrong results or crashes on valid programs, hence P2.
 
