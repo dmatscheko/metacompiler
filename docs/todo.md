@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1168** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1169** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,9 +103,10 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1165 kotlin: direct `java.lang.System.x()` calls in the compiler · P3 · KT · IN PROGRESS (KT worker, round 54) [V]
-Found while closing T-1164; oracle kotlinc 2.2.21.
-- Compiler (run and native): `fun main() { println(java.lang.System.nanoTime() > 0L) }` fails "js runtime error: unknown name: java.lang.System"; kotlinc and the interpreter print true. `ktPkgMember` (jsrtkotlin.go) and its layer-2 twin look up only globals (`ktGlobalFn`); System is not a global — the emitter declares it into scope on demand. `java.lang.Long.signum`, `java.lang.Math.abs`, `java.lang.Integer.signum` direct calls work. Also check `java.lang.System.currentTimeMillis()`, `.identityHashCode(x)` and `java.lang.System.out.println`.
+### T-1168 kotlin: System.err, `java` name shadowing in qualified java.lang rewrites · P3 · KT · OPEN [V]
+Found while closing T-1165; oracle kotlinc 2.2.21.
+- All engines: `System.err` is not modelled (`System.err.println("e")` should write "e" to stderr, exit 0; also `java.lang.System.err`, `System.err::println`). Compare stderr against the oracle's.
+- Both engines: the `java.lang.System.x` / `java.lang.X::name` rewrites ignore a program binding named `java` (a local, parameter or property, or `object java`). Probe what kotlinc accepts and keep ours consistent with it; if kotlinc rejects every such shadowing form, record it as a non-issue.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1208,6 +1209,7 @@ T-1161 kotlin: arity and Function-type checks of references to Java statics — 
 T-1164 kotlin: java.lang.Long::name in the compiler, function types from collection element types — merged d758f6ce: java.lang-qualified static references in the compiler, function types from collection/map element types, stored references keep identity in the interpreter; master four-leg probe matches kotlinc 2.2.21
 T-1162 bash: hidden NAME[SUB] locals through a nameref, `w=k export w=7`, hidePrefix before eval — merged 2b3a0888 (partial): hidden NAME[SUB] scalar locals through a nameref in both engines, prefix export/readonly NAME=V through a nameref, hidePrefix before eval; hidden array locals and callee-through-caller-nameref carried to a follow-up; master probe matches bash 5.3
 T-1163 ruby: include into Object, implicit-self builtins in reopened classes, breaking accumulator blocks on endless enums, instance_eval, NaN identity — merged 066db318 (partial): include into Object, bare builtin calls in reopened builtin classes (+69 respond_to? names), breaking inject/reduce/min/max/one? on endless enums, instance_eval/instance_exec; Float identity carried to a follow-up; master four-leg probe matches ruby 2.6
+T-1165 kotlin: direct `java.lang.System.x()` calls in the compiler — merged e2c27fb4: java.lang.System.x() calls in the compiler, System.out (println/print/references) in both engines; master four-leg probe matches kotlinc 2.2.21
 
 # Settled — do not re-open
 
