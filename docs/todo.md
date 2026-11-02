@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-step map/each_with_object, last → FloatDomainError · P3 · RB · OPEN [V]
+### T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-step map/each_with_object, last → FloatDomainError · P3 · RB · IN PROGRESS (RB worker, round 55) [V]
 
 Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
 - The halves disagree: `a = 1.step(10,3); p [a.respond_to?(:first), a.respond_to?(:begin), a.respond_to?(:each)]` gives [true, true, true] in MRI, [false, false, false] in the interpreter and [true, false, true] in llvm.Run/native. Add an "Enumerator::ArithmeticSequence" row to lib/ruby-respond.js / rubyRespondNames, and map the class the same way in both halves.
