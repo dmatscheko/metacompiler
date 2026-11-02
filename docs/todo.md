@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1154** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1155** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,18 +103,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1151 kotlin: array == / === compare contents instead of identity; vararg member references; local-fun ::name; inherited/inner static result types · P2 · KT · IN PROGRESS (KT worker, round 47) [V]
-
-Found while working T-1149. The oracle is kotlinc 2.2.21 (stdlib only). Item 1 silently changes program results, hence P2.
-
-1. In all engines, arrays compare by contents for both `==` and `===`. Kotlin's arrays are JVM arrays: `==` is `equals`, which is identity for arrays, and `===` is identity. Only `contentEquals` compares elements. Repro: `val b = intArrayOf(1,2); val c = intArrayOf(1,2); val d = b; println("${b === c} ${b === d} ${b == c} ${b.contentEquals(c)}")` prints `false true false true` in the oracle and `true true true true` in ours. Also, `fi(*a) === a` (a spread makes a copy) is false in the oracle. Check every array kind (IntArray, Array<T>, CharArray, ...), `!=`, `equals()`, arrays as map keys and set elements (hashCode is the identity hash; use the existing identity stand-in), `listOf(arr).contains(arr2)`, and `when (arr) { other -> }`. Lists must keep content equality. Keep it cost-neutral: `==` on numbers and strings is hot.
-2. Member references to vararg methods: with `class M(val k: Int) { fun s(vararg xs: Int) = k + xs.sum() }`, `(m::s)(intArrayOf(1,2))` gives 100 on all legs; the oracle says 103. `(M::s)(m, intArrayOf(3))` gives 100 on run and native; the oracle says 103. The interpreter gets 103 only by accident. Extend the `$vref` approach of T-1149 to methods (ktRefApply in jsrtkotlin.go and kotlin-rt.metajs).
-3. Interpreter only: `fun main() { fun loc2(x: Int) = x; println(::loc2.name) }` prints `kotlin.Unit`. Run, native and the oracle print `loc2`, because local function closures are not in fnRefFns.
-4. Static result types:
-   - `open class A160 { fun m(): Int = 1 }; class B160 : A160()`, plus another class with `fun m(): List<Int>`. `B160().m().javaClass.name` is `int` in the oracle and `java.lang.Integer` in ours, because kotlin-decltypes.js has no supertype information.
-   - `d.E160().m().javaClass.name` for an inner-class constructor through a receiver is `long` in the oracle and `java.lang.Long` in ours.
-
-Verify with `tests/probe.sh kotlin` on all four legs.
+### T-1154 kotlin: `===` identity beyond arrays, array toString/contentHashCode, named spread, vararg element type · P3 · KT · OPEN [V]
+Found while closing T-1151; oracle kotlinc 2.2.21.
+- Both grammars lower `===` to `==`: `data class P(val x: Int); P(1) === P(1)`, lists and Pairs still compare structurally (kotlinc: false). Needs an identity extern; keep `m.keys === ks` (section 147) true. All engines.
+- `intArrayOf(1,2).toString()` prints `[1, 2]`; kotlinc prints `[I@<hash>` (assert as a relation). `contentHashCode()` is missing in all engines ("unknown list method"); kotlinc prints 994 for `intArrayOf(1,2)`.
+- Named spread `g(xs = *b)` does not parse in either grammar.
+- `fun fl(vararg xs: Long) = xs; fl(5L)[0].javaClass.name` gives java.lang.Long; kotlinc says `long` (the vararg's static type is noted as its element type). All engines, pre-existing.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1209,6 +1203,7 @@ T-1146 bash: declaration message ordering and redirects, local -r/-a merges, rea
 T-1149 kotlin: function reference to a vararg function called with an array, interpreter by-name static return type — merged 4fa25278: vararg function references bind the array directly ($vref twin with the vararg as a plain parameter, top-level and local, in both engines), method result static types from the receiver class's own declaration (ktFunDecls/ktOwnFunRet) with name fallback; 4-leg probe matches kotlinc 2.2.21 (array identity defect found and filed P2); kotlin gates green; bench IR byte-identical
 T-1150 bash: compiler nameref attribute placement, circular-vs-depth message, compile-time readonly leaking out of subshells and dynamic calls — merged acfdc0f7: function readonly lifetime, circular-nameref readonly warnings, -i/-u/-l through computed namerefs; master four-leg probes match bash 5.3 except a pre-existing arithmetic-store case (filed)
 T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.size, Object instance methods + top-level define_method, uncaught-exception backtrace "from" lines — merged 45589482: Kernel#then, NUM2LONG count args, exact big times.size, program methods on Object; master probes match ruby 2.6 in run/native, interp gaps pre-existing (filed)
+T-1151 kotlin: array == / === compare contents instead of identity; vararg member references; local-fun ::name; inherited/inner static result types — merged 9bd4cb20: array ==/=== identity (tagged vararg arrays), vararg member refs, local ::name in interp, inherited result types; master four-leg probe matches kotlinc 2.2.21
 
 # Settled — do not re-open
 
