@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1143** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1144** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -139,21 +139,18 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list assignment parse, quoted compound values, reads through circular array nameref, path-length-dependent frozen step cost · P3 · SH · IN PROGRESS (SH worker, round 44) [V]
+### T-1143 bash: declaration error prefix rule, compiler run-time-circular and readonly nameref array decls, valueless local nameref subscript store, compiler step cost of comsub+extglob probes · P3 · SH · OPEN [V]
 
-Found while working T-1134. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+Found while working T-1139. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
-1. A list-to-array-member line whose internal declaration fails (`declare -A ia[k]=(x)` on an indexed ia) should print a bare `ia: cannot convert…` message; ours keeps the `declare: ` prefix. Inside a function, bash reports twice and continues.
-2. `declare r[1]=(x)` on a global nameref to an unset variable should turn the nameref itself into an array; ours turns its target into one.
-3. The prefix assignment `x=1 e[2]=(y) echo hi` fails to parse. bash prints ``e[2]': not a valid identifier`` and runs the command.
-4. Quoted compound values: `declare 'w[1]=(x)'` should warn "quoted compound array assignment deprecated". Under -a/-A, a run-time value `(x y)` should be treated as a compound assignment; we store it literally.
-5. Reads through a circular array nameref (`${w:=dd}`, `$w`) should fail with "invalid variable name for name reference" and abandon the line. Ours reads elements, and the interpreter (`[]`) and the compiler (`[x]`) disagree with each other.
-6. In the compiler, `local w=(q)` on a circular nameref drops the -n attribute.
-7. A failed `${NAME:=WORD}` store gives status 2 in bash 5.3, even for an ordinary readonly variable; ours gives 1.
-8. `declare q[1]=3` and `read -a q` on a nameref with no value should warn "removing nameref attribute" and turn q into an array; ours keeps -n.
-9. Performance: the bash interpreter's frozen step cost for a full-syntax test file grows strongly with the length of the file's path. Part 6 needed 11M steps at a short relative path, 81M at test.sh's work path, and about 140M at a scratchpad path. The suspect is the per-section stderr helpers (`${l#*: line }`) scanning lines that start with the script path, which is a pattern-removal cost that is quadratic or worse in the line length. Measure with a long path, find where the steps go, and make `${var#pattern}` / `${var%pattern}` with a leading or trailing `*` linear when the rest of the pattern is a literal. This is a fix to the algorithm, not an optimizer pass. Test parts 5–7 then gain real headroom.
+1. Error prefix rule. bash prefixes a declaration's first error with this_command_name, which is FUNCNAME only when the declaration is the first command the function runs; otherwise the message is bare. Both engines use FUNCNAME for any -g declaration in a function. Repro: `ib=(1); g() { true; declare -gA ib=(x); }; g` prints `ib: cannot convert indexed to associative array` in bash, and `g: ib: ...` in ours.
+2. Compiler: a readonly set after the function is defined (`f() { declare -gA c[1]=(x); }; readonly c=1; f`) is missed by the static roVars, so the compiler reports only "cannot assign list". It must also report the readonly error the interpreter gives.
+3. Compiler: when the circularity is only known at run time (`x=w; f() { local -n w=$x; local w=(q); }; f`), `local w=(q)` leaves `-n w="w"`. bash gives `declare -an w=([0]="q")`.
+4. `local -nr w=w; local w=(q)`: bash gives `-an w=([0]="q")`. Both engines keep `-nr w="w"`.
+5. `f() { local -n q7; declare q7[1]=5; declare -p q7; }; f`: bash prints ``declare: `5': invalid variable name for name reference`` and leaves `-an q7`. Both engines store `[1]="5"`.
+6. Compiler step cost. A long probe (19 command-substitution plus subshell cases, each filtering lines with the extglob `${l##*: line +([0-9]): }`) needs just over 100M steps in the compiled leg under -frozen, while each segment passes on its own. Find where the steps go (the extglob `+([0-9])` removal is not covered by the new literal-suffix fast path in stripPat), and fix the algorithm, not with an optimizer pass.
 
-Not to be emulated: in bash, after a scalar store to an array nameref, a later `declare w+=(z)` silently does nothing, and `for w in a` on one segfaults bash.
+Not emulated by design: the \001 byte bash prints before `: invalid variable name for name reference` when reading through a circular array nameref.
 
 Verify with `tests/probe.sh bash` on all four legs, and diff the `.err` files. New sections go in tests/bash-test-full.7.sh.
 
@@ -1202,6 +1199,7 @@ T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, o
 T-1138 kotlin: static Array<T>::class, KClass no-reflect suffix decision, function-reference javaClass and member-ref arity, receiver-lambda arity — merged d520bee5: static Array<T>::class (incl. nested/primitive element arrays), function-reference javaClass stand-in, reference arity for program methods/props/constructors (js_ktrefarity), receiver-param lambda arity, explicit it-parameter scoping; also fixed compiled js_ktrecvlam passing the receiver twice (two invalid-Kotlin feature tests corrected); 4-leg probe matches kotlinc 2.2.21; kotlin gates green; bench +0.04%
 T-1137 ruby: Hash#index warning via send/method and on multi-line calls, big-integer ranges, zero slice size, endless Float range slices — merged 8b79ec7b: Hash#index warning from the runtime arm at the running site (send/method/public_send; site fn registered once via js_rsitefn, no per-call extern), later-line call sites for warnings and backtraces in all engines, big-Integer ranges walk/count exactly, Range#length NoMethodError and Float-range count TypeError per MRI, each_slice/each_cons size checks with implicit conversion; 4-leg probe matches ruby 2.6 stdout + stderr; matrix 605/605; bench +0.02%
 T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) — merged 82430d9c: builtin method reference arity from one kotlinc-measured table in kotlin-decltypes.js (140 names x 30 receiver types; bound refs pass the spec to js_ktrefarity, unbound get it at compile time), expr::name records arity, inherited equals arity 1; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench 0.00%
+T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list assignment parse, quoted compound values, reads through circular array nameref, path-length-dependent frozen step cost — merged a35d7084: list-to-member declaration failures, nameref array conversions (-g target, removing nameref attribute, read -a/mapfile), prefix list assignments, quoted compound values (+ compiler keeps -i/-u/-l on runtime (...)), reads through circular array namerefs, readonly :=  status 2, linear ${v#*L}/${v%L*} for literal L (part 6 frozen steps 70M -> 27M); 4-leg probe matches bash 5.3 (stdout + stderr; \001 byte by design); bash gates green; bench 0.00%
 
 # Settled — do not re-open
 
