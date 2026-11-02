@@ -138,7 +138,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1127 bash: test arity errors, declare through circular -i nameref, readonly circular warning · P3 · SH · OPEN [V]
+### T-1127 bash: test arity errors, declare through circular -i nameref, readonly circular warning · P3 · SH · IN PROGRESS (SH worker, round 40) [V]
 
 Found while probing T-1124. All three diverge from bash 5.3 (LC_ALL=C) in the interpreter, the compiled run, or both:
 
