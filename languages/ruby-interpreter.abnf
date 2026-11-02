@@ -326,7 +326,7 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // whitespace in front of it), which makeBody publishes as the running statement's
 // site; Semi and Require push nothing, so it cannot sit on Statement itself.
 Statement   = Semi | Require | PosStmt ;
-PosStmt     <~~ push(stmtAt(takeAll())) ~~>
+PosStmt     <~~ var sti = takeAll(); settleSfx(sti[0]); push(stmtAt(sti)) ~~>
             = "" <~~ push(up.pos) ~~> ( DoWhileStmt | ModStmt ) ;
 Semi        = ";" ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
@@ -922,16 +922,16 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 PrimaryEnd  = :whitespace() "" <~~ push({phead: hasOwn(placeAt, "p" + up.pos) ? placeAt["p" + up.pos] : null}) ~~> :whitespace(Whitespace) ;
 CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
-MethodSfx   <~~ push(methodSfx(popName(), takeAll())) ~~>
-            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
+MethodSfx   <~~ var mp = peekMPos(); push(sfxAt(methodSfx(popName(), takeAll()), mp)) ~~>
+            = "." MethodName <~~ push({mname: noteMName(up.in), mpos: up.pos}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
 CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
             = "." "(" [ Arg { "," Arg } ] ")" ;
 FieldSfx    = "." MethodName <~~ push({kind: "field", name: noteMName(up.in)}) ~~> ;
 // Safe navigation obj&.m / obj&.m(args): yields nil (and skips the call, not even
 // evaluating the arguments) when the receiver is nil, else a normal method/field.
-SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
-            = "&." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
+SafeMethodSfx <~~ var sp = peekMPos(); push(sfxAt({kind: "smcall", name: popName(), args: takeAll()}, sp)) ~~>
+            = "&." MethodName <~~ push({mname: noteMName(up.in), mpos: up.pos}) ~~> MArgs ;
 SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}) ~~> ;
 // The LineCont guard keeps a line that OPENS with an array literal from being read
 // as an index of the previous expression (`txt = ""' then `[[1, 2]].each ...').
@@ -5875,9 +5875,52 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return out
         }
+        if (rangeWide(r)) {
+            var we = rangeWideEnd(r)
+            var wc = anytype
+            wc = r.lo
+            while (true) {
+                var wk = spaceship(wc, we.hi)
+                if (wk > 0 || (we.excl && wk == 0)) { break }
+                out.push(wc)
+                wc = numBin("+", wc, 1)
+            }
+            return out
+        }
         var end = toF(r.hi)
         for (var i = toF(r.lo); r.excl ? i < end : i <= end; i++) { out.push(i) }
         return out
+    }
+    // An Integer begin with an Integer or finite Float end, one of them at or
+    // past 2^53, where a double stepping by one stalls (2^53 + 1 rounds back to
+    // 2^53) and a count by subtraction rounds: the walk and #count step Integers
+    // up to the last one the end admits (rangeWideEnd), as MRI's range_each does.
+    // #size keeps range_size's rule, Integer arithmetic for an Integer end and
+    // the Float step count for a Float one. Twins: rubyRangeWide in
+    // abnf/jsrtruby.go, rbRangeWide in lib/ruby-rt.metajs.
+    function rangeWide(t) {
+        if (!(typeof t.lo == "number" || isBig(t.lo))) { return false }
+        var hi = anytype
+        hi = t.hi
+        if (isFlo(hi)) {
+            if (hi.f - hi.f != 0) { return false }
+            hi = hi.f
+        } else if (!(typeof hi == "number" || isBig(hi))) { return false }
+        return isBig(t.lo) || isBig(hi) || Math.abs(t.lo) >= 9007199254740992 || Math.abs(hi) >= 9007199254740992
+    }
+    // The last Integer a wide range's end admits: a Float end is floored, and
+    // still excludes only when it is integral.
+    function rangeWideEnd(t) {
+        if (!isFlo(t.hi)) { return {hi: t.hi, excl: t.excl === true} }
+        return {hi: mcall(t.hi, "floor", [], null), excl: t.excl === true && t.hi.f == Math.floor(t.hi.f)}
+    }
+    // Its element count: end - begin (+ 1 unless excluded), 0 for an empty range.
+    function rangeWideCount(t) {
+        var we = rangeWideEnd(t)
+        var d = anytype
+        d = numBin("-", we.hi, t.lo)
+        if (!we.excl) { d = numBin("+", d, 1) }
+        return spaceship(d, 0) < 0 ? 0 : d
     }
     function rangeCover(r, v) {
         if (r.lo !== null && r.lo !== undefined) {
@@ -5953,6 +5996,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (t.hi === null || t.hi === undefined) { return mkFlo(Math.pow(2, 1024)) }
         if (!isNumV(t.hi)) { return null }
         if (rangeUnbounded(t)) { return mkFlo(Math.pow(2, 1024)) }
+        if (rangeWide(t) && isFlo(t.hi)) { return rbnFloatStepSize(toF(t.lo), t.hi.f, 1, t.excl === true) }
+        if (rangeWide(t)) { return rangeWideCount(t) }
         var n = 0
         if (isFlo(t.lo)) { n = rbnFloatStepSize(t.lo.f, toF(t.hi), 1, t.excl === true) }
         else { n = rangeToA(t).length }
@@ -5963,8 +6008,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function rangeMethod(t, name, args, blk) {
         if (name == "lazy") { return rangeLazy(t) }
         // with_index / with_object are Enumerator's, not Enumerable's, and index /
-        // rindex are Array's.
-        if (name == "with_index" || name == "with_object" || name == "index" || name == "rindex") { noMethod(t, name) }
+        // rindex / length are Array's.
+        if (name == "with_index" || name == "with_object" || name == "index" || name == "rindex" || name == "length") { noMethod(t, name) }
         // dup / clone answer a new Range (Object#dup), never the receiver; clone
         // keeps the frozen flag #freeze set. Twins: rbRangeMethod, rubyRangeMethod.
         if (name == "dup" || name == "clone") {
@@ -6010,10 +6055,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return lazyMethod(lazyCopy(rangeLazy(t), null, false, rinspect(t)), name, args, null)
             }
             if (strOpen && name == "first" && args.length > 0) { return lazyFirst(rangeLazy(t), Math.trunc(toF(args[0]))) }
-            if (rbaSliceOp(name) != "" && args.length > 0 && Math.trunc(toF(args[0])) > 0) {
-                var rsn = Math.trunc(toF(args[0]))
+            if (rbaSliceOp(name) != "") {
+                var rsn = sliceSize(name, args)
                 var ue = lazyCopy(rangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
-                    "#<Enumerator: " + rinspect(t) + ":" + name + "(" + rsn + ")>")
+                    "#<Enumerator: " + rinspect(t) + ":" + name + inspectArgs(args) + ">")
                 if (blk == null) { return ue }
                 mcall(ue, "each", [], blk)
                 return null
@@ -6065,9 +6110,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // is 1 and (1..).max raises; materializing first would never end.
         if (t.hi === null || t.hi === undefined || t.lo === null || t.lo === undefined) {
             if (name == "min") { return t.lo }
-            if (name == "length" || name == "count") {
-                fail("cannot take the length of an endless range")
-            }
+            if (name == "count") { fail("cannot take the length of an endless range") }
         }
         // #min / #max of a range with a numeric end are its bounds (range_min /
         // range_max): (1.0..2.0).max is 2.0, (1..1.5).max is 1.5, and an exclusive
@@ -6085,14 +6128,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Range#size / #min / #max on their own: arrayMethod has no `size' arm, and
         // #min of an EMPTY range is nil in MRI ((1..-1).min), not the low bound.
         if (args.length == 0 && blk == null) {
-            // A Float range cannot be walked but has a size: the count of the
-            // values lo, lo + 1, ... (rubyRangeLen in abnf/jsrt.go).
-            if (isFlo(t.lo) && (name == "length" || name == "count")) {
-                return rbnFloatStepSize(t.lo.f, toF(t.hi), 1, t.excl === true)
-            }
+            if (name == "count" && rangeWide(t)) { return rangeWideCount(t) }
             var ra = anytype
             ra = rangeToA(t)
-            if (name == "length" || name == "count") { return ra.length }
+            if (name == "count") { return ra.length }
             if (name == "min") { return ra.length == 0 ? null : ra[0] }
             if (name == "max") { return ra.length == 0 ? null : ra[ra.length - 1] }
         }
@@ -7279,6 +7318,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         raiseErr(frame, "TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
         return 0
     }
+    // each_slice / each_cons take one Integer size of at least 1, converted and
+    // checked when the call is made (enum_each_slice), so a Float or endless
+    // receiver that is never walked still refuses it. args holds no block.
+    // Twins: rubySliceSize in abnf/jsrtruby.go, rbSliceSize in lib/ruby-rt.metajs.
+    function sliceSize(name, args) {
+        if (args.length != 1) { raiseErr(name, "ArgumentError", "wrong number of arguments (given " + args.length + ", expected 1)") }
+        var n = Math.trunc(implicitInt(name, args[0], ""))
+        if (n < 1) { raiseErr(name, "ArgumentError", name == "each_slice" ? "invalid slice size" : "invalid size") }
+        return n
+    }
     // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
     // directive, in that directive's own case or not ("%G" % Float::INFINITY is
     // "Inf"), and pads them with SPACES even under the 0 flag. rubyFloatWord in
@@ -8055,6 +8104,43 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
     function noteMName(n) { if (n == "arity" || n == "curry" || n == "default_proc") { usesArity = true } return n }
+    // MRI names a `.name(...)' call by the line of its method NAME (a call
+    // without parentheses keeps its receiver's), and a multi-line statement puts
+    // that past the statement's first: `x = h\n  .fetch(:k)' raises at line 2,
+    // and a warning inside the call names line 2. Such a call runs with its own
+    // site (sitedMcall). A suffix tag notes its name's position (sfxAt); the
+    // PosStmt tag of the statement, which fires after every suffix inside it,
+    // decides each on a later line (settleSfx). The decision is kept BY POSITION
+    // (sfxSites), since a tag value is copied, not shared. Twins: the same
+    // functions in ruby-to-llvm-ir.abnf.
+    var pendSfx = []
+    var sfxSites = {}
+    function peekMPos() {
+        var items = takeAll()
+        var p = -1
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mpos != undefined) { p = items[i].mpos }
+            push(items[i])
+        }
+        return p
+    }
+    function sfxAt(seg, pos) {
+        if (pos >= 0) {
+            seg.npos = pos
+            pendSfx.push(pos)
+        }
+        return seg
+    }
+    function settleSfx(spos) {
+        var keep = []
+        for (var i = 0; i < pendSfx.length; i++) {
+            var p = pendSfx[i]
+            if (p < spos) { keep.push(p) }
+            else { sfxSites["p" + p] = c.lineOf(p) != c.lineOf(spos) }
+        }
+        pendSfx = keep
+    }
+    function sfxSited(s) { return s.npos !== undefined && sfxSites["p" + s.npos] === true }
     // `x.+(y)' calls an operator METHOD by name, which is exactly `x.send(:+, y)'.
     // Twin of methodSfx in ruby-to-llvm-ir.abnf.
     function methodSfx(name, args) {
@@ -8211,8 +8297,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name != null && enumNoSize(v)) { return null }
             return v.items.length
         }
-        // A Range's size is its element COUNT; a Range object here has no .length.
-        if (isRange(v)) { return rangeMethod(v, "size", [], null) }
+        // A Range's size is its element COUNT, and it has no #length.
+        if (isRange(v)) { return rangeMethod(v, name == "length" ? name : "size", [], null) }
         if (v === null || v === undefined) { fail("length of nil") }
         // A String's length is in CHARACTERS (a surrogate pair is one), the way the
         // compiled halves' js_pylen counts it.
@@ -10560,9 +10646,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return iv
         }
         // Hash#index is MRI 2.6's deprecated alias of #key, which warns on every
-        // call. Twin of js_rhidxwarn in abnf/jsrtruby.go and lib/ruby-rt.metajs.
-        if (name == "index" && rbSitePos >= 0) { eprint(c.file + ":" + c.lineOf(rbSitePos) + ": warning: Hash#index is deprecated; use Hash#key\n") }
+        // call that passes its arity check, at the running site. Twins: the arm
+        // in rubyHashMethod (abnf/jsrt.go) and rbHashMethod (lib/ruby-rt.metajs).
         if (name == "key" || name == "index") {
+            if (args.length != 1) { raiseErr(name, "ArgumentError", "wrong number of arguments (given " + args.length + ", expected 1)") }
+            if (name == "index" && rbSitePos >= 0) { eprint(c.file + ":" + c.lineOf(rbSitePos) + ": warning: Hash#index is deprecated; use Hash#key\n") }
             for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return keyOut(target.keys[ky]) } }
             return null
         }
@@ -11264,10 +11352,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "lazy") { return t.lazy ? t : lazyCopy(t, null, true, "#<Enumerator::Lazy: " + t.desc + ">") }
         // each_slice(n) / each_cons(n) without a block stay one value at a time.
         // Twins: rbLazyMethod, rubyLazyMethod.
-        if (rbaSliceOp(name) != "" && blk == null && args.length > 0 && Math.trunc(toF(args[0])) > 0) {
-            var sn = Math.trunc(toF(args[0]))
+        if (rbaSliceOp(name) != "" && blk == null) {
+            var sn = sliceSize(name, args)
             return lazyCopy(t, {k: rbaSliceOp(name), f: null, n: sn}, t.lazy,
-                (t.lazy ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + t.desc + ":" + name + "(" + sn + ")>")
+                (t.lazy ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + t.desc + ":" + name + inspectArgs(args) + ">")
         }
         if (t.kind == "each" && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
         if (t.kind == "each" && name == "rewind") { return rbRunRewind(t) }
@@ -11748,8 +11836,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // (MRI 2.6; 3.1 answers the receiver); with no block, an Enumerator over the
         // groups.
         if (name == "each_slice" || name == "each_cons") {
-            var gn = Math.trunc(toF(args[0]))
-            if (gn < 1) { raiseErr(name, "ArgumentError", name == "each_slice" ? "invalid slice size" : "invalid size") }
+            var gn = sliceSize(name, args)
             var groups = []
             if (name == "each_slice") {
                 for (i = 0; i < t.length; i = i + gn) { groups.push(arrSub(t, i, gn)) }
@@ -12219,6 +12306,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var bf = sp.blk(home)
         return catchBlkBreak(function() { return mcall(recv, s.name, argv, bf) }, home)
     }
+    // A call on a later line than its statement (sfxSited) runs with its own
+    // site, and puts the statement's back after.
+    function sitedMcall(recv, s) {
+        var site = rbSitePos
+        rbSitePos = s.npos
+        var r = anytype
+        r = invokeMcall(recv, s)
+        rbSitePos = site
+        return r
+    }
 
     // The places a chain's primary can READ - a local, an @ivar, a $global - by the
     // source position the reference ENDS at, which is where PrimaryEnd matches when
@@ -12286,11 +12383,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     cur = nb
                 }
                 if (mut) { pObj = undefined }
+                if ((s.kind == "mcall" || s.kind == "smcall") && s.wsite === undefined) { s.wsite = sfxSited(s) }
                 if (s.kind == "mcall") {
-                    cur = boxOut(cur, invokeMcall(cur, s))
+                    cur = boxOut(cur, s.wsite === true ? sitedMcall(cur, s) : invokeMcall(cur, s))
                 } else if (s.kind == "smcall") {
                     if (cur === null || cur === undefined) { cur = null }
-                    else { cur = boxOut(cur, invokeMcall(cur, s)) }
+                    else { cur = boxOut(cur, s.wsite === true ? sitedMcall(cur, s) : invokeMcall(cur, s)) }
                 } else if (s.kind == "field") {
                     visCheck(cur, s.name)
                     if (isUserObj(cur)) { cur = boxOut(cur, mcall(cur, s.name, [], null)) }

@@ -2935,6 +2935,15 @@ function rbImplicitInt(frame, v, alt) {
     return 0
 }
 
+// The size argument of each_slice / each_cons, of the n positional ones in
+// args. Twin of sliceSize in ruby-interpreter.abnf, which states the rule.
+function rbSliceSize(name, args, n) {
+    if (n != 1) { rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given " + n + ", expected 1)") }
+    var sz = Math.trunc(rbImplicitInt(name, args[0], ""))
+    if (sz < 1) { rbRaiseErr(name, "ArgumentError", name == "each_slice" ? "invalid slice size" : "invalid size") }
+    return sz
+}
+
 // The base of a conversion character, and 0 for the ones that are not integers.
 function rbIntBase(conv) {
     // %u is MRI's %d: the 1.8 "unsigned" meaning is long gone and "%u" % -5 is
@@ -4937,6 +4946,7 @@ function rbRangeArr(lo, hi, excl) {
         }
         return out
     }
+    if (rbRangeWide(lo, hi)) { return rbRangeWideArr(lo, hi, excl) }
     var l = rbToF(lo)
     var h = rbToF(hi)
     var k = 0
@@ -4945,6 +4955,48 @@ function rbRangeArr(lo, hi, excl) {
         out.push(i)
         i = i + 1
         k = k + 1
+    }
+    return out
+}
+
+// A wide range (an Integer begin, an Integer or finite Float end, one of them at
+// or past 2^53), the last Integer its end admits, its count and its walk. Twins
+// of rangeWide / rangeWideEnd / rangeWideCount / the wide walk of rangeToA in
+// ruby-interpreter.abnf, which states the rule.
+function rbRangeWide(lo, hi) {
+    if (!(typeof lo == "number" || rbIsBig(lo))) { return false }
+    var h = anytype
+    h = hi
+    if (rbIsFlo(hi)) {
+        if (rbToF(hi) - rbToF(hi) != 0) { return false }
+        h = rbToF(hi)
+    } else if (!(typeof hi == "number" || rbIsBig(hi))) { return false }
+    return rbIsBig(lo) || rbIsBig(h) || Math.abs(lo) >= 9007199254740992 || Math.abs(h) >= 9007199254740992
+}
+function rbRangeWideEnd(hi, excl) {
+    if (!rbIsFlo(hi)) { return {hi: hi, excl: excl} }
+    return {hi: rbMethod(hi, "floor", []), excl: excl && rbToF(hi) == Math.floor(rbToF(hi))}
+}
+function rbRangeWideCount(r) {
+    var we = rbRangeWideEnd(r["end"], r["excl"] === true)
+    var d = anytype
+    d = rbBin("-", we["hi"], r["begin"])
+    if (!we["excl"]) { d = rbBin("+", d, 1) }
+    if (rbSpaceship(d, 0) < 0) { return 0 }
+    return d
+}
+function rbRangeWideArr(lo, hi, excl) {
+    var out = []
+    var we = rbRangeWideEnd(hi, excl)
+    var c = anytype
+    c = lo
+    var n = 0
+    while (n < 10000000) {
+        var k = rbSpaceship(c, we["hi"])
+        if (k > 0 || (we["excl"] && k == 0)) { break }
+        out.push(c)
+        c = rbBin("+", c, 1)
+        n = n + 1
     }
     return out
 }
@@ -5010,6 +5062,7 @@ function rbRangeLen(r) {
     }
     if (!rbRangeNumeric(r)) { return rbRangeToArr(r).length }
     if (rbIsFlo(r["begin"])) { return rbnFloatStepSize(rbToF(r["begin"]), rbToF(r["end"]), 1, r["excl"] === true) }
+    if (rbRangeWide(r["begin"], r["end"])) { return rbToF(rbRangeWideCount(r)) }
     var d = rbToF(r["end"]) - rbToF(r["begin"])
     var n = r["excl"] === true ? Math.ceil(d) : Math.floor(d) + 1
     if (n < 0) { return 0 }
@@ -5023,6 +5076,10 @@ function rbRangeSize(r) {
     if (!rbIsNum(r["begin"])) { return null }
     if (rtIsNil(r["end"])) { return rbMkFlo(Math.pow(2, 1024)) }
     if (!rbIsNum(r["end"])) { return null }
+    if (rbRangeWide(r["begin"], r["end"])) {
+        if (rbIsFlo(r["end"])) { return rbnFloatStepSize(rbToF(r["begin"]), rbToF(r["end"]), 1, r["excl"] === true) }
+        return rbRangeWideCount(r)
+    }
     var n = rbRangeLen(r)
     if (n - n != 0) { return rbMkFlo(n) }
     return n
@@ -5035,6 +5092,7 @@ function rbRangeAt(r, i) {
     }
     rbRangeWalkable(r)
     if (i < 0 || i >= rbRangeLen(r)) { fail("range index out of range: " + i) }
+    if (rbRangeWide(r["begin"], r["end"])) { return rbBin("+", r["begin"], i) }
     return rbToF(r["begin"]) + i
 }
 
@@ -5058,7 +5116,7 @@ function rbRangeMethod(t, name, args) {
     if (name == "lazy") { return rbRangeLazy(t) }
     if (name == "step" || name == "%") { return rbRangeStep(t, name, args) }
     // Twin of the with_index arm of rangeMethod in ruby-interpreter.abnf.
-    if (name == "with_index" || name == "with_object" || name == "index" || name == "rindex") { rbNoMethod(t, name) }
+    if (name == "with_index" || name == "with_object" || name == "index" || name == "rindex" || name == "length") { rbNoMethod(t, name) }
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
     var endless = rtIsNil(t["end"]) || rtIsNil(t["begin"])
@@ -5091,10 +5149,10 @@ function rbRangeMethod(t, name, args) {
             return rbLazyMethod(rbLazyCopy(rbRangeLazy(t), null, false, rbInspect(t)), name, args)
         }
         if (strOpen && name == "first" && npos > 0) { return rbLazyFirst(rbRangeLazy(t), Math.trunc(rbToF(args[0]))) }
-        var rsn = Math.trunc(rbToF(rbArgAt(args, 0)))
-        if (rbaSliceOp(name) != "" && npos > 0 && rsn > 0) {
+        if (rbaSliceOp(name) != "") {
+            var rsn = rbSliceSize(name, args, npos)
             var ue = rbLazyCopy(rbRangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
-                "#<Enumerator: " + rbInspect(t) + ":" + name + "(" + rsn + ")>")
+                "#<Enumerator: " + rbInspect(t) + ":" + name + rbInspectArgs(args, npos) + ">")
             if (blk === null) { return ue }
             rbLazyMethod(ue, "each", [js_rblkwrap(blk)])
             return null
@@ -5169,9 +5227,7 @@ function rbRangeMethod(t, name, args) {
     // one can be answered; MRI agrees that (1..).min is 1 and (1..).max raises.
     if (endless) {
         if (name == "min") { return t["begin"] }
-        if (name == "length" || name == "count") {
-            fail("cannot take the length of an endless range")
-        }
+        if (name == "count") { fail("cannot take the length of an endless range") }
     }
     // #min / #max of a range with a numeric end are its bounds (range_min /
     // range_max). Twin of the arm in ruby-interpreter.abnf's rangeMethod.
@@ -5188,8 +5244,10 @@ function rbRangeMethod(t, name, args) {
         if (!(typeof rlo == "number" || rbIsBig(rlo))) { rbRaiseErr(name, "TypeError", "cannot exclude end value with non Integer begin value") }
         return rbBin("-", rhi, 1)
     }
-    if (npos == 0 && blk === null) {
-        if (name == "length" || name == "count") { return rbRangeLen(t) }
+    if (npos == 0 && blk === null && name == "count") {
+        rbRangeWalkable(t)
+        if (rbRangeWide(t["begin"], t["end"])) { return rbRangeWideCount(t) }
+        return rbRangeLen(t)
     }
     var av = rbDelegArr(rbRangeToArr(t), t, name, args)
     // #each answers the RECEIVER in MRI, and the receiver is the range.
@@ -7354,11 +7412,11 @@ function rbLazyMethod(t, name, args) {
     }
     // each_slice(n) / each_cons(n) without a block stay one value at a time. Twins:
     // lazyMethod in ruby-interpreter.abnf, rubyLazyMethod in abnf/jsrtrubystr.go.
-    if (rbaSliceOp(name) != "" && blk === null && Math.trunc(rbToF(rbArgAt(args, 0))) > 0) {
-        var sn = Math.trunc(rbToF(rbArgAt(args, 0)))
+    if (rbaSliceOp(name) != "" && blk === null) {
+        var sn = rbSliceSize(name, args, args.length)
         var lz = t["lazy"] === true
         return rbLazyCopy(t, {k: rbaSliceOp(name), f: null, n: sn}, lz,
-            (lz ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + desc + ":" + name + "(" + sn + ")>")
+            (lz ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + desc + ":" + name + rbInspectArgs(args, args.length) + ">")
     }
     if (t["kind"] == "each" && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
     if (t["kind"] == "each" && name == "rewind") { return rbRunRewind(t) }
@@ -7778,6 +7836,8 @@ function rbHashMethod(o, keys, vals, name, args) {
         return iv
     }
     if (name == "key" || name == "index") {
+        if (nPos != 1) { rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given " + nPos + ", expected 1)") }
+        if (name == "index") { rbHidxWarn() }
         while (i < vals.length) {
             if (rbEq(vals[i], rbArgAt(args, 0))) { return rbKeyOut(keys[i]) }
             i = i + 1
@@ -8328,8 +8388,7 @@ function rbArrayMethod(t, name, args) {
     // (MRI 2.6; 3.1 answers the receiver); with no block, an Enumerator over the
     // groups.
     if (name == "each_slice" || name == "each_cons") {
-        var gn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
-        if (gn < 1) { rbRaiseErr(name, "ArgumentError", name == "each_slice" ? "invalid slice size" : "invalid size") }
+        var gn = rbSliceSize(name, args, nPos)
         var groups = []
         var gi = 0
         if (name == "each_slice") {
@@ -10050,6 +10109,7 @@ function js_rlen(v, name) {
     // materializing, because for-in asks for it once and then indexes. See
     // js_pyget.
     if (rbIsRange(v)) {
+        if (name == "length") { rbNoMethod(v, name) }
         if (name !== null) { return rbRangeSize(v) }
         return rbRangeLen(v)
     }
@@ -10108,16 +10168,20 @@ function js_rbxor(l, r) {
 function js_rshl(l, r) { return rbBin("<<", l, r) }
 function js_rshr(l, r) { return rbBin(">>", l, r) }
 function js_rneg(v) { return rbNeg(v) }
-// Hash#index is MRI 2.6's deprecated alias of #key, which warns at its call site.
-// Twin of js_rhidxwarn in abnf/jsrtruby.go, which states the rule.
-function js_rhidxwarn(recv, site) {
-    if (!rbIsDict(recv)) { return undefined }
-    var s = rbStr(site)
+// The running-site function. Twins: js_rsitefn and rubyHidxWarn in
+// abnf/jsrtruby.go, which state the rules.
+var rbSiteFns = []
+function js_rsitefn(f) {
+    rbSiteFns.push(f)
+    return undefined
+}
+function rbHidxWarn() {
+    if (rbSiteFns.length == 0) { return }
+    var s = rbStr(rbSiteFns[0]())
     var at = s.length - 5
     while (at >= 0 && s.slice(at, at + 5) != ":in `") { at = at - 1 }
     if (at >= 0) { s = s.slice(0, at) }
     eprint(s + ": warning: Hash#index is deprecated; use Hash#key\n")
-    return undefined
 }
 // ~x is -(x+1) at any size, which is one negate and one decrement on the box.
 function js_rbnot(v) {

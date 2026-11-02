@@ -104,8 +104,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	// A bare `.length` / `.size`: a String, Array, Hash or Enumerator counts
-	// through js_pylen, a Range answers Range#size, anything else (a Symbol, MatchData, a user object) is the
-	// method call. Twin of rlen in ruby-interpreter.abnf.
+	// through js_pylen, a Range answers Range#size (it has no #length), anything
+	// else (a Symbol, MatchData, a user object) is the method call. Twin of rlen
+	// in ruby-interpreter.abnf.
 	pylen := m["js_pylen"]
 	m["js_rlen"] = func(a []uint64) uint64 {
 		v := u(a[0])
@@ -118,6 +119,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		if r, isRng := rubyIsRange(v); isRng {
+			if n, _ := u(a[1]).(string); n == "length" {
+				rt.rubyNoMethod(r, n)
+			}
 			return w(rt.rubyRangeSize(r))
 		}
 		counted := false
@@ -3998,6 +4002,12 @@ func (rt *jsrt) rubyRangeSize(r *jsObject) interface{} {
 	if !rubyIsNum(r.props["end"]) {
 		return jsNull
 	}
+	if rubyRangeWide(r.props["begin"], r.props["end"]) {
+		if f, floHi := r.props["end"].(jsFlo); floHi {
+			return rubyFloatStepSize(rubyToF(r.props["begin"]), f.f, 1, r.props["excl"] == true)
+		}
+		return rt.rubyRangeWideCount(r)
+	}
 	if n := rt.rubyRangeLen(r); !math.IsInf(n, 0) {
 		return n
 	}
@@ -4012,6 +4022,96 @@ func (rt *jsrt) rubyBitNot(v interface{}) interface{} {
 		return rt.rubyBigNarrow(new(big.Int).Not(b))
 	}
 	return -rubyToF(v) - 1
+}
+
+// rubyRangeWide: an Integer begin, an Integer or finite Float end, and one of
+// them at or past 2^53. Twin of rangeWide in ruby-interpreter.abnf, which
+// states the rule.
+func rubyRangeWide(lo, hi interface{}) bool {
+	if !rubyIsIntV(lo) {
+		return false
+	}
+	if f, isFlo := hi.(jsFlo); isFlo {
+		if math.IsInf(f.f, 0) || math.IsNaN(f.f) {
+			return false
+		}
+		hi = f.f
+	} else if !rubyIsIntV(hi) {
+		return false
+	}
+	for _, v := range [2]interface{}{lo, hi} {
+		if f, small := v.(float64); !small || math.Abs(f) >= 9007199254740992 {
+			return true
+		}
+	}
+	return false
+}
+
+// rubyRangeWideEnd / rubyRangeWideCount / rubyRangeWideArr are the last Integer,
+// the count and the walk of a wide range, the walk under rubyRangeArr's step
+// cap. Twins of rangeWideEnd / rangeWideCount / the wide walk of rangeToA in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyRangeWideEnd(hi interface{}, excl bool) (interface{}, bool) {
+	if f, isFlo := hi.(jsFlo); isFlo {
+		return rt.rubyMethod(hi, "floor", nil), excl && f.f == math.Floor(f.f)
+	}
+	return hi, excl
+}
+
+func (rt *jsrt) rubyRangeWideCount(r *jsObject) interface{} {
+	hi, excl := rt.rubyRangeWideEnd(r.props["end"], r.props["excl"] == true)
+	d := rt.rubyBin("-", hi, r.props["begin"])
+	if !excl {
+		d = rt.rubyBin("+", d, float64(1))
+	}
+	if c, _ := rt.rubySpaceship(d, float64(0)); c < 0 {
+		return float64(0)
+	}
+	return d
+}
+
+func (rt *jsrt) rubyRangeWideArr(lo, hi interface{}, excl bool) *jsArray {
+	out := &jsArray{}
+	hi, excl = rt.rubyRangeWideEnd(hi, excl)
+	for c, n := lo, 0; n < 10000000; c, n = rt.rubyBin("+", c, float64(1)), n+1 {
+		if k, _ := rt.rubySpaceship(c, hi); k > 0 || (excl && k == 0) {
+			break
+		}
+		out.elems = append(out.elems, c)
+	}
+	return out
+}
+
+// rubyHidxWarn is MRI 2.6's warning on every call of Hash#index, the deprecated
+// alias of #key: "FILE:LINE: warning: Hash#index is deprecated; use Hash#key",
+// at the running site. Twin of rbHidxWarn in lib/ruby-rt.metajs; the
+// interpreter half warns in its Hash#index arm.
+func (rt *jsrt) rubyHidxWarn() {
+	if rt.rubySiteFn == nil {
+		return
+	}
+	site := rt.rubyStr(rt.call(rt.rubySiteFn, jsUndef, nil))
+	if at := strings.LastIndex(site, ":in `"); at >= 0 {
+		site = site[:at]
+	}
+	fmt.Fprint(warnWriter, site+": warning: Hash#index is deprecated; use Hash#key\n")
+}
+
+// rubySliceSize is the size argument of each_slice / each_cons. Twin of
+// sliceSize in ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubySliceSize(name string, pos []interface{}) int {
+	if len(pos) != 1 {
+		rt.rubyRaiseErr(name, "ArgumentError", fmt.Sprintf("wrong number of arguments (given %d, expected 1)", len(pos)))
+	}
+	n := int(math.Trunc(rt.rubyImplicitInt(name, pos[0], "")))
+	if n < 1 {
+		msg := "invalid size"
+		if name == "each_slice" {
+			msg = "invalid slice size"
+		}
+		rt.rubyRaiseErr(name, "ArgumentError", msg)
+	}
+	return n
 }
 
 // rubyBitLen is Integer#bit_length: the bits of x, or of ~x for a negative x.
@@ -4921,21 +5021,11 @@ func init() {
 			}
 			return w(&jsRStr{s: rt.rubyStr(u(a[0]))})
 		}
-		// Hash#index is MRI 2.6's deprecated alias of #key, and every call warns
-		// "FILE:LINE: warning: Hash#index is deprecated; use Hash#key". The
-		// emitter calls this before each `.index(...)` call with the running
-		// statement's site (rb.site, "FILE:LINE:in `WHO'"), since only the module
-		// knows it. Twin of js_rhidxwarn in lib/ruby-rt.metajs; the interpreter
-		// half warns in its Hash#index arm.
-		m["js_rhidxwarn"] = func(a []uint64) uint64 {
-			if _, _, isDict := dictParts(u(a[0])); !isDict {
-				return w(jsUndef)
-			}
-			site := rt.rubyStr(u(a[1]))
-			if at := strings.LastIndex(site, ":in `"); at >= 0 {
-				site = site[:at]
-			}
-			fmt.Fprint(warnWriter, site+": warning: Hash#index is deprecated; use Hash#key\n")
+		// js_rsitefn(f): f answers the running site ("FILE:LINE:in `WHO'", or nil),
+		// which the module alone holds; ruby-to-llvm-ir.abnf's buildMain registers
+		// it once. Twin of js_rsitefn in lib/ruby-rt.metajs.
+		m["js_rsitefn"] = func(a []uint64) uint64 {
+			rt.rubySiteFn = u(a[0])
 			return w(jsUndef)
 		}
 		// Unary plus: the identity on a number, String#+@ on a String.

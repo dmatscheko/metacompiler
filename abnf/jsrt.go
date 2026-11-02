@@ -494,6 +494,8 @@ type jsrt struct {
 	// rubyRunFn: the generator function js_rcoreg registered, which an
 	// Enumerator's run (rubyRunStep in jsrtruby.go) steps its method on.
 	rubyRunFn interface{}
+	// rubySiteFn: the running-site function js_rsitefn registered.
+	rubySiteFn interface{}
 
 	// ktRndDef is kotlin.random.Random.Default - the one generator every unseeded
 	// `random()` draws from. Built lazily by ktRndDefault (abnf/jsrtkotlin.go);
@@ -7465,6 +7467,9 @@ func (rt *jsrt) rubyRangeArr(lo, hi interface{}, excl bool) *jsArray {
 		}
 		return out
 	}
+	if rubyRangeWide(lo, hi) {
+		return rt.rubyRangeWideArr(lo, hi, excl)
+	}
 	l, h := rubyToF(lo), rubyToF(hi)
 	for i, n := l, 0; (i < h || (!excl && i == h)) && n < 10000000; i, n = i+1, n+1 {
 		out.elems = append(out.elems, i)
@@ -7586,6 +7591,9 @@ func (rt *jsrt) rubyRangeLen(r *jsObject) float64 {
 	if loF, isFlo := lo.(jsFlo); isFlo {
 		return rubyFloatStepSize(loF.f, rubyToF(hi), 1, r.props["excl"] == true)
 	}
+	if rubyRangeWide(lo, hi) {
+		return rubyToF(rt.rubyRangeWideCount(r))
+	}
 	d := rubyToF(hi) - rubyToF(lo)
 	n := math.Floor(d) + 1
 	if r.props["excl"] == true {
@@ -7608,6 +7616,9 @@ func (rt *jsrt) rubyRangeAt(r *jsObject, i int) interface{} {
 	rt.rubyRangeWalkable(r)
 	if i < 0 || float64(i) >= rt.rubyRangeLen(r) {
 		rt.fail("range index out of range: %d", i)
+	}
+	if rubyRangeWide(r.props["begin"], r.props["end"]) {
+		return rt.rubyBin("+", r.props["begin"], float64(i))
 	}
 	return rubyToF(r.props["begin"]) + float64(i)
 }
@@ -7636,7 +7647,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		return rt.rubyRangeStep(t, name, args)
 	}
 	// Twin of the with_index arm of rangeMethod in ruby-interpreter.abnf.
-	if name == "with_index" || name == "with_object" || name == "index" || name == "rindex" {
+	if name == "with_index" || name == "with_object" || name == "index" || name == "rindex" || name == "length" {
 		rt.rubyNoMethod(t, name)
 	}
 	pos, blk := rubyBlockArgs(args)
@@ -7679,9 +7690,10 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		if strOpen && name == "first" && len(pos) > 0 {
 			return &jsArray{elems: rt.rubyLazyFirst(rt.rubyRangeLazy(t).(*jsObject), int(math.Trunc(rubyToF(pos[0]))))}
 		}
-		if sn := int(math.Trunc(rubyToF(argAt(pos, 0)))); rubySliceOp(name) != "" && len(pos) > 0 && sn > 0 {
+		if rubySliceOp(name) != "" {
+			sn := rt.rubySliceSize(name, pos)
 			ue := rubySliceEnum(rt.rubyRangeLazy(t).(*jsObject), name, sn, false,
-				"#<Enumerator: "+rt.rubyInspect(t)+":"+name+"("+strconv.Itoa(sn)+")>")
+				"#<Enumerator: "+rt.rubyInspect(t)+":"+name+rt.rubyInspectArgs(pos)+">")
 			if blk == nil {
 				return ue
 			}
@@ -7786,7 +7798,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		switch name {
 		case "min":
 			return t.props["begin"]
-		case "length", "count":
+		case "count":
 			rt.fail("cannot take the length of an endless range")
 		}
 	}
@@ -7812,11 +7824,12 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		}
 		return rt.rubyBin("-", hi, float64(1))
 	}
-	if len(pos) == 0 && blk == nil {
-		switch name {
-		case "length", "count":
-			return rt.rubyRangeLen(t)
+	if len(pos) == 0 && blk == nil && name == "count" {
+		rt.rubyRangeWalkable(t)
+		if rubyRangeWide(t.props["begin"], t.props["end"]) {
+			return rt.rubyRangeWideCount(t)
 		}
+		return rt.rubyRangeLen(t)
 	}
 	av := rt.rubyDelegArr(rt.rubyRangeToArr(t), t, name, args)
 	// #each answers the RECEIVER in MRI, and the receiver is the range.
@@ -13058,6 +13071,12 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		}
 		return out, true
 	case "key", "index":
+		if len(pos) != 1 {
+			rt.rubyRaiseErr(name, "ArgumentError", fmt.Sprintf("wrong number of arguments (given %d, expected 1)", len(pos)))
+		}
+		if name == "index" {
+			rt.rubyHidxWarn()
+		}
 		for i := range vals.elems {
 			if rt.rubyEq(vals.elems[i], argAt(pos, 0)) {
 				return rt.rubyKeyOut(keys.elems[i]), true
@@ -14101,14 +14120,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	// (MRI 2.6; 3.1 answers the receiver); with no block, an Enumerator over the
 	// groups.
 	case "each_slice", "each_cons":
-		n := int(math.Trunc(rubyToF(argAt(pos, 0))))
-		if n < 1 {
-			msg := "invalid size"
-			if name == "each_slice" {
-				msg = "invalid slice size"
-			}
-			rt.rubyRaiseErr(name, "ArgumentError", msg)
-		}
+		n := rt.rubySliceSize(name, pos)
 		groups := &jsArray{}
 		if name == "each_slice" {
 			for i := 0; i < len(t.elems); i += n {

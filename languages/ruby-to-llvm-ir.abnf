@@ -364,7 +364,7 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // Statement itself (it would push a value where a body expects none) - it sits on
 // PosStmt, around the two alternatives that do push a thunk. See rbStmtPos.
 Statement   = Semi | Require | PosStmt ;
-PosStmt     <~~ push(rbStmtPos(takeAll())) ~~>
+PosStmt     <~~ var sti = takeAll(); settleSfx(sti[0]); push(rbStmtPos(sti)) ~~>
             = "" <~~ push(up.pos) ~~> ( DoWhileStmt | ModStmt ) ;
 Semi        = ";" ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
@@ -961,16 +961,16 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 PrimaryEnd  = :whitespace() "" <~~ push({phead: hasPlaceAt(up.pos) ? placeAt["p" + up.pos] : null}) ~~> :whitespace(Whitespace) ;
 CmdMethodSfx <~~ var cn = popName(); push({kind: "mcall", name: cn, args: dmArgs(cn, takeAll(), up.in)}) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
-MethodSfx   <~~ var mn = popName(); push(methodSfx(mn, dmArgs(mn, takeAll(), up.in))) ~~>
-            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
+MethodSfx   <~~ var mp = peekMPos(); var mn = popName(); push(sfxAt(methodSfx(mn, dmArgs(mn, takeAll(), up.in)), mp)) ~~>
+            = "." MethodName <~~ push({mname: noteMName(up.in), mpos: up.pos}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
 CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
             = "." "(" [ Arg { "," Arg } ] ")" ;
 FieldSfx    = "." MethodName <~~ push({kind: "field", name: noteMName(up.in)}) ~~> ;
 // Safe navigation obj&.m / obj&.m(args): yields nil (and skips the call, not even
 // evaluating the arguments) when the receiver is nil, else a normal method/field.
-SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
-            = "&." MethodName <~~ push({mname: noteMName(up.in)}) ~~> MArgs ;
+SafeMethodSfx <~~ var sp = peekMPos(); push(sfxAt({kind: "smcall", name: popName(), args: takeAll()}, sp)) ~~>
+            = "&." MethodName <~~ push({mname: noteMName(up.in), mpos: up.pos}) ~~> MArgs ;
 SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}) ~~> ;
 // The LineCont guard keeps a line that OPENS with an array literal from being read
 // as an index of the previous expression (`txt = ""' then `[[1, 2]].each ...').
@@ -2804,13 +2804,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         b.NewStore(sv.p, gRbSite)
         b.NewStore(sv.n, gRbSiteLen)
     }
-    // Hash#index warns at its call site, which only the module knows: an explicit
-    // `.index(...)' call hands js_rhidxwarn the running site first.
-    function emitHidxWarn(b, recvV, name) {
-        if (name != "index") { return }
+    // A call on a later line than its statement (sfxSited) runs with its own
+    // site, and the statement's goes back after (rbSiteBack). Twin of sitedMcall
+    // in ruby-interpreter.abnf.
+    function rbSiteAt(b, s) {
+        if (!sfxSited(s)) { return null }
         var sv = rbSiteLoad(b)
-        callExt(b, "js_rhidxwarn", [recvV, callExt(b, "js_str_mem", [sv.p, sv.n])])
+        rbSiteMark(b, s.npos)
+        return sv
     }
+    function rbSiteBack(b, sv) { if (sv !== null) { rbSiteStore(b, sv) } }
     // An exception the runtime raised takes its first backtrace frame where it is
     // caught: js_rsite combines the running site, still the raising statement's,
     // with the builtin method the exception names. Emitted at the entry of every
@@ -3325,6 +3328,36 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
     function noteMName(n) { if (n == "arity" || n == "curry" || n == "default_proc") { usesArity = true } return n }
+    // The site of a multi-line `.name(...)' call. Twins of peekMPos / sfxAt /
+    // settleSfx / sfxSited in ruby-interpreter.abnf, which states the rule.
+    var pendSfx = []
+    var sfxSites = {}
+    function peekMPos() {
+        var items = takeAll()
+        var p = -1
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mpos != undefined) { p = items[i].mpos }
+            push(items[i])
+        }
+        return p
+    }
+    function sfxAt(seg, pos) {
+        if (pos >= 0) {
+            seg.npos = pos
+            pendSfx.push(pos)
+        }
+        return seg
+    }
+    function settleSfx(spos) {
+        var keep = []
+        for (var i = 0; i < pendSfx.length; i++) {
+            var p = pendSfx[i]
+            if (p < spos) { keep.push(p) }
+            else { sfxSites["p" + p] = c.lineOf(p) != c.lineOf(spos) }
+        }
+        pendSfx = keep
+    }
+    function sfxSited(s) { return s.npos !== undefined && sfxSites["p" + s.npos] === true }
     // `x.+(y)' calls an operator METHOD by name, which is exactly `x.send(:+, y)'.
     // Twin of methodSfx in ruby-interpreter.abnf, and isBinOpName of its set.
     function isBinOpName(n) {
@@ -3625,6 +3658,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 pObj = null
                 if (s.kind == "mcall") {
+                    var wsv = rbSiteAt(b, s)
                     if (s.name == "new" && !hasBlockArg(s.args)) {
                         var rn = emitNew(b, cur, unwrapArgs(s.args))
                         b = rn.b
@@ -3660,9 +3694,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     } else {
                         var ea = emitArgs(b, unwrapArgs(s.args))
                         b = ea.b
-                        emitHidxWarn(b, cur, s.name)
                         cur = callExt(b, "js_rxmcall", [cur, emitMKey(b, cur, s.name, false), ea.v])
                     }
+                    rbSiteBack(b, wsv)
                 } else if (s.kind == "smcall" || s.kind == "sfield") {
                     // Safe navigation: guard on nil (skip the call, keep nil) via a
                     // hidden result variable; only the non-nil branch evaluates args.
@@ -3674,10 +3708,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     b.NewCondBr(truthy(b, callExt(b, "js_seq", [cur, hNull])), snEnd, callBk)
                     var snRes = hNull
                     if (s.kind == "smcall") {
+                        var swsv = rbSiteAt(callBk, s)
                         var sea = emitArgs(callBk, unwrapArgs(s.args))
                         callBk = sea.b
-                        emitHidxWarn(callBk, cur, s.name)
                         snRes = callExt(callBk, "js_rxmcall", [cur, emitMKey(callBk, cur, s.name, false), sea.v])
+                        rbSiteBack(callBk, swsv)
                     } else if (s.name == "length" || s.name == "size") {
                         snRes = callExt(callBk, "js_rlen", [cur, emitMKey(callBk, cur, s.name, false)])
                     } else if (s.name == "to_s") {
@@ -9434,6 +9469,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         rdSetB.NewBr(rdEndB)
         rdEndB.NewRet(rdExc)
         callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(rdIdx), curScopeV]), emitNum(b, 0)])
+        // The running site as a String (nil before any), registered with
+        // js_rsitefn for the runtimes' Hash#index warning, which send or a Method
+        // reaches with no call site of its own.
+        funcCount++
+        var sfIdx = funcCount
+        var sff = m.NewFunc("jsf_" + sfIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var sfb = sff.NewBlock("entry")
+        var sfSite = rbSiteLoad(sfb)
+        var sfHasB = sff.NewBlock("")
+        var sfNoB = sff.NewBlock("")
+        sfb.NewCondBr(sfb.NewICmp(llvm.enum.IPredNE, sfSite.n, handle(0)), sfHasB, sfNoB)
+        sfHasB.NewRet(callExt(sfHasB, "js_str_mem", [sfSite.p, sfSite.n]))
+        sfNoB.NewRet(hNull)
+        callExt(b, "js_rsitefn", [callExt(b, "js_closure", [handle(sfIdx), curScopeV])])
         // The generator an Enumerator's run (Enumerator#next over a user #each, a
         // `for` over one) steps its method on, registered with js_rcoreg: its body
         // calls the runtime's driver (the generator's one argument) with a function

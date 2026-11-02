@@ -1871,6 +1871,28 @@ check("method-defined", [PvE.method_defined?(:m), PvE.method_defined?(:pm), PvE.
       [true, true, false, true, true, false])
 check("module-constants", [PvE.constants.sort, PvF.constants.sort, PvF.constants(false)], [[:PW, :PZ], [:PN, :PW, :PZ], [:PN]])
 
+# ----- Hash#index by name, and the line of a call on a later line -----
+# MRI 2.6's Hash#index is #key and warns "FILE:LINE: warning: Hash#index is
+# deprecated; use Hash#key" on stderr at every call, through send or a Method
+# too. A `.name(...)' call whose name sits on a later line than its statement
+# is named by that line, in a warning and in a backtrace alike. --cross diffs
+# the two halves' stderr, which is where the warning lines are compared.
+hix = {a: 1, b: 2}
+check("hash-index-by-name", [hix.send(:index, 1), hix.method(:index).call(2), hix.public_send(:index, 2)], [:a, :b, :b])
+hix_r = hix
+  .index(2)
+hix_m = [1, 2]
+  .map(&hix.method(:index))
+check("hash-index-later-line", [hix_r, hix_m], [:b, [:a, :b]])
+hix_ln = __LINE__
+hix_bt = begin
+  hix
+    .fetch(:zz)
+rescue KeyError => e
+  e.backtrace[0].sub(/.*:(\d+):/, '\1:')
+end
+check("call-later-line-site", hix_bt, "#{hix_ln + 3}:in `fetch'")
+
 puts "features: #{FEAT[0]} checks, #{FEAT[1]} failures"
 
 exit(FEAT[1])

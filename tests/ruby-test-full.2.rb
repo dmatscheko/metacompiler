@@ -2742,6 +2742,71 @@ def s182
   check("rs182g", fo == ["a", "b", "c"] && [*s] == ["a", "b", "c"] && s.to_a.size == 3 && s.each.size.nil? && s.size.nil?)
 end
 
+# ===== SECTION 183: Integer ranges past 2^53, Range#length, Float #count, each_slice sizes, Hash#index by name =====
+# An Integer range with an endpoint at or past 2^53 walks and counts Integers (a
+# double stepping by one stalls there), up to the last Integer a Float end admits;
+# its #size keeps the Float step count for a Float end. A Range has no #length,
+# and a Float range's #count walks it, so raises. each_slice / each_cons convert
+# their size implicitly and refuse one below 1 when called, before any walk - a
+# Float or endless range included. Hash#index reached through send, public_send
+# or a Method is #key too, after #key's arity check. A `.name(...)' call whose
+# name sits on a later line than its statement raises at that line.
+# /usr/bin/ruby 2.6 settles each.
+def s183err
+  yield
+rescue => e
+  "#{e.class} #{e.message}"
+end
+def s183
+  v = [2**70, 3, 2**53, 0, 1.0, 2, nil, "2", 1.5, 2.5]
+  a = v[0]
+  r = (a..a + v[1])
+  check("wr183a", r.size == 4 && r.count == 4 && r.to_a == [a, a + 1, a + 2, a + 3] && r.sum == 4 * a + 6 &&
+        (a...a + v[1]).size == 3 && (a...a + v[1]).count == 3 && r.map { |x| x - a } == [0, 1, 2, 3] &&
+        (v[2]..v[2] + 3).to_a.size == 4 && (v[2]..v[2] + 3).size == 4 && (v[2] - 2..v[2]).to_a == [v[2] - 2, v[2] - 1, v[2]] &&
+        (v[3]..a).size == a + 1 && (a + 5..a).size == 0 && (a + 5..a).to_a == [] && (-a..-a + 2).to_a.size == 3)
+  fo = []
+  for i in (a..a + 2) do fo << i - a end
+  x, y, *z = *(a..a + 3)
+  b = v[2] + 1
+  check("wr183b", fo == [0, 1, 2] && [x - a, y - a, z.size] == [0, 1, 2] && (a..a + v[9]).to_a == [a] && (a..a + v[9]).size == 1 &&
+        (b..2.0**53 + 4).size == 5 && (b..2.0**53 + 4).count == 4 && (b...2.0**53 + 4).to_a.size == 3 &&
+        (a..a + 3).each_slice(v[5]).to_a == [[a, a + 1], [a + 2, a + 3]] && (a..a + 2).select(&:even?) == [a, a + 2])
+  check("rl183c", s183err { (1..v[1]).length }.start_with?("NoMethodError undefined method `length' for 1..3:Range") &&
+        !(1..v[1]).respond_to?(:length) && s183err { (v[4]..3.0).count } == "TypeError can't iterate from Float" &&
+        (1..3.5).count == 3 && (1..v[1]).size == 3)
+  fr = (v[4]..3.0)
+  check("sl183d", s183err { fr.each_slice(v[3]) } == "ArgumentError invalid slice size" &&
+        s183err { fr.each_cons(v[3]) } == "ArgumentError invalid size" &&
+        s183err { (1..).each_slice(v[3]) } == "ArgumentError invalid slice size" &&
+        s183err { (1..).each_cons(-1) } == "ArgumentError invalid size" &&
+        s183err { (1..3).each_slice(v[6]) } == "TypeError no implicit conversion from nil to integer" &&
+        s183err { [1].each_cons(v[7]) } == "TypeError no implicit conversion of String into Integer" &&
+        s183err { (1..3).each_slice } == "ArgumentError wrong number of arguments (given 0, expected 1)" &&
+        s183err { (1..).lazy.each_slice(v[3]) } == "ArgumentError invalid slice size" &&
+        fr.each_slice(v[8]).inspect == "#<Enumerator: 1.0..3.0:each_slice(1.5)>" && (1..3).each_slice(v[8]).to_a == [[1], [2], [3]])
+  check("sl183e", s183err { (1.0..).each_slice(v[5]).size } == "FloatDomainError Infinity" &&
+        (1.0..).each_cons(v[5]).size == Float::INFINITY && s183err { (1..).each_slice(v[5]).size } == "FloatDomainError Infinity")
+  h = {a: 1, b: v[5]}
+  m = h.method(:index)
+  check("hi183f", h.send(:index, 1) == :a && h.public_send(:index, v[5]) == :b && m.call(1) == :a && h.__send__(:index, 9).nil? &&
+        [1, 2].map(&m) == [:a, :b] && s183err { h.index(1, 2) } == "ArgumentError wrong number of arguments (given 2, expected 1)" &&
+        s183err { h.key } == "ArgumentError wrong number of arguments (given 0, expected 1)")
+  ln = __LINE__
+  bt = begin
+    h
+      .fetch(:zz)
+  rescue KeyError => e
+    e.backtrace[0].sub(/.*:(\d+):/, '\1:')
+  end
+  bs = begin
+    [1]
+      .each { |q| raise "boom" }
+  rescue => e
+    e.backtrace[0].sub(/.*:(\d+):/, '\1:')
+  end
+  check("ml183g", bt == "#{ln + 3}:in `fetch'" && bs == "#{ln + 9}:in `block in s183'")
+end
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -2804,5 +2869,6 @@ s179() # SECTION-CALL 179
 s180() # SECTION-CALL 180
 s181() # SECTION-CALL 181
 s182() # SECTION-CALL 182
+s183() # SECTION-CALL 183
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

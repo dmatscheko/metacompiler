@@ -660,8 +660,9 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		}
 		return rubyLazyCopy(t, nil, true, "#<Enumerator::Lazy: "+desc+">")
 	case "each_slice", "each_cons":
-		if sn := int(math.Trunc(rubyToF(argAt(pos, 0)))); blk == nil && sn > 0 {
-			sd := name + "(" + strconv.Itoa(sn) + ")>"
+		if blk == nil {
+			sn := rt.rubySliceSize(name, pos)
+			sd := name + rt.rubyInspectArgs(pos) + ">"
 			if lazy {
 				return rubySliceEnum(t, name, sn, true, "#<Enumerator::Lazy: "+desc+":"+sd)
 			}
