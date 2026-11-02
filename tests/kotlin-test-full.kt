@@ -8135,6 +8135,64 @@ fun s182() {
 }
 
 
+// ===== SECTION 183: named arguments run as written; qualified object references =====
+// Kotlin evaluates call arguments left to right as written, whatever parameter slots
+// named ones bind. A reference whose base is an object VALUE (an enum entry, a
+// companion, a nested object) is bound to it, and `C::f` names the companion's f
+// when C's own members lack it. A class method sharing a stdlib member's name and
+// parameter names in another order takes them only on its own instances.
+val log183 = mutableListOf<String>()
+fun <T> t183(s: String, v: T): T { log183.add(s); return v }
+fun f183(a: Int, b: Int, c: Int) = "$a$b$c"
+fun d183(a: Int, b: Int = a * 10, c: Int = b + 1) = "$a/$b/$c"
+fun v183(tag: String, vararg xs: Int) = tag + xs.joinToString(",")
+class P183(val x: Int, val y: Int) { fun pq(p: Int, q: Int) = p * 10 + q }
+data class D183(val a: Int, val b: Int)
+class Cm183 { companion object { fun bite() = 7; fun add(a: Int, b: Int) = a + b; val v = 3 } }
+class Cn183 { companion object Named { fun go(a: Int) = a + 1 } }
+enum class E183 { X, Y; fun run(a: Int, b: Int, c: Int) = a + b + c + ordinal }
+class Out183 { object Ob183 { fun dbl183(a: Int) = a * 2 } }
+open class Bs183 { fun bite() = 1 }
+class Cs183 : Bs183() { companion object { fun bite() = 9 } }
+class Z183 { fun padStart(padChar: Char, length: Int) = "Z$padChar$length" }
+data class Pc183(val x: Int) { companion object { val x = 100 } }
+open class Bp183(val y: Int)
+class Dp183(y: Int) : Bp183(y) { companion object { val y = 200 } }
+class Mc183 { fun tag() = "m"; companion object { fun tag() = "c" } }
+fun ar183(f: Any): Int = when (f) {
+    is Function3<*, *, *, *> -> 3
+    is Function2<*, *, *> -> 2
+    is Function1<*, *> -> 1
+    is Function0<*> -> 0
+    else -> -1
+}
+fun logged183(s: String): String { val r = s + " " + log183; log183.clear(); return r }
+
+fun s183() {
+    check("ord183a", logged183(f183(c = t183("c", 3), a = t183("a", 1), b = t183("b", 2))) == "123 [c, a, b]" &&
+        logged183(f183(t183("a", 1), c = t183("c", 3), b = t183("b", 2))) == "123 [a, c, b]" &&
+        logged183(d183(c = t183("c", 3), a = t183("a", 1))) == "1/10/3 [c, a]")
+    val p = P183(y = t183("y", 2), x = t183("x", 1))
+    check("ord183b", logged183("${p.x}${p.y}") == "12 [y, x]" &&
+        logged183(p.pq(q = t183("q", 2), p = t183("p", 1)).toString()) == "12 [q, p]" &&
+        logged183(D183(1, 2).copy(b = t183("b", 5), a = t183("a", 4)).toString()) == "D183(a=4, b=5) [b, a]" &&
+        logged183(v183(xs = intArrayOf(t183("1", 1)), tag = t183("t", "9"))) == "91 [1, t]")
+    check("ord183c", logged183(listOf(1, 2, 3).joinToString(postfix = t183("p", "!"), separator = t183("s", ";"))) == "1;2;3! [p, s]" &&
+        logged183("abc".padStart(padChar = t183("c", '*'), length = t183("l", 5))) == "**abc [c, l]" &&
+        logged183((1..6).toList().windowed(step = t183("st", 3), size = t183("sz", 2)).toString()) == "[[1, 2], [4, 5]] [st, sz]")
+    val f = E183.X::run
+    check("ref183d", listOf(ar183(Cm183.Companion::bite), ar183(Cm183::bite), ar183(Cm183::add), ar183(E183.X::run),
+        ar183(Cn183.Named::go), ar183(Out183.Ob183::dbl183), ar183(Cs183::bite)) == listOf(0, 0, 2, 3, 1, 1, 1) &&
+        f(1, 2, 3) == 6 && E183.Y::run.invoke(1, 2, 3) == 7 && Cm183::bite.invoke() == 7 && Cm183::add.invoke(2, 3) == 5 &&
+        Cm183::v.get() == 3 && Cm183.Companion::v.get() == 3 && listOf(1, 2).map(Cn183.Named::go) == listOf(2, 3) &&
+        Out183.Ob183::dbl183.invoke(5) == 10)
+    check("std183e", "x".padStart(length = 5, padChar = '*') == "****x" && Z183().padStart(length = 5, padChar = '*') == "Z*5" &&
+        with("ab") { padStart(length = 4, padChar = '.') } == "..ab" && with(Z183()) { padStart(length = 4, padChar = '.') } == "Z.4")
+    check("ref183f", Pc183::x.get(Pc183(5)) == 5 && Pc183.Companion::x.get() == 100 && Dp183::y.get(Dp183(7)) == 7 &&
+        Mc183::tag.invoke(Mc183()) == "m" && Mc183.Companion::tag.invoke() == "c" && listOf(Pc183(3)).map(Pc183::x) == listOf(3))
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -8314,6 +8372,7 @@ fun main() {
     s180() // SECTION-CALL 180
     s181() // SECTION-CALL 181
     s182() // SECTION-CALL 182
+    s183() // SECTION-CALL 183
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

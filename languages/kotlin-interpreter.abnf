@@ -12546,6 +12546,19 @@ NotMemberKw = :script(~~ "pure";
             // String::length - the base names a builtin type this value model has no
             // descriptor for. It is still a perfectly good unbound reference: the
             // receiver arrives with the call, and the member is read off it.
+            if (!hv && baseName.indexOf(".") >= 0) {
+                var qv = kQualValue(baseName)
+                if (qv !== kMISSING) {
+                    if (qv === null || typeof qv != "object" || qv.__isclass !== true) { return kBoundRef(qv, name) }
+                    hv = true
+                    base = qv
+                    isCls = true
+                }
+            }
+            if (isCls && base !== null && typeof base == "object" && base.__isclass === true) {
+                var cr = kCompanionRef(base, name)
+                if (cr != null) { return cr }
+            }
             if (!hv || isCls) {
                 var ur = kRefMake(null, name, false, baseName)
                 if (hv && base !== null && typeof base == "object" && base.__isclass === true) { ur.kcls = base }
@@ -12561,6 +12574,29 @@ NotMemberKw = :script(~~ "pure";
             r.kthis = (baseName == "this" || baseName.substring(0, 5) == "this@")
             return r
         }
+    }
+
+    // The value a dotted reference base reads off its first segment - `E.X`,
+    // `C.Companion`, `Outer.Obj`, `Outer.Nested` (a descriptor) - or kMISSING when the
+    // first segment is no binding or a type name (`kotlin.String`). Twin of the dotted
+    // arm of makeQualRef in kotlin-to-llvm-ir.abnf.
+    function kQualValue(baseName) {
+        var segs = baseName.split(".")
+        if (!hasVar(segs[0]) || kIsTypeName(segs[0])) { return kMISSING }
+        var v = anytype
+        v = getVar(segs[0])
+        for (var i = 1; i < segs.length; i++) { v = kGetField(v, segs[i]) }
+        return v
+    }
+    // `C::name` where C's own members lack the name and its companion has it is
+    // bound to the companion; null otherwise. Twin of ktCompanionOwns in
+    // abnf/jsrtkotlin.go.
+    function kCompanionRef(cls, name) {
+        var comp = cls.__companion
+        if (comp == undefined || clsFind(cls, name) !== undefined) { return null }
+        for (var c = cls; c != undefined && c != null; c = c.__super) { if (kClsOwnProp(c, name)) { return null } }
+        if (clsFind(comp.__class, name) === undefined && !hasOwn(comp, name)) { return null }
+        return kBoundRef(comp, name)
     }
 
     // ----- The callable-reference and class-literal values -----

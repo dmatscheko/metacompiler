@@ -8148,6 +8148,33 @@ function js_ktref(base, name, ext) {
     return ktMakeRef(k4bRefInfo(base, name, true, false, "", ext))
 }
 
+// js_ktbref(base, "v") is `base::v` for a base that is a VALUE whatever it holds
+// (`C.Companion::f`: the companion is the class descriptor). Twin in jsrtkotlin.go.
+function js_ktbref(base, name, ext) {
+    return ktMakeRef(k4bRefInfo(base, name, true, false, "", ext))
+}
+// js_ktcref(cls, "v") (jsrtkotlin.go): `C::v` that may name C's companion member.
+function js_ktcref(base, name, ext) {
+    if (ktIsObj(base) && ktCompanionOwns(base, name)) { return js_ktbref(base, name, ext) }
+    return js_ktref(base, name, ext)
+}
+// ktCompanionOwns (jsrtkotlin.go): `C::name` names a member of C's companion.
+function ktCompanionOwns(cls, name) {
+    var holder = cls["__class"]
+    if (!ktIsObj(holder)) { return false }
+    var c = cls
+    for (var g = 0; g < 64 && ktIsObj(c); g++) {
+        if (typeof c[name] == "function") { return false }
+        c = c["__super"]
+    }
+    c = holder
+    for (var h = 0; h < 64 && ktIsObj(c); h++) {
+        if (typeof c[name] == "function") { return true }
+        c = c["__super"]
+    }
+    return cls[name] !== undefined
+}
+
 // js_ktctorref(v) turns `::Box` into a CONSTRUCTOR reference (Kotlin names it
 // "<init>"): callable, and passable where a lambda is expected. A bare `::fn` is
 // handed back untouched - a function is already a first-class value.

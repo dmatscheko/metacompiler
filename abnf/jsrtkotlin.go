@@ -2352,6 +2352,22 @@ func init() {
 			return w(rt.ktMakeRef(&ktRefInfo{recv: base, name: name, bound: true, ext: ext}))
 		}
 
+		// js_ktbref(base, "v") is `base::v` for a base that is a VALUE whatever it
+		// holds: `C.Companion::f`, whose companion is the class descriptor itself.
+		m["js_ktbref"] = func(a []uint64) uint64 {
+			return w(rt.ktMakeRef(&ktRefInfo{recv: u(a[0]), name: rt.toString(u(a[1])), bound: true, ext: u(a[2])}))
+		}
+
+		// js_ktcref(cls, "v") is `C::v` where class C has a companion and no property
+		// v on its chain (the emitter's test): the companion's member when C's methods
+		// lack the name (ktCompanionOwns), else js_ktref's unbound reference.
+		m["js_ktcref"] = func(a []uint64) uint64 {
+			if o, isObj := u(a[0]).(*jsObject); isObj && ktCompanionOwns(o, rt.toString(u(a[1]))) {
+				return m["js_ktbref"](a)
+			}
+			return m["js_ktref"](a)
+		}
+
 		// js_ktbareref(scope, "name") is a bare `::name`. A scope binding is the value
 		// itself (::fn has always been the closure), except that a CLASS descriptor
 		// becomes a constructor reference; a name the scope does not carry but the
@@ -10056,6 +10072,34 @@ func ktRefMethodArity(info *ktRefInfo) int {
 		return 1
 	}
 	return 0
+}
+
+// ktCompanionOwns reports that `C::name` on class descriptor cls names a member of
+// C's COMPANION, which Kotlin then binds to the companion: the class's own method
+// chain lacks the name, and the companion (whose methods hang off the descriptor's
+// __class holder, its properties off the descriptor) has it. The class's own
+// properties are not on the descriptor; js_ktcref's caller has ruled them out. Twin of the same-named
+// function in languages/lib/kotlin-rt.metajs and kCompanionRef in
+// kotlin-interpreter.abnf.
+func ktCompanionOwns(cls *jsObject, name string) bool {
+	holder, _ := cls.props["__class"].(*jsObject)
+	if holder == nil {
+		return false
+	}
+	for c, guard := cls, 0; c != nil && guard < 64; guard++ {
+		if mth, ok := c.props[name]; ok && isCallable(mth) {
+			return false
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	for c, guard := holder, 0; c != nil && guard < 64; guard++ {
+		if mth, ok := c.props[name]; ok && isCallable(mth) {
+			return true
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	_, ok := cls.props[name]
+	return ok
 }
 
 // ktIsInstance reports a class instance or a class descriptor, whose members are
