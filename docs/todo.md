@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1145 ruby: uncaught-exception report via $stderr, (1..).take, big Integer#step, compiled for over endless String range, define_method rescue-modifier crash, `{` after a command call parse, warn uplevel limits · P3 · RB · OPEN [V]
+### T-1145 ruby: uncaught-exception report via $stderr, (1..).take, big Integer#step, compiled for over endless String range, define_method rescue-modifier crash, `{` after a command call parse, warn uplevel limits · P3 · RB · IN PROGRESS (RB worker, round 62) [V]
 
 Found while working T-1141. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected unless noted.
 
