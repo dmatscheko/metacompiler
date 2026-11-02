@@ -4,7 +4,9 @@
 // each diagnostic on stdout as php-cli does, and again with lines=0 as well, which
 // drops the location. Every diagnostic is also checked through error_get_last():
 // its type, message, file (__FILE__) and line (__LINE__), or "Unknown" and 0 with
-// lines=0. A failed check prints its id and the program ends with exit($fails).
+// lines=0. A failed check prints its id and the program exits 1 if any
+// check failed, else 0 (the ids name the failures; a raw count could read as a
+// timeout's or a signal's status).
 // The messages are php-src's (Zend/zend_execute.c, zend_operators.c,
 // zend_closures.c, zend_object_handlers.c, zend_API.c).
 
@@ -349,4 +351,4 @@ check("cb-compound-no-parent-error", $v, 'call_user_func(): Argument #1 ($callba
 
 // ----- done -----
 echo "warnings: " . $checks . " checks, " . $fails . " failures\n";
-exit($fails);
+exit($fails > 0 ? 1 : 0);
