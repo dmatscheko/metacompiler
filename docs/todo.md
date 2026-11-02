@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-self ivars, NaN identity · P3 · RB · OPEN [V]
+### T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-self ivars, NaN identity · P3 · RB · IN PROGRESS (RB worker, round 65) [V]
 Found while closing T-1153; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
 - `5[2.9]`, `5 << 2.9`, `5 >> 2.9` crash ("Float does not support '>>'"; run leg nil pointer); MRI truncates the count.
 - `5.digits(12.9)` — MRI [5]; interpreter and native give garbage floats, run crashes.
