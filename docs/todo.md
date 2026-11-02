@@ -107,7 +107,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1158 kotlin: per-scope local vararg function refs, System.identityHashCode · P3 · KT · OPEN [V]
+### T-1158 kotlin: per-scope local vararg function refs, System.identityHashCode · P3 · KT · IN PROGRESS (KT worker, round 50) [V]
 Found while closing T-1155; oracle kotlinc 2.2.21.
 - Compiled `llvm.Run` leg only: a reference to a local vararg function loses its array form when another function declares a same-named plain local function — the emitter tracks function names program-wide, not per scope. Repro: `fun a(){ fun loc(vararg xs:Int)=xs.size*10; println((::loc)(intArrayOf(4,5,6))) }` plus `fun b(){ fun loc(x:Int)=x; println(loc(1)) }`; kotlinc prints 30 then 1, run prints 10 (interp and native agree with kotlinc — also check why native and run differ here).
 - All engines: `System.identityHashCode(x)` fails with "unknown method 'identityHashCode'". Assert as relations (same object equal, distinct objects usually unequal).
