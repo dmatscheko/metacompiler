@@ -350,8 +350,10 @@ s165() {
 # its value and elements read as unset, every store to it or through it is dropped with
 # status 0 (a default included, which still expands), read and mapfile consume their
 # records, test -v finds nothing, ${!REF} is an invalid indirect expansion and `unset`
-# unsets the nameref itself. One that is an indexed array is never set for -v and its
-# ${!REF} is empty. Every expected value is bash 5.3's.
+# unsets the nameref itself. export and readonly of it change nothing, except that
+# readonly makes the variable bash finds instead readonly, after which both refuse as a
+# readonly variable named "" (twice, status 1, with a value). One that is an indexed
+# array is never set for -v and its ${!REF} is empty. Every expected value is bash 5.3's.
 s166() {
   local e
   s166s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; case $l in *"circular name reference") continue ;; esac; printf '%s;' "$l"; done <<< "$1"; }
@@ -365,6 +367,44 @@ s166() {
   s166f() { local -n w=w; declare w=(x y); [[ -v w ]]; echo "v=$?"; test -v 'w[0]'; echo "v=$?"; echo "<${!w}>"; }
   e=$( (s166c) 2>&1; (s166d) 2>&1; echo "s=$?"; (s166e) 2>&1; echo "s=$?"; (s166f) 2>&1)
   check anr2 "$(s166s "$e")" 's=0;s=0;s=0;s=0;x=d;<>;<>;declare -An w=([0]="x" );declare -An w=([0]="x" );s=0;declare -- w;declare -- w="5";w: invalid indirect expansion;s=1;w[@]: bad array subscript;s=2;v=1;v=1;<>;'
+  s166g() { local -n w=w; declare -A w=x; export w=1; echo "s=$?"; export w; echo "s=$?"; readonly -a w; echo "s=$?"; declare -p w; readonly w=2; echo "s=$?"; readonly w; echo "s=$?"; export w=3; echo "s=$?"; export -n w; echo "s=$?"; s166h; declare -p w; }
+  s166h() { export w; echo "h=$?"; }
+  s166i() { local -n w=w; declare -A w=x; readonly w; echo "s=$?"; unset w; readonly w; echo "s=$?"; declare -p w; }
+  e=$( (s166g; s166i) 2>&1)
+  check anr3 "$(s166s "$e")" 's=0;s=0;s=0;declare -An w=([0]="x" );: readonly variable;: readonly variable;s=1;: readonly variable;s=0;: readonly variable;: readonly variable;s=1;s=0;: readonly variable;h=0;declare -An w=([0]="x" );s=0;s=0;declare -r w;'
+}
+# ===== SECTION 167: unset of a computed name =====
+# `unset $v` acts on the name the word expands to as `unset NAME` does: a local of the
+# running function stays declared, a caller's local is dropped, a readonly variable is
+# refused, and a nameref unsets the variable it names and stays a nameref - a local of
+# the function it names stays declared, a caller's is dropped. Every expected value is
+# bash 5.3's.
+s167() {
+  local e
+  s167s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s167a() { local x=1 v=x; unset $v; declare -p x; local -n r=s167q; v=r; s167q=5; unset $v; declare -p r; echo "<${s167q-U}>"; }
+  s167b() { v=s167z; unset $v; echo "in:${s167z-U}"; }
+  s167c() { local s167z=7; s167b; echo "out:${s167z-U}"; }
+  s167d() { local -n rr=tt; local tt=4; unset rr; declare -p tt; tt=5; v=rr; unset $v; declare -p tt rr; }
+  s167e() { v=rr; unset $v; }
+  s167f() { local s167y=3; local -n rr=s167y; s167e; declare -p s167y; }
+  e=$( (s167a; s167z=G; s167c; echo "g:$s167z"; readonly s167r=1; v=s167r; unset $v; echo "s=$?"; s167d; s167y=G; s167f) 2>&1)
+  check cun1 "$(s167s "$e")" 'declare -- x;declare -n r="s167q";<U>;in:G;out:G;g:G;unset: s167r: cannot unset: readonly variable;s=1;declare -- tt;declare -- tt;declare -n rr="tt";declare -- s167y="G";'
+}
+# ===== SECTION 168: a default through a nameref to an element =====
+# ${REF[SUB]=WORD} through a nameref whose value is NAME[SUB] reads the never-set variable
+# that subscript applies to, and then expands WORD and refuses the store as one to the
+# name NAME[SUB] (after the running function's name when no command has run in it yet),
+# which abandons the line with status 2. Every expected value is bash 5.3's.
+s168() {
+  local e
+  s168s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s168a() { echo "${s168r[0]=v}"; echo no; }
+  s168v=(p q)
+  declare -n s168r='s168v[1]'
+  e=$( (echo "<${s168r[0]-u}> <${s168r:=w}> <${s168r[0]:+x}>"; echo "${s168r[0]:=$(echo hi >&2; echo k)}"; echo no) 2>&1; echo "s=$?"; (s168a; echo no) 2>&1; echo "s=$?"; (echo "${s168r[@]:=v}"; echo no) 2>&1; echo "s=$?")
+  check nde1 "$(s168s "$e")" '<u> <q> <>;hi;`s168v[1]'"'"': not a valid identifier;s=2;s168a: `s168v[1]'"'"': not a valid identifier;s=2;s168r[@]: bad array subscript;s=2;'
+  unset -n s168r
 }
 # ===== END SECTIONS =====
 
@@ -381,5 +421,7 @@ s163  # SECTION-CALL 163
 s164  # SECTION-CALL 164
 s165  # SECTION-CALL 165
 s166  # SECTION-CALL 166
+s167  # SECTION-CALL 167
+s168  # SECTION-CALL 168
 echo "full: $checks checks, $fails failures"
 exit $fails

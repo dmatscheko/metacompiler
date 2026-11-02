@@ -2854,13 +2854,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     diagErr("warning: " + pn + ": circular name reference\n")
                 }
                 var rcirc = (rn == "" && !vd) ? pn : ""
-                if (hasIdx && rn.indexOf("[") > 0 && !hidLocal(rn)) { rn = "" }
+                var rsub = ""
+                if (hasIdx && rn.indexOf("[") > 0 && !hidLocal(rn)) { rsub = rn; rn = "" }
                 else if (hasIdx && rn == "" && !lenp && !indp && !refQuiet && !vd) { diagErr("warning: " + pn + ": circular name reference\n") }
                 var gn = (rn == "" && !vd) ? refGlobal(pn) : ""
                 if (gn != "") { rn = gn }
-                var rk = (vd ? "!" : ((rcirc != "") ? "%" : "$")) + rn
+                var rk = (vd ? "!" : ((rcirc != "") ? "%" : ((rsub != "") ? "[" : "$"))) + ((rsub != "") ? rsub : rn)
                 if (!hasOwn(byRef, rk)) {
-                    var its = [{refPn: pn, refCirc: rcirc, refVoid: vd}]
+                    var its = [{refPn: pn, refCirc: rcirc, refVoid: vd, refSub: rsub}]
                     var q
                     for (q = 0; q < its0.length; q++) {
                         if (typeof its0[q] != "function" && its0[q].pname != undefined) { its.push({pname: rn}) } else { its.push(its0[q]) }
@@ -2926,10 +2927,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hasIdx = false
         var errName = null
         // Through a nameref (mkParamExp): the name as written, and that name again when its
-        // chain is circular, else "". refVoid: a default is stored nowhere (refIsAs).
+        // chain is circular, else "". refVoid: a default is stored nowhere (refIsAs). refSub:
+        // the NAME[SUB] the chain ends at, when a subscript reads the never-set "" instead.
         var refPn = ""
         var refCirc = ""
         var refVoid = false
+        var refSub = ""
         var idxAll = anytype
         idxAll = null
         var idxAq = null
@@ -2938,7 +2941,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (typeof it == "function") { args.push(it); wordT = it }
             else if (it.qname != undefined) { errName = it.qname }
-            else if (it.refPn != undefined) { refPn = it.refPn; refCirc = it.refCirc; refVoid = it.refVoid }
+            else if (it.refPn != undefined) { refPn = it.refPn; refCirc = it.refCirc; refVoid = it.refVoid; refSub = it.refSub }
             else if (it.hasIdx != undefined) { hasIdx = true; idxAll = idxAllItem(it); idxAq = idxAqItem(it) }
             else if (it.lenp != undefined) { lenp = true }
             else if (it.badsub != undefined) { badsub = it.badsub; badRc = it.rec }
@@ -3155,7 +3158,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var sub = readIdx()
                 var qn = (errName != null) ? errName : (isPosName(name) ? name : ((refPn != "") ? refPn : name) + "[" + sub + "]")
                 if (isWhole(sub)) { return listOpValue(name, sub, idxOp, idxWordT, qn, refCirc) }
-                return elemOpValue(name, sub, idxOp, idxWordT, qn, refPn, refCirc, refVoid)
+                return elemOpValue(name, sub, idxOp, idxWordT, qn, refPn, refCirc, refVoid, refSub)
             }
         }
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
@@ -3534,6 +3537,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return
             }
             if (selfV) { diagErr(kw + ": warning: " + names[k] + ": circular name reference\n") }
+            // export and readonly of a nameref that is an associative array (refIsAs) find no
+            // variable: nothing changes, status 0, except that readonly makes the variable bash
+            // finds instead readonly (vro), after which each refuses as a readonly variable
+            // named "" - twice, status 1, with a value. Twin of rt_nref_voidro.
+            if ((kw == "export" || kw == "readonly") && flags.indexOf("n") < 0 && refIsAs(names[k]) && (aw == null || aw.idxT == null)
+                && (asgs[k] == null || asgs[k].lit == null)) {
+                var vra = arrs[arrKey(names[k])]
+                if (vra.vro == true) {
+                    diagErr(": readonly variable\n")
+                    if (asgs[k] != null) { diagErr(": readonly variable\n"); roFail = true }
+                }
+                else if (kw == "readonly") { vra.vro = true }
+                return
+            }
             if (declCircGlob(k, v)) { return }
             // A function's own nameref that is an array (refIsArr) takes a scalar value as
             // the name it would refer to (bash 5.3): one that is no name is refused before
@@ -4955,7 +4972,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A shallow copy of one array store, for `local`'s save entry.
     function arrCopy(a) {
-        var c2 = {assoc: a.assoc, keys: [], vals: {}, gone: {}, lit: a.lit, decl: a.decl, nb: a.nb, hv: {}}
+        var c2 = {assoc: a.assoc, keys: [], vals: {}, gone: {}, lit: a.lit, decl: a.decl, nb: a.nb, hv: {}, vro: a.vro == true}
         var i
         for (i = 0; i < a.keys.length; i++) {
             var kk = a.keys[i]
@@ -5106,8 +5123,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ${a[k]-default} and its three siblings: the scalar arms with "is it set" asked of
     // the ELEMENT.
     // Through a nameref, ref is the name as written and circ that name for a circular chain;
-    // vd: a default is stored nowhere (refIsAs).
-    function elemOpValue(name, sub, op, wordT, qn, ref, circ, vd) {
+    // vd: a default is stored nowhere (refIsAs); es: the NAME[SUB] the chain ends at, which
+    // a default is expanded for and then refused as no name, abandoning the line with
+    // status 2 (bash 5.3). Twin of rt_sub_dflt.
+    function elemOpValue(name, sub, op, wordT, qn, ref, circ, vd, es) {
         var v = scGet(name, sub)
         if (op == "") { return v }
         var colon = (op.charAt(0) == ":")
@@ -5120,6 +5139,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // Read through a nameref that is an array, no element is set.
             if (refIsArr(name)) { refArrBad(); return "" }
             if (vd) { return blank ? dfltWord(wordT) : v }
+            if (blank && es != "") {
+                if (wordT != null) { wordJoin(wordT()) }
+                diagErr(tcWho() + "`" + es + "': not a valid identifier\n")
+                storeFail()
+                return ""
+            }
             // The store looks a circular chain up twice more, as NAME[SUB]=WORD does; it names
             // the nameref when it is refused, and makes a set scalar element 0.
             if (blank && circ != "" && !refQuiet) {

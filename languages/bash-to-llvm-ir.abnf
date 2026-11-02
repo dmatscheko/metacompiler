@@ -2069,8 +2069,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrConvLit = rtDecl("rt_arr_convlit", false, [1, 1, 1, 0, 1, 0])
     var rtBerr = rtDecl("rt_berr", false, [1, 1, 1])
     var rtArrEmpty = rtDecl("rt_arr_empty", false, [1, 0])
-    var rtUnsetName = rtDecl("rt_unset_name", false, [1])
-    var rtUnsetRef = rtDecl("rt_unset_ref", false, [1, 0])
+    var rtUnsetWord = rtDecl("rt_unset_word", false, [1, 0, 0, 0])
+    var rtNrefVoidro = rtDecl("rt_nref_voidro", false, [1, 0, 0])
+    var rtUnsetRef = rtDecl("rt_unset_ref", false, [1, 0, 0, 0])
     var rtNmark = rtDecl("rt_nmark", false, [1, 0])
     var rtNrefName = rtDecl("rt_nref_name", true, [1, 0])
     var rtIsAssoc = rtDecl("rt_isassoc", false, [1])
@@ -2179,7 +2180,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtUnsetX = rtDecl("rt_unset_x", false, [0, 0])
     var rtSubx = rtDecl("rt_subx", true, [1])
     var rtSubEmpty = rtDecl("rt_sub_empty", false, [1, 1, 1])
-    var rtSubDflt = rtDecl("rt_sub_dflt", false, [1, 1, 1, 0, 1, 0])
+    var rtSubDflt = rtDecl("rt_sub_dflt", false, [1, 1, 1, 0, 1, 0, 1])
     var rtPrefixRef = rtDecl("rt_prefix_ref", false, [1, 1, 0])
     var rtVset = rtDecl("rt_vset", false, [1, 0])
     var rtSubxa = rtDecl("rt_subxa", true, [1, 1])
@@ -2830,7 +2831,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             stB = rsB
                         }
                         var sdAt = roStore(name) ? llvm.constant.NewInt(i32, 8) : (attrOn(refVars, name) ? refAttrs(stB, gepStr(stB, name), true) : zero)
-                        stB.NewCall(rtSubDflt, [nmOf(stB), kk, stB.NewSelect(whole, de, pickedE), stB.NewSelect(star, llvm.constant.NewInt(i32, 2), stB.NewZExt(whole, i32)), gepStr(stB, name), sdAt])
+                        stB.NewCall(rtSubDflt, [nmOf(stB), kk, stB.NewSelect(whole, de, pickedE), stB.NewSelect(star, llvm.constant.NewInt(i32, 2), stB.NewZExt(whole, i32)), gepStr(stB, name), sdAt,
+                                               attrOn(refVars, name) ? tcWho(stB) : emptyPtr(stB)])
                         stB.NewBr(sjB)
                         b = sjB
                     }
@@ -4782,6 +4784,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var dpreDone = false
         // Set while declOne runs again past the run-time array nameref test it has emitted.
         var arrRefDone = false
+        // Set while declOne runs again past the run-time void readonly test it has emitted.
+        var voidRoDone = false
         // export and readonly of a function's circular local nameref, its chain known here,
         // act on the global variable of the name, after bash's warnings. Twin of
         // declCircGlob in bash-interpreter.abnf, which has the cases.
@@ -4929,6 +4933,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         return sEnd
                     }
                 }
+            }
+            // export and readonly of a nameref that is an associative array when this runs
+            // change nothing, or refuse, as rt_nref_voidro decides. Twin of the same check in
+            // declOne in bash-interpreter.abnf.
+            if (!voidRoDone && (kw == "export" || kw == "readonly") && flags.indexOf("n") < 0 && refuseP != null && (a == null || (a.lit == null && a.idxT == null))
+                && (aw == null || aw.idxT == null) && (attrOn(refVars, names[j]) || refMay(names[j]))) {
+                if (a != null) {
+                    var vrv = declValue(b, a, v)
+                    b = vrv.b
+                    v = vrv.v
+                }
+                var vrc = b.NewCall(rtNrefVoidro, [gepStr(b, names[j]), (kw == "readonly") ? one : zero, (a != null) ? one : zero])
+                var vrB = curF.NewBlock(""), vrNo = curF.NewBlock(""), vrEnd = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, vrc, zero), vrNo, vrB)
+                vrB.NewStore(vrB.NewOr(vrB.NewLoad(i32, refuseP), vrB.NewLShr(vrc, one)), refuseP)
+                vrB.NewBr(vrEnd)
+                // What the other path gives the name lexically is a run-time mark there.
+                var vrAt = caseAtBits(names[j]), vrRo = attrOn(roVars, names[j])
+                voidRoDone = true
+                vrNo = declOne(vrNo, j, v)
+                voidRoDone = false
+                vrNo = roBack(atBack(vrNo, names[j], vrAt), names[j], vrRo)
+                vrNo.NewBr(vrEnd)
+                return vrEnd
             }
             if (!circGlobDone && (kw == "export" || kw == "readonly") && curFrame != null && locOwn("$" + names[j]) && refLoops(names[j])) {
                 return declCircGlob(b, j, v)
@@ -5918,6 +5946,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rtRefuse = false
             for (j = 0; j < names.length; j++) {
                 if (attrOn(refVars, names[j]) || (roRtMay(names[j]) && !attrOn(roVars, names[j]))) { rtRefuse = true }
+                if ((kw == "export" || kw == "readonly") && refMay(names[j])) { rtRefuse = true }
             }
             refuseP = (isRef || plusArr || bareArr || rtRefuse || late != null || anyQuoted() || listOps.length > 0) && !query ? slotOf(i32) : null
             if (refuseP != null) { b.NewStore(zero, refuseP) }
@@ -6337,6 +6366,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var subSeq = 0
     var subIds = [0]
     function subEnter() { subSeq = subSeq + 1; subIds.push(subSeq) }
+    // The save-stack depth this call's frame starts at, -1 outside a function.
+    function frameDepth(b) { return (curFrame != null) ? b.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1) }
     function locOwn(key) {
         if (curFrame == null || !hasOwn(curFrame.locs, key)) { return false }
         var i
@@ -8722,6 +8753,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 // The status: 1 when an operand failed (rt_arr_unset), else 0.
                 var ust = zero
+                var fnSlot = llvm.constant.NewInt(i32, getVarId("FUNCNAME"))
                 for (; uk < argTs.length; uk++) {
                     // A name that is no variable (unset, no array, not declared) unsets the
                     // function of that name instead.
@@ -8740,7 +8772,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (argTs[uk].c == undefined) {
                         var ru = evalWord(b, argTs[uk])
                         b = ru.b
-                        ust = b.NewOr(ust, b.NewCall(rtUnsetName, ru.v))
+                        ust = b.NewOr(ust, b.NewCall(rtUnsetWord, [ru.v, un ? one : zero, frameDepth(b), fnSlot]))
                         b = emitAbortCheck(b)
                         continue
                     }
@@ -8749,7 +8781,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (sp0.key == null && !un && attrOn(refVars, sp0.name)) {
                         var urf = gepStr(b, sp0.name)
                         var uOwn = (curFrame != null && locOwn("$" + sp0.name)) ? 16 : 0
-                        ust = b.NewOr(ust, b.NewCall(rtUnsetRef, [urf, b.NewOr(refAttrs(b, urf, true), llvm.constant.NewInt(i32, uOwn))]))
+                        ust = b.NewOr(ust, b.NewCall(rtUnsetRef, [urf, b.NewOr(refAttrs(b, urf, true), llvm.constant.NewInt(i32, uOwn)), frameDepth(b), fnSlot]))
                         continue
                     }
                     // A caller's nameref (refMay), when this runs, as the arm above.
@@ -8758,7 +8790,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         var umt = refMayTest(b, sp0.name)
                         umB = umt.ref
                         var umf = gepStr(umB, sp0.name)
-                        umSt = umB.NewOr(ust, umB.NewCall(rtUnsetRef, [umf, refAttrs(umB, umf, true)]))
+                        umSt = umB.NewOr(ust, umB.NewCall(rtUnsetRef, [umf, refAttrs(umB, umf, true), frameDepth(umB), fnSlot]))
                         b = umt.plain
                     }
                     // One readonly only when this runs is refused there (roRtC).

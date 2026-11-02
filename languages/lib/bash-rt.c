@@ -356,14 +356,16 @@ char *rt_nref_arrstore(char *nm);
 int rt_arith_failed(void);
 char *rt_getvar_ref(char *n, int quiet);
 int rt_nref_void(char *n);
+int rt_nref_voidro(char *n, int ro, int asg);
 int rt_nref_unglob(void);
 char *rt_nref_gread(void);
 int rt_unset_name(char *n);
+int rt_unset_word(char *n, int un, int d, int fn);
 char *rt_subx(char *s);
 char *rt_subxa(char *nm, char *s);
 int rt_vset(char *s, int cond);
 int rt_sub_empty(char *nm, char *k, char *lbl);
-int rt_sub_dflt(char *nm, char *k, char *v, int whole, char *as, int at);
+int rt_sub_dflt(char *nm, char *k, char *v, int whole, char *as, int at, char *who);
 int rt_prefix_ref(char *n, char *v, int at);
 int rt_eval_assign(char *s);
 int rt_decl_word(char *w, int d, int x, int at, char *who);
@@ -6866,6 +6868,27 @@ int rt_nref_isarr(char *n, int sub)
     return 1;
 }
 
+/* export and readonly of the nameref n that is an associative array
+ * (rt_nref_isarr) find no variable: nothing changes, except that readonly (ro 1)
+ * makes the variable bash finds instead readonly (mark 65536), after which each
+ * refuses as a readonly variable named "" - twice, failing, with a value (asg 1).
+ * Answers 0 for any other n, else 1, or 3 when refused. Twin of the same check
+ * in declOne in bash-interpreter.abnf. */
+int rt_nref_voidro(char *n, int ro, int asg)
+{
+    int r;
+    if (rt_nref_isarr(n, 0) == 0 || rt_isassoc(n) == 0) return 0;
+    r = rt_ar_find(n);
+    if ((ar_mk[r] & 65536) == 0) {
+        if (ro != 0) ar_mk[r] = ar_mk[r] | 65536;
+        return 1;
+    }
+    rt_berr("", "", "readonly variable");
+    if (asg == 0) return 1;
+    rt_berr("", "", "readonly variable");
+    return 3;
+}
+
 /* A store that lands on the nameref n itself (its value unset or empty) must name
  * a variable, NAME or NAME[SUB]: otherwise bash's "not a valid identifier" (under
  * the storing builtin's ar_pfx), arith_err and sub_bad, and 1. Twin of refSelfBad
@@ -7281,13 +7304,13 @@ char *rt_nref_name(char *n, int own)
     return e;
 }
 
-/* `unset NAME` of the nameref n acts on the variable its chain ends at, which
- * ro (8, picked by the emitter as for rt_setvar_byname) says is readonly. A
- * circular chain bash looks up a second time (another warning), and the unset
- * acts on n itself, its nameref mark going first; a local of the running call
- * (ro 16) stays declared. Twin of the unset arm of runCommand in
- * bash-interpreter.abnf. */
-int rt_unset_ref(char *n, int ro)
+/* `unset NAME` of the nameref n, in a call whose frame starts at depth d (as
+ * rt_unset_word), acts on the variable its chain ends at, which ro (8, picked
+ * by the emitter as for rt_setvar_byname) says is readonly. A circular chain
+ * bash looks up a second time (another warning), and the unset acts on n
+ * itself, its nameref mark going first; a local of the running call (ro 16)
+ * stays declared. Twin of the unset arm of runCommand in bash-interpreter.abnf. */
+int rt_unset_ref(char *n, int ro, int d, int fn)
 {
     char *e = 0;
     int i;
@@ -7315,7 +7338,7 @@ int rt_unset_ref(char *n, int ro)
         rt_arr_smark(e);
         return 0;
     }
-    return rt_unset_name(e);
+    return rt_unset_word(e, 1, d, fn);
 }
 
 /* The attribute letters `at` (bash's order: a/A i n r t x c l u) with the n of a
@@ -10007,11 +10030,24 @@ int rt_sub_empty(char *nm, char *k, char *lbl)
  * readonly, which refuses the store naming the nameref - through a circular
  * one (nref_glob), the global it lands on. An element store looks a circular
  * chain up twice more, a whole one once, and makes a set scalar element 0. A
- * refusal abandons the line, status 2 (arith_err 3). Twin of elemOpValue and
- * listDefault in bash-interpreter.abnf. */
-int rt_sub_dflt(char *nm, char *k, char *v, int whole, char *as, int at)
+ * refusal abandons the line, status 2 (arith_err 3). An element through a
+ * nameref whose chain ends at NAME[SUB] is refused as that name, after who
+ * (the running command's name, or ""). Twin of elemOpValue and listDefault in
+ * bash-interpreter.abnf. */
+int rt_sub_dflt(char *nm, char *k, char *v, int whole, char *as, int at, char *who)
 {
     int i;
+    char *t = 0;
+    if (whole == 0 && nref_any != 0 && (rt_arr_marks(as) & 32) != 0) {
+        nref_quiet = nref_quiet + 1;
+        t = rt_nref_end(as);
+        nref_quiet = nref_quiet - 1;
+    }
+    if (t != 0 && rt_nref_el(t, as) > 0) {
+        rt_berr(who, rt_strcat(rt_strcat("`", t), "'"), "not a valid identifier");
+        arith_err = 3;
+        return 0;
+    }
     if (whole != 0 && rt_isassoc(nm) == 0) {
         if (nref_glob != 0 && nref_quiet == 0) rt_berr("warning", as, "circular name reference");
         rt_berr("", rt_strcat(as, whole == 2 ? "[*]" : "[@]"), "bad array subscript");
@@ -10093,6 +10129,40 @@ int rt_unset_name(char *n)
     rt_setvar_byname(n, &unset_marker[0], 0, 0);
     rt_arr_clear(n);
     rt_xmark(n, 0);
+    return 0;
+}
+
+/* `unset [-n] WORD` where the word came out of an expansion, run in a call whose
+ * frame starts at depth d (-1 outside a function; fn is $FUNCNAME's slot): a
+ * NAME[SUB] as rt_unset_name; without -n (un 0), a nameref as rt_unset_ref; a
+ * readonly variable is refused; a local of this call stays declared (rt_unset_x),
+ * a caller's is dropped (rt_unset_up). Twin of the literal unset arm of the
+ * emitter, and of the unset arm of runCommand in bash-interpreter.abnf. */
+int rt_unset_word(char *n, int un, int d, int fn)
+{
+    int len = rt_strlen(n);
+    int id = rt_varslot(n);
+    int own = 0;
+    int t = d;
+    if (len > 2 && n[len - 1] == 93) return rt_unset_name(n);
+    while (id >= 0 && d >= 0 && t < ls_top && own == 0) {
+        if (ls_id[t] == id && ls_tmp[t] != 1) own = 16;
+        t = t + 1;
+    }
+    if (un == 0 && (rt_arr_marks(n) & 32) != 0) return rt_unset_ref(n, rt_ro_name(n) | own, d, fn);
+    if (((un == 0 ? rt_ro_name(n) : rt_dyn_at(n)) & 8) != 0) {
+        rt_berr("unset", n, "cannot unset: readonly variable");
+        return 1;
+    }
+    if (id >= 0) gvars[id] = &unset_marker[0];
+    rt_arr_clear(n);
+    if (own != 0) {
+        rt_unset_x(id, d);
+        rt_arr_smark(n);
+        return 0;
+    }
+    rt_xmark(n, 0);
+    if (id >= 0 && d >= 0 && id != fn) rt_unset_up(id, d, fn);
     return 0;
 }
 
