@@ -12832,8 +12832,12 @@ func (rt *jsrt) ktRefApply(info *ktRefInfo, args []interface{}) interface{} {
 			return ktMemberCall(recv, info.name, ktRefRest(info, args))
 		}
 		// A member the receiver really HAS wins over a same-named extension, which is
-		// Kotlin's rule for the call too.
-		if _, own := o.props[info.name]; own {
+		// Kotlin's rule for the call too. On a java class's statics (__kjstatic) a
+		// function member is a static METHOD, which `Math::abs` calls.
+		if v, own := o.props[info.name]; own {
+			if o.props["__kjstatic"] == true && isCallable(v) {
+				return rt.call(v, jsUndef, ktRefRest(info, args))
+			}
 			return ktRefRead(recv, info.name)
 		}
 	}

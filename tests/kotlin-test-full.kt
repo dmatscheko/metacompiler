@@ -8452,6 +8452,29 @@ fun s189() {
         listOf(o).hashCode() == 31 + o.hashCode())
 }
 
+// ===== SECTION 190: references to java static members =====
+// `Math::abs`, `System::currentTimeMillis`, `Integer::parseInt` are bound to the
+// java class's statics; calling one calls the static method. An overloaded one
+// (abs, max, parseInt) needs an expected type, which a declared function type or
+// the parameter it is passed to gives.
+fun clk190(f: () -> Long) = f() > 0L && f() > 0L
+
+fun s190() {
+    val ab: (Int) -> Int = Math::abs
+    val mx: (Int, Int) -> Int = Math::max
+    val sq: (Double) -> Double = Math::sqrt
+    check("jstatic190a", ab(-3) == 3 && mx(2, 7) == 7 && sq(16.0) == 4.0 &&
+        listOf(-1, 2, -3).map(Math::abs) == listOf(1, 2, 3) && listOf(3, 9, 4).reduce(Math::max) == 9)
+    val g = System::currentTimeMillis
+    val n = System::nanoTime
+    val ih = System::identityHashCode
+    val o = "x"
+    check("jstatic190b", g() > 0L && n() > 0L && clk190(System::currentTimeMillis) && ih(o) == ih(o) && ih(null) == 0)
+    val pi: (String) -> Int = Integer::parseInt
+    check("jstatic190c", pi("42") + 1 == 43 && listOf("1", "22").map(Integer::parseInt).sum() == 23 &&
+        ab.toString() == "function abs (Kotlin reflection is not available)")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8639,6 +8662,7 @@ fun main() {
     s187() // SECTION-CALL 187
     s188() // SECTION-CALL 188
     s189() // SECTION-CALL 189
+    s190() // SECTION-CALL 190
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

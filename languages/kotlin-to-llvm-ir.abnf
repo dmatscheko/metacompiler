@@ -8715,6 +8715,8 @@ KwContract  = "contract" KwEnd ;
         if (name == "class" && isReifiedHere(baseName)) {
             return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, reifiedKSlot(baseName))])} }
         }
+        // The base is read as a value (`System::nanoTime`), so a builtin it names is declared.
+        if (name != "class") { ktVarSeen["$" + baseName.split(".")[0]] = true }
         return function(b) {
             // `Array<Dog>::class` is the java array class its element type fixes
             // ([LDog;), handed to js_ktclasslit as a type name. Twin of makePropRef
@@ -9567,6 +9569,7 @@ KwContract  = "contract" KwEnd ;
         // over js_ktclock(kind, us), identityHashCode one over js_ktidhash.
         if (ktVarSeen["$System"] == true && classNames["$System"] == undefined) {
             var sysV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [sysV, emitStr(b, "__kjstatic"), hTrue])
             var clocks = ["currentTimeMillis", "nanoTime"]
             for (var ck = 0; ck < clocks.length; ck++) {
                 callExt(b, "js_set", [sysV, emitStr(b, clocks[ck]),

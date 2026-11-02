@@ -4255,7 +4255,7 @@ NotMemberKw = :script(~~ "pure";
         return function(x) { return kFlo(ktmMath1(kn, kNumD(x))) }
     }
     function kJavaAngleFn(jn) { return function(x) { return kFlo(ktmJavaAngle(jn, kNumD(x))) } }
-    var kJavaMath = {PI: kFlo(ktmConst("PI")), E: kFlo(ktmConst("E")), abs: hostGlobals["abs"],
+    var kJavaMath = {__kjstatic: true, PI: kFlo(ktmConst("PI")), E: kFlo(ktmConst("E")), abs: hostGlobals["abs"],
                      max: hostGlobals["max"], min: hostGlobals["min"],
                      toRadians: kJavaAngleFn("toRadians"), toDegrees: kJavaAngleFn("toDegrees"),
                      floorDiv: function(x, y) { return kFloorDivMod(x, y, false) },
@@ -4272,6 +4272,7 @@ NotMemberKw = :script(~~ "pure";
     // without identity in this value model its own hash. Twin of ktIdHash in
     // abnf/jsrtkotlin.go and js_ktidhash in languages/lib/kotlin-rt.metajs.
     hostGlobals["System"] = {
+        __kjstatic: true,
         currentTimeMillis: function() { return kConv(Math.floor(clockMicros() / 1000), 64, false) },
         nanoTime: function() { return kArith("*", kConv(clockMicros(), 64, false), kConv(1000, 64, false)) },
         identityHashCode: function(v) {
@@ -4315,7 +4316,7 @@ NotMemberKw = :script(~~ "pure";
         var parse = w == 64 ? "toLong" : "toInt"
         var parser = function(s, r) { return mcall(s, parse, r === undefined ? [] : [r]) }
         var cmp = function(a, b) { return mcall(kConv(a, w, false), "compareTo", [kConv(b, w, false)]) }
-        var o = {MAX_VALUE: kt.MAX_VALUE, MIN_VALUE: kt.MIN_VALUE, SIZE: w, BYTES: w / 8, compare: cmp,
+        var o = {__kjstatic: true, MAX_VALUE: kt.MAX_VALUE, MIN_VALUE: kt.MIN_VALUE, SIZE: w, BYTES: w / 8, compare: cmp,
                  signum: function(v) { return cmp(v, 0) },
                  max: function(a, b) { return kPick(kConv(a, w, false), kConv(b, w, false), true) },
                  min: function(a, b) { return kPick(kConv(a, w, false), kConv(b, w, false), false) },
@@ -12991,9 +12992,14 @@ NotMemberKw = :script(~~ "pure";
             return mcall(recv, mn, kRefRest(r, args))
         }
         // A member the receiver really HAS wins over a same-named extension, which is
-        // Kotlin's rule for the call too.
+        // Kotlin's rule for the call too. On a java class's statics (Math, System,
+        // Integer: __kjstatic) a function member is a static METHOD, which `Math::abs`
+        // calls. Twin of ktRefApply in abnf/jsrtkotlin.go and kotlin-rt.metajs.
         if (recv !== null && recv !== undefined && typeof recv == "object" && hasOwn(recv, r.pname)) {
-            return kGetField(recv, r.pname)
+            var ov = anytype
+            ov = kGetField(recv, r.pname)
+            if (recv.__kjstatic === true && typeof ov == "function") { return ov.apply(undefined, kRefRest(r, args)) }
+            return ov
         }
         // An EXTENSION function - `Box::tripled`, `b::tripled`. extFor is the same
         // resolution the call `b.tripled()` uses.

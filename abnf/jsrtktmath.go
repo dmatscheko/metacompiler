@@ -217,6 +217,7 @@ var ktJavaMathNames = map[string]string{
 // languages/lib/kotlin-rt.metajs.
 func ktJavaMath(rt *jsrt) *jsObject {
 	o := newJSObject()
+	o.set("__kjstatic", true)
 	o.set("PI", jsJFlo{f: math.Pi})
 	o.set("E", jsJFlo{f: math.E})
 	for _, n := range []string{"abs", "max", "min"} {
@@ -285,6 +286,7 @@ func ktJavaInt(rt *jsrt, w uint8) *jsObject {
 	fn := func(name string, f func(args []interface{}) interface{}) {
 		kt.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} { return f(args) }))
 	}
+	kt.set("__kjstatic", true)
 	kt.set("SIZE", float64(w))
 	kt.set("BYTES", float64(w/8))
 	tail := func(args []interface{}) []interface{} {

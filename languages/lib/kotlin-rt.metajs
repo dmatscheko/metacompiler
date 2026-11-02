@@ -7851,8 +7851,14 @@ function ktRefApply(info, args) {
             return ktSmcall(recv, info["name"], k4bRefRest(info, args))
         }
         // A member the receiver really HAS wins over a same-named extension,
-        // which is Kotlin's rule for the call too.
-        if (recv[info["name"]] !== undefined) { return ktRefRead(recv, info["name"]) }
+        // which is Kotlin's rule for the call too. On a java class's statics
+        // (__kjstatic) a function member is a static METHOD, which `Math::abs` calls.
+        var own = anytype
+        own = recv[info["name"]]
+        if (own !== undefined) {
+            if (recv["__kjstatic"] === true && ktIsFn(own)) { return ktCall(own, k4bRefRest(info, args)) }
+            return ktRefRead(recv, info["name"])
+        }
     }
     var ext = info["ext"]
     if (ktIsArr(ext)) {
@@ -9926,6 +9932,7 @@ function k4JavaMathFn(kn) {
 function k4JavaAngleFn(jn) { return function (x) { return flo(ktmJavaAngle(jn, ktNum(x)), 0) } }
 function k4JavaMath() {
     var o = {}
+    o["__kjstatic"] = true
     o["PI"] = flo(ktmConst("PI"), 0)
     o["E"] = flo(ktmConst("E"), 0)
     o["abs"] = ktGlobalFn("abs")
@@ -9977,6 +9984,7 @@ function k4JavaInt(w) {
         o = js_kttype("Long")
         parse = "toLong"
     }
+    o["__kjstatic"] = true
     o["SIZE"] = w
     o["BYTES"] = w / 8
     var parser = k4JavaIntParser(parse)
