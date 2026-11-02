@@ -118,7 +118,7 @@ ElseClause  <~~ push(mkElse(pop())) ~~>
 // they are the same "unquoted but unsplit" context an assignment's right hand side is.
 // The body of a clause is an ordinary statement list, except that its separator run must not
 // swallow the leading ";" of the ";;" that ends the clause - which is what NotCaseTerm guards.
-CaseStmt    <~~ push(makeCase(takeAll(), lineStr(up.start))) ~~>
+CaseStmt    <~~ push(makeCase(takeAll(), lnOf(up.start))) ~~>
             = KwCase NsWord KwIn CaseSepOpt { CaseClause } KwEsac ;
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = CaseOpen CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
@@ -149,7 +149,7 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
 // for (( init; cond; step )); do LIST; done
 // Each part is arithmetic text that, like (( )), is expanded FIRST when it holds an
 // expansion (e='1 + 2'; `i < $e * 2` is i < 5), and may be empty: an empty condition is 1.
-CForStmt    <~~ push(makeCFor(takeAll(), lineStr(up.start))) ~~>
+CForStmt    <~~ push(makeCFor(takeAll(), lnOf(up.start))) ~~>
             = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep LoopBody ;
 CfPart      = CfDyn | CfSt | CfRaw | CfZero ;
 CfCond      = CfDyn | CfSt | CfRaw | CfOne ;
@@ -165,7 +165,7 @@ CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
 // Each word is one iteration value (no re-splitting).
-ForStmt     <~~ push(makeFor(takeAll(), lineStr(up.start))) ~~>
+ForStmt     <~~ push(makeFor(takeAll(), lnOf(up.start))) ~~>
             = KwFor ForName [ ForIn ] Sep LoopBody ;
 // A for loop's body is do LIST done or, as bash also takes it, { LIST; }.
 LoopBody    = ( KwDo CompoundList KwDone ) | ( "{" BraceKwEnd CompoundList "}" ) ;
@@ -229,7 +229,7 @@ FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileS
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
 // Redirections may stand before and among the assignments (`>/dev/null x=5 cmd`).
-PrefixCommand <~~ push(makePrefixCmd(takeAll(), "" + lnPop())) ~~>
+PrefixCommand <~~ push(makePrefixCmd(takeAll(), lnPop())) ~~>
             = { RedirItem } AsgPrefix1 { AsgPrefix | RedirItem } NotIoRedir NotReserved CWord { CmdSuffix } ;
 AsgPrefix1  <~~ lnPush(up.pos) ~~> = AsgPrefix ;
 // A subscripted one (`a[1]=Q cmd`) parses too: bash refuses it when it runs (mkPrefixAsg).
@@ -242,7 +242,7 @@ AsgPList    <~~ push(mkPrefixList(takeAll())) ~~> = "(" :whitespace(WsNL) { NsWo
 AsgPOp      <~~ push({pop: up.in}) ~~> = "+=" | AsgEq ;
 AsgEq       = "=" ;
 // NAME=VALUE... before a declaration builtin (makePrefixDecl has the rules).
-PrefixDecl  <~~ push(makePrefixDecl(takeAll(), "" + lnPop())) ~~>
+PrefixDecl  <~~ push(makePrefixDecl(takeAll(), lnPop())) ~~>
             = AsgPrefix1 { AsgPrefix } DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
@@ -255,20 +255,20 @@ BraceGroup  <~~ push(eeExempt(makeGroupR(takeAll()))) ~~> = "{" BraceKwEnd Compo
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is (see ArithExp).
 ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
-ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(makeArithCmd(pop(), lineStr(up.pos))) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
-ArithCmdDyn <~~ arSqClaim(up.start + 2, up.pos - 2); badClaim(up.start + 2, up.pos - 2, true); push(makeArithCmd(mkArDyn(pop()), lineStr(up.pos))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(makeArithCmd(pop(), lnOf(up.pos))) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+ArithCmdDyn <~~ arSqClaim(up.start + 2, up.pos - 2); badClaim(up.start + 2, up.pos - 2, true); push(makeArithCmd(mkArDyn(pop()), lnOf(up.pos))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
-ArithCmdRaw <~~ arSqClaim(up.start + 2, up.pos - 2); badClaim(up.start + 2, up.pos - 2, true); push(makeArithCmd(mkArDyn(pop()), lineStr(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
+ArithCmdRaw <~~ arSqClaim(up.start + 2, up.pos - 2); badClaim(up.start + 2, up.pos - 2, true); push(makeArithCmd(mkArDyn(pop()), lnOf(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
-CondCmd     <~~ push(makeCondCmd(pop(), lineStr(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr Linebreak "]]" ;
+CondCmd     <~~ push(makeCondCmd(pop(), lnOf(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr Linebreak "]]" ;
 
 RedirList   = RedirItem { RedirItem } ;
 RedirItem   = HereDoc | Redir ;
 
 // let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
 // Redirections may stand among the arguments (`let x=1 2>/dev/null`).
-LetCmd      <~~ push(makeLetCmd(takeAll(), lineStr(up.start))) ~~> = KwLet LetItem { LetItem } ;
+LetCmd      <~~ push(makeLetCmd(takeAll(), lnOf(up.start))) ~~> = KwLet LetItem { LetItem } ;
 KwLet       = "let" KwEnd ;
 LetItem     = RedirItem | NotIoRedir LetArg ;
 // Each argument is a WORD: expanded, field-split where it is unquoted, and every field is
@@ -290,7 +290,7 @@ LetRaw      <~~ push({letws: takeAll()}) ~~> = CWord ;
 // variable slot, and `local` needs it to record the save entry for the current call frame.
 // It is not a SimpleCommand, so it needs its own [ RedirList ] for
 // `declare -p missing 2>/dev/null` to parse.
-DeclCommand <~~ push(makeDeclR(takeAll(), lineStr(up.start))) ~~>
+DeclCommand <~~ push(makeDeclR(takeAll(), lnOf(up.start))) ~~>
             = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
 DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
@@ -318,7 +318,7 @@ DeclDyn     <~~ push({dyn: takeAll(), dsrc: arSrc(up.start, up.pos)}) ~~> = NotI
 // It may carry redirections, before, among or after (`r=$(cmd) 2>/dev/null`): bash performs
 // them after the assignment, so they do not apply to a command substitution on the right hand side.
 // Several may share one command (`a=1 b=$a`): they run left to right, each seeing the last.
-Assignment  <~~ push(makeAssign(takeAll(), "" + lnPop())) ~~> = [ RedirList ] AsgOne1 { AsgOne | RedirItem } ;
+Assignment  <~~ push(makeAssign(takeAll(), lnPop())) ~~> = [ RedirList ] AsgOne1 { AsgOne | RedirItem } ;
 AsgOne1     <~~ lnPush(up.pos) ~~> = AsgOne ;
 AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
@@ -357,14 +357,14 @@ AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
 // command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
-SimpleCommand <~~ push(makeSimpleCommand(takeAll(), "" + lnPop(), null)) ~~>
+SimpleCommand <~~ push(makeSimpleCommand(takeAll(), lnPop(), null)) ~~>
             = NotReserved FirstWord { CmdSuffix } ;
 FirstWord   <~~ lnPush(up.pos) ~~> = CWord ;
 CmdSuffix   = HereDoc | Redir | CWord ;
 // Redirections BEFORE the command word (`2>/dev/null cmd`), or with no command at all: bash
 // 5.3 performs `>file` alone (status 0) and `>&6` with fd 6 closed fails with status 1.
 // Without a command word this is `:` with the redirections.
-RedirCommand <~~ push(makeSimpleCommand(redirCmdItems(takeAll()), "" + lnPop(), null)) ~~>
+RedirCommand <~~ push(makeSimpleCommand(redirCmdItems(takeAll()), lnPop(), null)) ~~>
             = RedirFirst { RedirItem } [ NotReserved CWord { CmdSuffix } ] ;
 RedirFirst  <~~ lnPush(up.pos) ~~> = RedirItem ;
 
@@ -506,7 +506,7 @@ ExpSeg      = ArithExp | CmdSub | BackSub | FunSub | ReplySub | DollarBrace | Do
 // word segment is that output with its trailing newlines removed (exactly like the shell).
 // The list is parsed with the normal whitespace rule; the enclosing word's "no skipping"
 // state is restored automatically when the production returns.
-CmdSub      <~~ push(mkCmdSub(pop(), bashCsLines(arSrc(up.start + 2, up.pos - 1), srcLine(up.start)))) ~~>
+CmdSub      <~~ push(mkCmdSub(pop(), bashCsLines(arSrc(up.start + 2, up.pos - 1), srcLine(up.start), up.start + 2))) ~~>
             = "$(" :whitespace(Whitespace) CompoundList ")" ;
 // Inside `...` a backslash before $, ` or \ (and before " when the `...` stands in double
 // quotes) is removed first, and the remaining text is then parsed as the list (POSIX 2.6.3):
@@ -3293,13 +3293,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         var opts = ""
         var anyDyn = false
+        // The NAME[SUB]=(list) operands (bashDeclListElems), in order: each one's first
+        // declaration runs as its words expand, the builtin's own as its operand is declared.
+        var les = bashDeclListElems(items)
+        var listOps = []
+        for (i = 0; i < les.length; i++) { listOps.push({pre: makeDecl(les[i].pre, [], ln, true), late: makeDecl(les[i].late, [], ln, true), lbl: les[i].lbl}) }
         for (i = 1; i < items.length; i++) {
             if (items[i].dflag != undefined) { opts = opts + items[i].dflag }
             else if (items[i].dyn != undefined) { anyDyn = true }
         }
         if (opts != "") {
             var badOpt = bashDeclBadOpt(kw, opts)
-            if (badOpt != "") { return declBadOpt(badOpt, redirs, ln) }
+            if (badOpt != "") { return declListFirst(listOps, kw, declBadOpt(badOpt, redirs, ln)) }
             if (opts.indexOf("I") >= 0) { fail(kw + " " + opts + " is not supported") }
         }
         // Option words after an operand that mark array literals (bashDeclLate): each name's
@@ -3307,7 +3312,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var late = bashDeclLate(items)
         var lateBad = []
         if (late != null) { items = late.items; lateBad = late.bad; anyDyn = false }
-        if (anyDyn) { return makeDeclDyn(items, redirs, ln) }
+        if (anyDyn) { return declListFirst(listOps, kw, makeDeclDyn(items, redirs, ln)) }
         var lates = []
         for (i = 1; i < items.length; i++) {
             var it = items[i]
@@ -3315,6 +3320,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dflag != undefined) { flags = flags + it.dflag; continue }
             if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null); lates.push("") }
             else { names.push(it.a.name); asgs.push(it.a); darrs.push(null); lates.push((it.dlate != undefined) ? it.dlate : "") }
+        }
+        // listAt[k]: operand k's listOps entry, else null.
+        var listAt = []
+        var li = 0
+        for (i = 0; i < asgs.length; i++) {
+            var la = asgs[i]
+            listAt.push((la != null && la.idxT != null && la.lit != null && li < listOps.length) ? listOps[li] : null)
+            if (listAt[i] != null) { li = li + 1 }
         }
         // export and readonly print with -p only when no name is given: bash 5.3's
         // `export -p x` exports x and prints nothing. Twin of makeDecl in bash-to-llvm-ir.abnf.
@@ -3411,9 +3424,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var roAttr = bashDeclRoAttr(kw, flags, plus)
         // A readonly name the declaration would assign or make local is refused (status 1).
         var roFail = false
+        // The builtin's own report of a literal refused while the words expand comes after
+        // every operand has expanded, under the redirections (bash 5.3: `declare -gA a=(x)
+        // a=(y)` reports "NAME: ..." twice before "declare: NAME: ..." twice). While the
+        // words expand, litLate collects them per operand for body to print in turn.
+        var litLate = null
+        var builtinDiag = function(k, msg) {
+            if (litLate == null) { diagErr(msg) } else { litLate[k] = litLate[k] + msg }
+        }
         // One name, which -g declares on its global binding even where a local hides it.
         var declAt = function(k, v) {
             if (!global || localFrames.length == 0) { declOne(k, v); return }
+            // NAME[SUB]=VALUE where NAME is the function's own nameref with no value declares
+            // the global NAME an array, but the element store looks NAME up as usual and finds
+            // the nameref: bash 5.3's "`': not a valid identifier", status 1. Twin of declAt
+            // in bash-to-llvm-ir.abnf.
+            var aw = asgsWritten[k]
+            if (!isRef && aw != null && aw.idxT != null && aw.isrc != "" && aw.lit == null && localHere(names[k]) && refVoid(names[k])) {
+                var nm = names[k]
+                onGlobal(nm, function() { arrAdopt(nm); arrEnsure(nm, assoc); arrs[arrKey(nm)].lit = true })
+                diagErr(kw + ": `': not a valid identifier\n")
+                roFail = true
+                return
+            }
             onGlobal(names[k], function() { declOne(k, v) })
         }
         // Does the NAME[SUB] operand k, of a nameref, drop the nameref attribute (declOne)?
@@ -3472,9 +3505,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         var roLit = lit0 && attrOn(roVars, names[k])
                         var litChk = bashDeclLitChk(flags)
                         if (roLit && litChk) { diagErr(tcWho() + names[k] + ": readonly variable\n") }
-                        if (lit0 && !isArray && !refQuiet) { diagErr("warning: " + names[k] + ": circular name reference\n"); diagErr("warning: " + names[k] + ": circular name reference\n") }
+                        // The literal's own two lookups resolve to the global variable
+                        // (refGlobal); a readonly one refuses it after the first, reported bare,
+                        // and the line is abandoned.
+                        var gro = (lit0 && !isArray && !roLit) ? refGlobal(names[k]) : ""
+                        var roGlob = gro != "" && globalEntry(gro).ar == true
+                        if (lit0 && !isArray && !refQuiet) { diagErr("warning: " + names[k] + ": circular name reference\n") }
+                        if (roGlob) { diagErr(gro + ": readonly variable\n"); abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
+                        if (lit0 && !isArray && !refQuiet) { diagErr("warning: " + names[k] + ": circular name reference\n") }
                         if (roLit && !litChk) { abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
-                        if (roLit) { diagErr(kw + ": " + names[k] + ": readonly variable\n"); roFail = true; return }
+                        if (roLit) { builtinDiag(k, kw + ": " + names[k] + ": readonly variable\n"); roFail = true; return }
                         var sa0 = asgs[k]
                         if (integer && sa0 != null && !lit0) { asgs[k] = null; roFail = true }
                         if (lit0 && sa0.op == "+=" && !isArr(names[k])) {
@@ -3484,6 +3524,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         declOneN(k, (asgs[k] == null) ? null : v)
                         noRef = noRef - 1
                         asgs[k] = sa0
+                        // A value that is NAME itself warns once more, stored or not.
+                        if (sa0 != null && !lit0 && sa0.op == "=" && v == names[k] && !refQuiet) { diagErr("warning: " + names[k] + ": circular name reference\n") }
                         return
                     }
                 }
@@ -3623,9 +3665,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     diagErr((early ? tcWho() : "") + names[k] + ": readonly variable\n")
                     if (!early || fnDepth == 0 || kw == "export" || kw == "readonly") { abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
                 }
-                diagErr(roWho + ((asgs[k] != null && roWho != "") ? shown : names[k]) + ": readonly variable\n")
+                builtinDiag(k, roWho + ((asgs[k] != null && roWho != "") ? shown : names[k]) + ": readonly variable\n")
                 // export still exports it (bash 5.3: readonly z=1; export z=2 leaves -rx).
                 if (kw == "export" && flags.indexOf("n") < 0) { exVars["$" + names[k]] = true }
+                // A function's readonly local declared -a or -A again becomes an empty array of
+                // that kind all the same, unless it is an array (bash 5.3: local -r y=1; local
+                // -a y leaves declare -ar y=()). Twin of roArrLocal in bash-to-llvm-ir.abnf.
+                if (bareArr && localize && !fresh && !isArr(names[k])) {
+                    var roSet = isSetVar(names[k])
+                    unsetVar(names[k])
+                    arrEnsure(names[k], assoc)
+                    arrs[arrKey(names[k])].decl = true
+                    if (roSet) { arrs[arrKey(names[k])].lit = true }
+                }
                 roFail = true
                 return
             }
@@ -3648,7 +3700,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var cmsg = shown + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n"
                 diagErr(tcWho() + cmsg)
                 if (fnDepth == 0) { abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
-                if (!lateOnly && !listPre) { diagErr(kw + ": " + cmsg) }
+                if (!lateOnly && !listPre) { builtinDiag(k, kw + ": " + cmsg) }
                 roFail = true
                 return
             }
@@ -3729,9 +3781,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (plus.indexOf("x") >= 0) { exVars["$" + names[k]] = false }
             if (asgs[k] == null && !isArray && darrs[k] == null && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
         }
-        // The expanded values, one array per running declaration: the expansion of a value can
-        // run this same declaration again (`local x=$(f)` inside a recursive f).
+        // The expanded values and the deferred reports (litLate), one array each per running
+        // declaration: the expansion of a value can run this same declaration again (`local
+        // x=$(f)` inside a recursive f).
         var valStack = []
+        var lateStack = []
         var body = function() {
             var k
             var vals = valStack[valStack.length - 1]
@@ -3776,6 +3830,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 setStatus(0); return 0
             }
+            var lates0 = lateStack[lateStack.length - 1]
             for (k = 0; k < names.length; k++) {
                 // export and readonly take no NAME[SUB], with a value or without. Twin of
                 // declWritten in bash-to-llvm-ir.abnf.
@@ -3786,6 +3841,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     continue
                 }
                 lateDiag(k)
+                if (lates0[k] != "") { diagErr(lates0[k]) }
+                if (listAt[k] != null) {
+                    var lst = anytype
+                    lst = listAt[k].late()
+                    if (typeof lst == "object") { return lst }
+                    if (lst != 0) { roFail = true }
+                    continue
+                }
                 if (asgs[k] == null || asgs[k].lit == null) { if (!declQuoted(k, vals[k])) { declAt(k, vals[k]) } }
                 else if (lates[k].indexOf("g") >= 0 && localizes()) {
                     // A literal a -g mark sent to the global still declares the name here,
@@ -3817,14 +3880,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             run = mkRedirected(wrapped)
         }
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             var k
             var vals = []
+            var mine = []
+            for (k = 0; k < names.length; k++) { mine.push("") }
             for (k = 0; k < names.length && !query; k++) {
                 var a = asgs[k]
+                if (listAt[k] != null) {
+                    var lab = declListPre(listAt[k], kw)
+                    if (lab != null) { return lab }
+                    vals.push("")
+                    continue
+                }
                 if (a != null && a.lit != null) {
                     if (lates[k] != "") { lateFor(k) }
+                    var svLate = litLate
+                    litLate = mine
                     declAt(k, "")
+                    litLate = svLate
                     if (lates[k] != "") { lateFor(-1) }
                 }
                 vals.push((a != null && a.lit == null && a.valT != null) ? wordJoin(a.valT()) : "")
@@ -3832,9 +3906,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (ab != null) { return ab }
             }
             valStack.push(vals)
+            lateStack.push(mine)
             var r = anytype
             r = run()
             valStack.pop()
+            lateStack.pop()
             if (keepTc != true) { thisCmd = "" }
             return r
         }
@@ -3860,7 +3936,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var run = body
         if (redirs.length > 0) { run = mkRedirected([body].concat(redirs)) }
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             var dt = bashDeclText(items, function(dyn) {
                 var fs = expandWords(dyn)
                 return (abortSignal != null || arithErr) ? null : fs
@@ -3898,10 +3974,35 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // An option the builtin does not take (bashDeclBadOpt, diagnostic msg) fails it with
     // status 2 before anything is done. Twin of the option check in makeDecl in
     // bash-to-llvm-ir.abnf.
+    // The first declaration of the list operand op (makeDecl's listOps), as the words expand:
+    // made, it abandons the line ("NAME[SUB]: cannot assign list to array member"); refused,
+    // too, except in a function's declare, typeset or local (kw). Answers the abort, or null.
+    function declListPre(op, kw) {
+        var st = anytype
+        st = op.pre()
+        if (typeof st == "object") { return st }
+        if (st != 0 && fnDepth > 0 && kw != "export" && kw != "readonly") { return null }
+        if (st == 0) { diagErr(op.lbl + ": cannot assign list to array member\n") }
+        abortSignal = {ret: 1, isExit: 1, soft: 1}
+        return takeAbort()
+    }
+    // A declaration run whole (a bad option, a computed operand): the first declarations of
+    // its list operands ops come first.
+    function declListFirst(ops, kw, run) {
+        if (ops.length == 0) { return run }
+        return function() {
+            var j
+            for (j = 0; j < ops.length; j++) {
+                var ab = declListPre(ops[j], kw)
+                if (ab != null) { return ab }
+            }
+            return run()
+        }
+    }
     function declBadOpt(msg, redirs, ln) {
         var run = mkRedirected([function() { diagErr(msg); return 2 }].concat(redirs))
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             thisCmd = ""
             var st = anytype
             st = run()
@@ -3921,34 +4022,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { core.push(bashDeclPlusOp(core, it, makeConst)) }
             else { reds.push(it) }
         }
-        var les = bashDeclListElems(core)
-        if (les.length == 0) { return makeDecl(core, reds, ln) }
-        // Twin of makeDeclR in bash-to-llvm-ir.abnf.
-        // A refused first declaration abandons the line too, except in a function's declare,
-        // typeset or local.
-        var pres = []
-        var lates = []
-        var xr = core[0].dkw == "export" || core[0].dkw == "readonly"
-        for (i = 0; i < les.length; i++) { pres.push(makeDecl(les[i].pre, [], ln, true)); lates.push(makeDecl(les[i].late, [], ln, true)) }
-        return function() {
-            var j
-            var st = anytype
-            for (j = 0; j < pres.length; j++) {
-                st = pres[j]()
-                if (typeof st == "object") { return st }
-                if (st == 0 || fnDepth == 0 || xr) {
-                    if (st == 0) { diagErr(les[j].lbl + ": cannot assign list to array member\n") }
-                    abortSignal = {ret: 1, isExit: 1, soft: 1}
-                    return takeAbort()
-                }
-            }
-            for (j = 0; j < lates.length; j++) {
-                st = lates[j]()
-                if (typeof st == "object") { return st }
-            }
-            thisCmd = ""
-            return st
-        }
+        return makeDecl(core, reds, ln)
     }
     // src: the item as written, which a declaration with a computed operand re-reads.
     function mkDeclItem(items, src) { return {a: parseAssign(items), src: src} }
@@ -5707,13 +5781,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (`r="$LINENO<nl>$LINENO"` is the second line, `echo "$LINENO<nl>"` the first): FirstWord
     // and the other first-word rules push it, the command's own tag pops it.
     var lnStack = []
-    function lnPush(pos) { lnStack.push(srcLine(pos)) }
-    function lnPop() { return lnStack.length > 0 ? lnStack.pop() : 0 }
+    function lnPush(pos) { lnStack.push(pos) }
+    function lnPop() { return lnOf(lnStack.length > 0 ? lnStack.pop() : -1) }
+    // A command's place: its line, and the source offset its first word ends at (-1: none).
+    function lnOf(pos) { return {l: (pos < 0) ? "0" : lineStr(pos), p: pos} }
     // Inside a $( ), the line of a command is renumbered from the enclosing command's (see
     // lib/bash-lines.js): lnCtx = {tab, base} while the substitution's own commands run. A
     // function carries the lnCtx it was defined under; an eval or trap string runs with none.
     var lnCtx = null
-    function lnIn(ln) { return "" + bashCsLine(lnCtx.tab, lnCtx.base, strToInt(ln)) }
+    function lnAt(lp) { return (lnCtx == null) ? lp.l : "" + bashCsLine(lnCtx.tab, lnCtx.base, strToInt(lp.l), lp.p) }
     function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
     function arCompile(text, rule, claimAll) {
         var svS = arSnip, svIn = arInSnip, svR = arRecs, svQ = arSqRecs, svB = badRecs
@@ -6548,7 +6624,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (items[i].a != undefined) { as.push(items[i].a) } else { redirs.push(items[i]) }
         }
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             thisCmd = ""
             cmdSubRan = false
             var k
@@ -6897,7 +6973,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it == "function") { argTs.push(it) } else { redirs.push(it) }
         }
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             cmdSubRan = false
             // THE COMMAND WORD IS FIELD-SPLIT LIKE ANY OTHER: `cmd="echo hi"; $cmd` runs
             // echo with the argument hi. The extra fields become the FIRST arguments, and a
@@ -8900,7 +8976,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var subjT = items[0]
         var clauses = items.slice(1)
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             var s = wordJoin(subjT())
             // An expansion error in the word or a pattern abandons the case (bash 5.3:
             // `( case a${#x-a}b in x) ;; esac ); echo $?` prints 1).
@@ -9073,7 +9149,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeArithCmd(exprT0, ln) {
         var exprT = arIn("((: ", exprT0)
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             thisCmd = "(("
             var st = !arIsZero(exprT()) ? 0 : 1
             if (takeArithErr()) { st = 1 }
@@ -9099,7 +9175,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { redirs.push(items[i]) }
         }
         var core = function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             var lists = []
             var total = 0
             var k
@@ -9141,7 +9217,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var condErr = 0
     function makeCondCmd(t, ln) {
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             thisCmd = "[["
             condErr = 0
             var v = t()
@@ -9448,7 +9524,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var plain = makeDecl(decl, reds, ln)
         var bound = makeDecl(taken, reds, ln)
         return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             var saved = applyPrefix(asgs, true, false)
             var ab = takeAbort()
             if (ab != null) { restorePrefix(saved); return ab }
@@ -9563,7 +9639,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeCFor(items, ln) {
         var initT = arIn("((: ", items[0]), condT = arIn("((: ", items[1]), stepT = arIn("((: ", items[2]), bodyT = items[3]
         return inLoop(function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             // An arithmetic error in any of the three parts ends the loop with status 1.
             var last = 0
             var r = anytype
@@ -9646,7 +9722,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.fname != undefined) { fname = it.fname }
         }
         return inLoop(function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            vars["$LINENO"] = lnAt(ln)
             // `for NAME; do` with no `in` list iterates the positional parameters.
             var vals = []
             if (wordThunks == null) {

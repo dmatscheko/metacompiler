@@ -253,6 +253,119 @@ s144() {
   check egs4 "${l#?(/)a}|${l##*[0-9]: }" '/b.sh: line 12: x: y: line 3: z|z'
   shopt -u extglob
 }
+# ===== SECTION 145: the expansion-time reports of a declaration come first =====
+# A declaration's words expand before the builtin runs, and before its redirections apply:
+# every literal's "NAME: ..." comes before the builtin's "declare: NAME: ...", and a
+# redirection hides only the builtin's. A NAME[SUB]=(list) operand takes its turn among the
+# others. Every expected value is bash 5.3's.
+s145() {
+  local e
+  s145s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$(s145a=(1); s145f() { declare -gA s145a=(x) s145a=(y); echo "f $?"; }; s145f 2>&1)
+  check dxo1 "$(s145s "$e")" 's145f: s145a: cannot convert indexed to associative array;s145f: s145a: cannot convert indexed to associative array;declare: s145a: cannot convert indexed to associative array;declare: s145a: cannot convert indexed to associative array;f 1;'
+  e=$(s145b=(1); s145g() { declare -gA s145b=(x) 2>/dev/null; echo "g $?"; }; s145g 2>&1)
+  check dxo2 "$(s145s "$e")" 's145g: s145b: cannot convert indexed to associative array;g 1;'
+  e=$(readonly s145r=1; s145h() { declare -a s145r=(1) s145v=$(echo v) s145r=(2); echo "h $?"; }; s145h 2>&1)
+  check dxo3 "$(s145s "$e")" 's145h: s145r: readonly variable;s145h: s145r: readonly variable;declare: s145r: readonly variable;declare: s145r: readonly variable;h 1;'
+  e=$(s145c=(1); s145q=(1); s145k() { declare -gA s145c=(x) s145q[1]=(a b) s145z=(y); echo "k $?"; declare -p s145z; }; s145k 2>&1)
+  check dxo4 "$(s145s "$e")" 's145k: s145c: cannot convert indexed to associative array;s145k: s145q: cannot convert indexed to associative array;declare: s145c: cannot convert indexed to associative array;declare: s145q: cannot convert indexed to associative array;k 1;declare -A s145z=([y]="" );'
+  e=$( (s145d=(1); s145m() { declare -gA s145d=(x) s145n[1]=(a b) s145d=(y); echo "m $?"; }; s145m) 2>&1; echo "s $?")
+  check dxo5 "$(s145s "$e")" 's145m: s145d: cannot convert indexed to associative array;s145n[1]: cannot assign list to array member;s 1;'
+}
+# ===== SECTION 146: -a or -A of a function's readonly local =====
+# The declaration is refused, status 1, and the local scalar becomes an empty array of that
+# kind all the same, keeping its attributes; one that is an array already stays as it is.
+# Every expected value is bash 5.3's.
+s146() {
+  local e
+  s146s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s146f() { local -r y=1; local -a y; echo "a $?"; declare -p y; }
+  e=$(s146f 2>/dev/null)
+  check rla1 "${e//$'\n'/;}" 'a 1;declare -ar y=()'
+  s146g() { local -ri y=1; declare -A y=x; echo "b $?"; declare -p y; }
+  e=$(s146g 2>&1)
+  check rla2 "$(s146s "$e")" 'declare: y: readonly variable;b 1;declare -Air y=();'
+  s146h() { local -r y; local -a y; local -nr w=w; local -a w; declare -p y w; } 2>/dev/null
+  check rla3 "$(s146h)" 'declare -ar y
+declare -anr w=()'
+  s146k() { local -ra y=(1); local -A y; declare -p y; } 2>/dev/null
+  check rla4 "$(s146k)" 'declare -ar y=([0]="1")'
+}
+# ===== SECTION 147: declarations of a function's circular nameref =====
+# readonly of a function's nameref that refers to itself acts on the global variable, and a
+# literal declared through the nameref then meets that readonly global: after the lookups'
+# warnings "NAME: readonly variable", and the line is abandoned. A value that is NAME itself
+# warns once more, stored or not. A value the nameref refuses applies no attribute. Every
+# expected value is bash 5.3's.
+s147() {
+  local e
+  s147s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$( (s147f() { local -n w=w; readonly w; echo "a $?"; local w=(q); echo "b $?"; }; s147f) 2>&1; echo "s $?")
+  check crg1 "$(s147s "$e")" 'local: warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;warning: w: maximum nameref depth (8) exceeded;a 0;warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;w: readonly variable;s 1;'
+  e=$(s147g() { local -n v=v; local v=v; echo "c $?"; declare -p v; }; s147g 2>&1)
+  check crg2 "$(s147s "$e")" 'local: warning: v: circular name reference;warning: v: circular name reference;warning: v: circular name reference;warning: v: circular name reference;warning: v: circular name reference;c 0;declare -n v="v";'
+  e=$(s147h() { local -n v=v; local -i v=v; echo "d $?"; }; s147h 2>&1)
+  check crg3 "$(s147s "$e")" 'local: warning: v: circular name reference;warning: v: circular name reference;warning: v: circular name reference;warning: v: circular name reference;warning: v: circular name reference;d 1;'
+  s147k() { local -n u=$1; local -i u=3; echo "e $?"; declare -p u; }
+  e=$(s147k u 2>/dev/null)
+  check crg4 "${e//$'\n'/;}" 'e 1;declare -n u="u"'
+  s147m() { local -n u=$1; local -i u=u; echo "f $?"; declare -p u; }
+  e=$(s147m u 2>/dev/null)
+  check crg5 "${e//$'\n'/;}" 'f 1;declare -in u="u"'
+}
+# ===== SECTION 148: declare -g NAME[SUB]=VALUE of a function's nameref with no value =====
+# The global NAME becomes an array (a set scalar its element 0), but the element store looks
+# NAME up as usual, finds the nameref and is refused as a store to the name "": status 1.
+# Without a value it is only declared. Every expected value is bash 5.3's.
+s148() {
+  local e
+  s148s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$(s148f() { local -n q7; declare -g q7[1]=5; echo "a $?"; declare -p q7; }; s148f 2>&1; declare -p q7)
+  check gvn1 "$(s148s "$e")" 'declare: `'"'"': not a valid identifier;a 1;declare -n q7;declare -a q7=();'
+  e=$(r5=1; s148g() { local -n r5; declare -g r5[2]+=x; echo "b $?"; }; s148g 2>&1; declare -p r5)
+  check gvn2 "$(s148s "$e")" 'declare: `'"'"': not a valid identifier;b 1;declare -a r5=([0]="1");'
+  e=$(s148h() { local -n q8; declare -g q8[1]; echo "c $?"; declare -p q8; }; s148h 2>&1)
+  check gvn3 "$(s148s "$e")" 'c 0;declare -n q8;'
+}
+# ===== SECTION 149: a name made readonly by code further down =====
+# A function that runs after a later line made a name readonly meets it as bash does: its
+# `local NAME` is refused and makes no local, so every later declaration, assignment or
+# arithmetic store of NAME in the call is refused too, and declare -p shows the global. A
+# local made before the readonly is not. Every expected value is bash 5.3's.
+s149() {
+  local e
+  s149s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$(
+    s149f() { local s149d; echo "a $?"; declare -a s149d=(1); echo "b $?"; local s149d; echo "c $?"; declare -p s149d; }
+    s149g() { s149c=2; echo "d $?"; }
+    s149h() { local s149e; s149e=3; echo "e $?"; }
+    s149k() { local s149e; (( s149e = 4 )); echo "f $?"; }
+    s149m() { local s149m=1; declare -g -r s149m=9; s149m=2; echo "g $s149m"; }
+    readonly s149d=1 s149c=1 s149e=1
+    s149f 2>&1; (s149g) 2>&1; echo "h $?"; (s149h) 2>&1; echo "i $?"; (s149k) 2>&1; echo "l $?"; s149m; echo "j $s149m"
+  )
+  check rol1 "$(s149s "$e")" 'local: s149d: readonly variable;a 1;s149d: readonly variable;declare: s149d: readonly variable;b 1;local: s149d: readonly variable;c 1;declare -r s149d="1";s149c: readonly variable;h 1;local: s149e: readonly variable;s149e: readonly variable;i 1;local: s149e: readonly variable;s149e: readonly variable;f 1;l 0;g 2;j 9;'
+  e=$( (for i in 1 2; do s149x=$i; echo "x=$s149x"; readonly s149x; done) 2>&1; echo "k $?")
+  check rol2 "$(s149s "$e")" 'x=1;s149x: readonly variable;k 1;'
+}
+# ===== SECTION 150: line numbers of a function's commands inside $( ) =====
+# bash runs a $( ) from its printed text, where each command a function body separates with
+# ; stands on a line of its own, a subshell's too, and the commands after a body closed on
+# its line follow its `}`. An error message keeps the same line. The line prefixes stay in
+# these checks. Every expected value is bash 5.3's.
+s150() {
+  local e l
+  l=$LINENO; e=$(s150f() { echo $LINENO; echo $LINENO; (echo $LINENO; echo "x;" $LINENO); echo ${x:-;} $LINENO; }; s150f); check fln1 "${e//$'\n'/,}" "$((l+2)),$((l+3)),$((l+4)),x; $((l+5)),; $((l+6))"
+  l=$LINENO; e=$(s150g() { echo $LINENO; echo $LINENO; }; echo $LINENO; s150g
+echo $LINENO); check fln2 "${e//$'\n'/,}" "$((l+5)),$((l+3)),$((l+4)),$((l+6))"
+  l=$LINENO; e=$(s150h() {
+echo $LINENO; echo $LINENO
+echo $LINENO
+}
+s150h); check fln3 "${e//$'\n'/,}" "$((l+6)),$((l+7)),$((l+9))"
+  l=$LINENO; e=$(s150k() { readonly s150r=1; s150r=2; echo no; }
+s150k 2>&1); check fln4 "${e#*: line }" "$((l+4)): s150r: readonly variable"
+}
 # ===== END SECTIONS =====
 
 s135  # SECTION-CALL 135
@@ -265,5 +378,11 @@ s141  # SECTION-CALL 141
 s142  # SECTION-CALL 142
 s143  # SECTION-CALL 143
 s144  # SECTION-CALL 144
+s145  # SECTION-CALL 145
+s146  # SECTION-CALL 146
+s147  # SECTION-CALL 147
+s148  # SECTION-CALL 148
+s149  # SECTION-CALL 149
+s150  # SECTION-CALL 150
 echo "full: $checks checks, $fails failures"
 exit $fails

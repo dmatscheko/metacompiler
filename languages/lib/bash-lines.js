@@ -10,22 +10,29 @@
 // A function definition prints as `function NAME () `, `{ ` and its body on lines
 // of their own, the body's line breaks doubled (an empty line after each command)
 // and its closing `}` on the line after the last one: in `p() {<nl>a<nl>b<nl>}` a
-// is 2 lines below p and b 2 below a.
+// is 2 lines below p and b 2 below a. Commands a ; separates in a body print on lines
+// of their own: in `p() { a; b; }` b is 1 below a.
 // The printer also re-flows other compound commands (`if a; then b; fi` prints as
 // three lines), which is not modelled. A `...` substitution runs from its raw
 // text, so there every newline counts.
 
-// The line table of a $( ) whose text t (from just after "$(" up to the ")")
-// starts on line l0: {first, skips, addL, addN, own}, first = the line of its first
-// command, skips = the lines from first on whose line break does not count, addN[i]
-// = how many more lines the break after line addL[i] counts, own = the lines whose
-// commands stand 2 lines further down (a body begun on its definition's line).
-function bashCsLines(t, l0) {
+// The line table of a $( ) whose text t (from just after "$(" up to the ")", at
+// source offset off) starts on line l0: {first, skips, addL, addN, own, seps, closes}, first =
+// the line of its first command, skips = the lines from first on whose line break does
+// not count, addN[i] = how many more lines the break after line addL[i] counts, own =
+// the lines whose commands stand 2 lines further down (a body begun on its
+// definition's line), seps = the offsets of a body's ; separators (bashCsSeps), each a
+// line further for every command after it, closes = {ln, at} the `}` of such a body
+// closed on its line, which the commands after it on that line follow on a line of its
+// own.
+function bashCsLines(t, l0, off) {
     var first = -1
     var skips = []
     var addL = []
     var addN = []
     var own = []
+    var seps = []
+    var closes = []
     var pending = -1      // the last counting line, until the next line shows it is joined
     var body = 0          // the brace depth inside a function definition's body
     var ln = l0
@@ -56,6 +63,11 @@ function bashCsLines(t, l0) {
             var l1 = t.charAt(z - 1)
             var l2 = z - 2 >= a ? t.substring(z - 2, z) : ""
             var hb = (body == 0) ? bashFnHeadBody(s) : -1
+            if (hb >= 0 && hb < s.length) {
+                var cl = bashCsSeps(t, a + hb, z, off, seps)
+                if (cl >= 0) { closes.push({ln: ln, at: off + cl}) }
+            }
+            else if (body > 0) { bashCsSeps(t, a, z, off, seps) }
             if (hb >= 0) {
                 // A definition's header: its body starts 2 printed lines below it. Closed on
                 // the same line, its `}` is the line after the body.
@@ -83,7 +95,38 @@ function bashCsLines(t, l0) {
         i = e + 1
     }
     if (first < 0) { first = l0 }
-    return {first: first, skips: skips, addL: addL, addN: addN, own: own}
+    return {first: first, skips: skips, addL: addL, addN: addN, own: own, seps: seps, closes: closes}
+}
+
+// The source offsets (t[0] at off) of the ; separators in the body text t[from, to) that
+// a command follows on the line, a subshell's included: each is a printed line break.
+// One inside $( ), ${ } or [ ] is not, and a `}` the text does not open ends the body:
+// answers its offset in t, else -1.
+function bashCsSeps(t, from, to, off, seps) {
+    var q = ""
+    var st = []
+    var k = from
+    while (k < to) {
+        var ch = t.charAt(k)
+        var top = (st.length > 0) ? st[st.length - 1] : ""
+        if (q != "") { if (ch == q) { q = "" } else if (ch == "\\" && q == "\"") { k = k + 1 } }
+        else if (ch == "'" || ch == "\"") { q = ch }
+        else if (ch == "\\") { k = k + 1 }
+        else if (ch == "$" && (t.charAt(k + 1) == "(" || t.charAt(k + 1) == "{")) { st.push("o"); k = k + 1 }
+        else if (ch == "(" || ch == "{") { st.push((top == "o") ? "o" : "p") }
+        else if (ch == "[") { st.push("o") }
+        else if (ch == ")" || ch == "]" || ch == "}") {
+            if (st.length == 0) { return k }
+            st.pop()
+        }
+        else if (ch == ";" && top != "o" && t.charAt(k - 1) != ";") {
+            var j = k + 1
+            while (j < to && (t.charAt(j) == " " || t.charAt(j) == "\t")) { j = j + 1 }
+            if (j < to && ";)}".indexOf(t.charAt(j)) < 0) { seps.push(off + k) }
+        }
+        k = k + 1
+    }
+    return -1
 }
 
 // Whether the line s opens a function definition's body - `NAME() {`, `function NAME {`
@@ -116,14 +159,16 @@ function bashFnClosed(s, b) {
     return s.charAt(d) == ";" || s.charAt(d) == "&"
 }
 
-// The line of source line n of the substitution with table tab, when the enclosing
-// command is on line base.
-function bashCsLine(tab, base, n) {
+// The line of a command on source line n, its first word ending at source offset pos,
+// of the substitution with table tab, when the enclosing command is on line base.
+function bashCsLine(tab, base, n, pos) {
     if (n <= tab.first && tab.own.indexOf(n) < 0) { return base }
     var k = n - tab.first
     var j
     for (j = 0; j < tab.skips.length; j++) { if (tab.skips[j] < n) { k = k - 1 } }
     for (j = 0; j < tab.addL.length; j++) { if (tab.addL[j] < n) { k = k + tab.addN[j] } }
     if (tab.own.indexOf(n) >= 0) { k = k + 2 }
+    for (j = 0; j < tab.seps.length; j++) { if (tab.seps[j] < pos) { k = k + 1 } }
+    for (j = 0; j < tab.closes.length; j++) { if (tab.closes[j].ln == n && tab.closes[j].at < pos) { k = k + 1 } }
     return base + k
 }
