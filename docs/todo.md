@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1153 ruby: big-Integer ranges, NaN vs bignum, Object-method self, float counts · P3 · RB · OPEN [V]
+### T-1153 ruby: big-Integer ranges, NaN vs bignum, Object-method self, float counts · P3 · RB · IN PROGRESS (RB worker, round 64) [V]
 Found while closing T-1148; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
 - `upto`/`downto`/`step` with a big-Integer bound hang instead of iterating or returning an Enumerator with the exact size.
 - Comparisons of Float::NAN against a big Integer (`<`, `<=>`, `==`) disagree with MRI.
