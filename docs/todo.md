@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1132** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1133** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,20 +69,22 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each), lazy no-block ArgumentError, lazy.take size, AS#last arity, Range#equal? · P3 · RB · IN PROGRESS (RB worker, round 57) [V]
+### T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#method, tally/Symbol#name not in 2.6, interp Integer#+ Method#call, Range freeze · P3 · RB · OPEN [V]
 
-Found while working T-1126. Each item lists MRI 2.6's answer (`/usr/bin/ruby`, LC_ALL=en_US.UTF-8) first, then ours. All three engines are affected unless noted.
+Found while working T-1128. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected unless noted.
 
-1. `find`, `find_index` and `take_while` with no block on stream enumerators (`[1,2].cycle`, `1.step`, `(1..).each`, Lazy). MRI returns an Enumerator whose `#size` is nil. Ours raise NoMethodError. On `[1].cycle(2)` ours report a size of 2 where MRI's is nil.
-2. `each_entry` with no block on cycle/step enumerators. MRI returns an Enumerator. Ours raise NoMethodError.
-3. A Lazy with no block for `map`, `select`, `reject`, `flat_map` and `take_while`. MRI raises ArgumentError `tried to call lazy map without a block`. Ours raise NoMethodError.
-4. `[1,2].cycle.send(:each)` with no block. MRI returns the Enumerator. Ours raise NoMethodError.
-5. `(1..).with_index` and `(1..).with_object` raise NoMethodError in MRI, because Range has no such methods. Ours try to build the whole array: RangeError on `1..`. On `1..Float::INFINITY`, and with a blockless `(1..Float::INFINITY).find`, the interpreter hangs and the Go twin stops at 1e7.
-6. `(1..).lazy.take(3).size` is 3 in MRI. Ours give nil.
-7. `1.step(10,3).method(:last).arity` is -1 in MRI. Ours give 0.
-8. `(1..2).equal?(1..2)` is false in MRI (identity). Ours give true.
+1. Blockless `take_while` used through first/next: `[1,2,3].take_while.first(3)` is `[1]` in MRI, and `.take_while.next` raises StopIteration, because the internal block of first/next returns nil. Ours give `[1, 2, 3]` and `[1, 2]`.
+2. String ranges: `("a".."c").lazy.size` and `("a".."e").each_slice(2).size` are nil in MRI. Ours give 3.
+3. Float ranges: `(1.0..3.0).lazy.size` is 3 and `.lazy.take(2).size` is 2 in MRI. Ours raise TypeError "can't iterate from Float".
+4. `proc {}.method(:call)` and `1.method(:+).method(:call)` return a Method in MRI. Ours raise NoMethodError.
+5. The respond_to? rows list methods that MRI 2.6 lacks: `tally` (Array, Hash, Range, Enumerator, ArithmeticSequence) and `Symbol#name`. `x.method(:tally)` succeeds in ours, where MRI raises NameError. Check that the calls themselves also raise NoMethodError, as in 2.6.
+6. Interpreter only: `1.method(:+).call(2)` raises NoMethodError "undefined method `+' for 1:Integer". llvm.Run and native give 3.
+7. `(1..3).freeze.frozen?` is true in MRI, and so is `.clone.frozen?` of a frozen range (`.dup` of it is false). An unfrozen literal's `(1..3).frozen?` is false in 2.6. Ours always say false.
+8. Smaller gaps: `[1,2].chunk_while { true }.size` is nil in MRI, ours 1. `(1..3).index` and `[1].cycle(2).index` raise NoMethodError in MRI; ours answer an Enumerator.
 
-Verify with `tests/probe.sh ruby` (all four legs) and add new sections to tests/ruby-test-full.2.rb or .3.rb.
+Not a defect: MRI makes one object per constant range literal at each source site (`def mk; 1..2; end; mk.equal?(mk)` is true). That is a compiler artefact, not a language rule.
+
+Verify with `tests/probe.sh ruby` on all four legs; new sections go in tests/ruby-test-full.2.rb or .3.rb.
 
 # JS — JavaScript and TypeScript
 
@@ -1194,6 +1196,7 @@ T-1126 ruby: Hash Array keys use eql? (not ==); endless Range blockless enumerat
 T-1125 kotlin: program-class toString/hashCode agreement; synchronized; Integer.toHexString; data-class hashCode with Unit; printing a function value — merged f8958f7a: Object#toString = binary name@hex(hashCode) via overrides (kotlin.Any hashCode only on chain root, super.hashCode works), synchronized{}, Integer/Long statics, Unit hash consistency, function-value printing (refs match oracle; lambdas print $$Lambda@1 stand-in by design), typed array copies + array+x stays an array; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench +0.01%
 T-1127 bash: test arity errors, declare through circular -i nameref, readonly circular warning — merged b302a5c7: bash 5.3 test.c parser port (arity rules, all syntax diagnostics, status 2) in both engines; circular/self nameref declarations (double-lookup warnings, invalid-name error, self-ref check before readonly); 4-leg probe + stderr match bash 5.3; matrix 605/605; bench +0.04%/+0.02%
 T-1130 bash: compiled test with run-time operators, test -o/-R, -n on subscripted names, circular nameref declarations with attributes — merged 4fd1c782: compiled test/[ falls back to a run-time C parser (rt_test) when operators/field lists only exist at run time; test -o/-R in test/[/[[; -n on NAME[SUB] error; circular local nameref declarations with attributes/+=/literals; computed self-ref checked first; 4-leg probe + stderr match bash 5.3; bash gates green; bench -1.23%
+T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each), lazy no-block ArgumentError, lazy.take size, AS#last arity, Range#equal? — merged 463872a5: blockless find/find_index/take_while/each_entry stream enumerators (nil size), lazy no-block ArgumentError, send(:each), Range#with_index NoMethodError + infinite find, Lazy size carries counts, builtin Method#arity table (+ curry), Range dup/equal? identity; 4-leg probe matches ruby 2.6; ruby gates + go test green after rebase (worker: full matrix 605/605); bench -0.04%
 
 # Settled — do not re-open
 
