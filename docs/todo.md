@@ -136,7 +136,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1124 bash: test/[ -eq "integer expected"; compiled circular nameref loses -i; compiled `type` refuses unprintable bodies · P3 · SH · OPEN [V]
+### T-1124 bash: test/[ -eq "integer expected"; compiled circular nameref loses -i; compiled `type` refuses unprintable bodies · P3 · SH · IN PROGRESS (SH worker, round 39) [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
 - `test x -eq 3`, `[ 'x+0' -eq 3 ]` and `test 'a[1]' -eq 0` print "integer expected" (test: x: integer expected) and return status 2. Both our engines evaluate the operands as arithmetic and return 0 or 1. Only `[[ ]]` evaluates arithmetic; `test`/`[` take plain integers (leading/trailing blanks and a sign allowed). Repro: scratchpad/SH38/t4.sh.
