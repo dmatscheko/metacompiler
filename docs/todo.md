@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1173 ruby: String#to_r/to_c/setbyte/grapheme_clusters/undump, unicode_normalize, Class.new reflection · P3 · RB · OPEN [V]
+### T-1173 ruby: String#to_r/to_c/setbyte/grapheme_clusters/undump, unicode_normalize, Class.new reflection · P3 · RB · IN PROGRESS (RB worker, round 68) [V]
 Carried over from T-1167 (closed partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
 - Still NoMethodError: String#to_r and #to_c (needs a rational/complex string parser: "1/3".to_r, " 2.5 ".to_r, "1+2i".to_c, junk suffixes), #setbyte (byte-level mutation of the text model), #grapheme_clusters / #each_grapheme_cluster (UAX#29 segmentation; mapping to chars is wrong for combining marks — at least the common extend/ZWJ/regional-indicator rules), #undump.
 - String#unicode_normalize (and the ! form) is the identity; MRI NFC-composes "é" into a 1-character "é" (also :nfd/:nfkc/:nfkd).
