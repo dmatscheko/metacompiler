@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1167** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1168** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1163 ruby: include into Object, implicit-self builtins in reopened classes, breaking accumulator blocks on endless enums, instance_eval, NaN identity · P3 · RB · IN PROGRESS (RB worker, round 66) [V]
-Found while closing T-1157 (partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
-- Interpreter: `module M; end; class Object; include M; end; p 1` aborts ("Cannot read property 'length' of undefined" in includeInto: builtin class objects have no `__mixins`); compiled engines print 1 like MRI.
-- Compiled engines: a bare implicit-self builtin call inside a reopened builtin class fails — `class Integer; def e; [frozen?, even?]; end; end; p 4.e` raises "undefined method `even?' for 4:Integer"; MRI `[true, true]`.
-- All engines: inject/reduce, min/max/minmax with a block, and one? hang on an endless Enumerator even when the block breaks — MRI `e.inject { |a, x| break a if x > 4; a + x }` is 10, `e.max { break :mx }` is :mx.
-- All engines: Object#instance_eval / instance_exec are unimplemented (incl. `nil.instance_eval`).
-- Carried from T-1157: `n = Float::NAN; [n].include?(n)` is false in the compiled engines (MRI true, identity first) and `Float::NAN.equal?(Float::NAN)` is false in the interpreter. The Go twin's `jsFlo` is a value type with no identity; a fix needs a pointer box or a per-object stamp (~130 creation sites, mostly abnf/jsrt.go — coordinate as a shared-file change, keep run and native in step).
+### T-1167 ruby: Float object identity (NaN/non-flonum), module reflection after include into builtins, NaN hash keys · P3 · RB · OPEN [V]
+Carried over from T-1163 (closed partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
+- Float identity, all engines. MRI: `n = Float::NAN; n.equal?(n)` true, `Float::NAN.equal?(Float::NAN)` true, `[m].include?(m)` / `index` / `count` find the same NaN; but `1e300.equal?(1e300)` and `(-0.0).equal?(-0.0)` are false (non-flonum floats are distinct objects). Ours: interp `equal?` false for NaN; run/native `[m].include?(m)` false, `index` nil, `count` 0; all engines true for the non-flonum cases. Needs a pointer box for the Go twin's value-type `jsFlo` (abnf/jsrt.go, ~59 creation sites) plus flonum-range identity rules in all three engines — a shared-file structural change; schedule it in a round where jsrt.go is free and keep run and native in step.
+- Run vs native divergence: `m = 0.0/0.0; {m => 1}[m]` and `key?` give nil under `llvm.Run` but 1 natively (MRI 1).
+- All engines: a module included into Object or a builtin class is missing from reflection — `class Object; include M; end`: MRI `Object.ancestors` = [Object, M, Kernel, BasicObject], `Integer.include?(M)` true, `5.is_a?(M)` true, `M === "s"` true; ours omit M / answer false. `class Integer; include M; end`: the interpreter lists M in ancestors, compiled engines don't; `5.is_a?(M)` false everywhere.
+- `Enumerator.new { |y| ... }` unsupported (`e.first(3)` raises "undefined method `each'"; MRI [1, 2, 3]). On an endless `(1..Float::INFINITY).each`: `each_slice(2) { break }` / `each_cons(2) { break }` raise NoMethodError and `zip([1]) { break :zp }` hangs (MRI :es, :ec, :zp).
+- Missing builtins (NoMethodError in all engines; pick the commonly used ones first): String `to_r to_c setbyte grapheme_clusters each_grapheme_cluster scrub! encode! unicode_normalize! undump`; Symbol `casecmp casecmp? encoding intern match match? slice`; Array `bsearch_index difference union rassoc repeated_combination repeated_permutation replace rotate! to_ary`; Hash `compact! flatten has_value? value? rassoc reverse_each slice slice_when to_hash`; nil `to_r to_c to_h rationalize`.
 
 # JS — JavaScript and TypeScript
 
@@ -1207,6 +1207,7 @@ T-1157 ruby: Float shift/bit-ref args, digits base, byteslice, bare nil?, nil-se
 T-1161 kotlin: arity and Function-type checks of references to Java statics — merged 817db5dc: FunctionN arity of references from declared function types and a measured java-static table; retyping lambdas keep arity; master four-leg probe matches kotlinc 2.2.21
 T-1164 kotlin: java.lang.Long::name in the compiler, function types from collection element types — merged d758f6ce: java.lang-qualified static references in the compiler, function types from collection/map element types, stored references keep identity in the interpreter; master four-leg probe matches kotlinc 2.2.21
 T-1162 bash: hidden NAME[SUB] locals through a nameref, `w=k export w=7`, hidePrefix before eval — merged 2b3a0888 (partial): hidden NAME[SUB] scalar locals through a nameref in both engines, prefix export/readonly NAME=V through a nameref, hidePrefix before eval; hidden array locals and callee-through-caller-nameref carried to a follow-up; master probe matches bash 5.3
+T-1163 ruby: include into Object, implicit-self builtins in reopened classes, breaking accumulator blocks on endless enums, instance_eval, NaN identity — merged 066db318 (partial): include into Object, bare builtin calls in reopened builtin classes (+69 respond_to? names), breaking inject/reduce/min/max/one? on endless enums, instance_eval/instance_exec; Float identity carried to a follow-up; master four-leg probe matches ruby 2.6
 
 # Settled — do not re-open
 
