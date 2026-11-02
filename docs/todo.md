@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1162** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1163** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -136,11 +136,11 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` crash, hidden element locals · P3 · SH · IN PROGRESS (SH worker, round 50) [V]
-Found while closing T-1156; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- Compiler: after `f1(){ local -n w=$1; readonly w; }; s=4; f1 s`, these are not refused (oracle refuses each, status 1, value stays 4; the interpreter is right): `read s <<< 9`, `declare s=5`, a function's `local s=6`, `unset s`, `printf -v s %s 7`, `for s in 1 2`, prefix `s=9 true`. Each path decides readonly at compile time; give each the run-time `rt_ro_name`/`rt_dyn_at` branch `roRtTest` has, emitted only when refAnywhere × roNames says it can matter.
-- `h(){ local -n w=x; w=k export w; echo "y $?"; declare -p x w; }; ( h )` — interpreter dies with `TypeError: Cannot read property 'length' of undefined at isFields`; compiler prints `declare -x x="k"` / `declare -nx w="x"`; oracle `y 0`, `declare -- x="1"`... (verify exact oracle text), `declare -n w="x"`.
-- Both engines: in a function, `local -n w=$1; declare -r w` with $1=`arr[2]` — bash makes a hidden local named `arr[2]`: a later `readonly w` prints `arr[2]: readonly variable` and `export w=5` is refused with status 1. Ours treats the declaration as doing nothing. Emulate or record as a limit.
+### T-1162 bash: hidden NAME[SUB] locals through a nameref, `w=k export w=7`, hidePrefix before eval · P3 · SH · OPEN [V]
+Carried over from T-1159 (closed partial); oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Both engines: after `local -n w=$1; declare -r w` (or `declare w`, `declare -i w`) with $1=`arr[2]`, bash makes a local literally named `arr[2]` that every later lookup through a nameref ending there finds instead of the element (reads, writes, `+=`, arithmetic, `unset`, `local -p`, callees via dynamic scope). Oracle: `declare w; w=5` leaves `arr[2]=c` and `local -p` shows `declare -- arr[2]="5"`; `declare -i w; w=2*3` reads back 6; after `declare -r w`, `export w=5` / `w=9` give `arr[2]: readonly variable`, status 1. Emulating it is a new variable kind across the interpreter, compiler and bash-rt.c (~30 nameref-resolution sites); currently a recorded limit at the declaration site in bash-to-llvm-ir.abnf. The engines also disagree with each other here (callee through caller's nameref after `declare w`: oracle `6 []`, interp `6 [7]` + arr[2]=z, compiler `6 [arr[2]]` + arr[2]=7) — at minimum make the two engines agree.
+- Both engines: `w=k export w=7` (or `readonly w=7`) inside a function through a prefix nameref — bash stores x=7 without the attribute (`declare -- x="7"`); ours prints `declare -x x="7"`.
+- Compiler: a prefix name refused only at run time, before `eval`, still has its array and run-time marks cleared by hidePrefix in the simple-command path.
 
 # C — C subset
 
@@ -1206,6 +1206,7 @@ T-1155 kotlin: Char/Boolean array element types, sum() result type, emptyList an
 T-1156 bash: run-time readonly through namerefs, element-nameref declarations, eval refusals — merged 8558cf43: run-time readonly through computed namerefs for plain/arith/eval stores, prefix declarations through circular refs, element-nameref declare/export, local -n ''; eval refusal fixed after master send-back; master probes match bash 5.3
 T-1158 kotlin: per-scope local vararg function refs, System.identityHashCode — merged 3ae27e56: per-scope local vararg ::refs, System.identityHashCode, array hashCode identity in compiled halves; master four-leg probe matches kotlinc 2.2.21
 T-1160 kotlin: references to Java static members (Math::abs, System::currentTimeMillis) — merged 322c8260: references to Java static members (Math/System/Integer) call the static in all engines; master four-leg probe matches kotlinc 2.2.21
+T-1159 bash: compiler stores that ignore a run-time readonly, `w=k export w` crash, hidden element locals — merged 33646300 (partial): run-time readonly refusals for read/declare/local/unset/printf -v/for/prefix, per-operand prefix declarations, w=k export w through a nameref; hidden NAME[SUB] locals and export w=7 carried to a follow-up; master probe matches bash 5.3
 
 # Settled — do not re-open
 
