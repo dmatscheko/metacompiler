@@ -3024,7 +3024,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var o = colon ? op.slice(1) : op
         return {c: undefined, f: (o == "-" || o == "+"), fn: function(b) {
             var t6 = targetOf(b); b = t6.b
+            // These operators test set-ness themselves: set -u does not apply to the read.
+            var nu = b.NewLoad(i32, gOptU)
+            b.NewStore(zero, gOptU)
             var v = valOf(b, t6.v)
+            b.NewStore(nu, gOptU)
             // ":" forms treat "" like unset; the bare forms only test set-ness, which the
             // unset marker (a distinct empty string) records.
             var blank = colon ? isEmptyStr(b, v)
@@ -4974,13 +4978,47 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // not start from the nameref's value. Twin of the same arm of declOne in
             // bash-interpreter.abnf.
             var plainV = a == null || (a.lit == null && a.idxT == null && a.op != "+=")
-            var circOk = a == null || a.idxT == null
+            var arrPlain = bareArr && aw != null && aw.idxT == null && aw.lit == null
+            var circOk = a == null || a.idxT == null || arrPlain
             var cf
             for (cf = 0; cf < flags.length; cf++) { if ("-irxulctaA".indexOf(flags.charAt(cf)) < 0) { circOk = false } }
             // The value and attributes of a declaration without -n of a nameref whose chain
             // is circular go to the nameref itself.
             var circArm = function(b, v) {
                 var lit0 = a != null && a.lit != null
+                // -a or -A of a plain value makes the nameref an empty array of that kind. A
+                // value that names no variable is then refused (status 1, no other attribute
+                // given); otherwise -A stores it as element 0, while -a's store looks the
+                // nameref up by a name bash reads from freed memory (status 0), printed here
+                // as `'. Twin of arrPlain in declOne in bash-interpreter.abnf.
+                if (arrPlain) {
+                    var pr = declValue(b, a, v)
+                    b = pr.b
+                    var pbad = b.NewCall(rtDeclCirc, [gepStr(b, kw), gepStr(b, names[j]), pr.v, one])
+                    var pBadB = curF.NewBlock(""), pOkB = curF.NewBlock(""), pEnd = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, pbad, zero), pBadB, pOkB)
+                    pBadB = roArrLocal(pBadB, names[j])
+                    pBadB.NewStore(one, refuseP)
+                    pBadB.NewBr(pEnd)
+                    // The attributes only the second path gives are run-time marks (rt_atmark).
+                    var pAt = caseAtBits(names[j])
+                    var pRo = attrOn(roVars, names[j])
+                    refVars["$" + names[j]] = false
+                    if (assoc) {
+                        // Element 0 starts empty, not from the nameref's value.
+                        storeVarRaw(pOkB, names[j], unsetPtr(pOkB))
+                        pOkB = declOneBody(pOkB, j, pr.v)
+                    } else {
+                        asgs[j] = null
+                        pOkB = declOneBody(pOkB, j, null)
+                        asgs[j] = a
+                        emitDiag(pOkB, gepStr(pOkB, kw + ": `': not a valid identifier\n"))
+                    }
+                    refVars["$" + names[j]] = true
+                    pOkB = roBack(atBack(pOkB, names[j], pAt), names[j], pRo)
+                    pOkB.NewBr(pEnd)
+                    return pEnd
+                }
                 var cEnd = null
                 // A written value that names no variable is refused before any attribute.
                 var cw = (a == null || lit0 || v != null) ? null : ((a.valT == null) ? "" : a.valT.c)
@@ -5064,9 +5102,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // A chain known only when it runs (a computed target) is tested then (rt_nref_loops).
             // So is -a or -A of a plain value, which is element 0's.
-            var awE = asgsWritten[j]
-            var arrPlain = bareArr && awE != null && awE.idxT == null && awE.lit == null
-            if (!nrefDone && !circDone && !isRef && localHereJ && plus.indexOf("n") < 0 && (circOk || arrPlain) && attrOn(refVars, names[j]) === true) {
+            if (!nrefDone && !circDone && !isRef && localHereJ && plus.indexOf("n") < 0 && circOk && attrOn(refVars, names[j]) === true) {
                 var lk = "$" + names[j]
                 var preAt = caseAtBits(names[j])
                 var preRo = attrOn(roVars, names[j])

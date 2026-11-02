@@ -8400,19 +8400,25 @@ char *rt_nounset(char *v, char *name, int isarr)
     return v;
 }
 
-/* $NAME for a plain name: element 0 when NAME is an array, else v, the value of
- * its slot, with set -u's check. Every expansion of a variable makes this call. */
+/* Element 0 of the array in row r, which $NAME reads: the unset marker when it
+ * has none, so ${NAME-w} and set -u see it unset as bash 5.3 does. Twin of
+ * isSetVal / getVarVal in bash-interpreter.abnf. */
+char *rt_var_el0(int r, char *nm)
+{
+    int at = rt_ar_pos(r, "0");
+    if (at < 0) return rt_nounset(&unset_marker[0], nm, 0);
+    return eb_n != 0 ? rt_eread(ar_v[r][at]) : ar_v[r][at];
+}
+
+/* $NAME for a plain name: element 0 when NAME is an array (rt_var_el0), else v,
+ * the value of its slot, with set -u's check. Every expansion of a variable makes
+ * this call. */
 char *rt_var(char *nm, char *v)
 {
     int r;
-    int at;
     if (arr_rows != 0) {
         r = rt_ar_find(nm);
-        if (r >= 0 && ar_n[r] > 0) {
-            at = rt_ar_pos(r, "0");
-            if (at < 0) return &empty[0];
-            return eb_n != 0 ? rt_eread(ar_v[r][at]) : ar_v[r][at];
-        }
+        if (r >= 0 && ar_n[r] > 0) return rt_var_el0(r, nm);
     }
     if (opt_nounset != 0) return rt_nounset(v, nm, 0);
     return v;
@@ -9410,7 +9416,7 @@ char *rt_getvar_byname(char *n)
         if (n == 0) return rt_nref_gread();
         if (n != n0 && nref_hid != 0 && rt_indbr(n) > 0) {
             i = rt_nref_hid(n);
-            if (i >= 0 && gvars[i] == &unset_marker[0] && rt_arr_any(n) != 0) return rt_arr_get(n, "0");
+            if (i >= 0 && gvars[i] == &unset_marker[0] && rt_arr_any(n) != 0 && rt_arr_has(n, "0") != 0) return rt_arr_get(n, "0");
             if (i >= 0) return gvars[i];
         }
     }
@@ -9458,8 +9464,8 @@ char *rt_getvar_byname(char *n)
     sel = &unset_marker[0];
     i = rt_varslot(n);
     if (i >= 0) sel = gvars[i];
-    /* An array name reads its element 0, as $arr does. */
-    if (sel == &unset_marker[0] && rt_arr_any(n) != 0) return rt_arr_get(n, "0");
+    /* An array name reads its element 0, as $arr does (rt_var): unset when it has none. */
+    if (sel == &unset_marker[0] && rt_arr_any(n) != 0 && rt_arr_has(n, "0") != 0) return rt_arr_get(n, "0");
     return sel;
 }
 

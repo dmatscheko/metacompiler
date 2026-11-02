@@ -1712,6 +1712,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(varsHas, key)) { return false }
         return varsHas[key]
     }
+    // NAME IS SET for ${NAME-w}, ${NAME+w} and ${NAME?w}: a set scalar, or an array with an
+    // element 0 (bash 5.3: `x=([1]=a)` is unset there). Twin of rt_var in
+    // languages/lib/bash-rt.c, which reads such an array as the unset marker.
+    function isSetVal(name) {
+        if (isSetVar(name)) { return true }
+        var n = name
+        if (anyRef) { var q = refQuiet; refQuiet = true; n = refTarget(name); refQuiet = q }
+        return arrHas(n, "0")
+    }
     // NAME[SUB] as a NAME, which an indirection makes: ${!r} with r='arr[1]' reads the
     // element and r='arr[@]' the joined list. One a nameref's chain ends at is a hidden
     // local while there is one (hidLocal), as `declare -p NAME[SUB]` finds it too; an
@@ -1952,10 +1961,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (rn == "" && refGlobal(name) != "") { var gv = {v: ""}; var gn = refGlobal(name); onRefGlobal(gn, function() { gv.v = getVarVal(gn) }); return gv.v }
             if (rn != name) { return getVarVal(rn) }
         }
-        if (isArr(name)) { return arrGet(name, "0") }
-        if (isElemRef(name)) { return hidLocal(name) ? hidVal(name) : elemRefVal(name) }
         var key = "$" + name
-        if (hasOwn(vars, key) && (!hasOwn(varsHas, key) || varsHas[key])) { return vars[key] }
+        // An array reads as its element 0, which set -u requires to exist.
+        if (isArr(name)) { if (!optNounset || arrHas(name, "0")) { return arrGet(name, "0") } }
+        else if (isElemRef(name)) { return hidLocal(name) ? hidVal(name) : elemRefVal(name) }
+        else if (hasOwn(vars, key) && (!hasOwn(varsHas, key) || varsHas[key])) { return vars[key] }
         // set -u: an unbound variable ends the (sub)shell. Expansion has no way to return a
         // status, so the abort is recorded and picked up by the command about to run.
         // languages/lib/bash-rt.c's rt_nounset writes the same diagnostic.
@@ -3190,7 +3200,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return function() {
                 var xn = nameOf()
                 if (xn == null) { return "" }
-                return xformOne(getVarVal(xn), xfOp, xn, isSetVar(xn) || isArr(xn))
+                return xformOne(getVarVal(xn), xfOp, xn, isSetVal(xn))
             }
         }
         if (pe == "substr") {
@@ -3224,10 +3234,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var gp = refGlobPn
             refGlobPn = ""
             var tn = nameOf()
+            // These operators test set-ness themselves: set -u does not apply to the read.
+            var nu = optNounset
+            optNounset = false
             var v = (tn == null) ? "" : getVarVal(tn)
+            optNounset = nu
             var colon = (op.charAt(0) == ":")
             var o = colon ? op.slice(1) : op
-            var blank = (tn == null) || (colon ? (!isSetVar(tn) || v == "") : !isSetVar(tn))
+            var blank = (tn == null) || (colon ? (v == "" || !isSetVal(tn)) : !isSetVal(tn))
             if (o == "-") { return blank ? dfltWord(wordT) : v }
             if (o == "+") { return blank ? "" : dfltWord(wordT) }
             if (o == "=") {
@@ -3518,7 +3532,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // one is not stored (status 1); an array literal, looked up twice more unless -a
             // or -A is given, makes the nameref an array, which += does not start from the
             // nameref's value. Twin of the same arm of declOne in bash-to-llvm-ir.abnf.
-            var circOk = asgs[k] == null || asgs[k].idxT == null
+            var arrPlain = bareArr && aw != null && aw.idxT == null && aw.lit == null
+            var circOk = asgs[k] == null || asgs[k].idxT == null || arrPlain
             var cf
             for (cf = 0; cf < flags.length; cf++) { if ("-irxulctaA".indexOf(flags.charAt(cf)) < 0) { circOk = false } }
             if (anyRef && plus.indexOf("n") < 0 && attrOn(refVars, names[k]) && localizes() && localHere(names[k]) && (isRef ? plainV : circOk)) {
@@ -3527,6 +3542,31 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (!isRef) {
                         if (asgs[k] == null && flags == "") { return }
                         var lit0 = asgs[k] != null && asgs[k].lit != null
+                        // -a or -A of a plain value makes the nameref an empty array of that
+                        // kind. A value that names no variable is then refused (status 1, no
+                        // other attribute given); otherwise -A stores it as element 0, while -a's
+                        // store looks the nameref up by a name bash reads from freed memory
+                        // (status 0), printed here as `'.
+                        if (arrPlain) {
+                            noRef = noRef + 1
+                            if (!bashIsRef(v)) {
+                                unsetVar(names[k])
+                                var ca = arrEnsure(names[k], assoc)
+                                ca.decl = true
+                                ca.lit = true
+                                diagErr(kw + ": `" + v + "': invalid variable name for name reference\n")
+                                roFail = true
+                            } else if (assoc) { declOneN(k, v) }
+                            else {
+                                var sa1 = asgs[k]
+                                asgs[k] = null
+                                declOneN(k, null)
+                                asgs[k] = sa1
+                                diagErr(kw + ": `': not a valid identifier\n")
+                            }
+                            noRef = noRef - 1
+                            return
+                        }
                         if (asgs[k] != null && !lit0 && !bashIsRef(v)) { diagErr(kw + ": `" + v + "': invalid variable name for name reference\n"); roFail = true; return }
                         // A readonly one refuses the literal (bash 5.3): checked while the words
                         // expand (bashDeclLitChk), the report after thisCmd comes first, then

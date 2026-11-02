@@ -284,6 +284,29 @@ s162() {
   e=$( (s162a=(a b c); s162j 's162a[1]'; declare -p s162a) 2>&1)
   check hna3 "$(s162s "$e")" 'declare -ax s162a[1]=([0]="1" [1]="2" [2]="m");e=1;e=2;e=m;[];declare -a s162a=([0]="a" [1]="b" [2]="c");'
 }
+# ===== SECTION 163: parameter operators on an array name; set -u; circular array namerefs =====
+s163() {
+  local e
+  s163s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; case $l in *"not a valid identifier") l="${l%%\`*}NVI" ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  local x=(p q) y=([1]=a) x2=("" b) n=() s163r
+  local -A z=([k]=v) z0=([0]=v)
+  local -n w=x
+  check pao1 "${x:-d} ${x-e} ${x:+f} ${x+g} ${x?i} ${w:-d} ${w-e} ${w:+f} ${w+g}" 'p p f g p p p f g'
+  check pao2 "[${y-e}] [${y+g}] [${y:-d}] [${y:+f}] [${z-e}] [${z+g}] [${z0-e}] [${z0+g}] [${n-e}] [${n+g}]" '[e] [] [d] [] [e] [] [v] [g] [e] []'
+  check pao3 "[${x2:-d}] [${x2-e}] [${x2:+f}] [${x2+g}] [${y@Q}] [${y@A}] [${#y}]" '[d] [] [] [g] [] [declare -a y] [0]'
+  s163r=y
+  check pao4 "[${!s163r-e}] [${!s163r+g}] [${y:=zz}] [${y[*]}]" '[e] [] [zz] [zz a]'
+  e=$( (y=([1]=a); set -u; echo "a ${y-dd} ${y:-ee} ${y+ff} ${zz-dd} ${zz+ff} ${n-dd} ${3:-p}"; echo "b $x $z0"; (echo "c $y") || echo "st=$?"; (echo "d $n") || echo "st=$?"; (echo "e $z") || echo "st=$?"; (echo "f ${#y}") || echo "st=$?"; (echo "g ${y?gone}") || echo "st=$?") 2>&1)
+  check pao5 "$(s163s "$e")" 'a dd ee  dd  dd p;b p v;y: unbound variable;st=1;n: unbound variable;st=1;z: unbound variable;st=1;y: unbound variable;st=1;y: gone;st=1;'
+  s163a() { local -n w=w; declare -a w=$1; echo "s=$?"; declare -p w; }
+  s163b() { local -n w=w; local -A w=$1; echo "s=$?"; declare -p w; }
+  s163c() { local -n w=w; declare -ai w+=$1; echo "s=$?"; declare -p w; }
+  s163d() { local -n w=w; declare -Au w+=x; echo "s=$?"; declare -p w; }
+  e=$( (s163a x; s163a 3; s163b x; s163b 3) 2>&1)
+  check pao6 "$(s163s "$e")" 'local: warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;declare: NVI;s=0;declare -an w=();local: warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;declare: `3'"'"': invalid variable name for name reference;s=1;declare -an w=();local: warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;s=0;declare -An w=([0]="x" );local: warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;warning: w: circular name reference;local: `3'"'"': invalid variable name for name reference;s=1;declare -An w=();'
+  e=$( (s163c x; s163c 3; s163d) 2>/dev/null)
+  check pao7 "$(s163s "$e")" 's=0;declare -ain w=();s=1;declare -an w=();s=0;declare -Anu w=([0]="X" );'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -295,5 +318,6 @@ s159  # SECTION-CALL 159
 s160  # SECTION-CALL 160
 s161  # SECTION-CALL 161
 s162  # SECTION-CALL 162
+s163  # SECTION-CALL 163
 echo "full: $checks checks, $fails failures"
 exit $fails
