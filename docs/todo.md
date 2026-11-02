@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1126 ruby: Hash Array keys use eql? (not ==); endless Range blockless enumerators; Infinity #size of endless streams; method(:x).owner · P3 · RB · OPEN [V]
+### T-1126 ruby: Hash Array keys use eql? (not ==); endless Range blockless enumerators; Infinity #size of endless streams; method(:x).owner · P3 · RB · IN PROGRESS (RB worker, round 56) [V]
 
 Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
 - The correctness item: `{[1] => 1}[[1.0]]` is nil in MRI. Array (and nested) keys compare with eql?, so 1 and 1.0 differ. All our engines return 1. Check `{1 => :a}[1.0]` (nil), `{[1, [2]] => :a}[[1, [2.0]]]` (nil) and `{1.0 => :a}[1]` (nil) too, plus Hash#key?, #delete, #fetch and Array#uniq / #- / #& / #|, which also use hash+eql?. Keep the fast path cost-neutral (bench --paired).
