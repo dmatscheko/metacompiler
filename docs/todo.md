@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1151** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1152** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -109,12 +109,16 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1149 kotlin: function reference to a vararg function called with an array, interpreter by-name static return type · P3 · KT · IN PROGRESS (KT worker, round 46) [V]
+### T-1151 kotlin: array == / === compare contents instead of identity; vararg member references; local-fun ::name; inherited/inner static result types · P2 · KT · OPEN [V]
 
-Found while working T-1147. The oracle is kotlinc 2.2.21 (stdlib only).
+Found while working T-1149. The oracle is kotlinc 2.2.21 (stdlib only). Item 1 silently changes program results, hence P2.
 
-1. A function reference to a vararg function, called with an array, is wrong. Last vararg: `fun fx(vararg xs: Int) = xs.sum(); val r = ::fx; println(r(intArrayOf(1, 2)))` prints 3 in the oracle and 0 in all engines. Non-last vararg: `fun fd(vararg xs: Int, tag: String = "D")`, then `val q = ::fd; q(intArrayOf(9, 8), "R")` gives `9,8R` in the oracle and in run/native, but `[9, 8],RD` in the interpreter. The cause is that a reference call passes the array as one element, and the callee re-collects the positional arguments. A KFunction of a vararg function takes the array as its parameter, so a reference call must bind it directly.
-2. Interpreter: the static type of `q.m().javaClass` is judged by method name. A second class declaring a `fun m(...)` with a List result made `q.m().javaClass.name` stop being "int" (assertion jstat160c in section 160). The lookup should use the receiver's declared class, and fall back to the name only when that class is unknown.
+1. In all engines, arrays compare by contents for both `==` and `===`. Kotlin's arrays are JVM arrays: `==` is `equals`, which is identity for arrays, and `===` is identity. Only `contentEquals` compares elements. Repro: `val b = intArrayOf(1,2); val c = intArrayOf(1,2); val d = b; println("${b === c} ${b === d} ${b == c} ${b.contentEquals(c)}")` prints `false true false true` in the oracle and `true true true true` in ours. Also, `fi(*a) === a` (a spread makes a copy) is false in the oracle. Check every array kind (IntArray, Array<T>, CharArray, ...), `!=`, `equals()`, arrays as map keys and set elements (hashCode is the identity hash; use the existing identity stand-in), `listOf(arr).contains(arr2)`, and `when (arr) { other -> }`. Lists must keep content equality. Keep it cost-neutral: `==` on numbers and strings is hot.
+2. Member references to vararg methods: with `class M(val k: Int) { fun s(vararg xs: Int) = k + xs.sum() }`, `(m::s)(intArrayOf(1,2))` gives 100 on all legs; the oracle says 103. `(M::s)(m, intArrayOf(3))` gives 100 on run and native; the oracle says 103. The interpreter gets 103 only by accident. Extend the `$vref` approach of T-1149 to methods (ktRefApply in jsrtkotlin.go and kotlin-rt.metajs).
+3. Interpreter only: `fun main() { fun loc2(x: Int) = x; println(::loc2.name) }` prints `kotlin.Unit`. Run, native and the oracle print `loc2`, because local function closures are not in fnRefFns.
+4. Static result types:
+   - `open class A160 { fun m(): Int = 1 }; class B160 : A160()`, plus another class with `fun m(): List<Int>`. `B160().m().javaClass.name` is `int` in the oracle and `java.lang.Integer` in ours, because kotlin-decltypes.js has no supertype information.
+   - `d.E160().m().javaClass.name` for an inner-class constructor through a receiver is `long` in the oracle and `java.lang.Long` in ours.
 
 Verify with `tests/probe.sh kotlin` on all four legs.
 
@@ -1207,6 +1211,7 @@ T-1144 kotlin: compiled named arguments evaluated in parameter order, not source
 T-1145 ruby: uncaught-exception report via $stderr, (1..).take, big Integer#step, compiled for over endless String range, define_method rescue-modifier crash, `{` after a command call parse, warn uplevel limits — merged e5203845: uncaught-exception report through $stderr.write in MRI print_errinfo shape (abort probe + launch.json updated), endless-range take/first/min(n) incl. negative-size errors, exact big Integer step/upto/downto/times/Range#step, for over endless String ranges, top-level define_method/alias_method NoMethodError instead of engine crash (full define_method needs Object instance methods: follow-up), block must start on the call's line; item 7 left as limits (uplevel>=2 needs per-call cost; rescue-clause line is an MRI line-table artifact); 4-leg probe matches ruby 2.6; matrix 605/605; bench -0.03%
 T-1147 kotlin: non-last vararg parameters, same-named nested class/object across owners (compiled), nested-object bound-ref arity (interp) — merged 2900b17f: non-last vararg parameters (caller packs the vararg slot, named args + trailing lambda placed after it, source-order evaluation kept; callee skips rest-collection) in both engines, nested class/object same simple name resolved by binary name in compiled code, nested-object method arity under goja (kNestedRec keeps the original value); 4-leg probe matches kotlinc 2.2.21; kotlin gates + gen-all green; bench IR byte-identical to base
 T-1146 bash: declaration message ordering and redirects, local -r/-a merges, readonly of circular nameref, warning counts, valueless -g nameref subscript, compiler lexical-readonly limits — merged 1efac3fd: declaration message order across literal operands, redirect hides only the builtin message, readonly local + -a/-A merges, readonly of circular local nameref on the global, local w=w warning count, -g subscript store on valueless local nameref, compiler readonly-by-later-code via per-call noLocal + run-time check, run-time-circular local -i attrs, line numbers of functions defined in $( ) (bash-lines.js); 4-leg probe matches bash 5.3 stdout + stderr incl. comsub line numbers; bash gates green; bench -0.02%
+T-1149 kotlin: function reference to a vararg function called with an array, interpreter by-name static return type — merged 4fa25278: vararg function references bind the array directly ($vref twin with the vararg as a plain parameter, top-level and local, in both engines), method result static types from the receiver class's own declaration (ktFunDecls/ktOwnFunRet) with name fallback; 4-leg probe matches kotlinc 2.2.21 (array identity defect found and filed P2); kotlin gates green; bench IR byte-identical
 
 # Settled — do not re-open
 
