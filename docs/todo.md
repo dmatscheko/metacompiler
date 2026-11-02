@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1124** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1125** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -136,15 +136,15 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local -n drops -i; compiled declare -f listing · P3 · SH · IN PROGRESS (SH worker, round 38) [V]
+### T-1124 bash: test/[ -eq "integer expected"; compiled circular nameref loses -i; compiled `type` refuses unprintable bodies · P3 · SH · OPEN [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
-- Through a circular local nameref (`f(){ local -n a=a; ...; }`), an element store `a[1]=Q` warns twice and stores to the global a. An array literal `a=(n m)` warns once and replaces the global. `(( l = 5 ))` and `let l+=1` each miss one "circular" warning. Interpreter only: `${l:=DEF}` misses the max-depth warning.
-- `${v~}` and `${v~~}` (case toggle of the first / every character) give "bad substitution" in both engines; bash supports them. Under the current UTF-8 model, toggle ASCII letters; leave non-ASCII as is until the LC_ALL policy decision.
-- `local -i n; local -n n=m`: bash drops -i (`declare -n n="m"`); we keep `-in n="0"`.
-- Compiler: `declare -f` / `-ft` with no names prints every function in the program, so it refuses the whole program when any body holds something the printer can't handle (an unclosed `$(`). Print only what bash would, or limit the refusal to the functions actually listed.
+- `test x -eq 3`, `[ 'x+0' -eq 3 ]` and `test 'a[1]' -eq 0` print "integer expected" (test: x: integer expected) and return status 2. Both our engines evaluate the operands as arithmetic and return 0 or 1. Only `[[ ]]` evaluates arithmetic; `test`/`[` take plain integers (leading/trailing blanks and a sign allowed). Repro: scratchpad/SH38/t4.sh.
+- Compiled only: with a global `declare -i l=3`, `f(){ local -n l=l; l=7; l+=8; }` gives 78 instead of 15. refAttrs uses rt_nref_base, which returns "" for a circular chain, so -i is lost.
+- Compiled `type $x` (emitFnTextOf) still fails at compile time when any function body cannot be printed. Make it lazy, like the r38 declare -f fix.
+- Known compiled limitation, document it or fix it: `local -i n; local -n n` (no value, second local) keeps -i, because attributes are fixed at compile time.
 
-Keep any change to hot runtime functions (rt_var, rt_getvar_byname, rt_setvar_byname) cost-neutral. Adding a caller to rt_var cost 1.7% on every program in r37; check with `tests/bench.sh bash --draws 5 --paired`.
+Keep the hot runtime functions cost-neutral (check with `tests/bench.sh bash --draws 5 --paired`).
 
 # C — C subset
 
@@ -1172,6 +1172,7 @@ T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for ste
 T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and local resolution; declare -ft; LC_ALL=C case mapping — DONE r37 (2fb2fdcc, 25e42574): arithmetic-text expansion errors abandon the line unprefixed, circular-nameref @a/@A warning counts, circular local nameref reads/scalar stores/unset resolve to the global, declare -ft/-F/-pf, stray UTF-8 continuation bytes in compiled strip/case; paired bench -0.03% after the rt_var-caller fix. LC_ALL=C case mapping NOT done: needs the general locale model (user POLICY decision)
 T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.util classes; RandomAccess — DONE r35 (7f42e176): stale subList index read / for / iterators / indices throw CME (paired bench -0.02%), casts to concrete java.util classes checked with JVM messages, RandomAccess/Cloneable/Serializable markers per JVM class and program supertypes; master-probed vs kotlinc 2.2.21
 T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endless-range enumerators without a block; Range#%; ArithmeticSequence#hash — DONE r54 (1570c52a, 20b5d84f): catchable RangeError for endless to_a/splat, streaming endless String step and blockless each/each_entry, Range#% (tested only after % finds a non-number: paired bench +0.01%), ArithmeticSequence#hash, Float values toward Float::INFINITY; master-probed vs ruby 2.6
+T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local -n drops -i; compiled declare -f listing — DONE r38 (d8fa8690): circular local nameref element/literal stores and warning counts, ${v~}/${v~~}, -n drops -i/-u/-l/-c, lazy compiled declare -f/-ft, arith element store on a scalar; paired bench +0.05%; master-probed vs bash 5.3 (stdout+stderr)
 
 # Settled — do not re-open
 
