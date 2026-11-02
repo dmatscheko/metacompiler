@@ -112,7 +112,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level lateinit isInitialized, ::f for a lambda-holding val · P3 · KT · OPEN [V]
+### T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level lateinit isInitialized, ::f for a lambda-holding val · P3 · KT · IN PROGRESS (KT worker, round 39) [V]
 
 Found while working T-1129. The oracle is kotlinc 2.2.21 (stdlib only).
 
