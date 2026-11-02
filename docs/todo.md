@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1133** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1134** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -112,17 +112,22 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::topVal reference, Array<ProgramClass> JVM name, extension-function references · P3 · KT · IN PROGRESS (KT worker, round 38) [V]
+### T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level lateinit isInitialized, ::f for a lambda-holding val · P3 · KT · OPEN [V]
 
-Found while working T-1125. The oracle is kotlinc 2.2.21 (stdlib only, no kotlin-reflect).
+Found while working T-1129. The oracle is kotlinc 2.2.21 (stdlib only).
 
-1. `super.toString()` and `super.equals()` that reach kotlin.Any fail in every engine. The interpreter says "no super method 'toString'"; the compiled side says "unknown super method". Example: `class X2 : B() { override fun toString() = "X:" + super.toString() }`, where B does not override toString. The oracle prints `X:X@<hash>`; ours should print `X:X@<our hashCode in hex>`.
-2. `super.m()` in a class with no declared superclass is a compiler notImpl: "super call (no superclass declared)". For example `class E { override fun hashCode() = super.hashCode() + 1 }`. The interpreter already runs it.
-3. `println(::top)` for a top-level `val top = 5` prints 5. The oracle prints `property top (Kotlin reflection is not available)`. The bare-reference path returns the value for any binding that is not callable.
-4. An Array of a program class reports `[Ljava.lang.Object;`. The oracle gives `[LAnimal;` for `arrayOf<Animal>(Dog())`, for `val d: Array<Animal> = arrayOf(Dog())` and for their copies. ktArrElemJvm skips program types.
-5. A reference to an extension function (`b::ext`, `Box::ext`) prints as `property ext`. The oracle prints `function ext (Kotlin reflection is not available)`. The function-or-property decision only looks at the class chain.
+1. Mixed element classes: Kotlin infers the common supertype. `arrayOf(Dog(), Animal())` is `[LAnimal;`. `arrayOf(S1(), S2())`, where both implement only Shape, is `[LShape;`. `arrayOf(M1(), C1())` is `[LBase;`. All engines give `[Ljava.lang.Object;`. When the only common supertype is an intersection (Base + Shape + Named), the oracle also gives Object, which we already match.
+2. Non-java.lang element classes. All engines give `[Ljava.lang.Object;` where the oracle gives:
+   - `[Lkotlin.jvm.functions.Function0;` for `arrayOf({1})`
+   - `[Lkotlin.Unit;` for `arrayOf(Unit)`
+   - `[Lkotlin.Pair;` for `arrayOf(1 to 2)`
+   - `[LP6Kt$main$2;` (anonymous object class) for `arrayOf(object : Shape {})`
+3. `lateinit var late: String` at top level, then `::late.isInitialized`, prints `false`, then `true` after assignment, in the oracle. The interpreter is right. The compiled half fails with "js runtime error: unknown name: this", because `makeIsInit` in kotlin-to-llvm-ir.abnf always reads `this`.
+4. Check these against the oracle first:
+   - a top-level `val f = { .. }`, where `::f` should be a KProperty0 printing `property f (Kotlin reflection is not available)`; ours hands back the lambda;
+   - an unbound `Box::name` when Box has both a member property `name` and an extension function `name`.
 
-Item 1 may need the shared js_supercall (jsrt.go / runtime.metajs). If so, prefer a Kotlin-only extern.
+Verify with `tests/probe.sh kotlin` on all four legs.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1197,6 +1202,7 @@ T-1125 kotlin: program-class toString/hashCode agreement; synchronized; Integer.
 T-1127 bash: test arity errors, declare through circular -i nameref, readonly circular warning — merged b302a5c7: bash 5.3 test.c parser port (arity rules, all syntax diagnostics, status 2) in both engines; circular/self nameref declarations (double-lookup warnings, invalid-name error, self-ref check before readonly); 4-leg probe + stderr match bash 5.3; matrix 605/605; bench +0.04%/+0.02%
 T-1130 bash: compiled test with run-time operators, test -o/-R, -n on subscripted names, circular nameref declarations with attributes — merged 4fd1c782: compiled test/[ falls back to a run-time C parser (rt_test) when operators/field lists only exist at run time; test -o/-R in test/[/[[; -n on NAME[SUB] error; circular local nameref declarations with attributes/+=/literals; computed self-ref checked first; 4-leg probe + stderr match bash 5.3; bash gates green; bench -1.23%
 T-1128 ruby: blockless stream enumerators (find/take_while/each_entry/send :each), lazy no-block ArgumentError, lazy.take size, AS#last arity, Range#equal? — merged 463872a5: blockless find/find_index/take_while/each_entry stream enumerators (nil size), lazy no-block ArgumentError, send(:each), Range#with_index NoMethodError + infinite find, Lazy size carries counts, builtin Method#arity table (+ curry), Range dup/equal? identity; 4-leg probe matches ruby 2.6; ruby gates + go test green after rebase (worker: full matrix 605/605); bench -0.04%
+T-1129 kotlin: super to kotlin.Any (toString/equals, no-superclass super), ::topVal reference, Array<ProgramClass> JVM name, extension-function references — merged 3bd224e6: super toString/hashCode/equals reaching kotlin.Any (js_ktsuperany, also no-superclass and builtin-exception supers), ::top property refs (get/set/invoke/name), Array<ProgramClass> binary names incl. nested/late-declared, extension-function refs; plus newline-before-:: statement boundary via OpSameLine (continues inside brackets); 4-leg probes match kotlinc 2.2.21 after two review rounds; kotlin gates green; bench -0.02%
 
 # Settled — do not re-open
 
