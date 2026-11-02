@@ -2621,6 +2621,76 @@ def s180
   check("st180h", !g.equal?(v[0]..v[1]) && g.equal?(g) && !g.equal?(g.dup) && !g.equal?(g.clone) && g.dup == g &&
         g.dup.class == Range && g.clone.inspect == "1..2" && g.itself.equal?(g))
 end
+# ===== SECTION 181: blockless take_while / drop_while consumers, non-numeric Range sizes, Method of a Proc, 2.6's surface, Range#freeze =====
+# A blockless take_while / drop_while Enumerator stops at the first nil its
+# consumer's block answers, so first / next / to_a / any Enumerable method sees
+# only the first value; #each and with_index / with_object given a block hand
+# the method the caller's answers, and the first op on its Lazy sees them all.
+# An Enumerator made from a String range, or a chunk_while / slice_when /
+# slice_before / slice_after / chunk one, has a nil #size; a Float range's Lazy
+# has the range's size and raises only once a value is pulled. Proc#method and
+# Method#method are Methods, and one of an operator runs as #send does. MRI 2.6
+# has no tally or Symbol#name, Range / Enumerator no index, and Range#freeze /
+# #clone keep the frozen flag. /usr/bin/ruby 2.6 settles each.
+def s181err
+  yield
+rescue => e
+  "#{e.class} #{e.message}"
+end
+def s181
+  v = [1, 2, 3, 4, "a", "c", "e", 1.0, 3.0, 3.5, 0]
+  a = [v[0], v[1], v[2]]
+  e = a.take_while
+  check("tw181a", a.take_while.first(3) == [1] && a.take_while.first == 1 && e.next == 1 &&
+        s181err { e.next } == "StopIteration iteration reached an end" && a.take_while.to_a == [1] &&
+        a.take_while.map { |x| x } == [1] && a.take_while.count == 1 && a.take_while.each { |x| x < 3 } == [1, 2] &&
+        a.take_while.with_index { |x, i| x < 3 } == [1, 2] && a.take_while.with_index.to_a == [[1, 0]] &&
+        a.take_while.with_object([]) { |x, m| m << x; x < 3 } == [1, 2, 3] && a.take_while.zip(a) == [[1, 1]] &&
+        a.drop_while.first(3) == [1] && a.drop_while.with_index { |x, i| x < 2 } == [2, 3] && (v[0]..v[2]).take_while.first(3) == [1] &&
+        a.take_while.lazy.to_a == [1] && a.take_while.lazy.map { |x| x * 2 }.to_a == [2, 4, 6] &&
+        a.take_while.lazy.select { |x| x > 1 }.to_a == [2, 3] && a.find.first(3) == [1, 2, 3] && a.take_while.size.nil?)
+  s = (v[4]..v[6])
+  check("sr181b", (v[4]..v[5]).lazy.size.nil? && s.each_slice(2).size.nil? && s.each.size.nil? && s.map.size.nil? &&
+        s.each_cons(2).size.nil? && s.lazy.map { |x| x }.size.nil? && s.lazy.take(2).size.nil? && s.each.lazy.size.nil? &&
+        s.map.with_index.size.nil? && s.each_slice(2).to_a == [["a", "b"], ["c", "d"], ["e"]] && s.lazy.first(2) == ["a", "b"] &&
+        (v[4]..v[5]).lazy.map { |x| x * 2 }.to_a == ["aa", "bb", "cc"] && (v[4]...v[5]).lazy.to_a == ["a", "b"] &&
+        (v[0]..v[2]).each.lazy.size == 3 && a.find.lazy.size.nil?)
+  f = (v[7]..v[8])
+  check("fr181c", f.lazy.size == 3 && f.lazy.take(2).size == 2 && f.lazy.map { |x| x }.size == 3 && f.lazy.select { |x| x }.size.nil? &&
+        (v[7]...v[9]).lazy.size == 3 && (v[7]...v[8]).lazy.size == 2 && (v[7]..).lazy.size == Float::INFINITY &&
+        (v[9]..v[7]).lazy.size == 0 && f.lazy.each_slice(2).size == 2 && f.lazy.take(0).to_a == [] &&
+        f.lazy.inspect == "#<Enumerator::Lazy: 1.0..3.0>" && s181err { f.lazy.to_a } == "TypeError can't iterate from Float" &&
+        s181err { f.lazy.first } == "TypeError can't iterate from Float" && (v[7]...v[9]).size == 3 &&
+        (v[0]...v[9]).to_a == [1, 2, 3] && (v[0]...v[9]).size == 3)
+  b = [v[0], v[1], v[3]]
+  check("gn181d", b.chunk_while { |x, y| y == x + 1 }.class == Enumerator && b.chunk_while { |x, y| y == x + 1 }.size.nil? &&
+        b.slice_when { |x, y| y != x + 1 }.size.nil? && b.slice_before { |x| x > 1 }.size.nil? && b.slice_after { |x| x > 1 }.size.nil? &&
+        b.chunk { |x| x > 1 }.size.nil? && b.chunk_while { |x, y| y == x + 1 }.next == [1, 2] &&
+        b.chunk_while { |x, y| y == x + 1 }.with_index.to_a == [[[1, 2], 0], [[4], 1]] && b.chunk_while { |x, y| true }.map.size.nil? &&
+        b.chunk_while { |x, y| y == x + 1 }.each { |x| x }.nil? && b.chunk { |x| x > 1 }.each { |x| x }.nil? &&
+        (v[0]..v[3]).slice_when { |x, y| true }.size.nil? && b.chunk_while { |x, y| y == x + 1 }.to_a == [[1, 2], [4]])
+  check("mm181e", proc {}.method(:call).class == Method && proc { |x| x * 2 }.method(:call).call(4) == 8 &&
+        lambda { |x| x + 1 }.method(:call).call(4) == 5 && v[0].method(:+).method(:call).call(4) == 5 &&
+        v[0].method(:+).method(:arity).call == 1 && s181err { proc {}.method(:nope) } == "NameError undefined method `nope' for class `Proc'" &&
+        v[0].method(:+).call(2) == 3 && v[3].method(:<).call(5) && v[3].method(:<=>).call(5) == -1 && 1.5.method(:<).call(2) &&
+        b.map(&v[10].method(:+)) == [1, 2, 4] && b.select(&v[1].method(:<)) == [4] && "a".method(:+).call("b") == "ab" &&
+        [v[0]].method(:<<).call(2) == [1, 2])
+  check("tl181f", ![v[0]].respond_to?(:tally) && !{}.respond_to?(:tally) && !(v[0]..v[1]).respond_to?(:tally) &&
+        ![v[0]].each.respond_to?(:tally) && !v[0].step(3).respond_to?(:tally) && !:a.respond_to?(:name) &&
+        s181err { [v[0]].method(:tally) } == "NameError undefined method `tally' for class `Array'" &&
+        s181err { [v[0]].tally } == "NoMethodError undefined method `tally' for [1]:Array" &&
+        s181err { (v[0]..v[1]).tally } == "NoMethodError undefined method `tally' for 1..2:Range" &&
+        s181err { :a.name } == "NoMethodError undefined method `name' for :a:Symbol" &&
+        s181err { (v[0]..v[2]).index } == "NoMethodError undefined method `index' for 1..3:Range" &&
+        s181err { (v[0]..v[2]).rindex(1) } == "NoMethodError undefined method `rindex' for 1..3:Range" &&
+        s181err { [v[0]].cycle(2).index } == "NoMethodError undefined method `index' for #<Enumerator: [1]:cycle(2)>" &&
+        s181err { [v[0]].each.index(1) } == "NoMethodError undefined method `index' for #<Enumerator: [1]:each>" &&
+        (v[0]..v[2]).find_index.class == Enumerator)
+  r = (v[0]..v[2])
+  check("fz181g", !(v[0]..v[2]).frozen? && r.freeze.equal?(r) && r.frozen? && r.clone.frozen? && !r.dup.frozen? &&
+        !Range.new(v[0], v[2]).frozen? && !(v[0]..v[2]).clone.frozen? && r == (v[0]..v[2]) && r.hash == (v[0]..v[2]).hash &&
+        r.to_a == [1, 2, 3] && { r => 1 }[v[0]..v[2]] == 1 && (v[4]..v[5]).freeze.frozen?)
+end
 
 
 s122() # SECTION-CALL 122
@@ -2682,5 +2752,6 @@ s177() # SECTION-CALL 177
 s178() # SECTION-CALL 178
 s179() # SECTION-CALL 179
 s180() # SECTION-CALL 180
+s181() # SECTION-CALL 181
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

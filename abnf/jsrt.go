@@ -7466,10 +7466,7 @@ func (rt *jsrt) rubyRangeArr(lo, hi interface{}, excl bool) *jsArray {
 		return out
 	}
 	l, h := rubyToF(lo), rubyToF(hi)
-	if excl {
-		h = h - 1
-	}
-	for i, n := l, 0; i <= h && n < 10000000; i, n = i+1, n+1 {
+	for i, n := l, 0; (i < h || (!excl && i == h)) && n < 10000000; i, n = i+1, n+1 {
 		out.elems = append(out.elems, i)
 	}
 	return out
@@ -7569,17 +7566,11 @@ func rubyRangeNumeric(r *jsObject) bool {
 // destructuring ask for the length once and then index element by element, so
 // materializing inside rubyRangeAt would make every one of them quadratic.
 // THE ARITHMETIC HERE MUST BE rubyRangeArr'S, EXACTLY. rubyRangeArr walks
-// `i = lo; i <= hi; i++', so element i is lo + i and the count is
-// floor(hi - lo) + 1 - NOT trunc(hi) - trunc(lo) + 1, which is the same for
-// integers and differs for a FLOAT range: `(1.5..3.5).size' is 3. Walking a
-// Float range raises TypeError (rubyRangeWalkable), so rubyRangeAt does too.
-func rubyRangeSpan(r *jsObject) float64 {
-	h := rubyToF(r.props["end"])
-	if excl, _ := r.props["excl"].(bool); excl {
-		h = h - 1
-	}
-	return h - rubyToF(r.props["begin"])
-}
+// `i = lo; i <= hi; i++' (i < hi when exclusive), so element i is lo + i and
+// the count is floor(hi - lo) + 1 (ceil(hi - lo)) - NOT trunc(hi) - trunc(lo) +
+// 1, which is the same for integers and differs for a FLOAT end:
+// `(1.5..3.5).size' is 3 and so is `(1...3.5).size'. Walking a Float range
+// raises TypeError (rubyRangeWalkable), so rubyRangeAt does too.
 
 func (rt *jsrt) rubyRangeLen(r *jsObject) float64 {
 	lo, hi := r.props["begin"], r.props["end"]
@@ -7592,7 +7583,15 @@ func (rt *jsrt) rubyRangeLen(r *jsObject) float64 {
 	if !rubyRangeNumeric(r) {
 		return float64(len(rt.rubyRangeToArr(r).elems))
 	}
-	if n := math.Floor(rubyRangeSpan(r)) + 1; n > 0 {
+	if loF, isFlo := lo.(jsFlo); isFlo {
+		return rubyFloatStepSize(loF.f, rubyToF(hi), 1, r.props["excl"] == true)
+	}
+	d := rubyToF(hi) - rubyToF(lo)
+	n := math.Floor(d) + 1
+	if r.props["excl"] == true {
+		n = math.Ceil(d)
+	}
+	if n > 0 {
 		return n
 	}
 	return 0
@@ -7637,7 +7636,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		return rt.rubyRangeStep(t, name, args)
 	}
 	// Twin of the with_index arm of rangeMethod in ruby-interpreter.abnf.
-	if name == "with_index" || name == "with_object" {
+	if name == "with_index" || name == "with_object" || name == "index" || name == "rindex" {
 		rt.rubyNoMethod(t, name)
 	}
 	pos, blk := rubyBlockArgs(args)
@@ -7719,16 +7718,23 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		}
 		bn, _ := a0.props["__rbuiltin"].(string)
 		return bn == "Range"
-	case "nil?", "frozen?":
+	case "nil?":
 		return false
 	case "hash":
 		return rt.rubyHashOf(t)
 	case "object_id":
 		return rt.rubyObjectId(t)
-	case "freeze", "itself":
+	case "freeze":
+		t.set("__fz", true)
+		return t
+	case "itself":
 		return t
 	case "dup", "clone":
-		return rubyOpenRange(t.props["begin"], t.props["end"], t.props["excl"] == true)
+		c := rubyOpenRange(t.props["begin"], t.props["end"], t.props["excl"] == true)
+		if name == "clone" && t.props["__fz"] == true {
+			c.set("__fz", true)
+		}
+		return c
 	case "eql?":
 		return rt.rubyEql(t, argAt(args, 0))
 	case "equal?":
@@ -11336,13 +11342,14 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if rt.rubyClassNameRT(target) != "" && !rubyUserObj(target) {
 			return rt.rubyIsA(target, argAt(args, 0))
 		}
-	// Object#method on a builtin value: a Method that re-dispatches by name, or
+	// Object#method on a builtin value, a Proc or a Method: a Method that
+	// re-dispatches through #send, or
 	// MRI's NameError when the value does not respond to it. Twins: the "method"
 	// arms of mcall in ruby-interpreter.abnf and rbMethod in lib/ruby-rt.metajs.
 	case "method":
 		o, isObj := target.(*jsObject)
 		isCls := isObj && o.props["__isclass"] == true
-		if kind := rt.rubyValueClassName(target); kind != "" && !rubyUserObj(target) && !isCls && !isCallable(target) {
+		if kind := rt.rubyValueClassName(target); kind != "" && !rubyUserObj(target) && !isCls {
 			nm := rt.rubyStr(argAt(args, 0))
 			if rt.rubyRespond(target, []interface{}{jsSym{s: nm}}) != true {
 				rt.rubyRaiseErr(name, "NameError", "undefined method `"+nm+"' for class `"+kind+"'")
@@ -11517,7 +11524,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case jsNullT, jsUndefT, bool, jsSym:
 			return true
 		case *jsObject:
-			if rubyUserObj(t) || rubyIsEnum(t) {
+			if _, isRng := t.props["__rrange"]; isRng || rubyUserObj(t) || rubyIsEnum(t) {
 				fz, _ := t.props["__fz"].(bool)
 				return fz
 			}
@@ -11656,7 +11663,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	switch o := target.(type) {
 	case jsSym:
 		switch name {
-		case "to_s", "id2name", "name":
+		case "to_s", "id2name":
 			return o.s
 		case "to_sym":
 			return o
@@ -12766,7 +12773,7 @@ func (rt *jsrt) rubyFormatArgs(args []interface{}, frame string) string {
 }
 
 // rubyNewDict builds an empty Hash in the shared {__dict, keys, vals} shape that
-// group_by and tally answer with.
+// group_by answers with.
 func rubyNewDict() *jsObject {
 	d := newJSObject()
 	d.set("__dict", true)
@@ -12898,7 +12905,7 @@ func rubyHashEnumName(n string) bool {
 		"min_by", "max_by", "minmax", "sum", "count", "group_by", "partition",
 		"each_with_index", "each_with_object", "inject", "reduce", "all?",
 		"any?", "none?", "one?", "first", "take", "drop", "take_while",
-		"drop_while", "each_slice", "each_cons", "empty?", "tally", "zip",
+		"drop_while", "each_slice", "each_cons", "empty?", "zip",
 		"each_entry", "assoc", "uniq", "reverse", "freeze", "itself",
 		"find_all", "cycle", "chunk_while", "lazy", "grep", "grep_v", "minmax_by",
 		"slice_before", "slice_after", "chunk", "chain":
@@ -13353,6 +13360,9 @@ func rubyEnumFinish(t *jsObject, items *jsArray, results []interface{}) interfac
 // Twin of enumEachVal in ruby-interpreter.abnf, which states the rule, and
 // rbEnumEachVal in lib/ruby-rt.metajs.
 func rubyEnumEachVal(t *jsObject, results []interface{}) interface{} {
+	if t.props["op"] == "gen" {
+		return jsNull
+	}
 	m, isStr := t.props["meth"].(string)
 	if !isStr || m == "step" {
 		return t
@@ -13386,6 +13396,24 @@ func rubyIsEnum(v interface{}) bool {
 func rubyEnumUnsized(t *jsObject) bool {
 	op, _ := t.props["op"].(string)
 	return rubyUnsizedOp(op) || op == "index" || op == "rindex"
+}
+
+// rubyEnumNoSize is enumNoSize of ruby-interpreter.abnf, which states the rule.
+func rubyEnumNoSize(t *jsObject) bool {
+	var e interface{} = t
+	for rubyIsEnum(e) {
+		o := e.(*jsObject)
+		if rubyEnumUnsized(o) || o.props["op"] == "gen" {
+			return true
+		}
+		if en, has := o.props["en"]; has && o.props["__rlazy"] == true {
+			e = en
+		} else {
+			e = o.props["src"]
+		}
+	}
+	r, isRng := rubyIsRange(e)
+	return isRng && !rubyIsNum(r.props["begin"])
 }
 
 func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) interface{} {
@@ -13464,25 +13492,48 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 			rt.rubyEnumForce(t)
 		}
 	}
-	if name == "lazy" {
-		its, _ := t.props["items"].(*jsArray)
-		if its == nil {
-			its = &jsArray{}
-		}
-		lz := rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, its.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyEnumInspect(t)+">")
-		lz.set("en", t)
-		return lz
-	}
 	items, _ := t.props["items"].(*jsArray)
 	if items == nil {
 		items = &jsArray{}
 	}
 	pos, blk := rubyBlockArgs(args)
+	// Twin of the rbaStopsOnNil arms of enumMethod in ruby-interpreter.abnf.
+	if rubyStopsOnNil(t.props["op"]) {
+		if blk != nil && rubyRerunsMethod(name) {
+			ix := 0
+			if name == "with_index" && len(pos) > 0 {
+				ix = int(math.Trunc(rubyToF(pos[0])))
+			}
+			memo := argAt(pos, 0)
+			wobj := name == "with_object" || name == "each_with_object"
+			wrap := &hostFunc{name: name, fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+				second := memo
+				if !wobj {
+					second = float64(ix)
+				}
+				ix++
+				return rt.call(blk, jsUndef, []interface{}{argAt(a, 0), second})
+			}}
+			st := rt.rubyArrayMethod(items, t.props["op"].(string), []interface{}{rubyBlkWrap(wrap)})
+			if wobj {
+				return memo
+			}
+			return st
+		}
+		if (name != "each" || blk == nil) && len(items.elems) > 1 {
+			items = &jsArray{elems: items.elems[:1]}
+		}
+	}
+	if name == "lazy" {
+		lz := rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, items.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyEnumInspect(t)+">")
+		lz.set("en", t)
+		return lz
+	}
 	switch name {
 	case "to_a", "entries", "force":
 		return &jsArray{elems: append([]interface{}{}, items.elems...)}
 	case "size", "length", "count":
-		if name == "size" && rubyEnumUnsized(t) {
+		if name == "size" && rubyEnumNoSize(t) {
 			return jsNull
 		}
 		if len(pos) == 0 && blk == nil {
@@ -13548,6 +13599,9 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 		return memo
 	}
 	// Everything else is Enumerable, and an eager Enumerator IS its element list.
+	if name == "index" || name == "rindex" {
+		rt.rubyNoMethod(t, name)
+	}
 	return rt.rubyDelegArr(items, t, name, args)
 }
 
@@ -13941,19 +13995,6 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		return float64(n)
-	case "tally":
-		d := rubyNewDict()
-		keys := d.props["keys"].(*jsArray)
-		vals := d.props["vals"].(*jsArray)
-		for _, e := range t.elems {
-			if ix := rt.rubyDictFind(keys, e); ix >= 0 {
-				vals.elems[ix] = rubyToF(vals.elems[ix]) + 1
-			} else {
-				keys.elems = append(keys.elems, rubySV(e))
-				vals.elems = append(vals.elems, float64(1))
-			}
-		}
-		return d
 	// Array#to_h: every element (or the block's answer for it) is a [key, value]
 	// pair. Twin of to_h in ruby-interpreter.abnf's arrayMethod.
 	case "to_h":
@@ -14610,7 +14651,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			last := out.elems[len(out.elems)-1].(*jsArray)
 			last.elems = append(last.elems, e)
 		}
-		return out
+		return rubyMkEnumOp(out, "gen")
 	case "assoc":
 		for _, e := range t.elems {
 			if row, isArr := e.(*jsArray); isArr && len(row.elems) > 0 && rt.rubyEq(row.elems[0], argAt(pos, 0)) {

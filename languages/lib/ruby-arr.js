@@ -6,8 +6,10 @@
 // each_slice / each_cons on an endless range: an Enumerator object that also
 // carries __rlazy, a SOURCE - kind "arr" (items), "cycle" (items, forever) or
 // "range" (lo, lo+1, ... up to hi; hi null is endless) or "each" (the #each of
-// a user Enumerable, src) - and the OPS {k, f, n}, applied to one value at a
-// time: map / select / reject / take_while / drop_while / flat_map / chunk_while
+// a user Enumerable or of a Range that cannot be walked by counting, src; a
+// non-null hi is then its size, a Float range's) - and the OPS {k, f, n},
+// applied to one value at a time: map / select / reject / take_while /
+// drop_while / flat_map / chunk_while
 // / slice_when (f the block), take / drop / with_index (n the count or offset),
 // with_object (f the memo),
 // step (every n-th value from the first, a String range's #step),
@@ -33,6 +35,8 @@ function rbaLazyFirst(lz, n, call, test, eql, drive, emit) {
         st.cnt.push(0)
         st.on.push(false)
         st.buf.push([])
+        // take(0) makes a Lazy over nothing (lazy_take), so no value is pulled.
+        if (ops[j].k == "take" && ops[j].n == 0) { st.done = true }
         j = j + 1
     }
     if (lz.kind == "each" && !st.done) {
@@ -240,6 +244,7 @@ function rbaLazyCount(lz, inf) {
     if (lz.kind == "range") {
         if (lz.hi === null) { c = inf } else { c = Math.max(0, lz.hi - lz.lo + (lz.excl ? 0 : 1)) }
     }
+    if (lz.kind == "each" && lz.hi !== null) { c = lz.hi }
     var i = 0
     while (i < lz.ops.length && c >= 0) {
         var k = lz.ops[i].k
@@ -262,6 +267,13 @@ function rbaLazyCount(lz, inf) {
 function rbaUnsizedOp(name) {
     return name == "find" || name == "detect" || name == "find_index" || name == "take_while" || name == "drop_while"
 }
+
+// The unsized ops that stop yielding at the first falsy block answer. Every
+// Enumerable and Enumerator method iterates with a block answering nil, so it
+// sees only the first value (`[1, 2].take_while.first(2)` is [1]); only #each and
+// the rbaRerunsMethod ones given a block hand the method the caller's answers.
+// Go twin: rubyStopsOnNil in abnf/jsrtrubystr.go.
+function rbaStopsOnNil(op) { return op == "take_while" || op == "drop_while" }
 
 // The Enumerable methods a Lazy answers EAGERLY, over the Array of all its
 // values: MRI's Lazy inherits them from Enumerable unchanged. The ones that can

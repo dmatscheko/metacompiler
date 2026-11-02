@@ -104,8 +104,15 @@ func rubyMkLazy(kind string, items *jsArray, lo float64, hi interface{}, excl, l
 	return o
 }
 
+// Twin of lazyCopy in ruby-interpreter.abnf, which states the rule.
 func rubyLazyCopy(t *jsObject, op *jsObject, lazy bool, desc string) *jsObject {
-	c := rubyMkLazy(t.props["kind"].(string), t.props["items"].(*jsArray), t.props["lo"].(float64), t.props["hi"],
+	its := t.props["items"].(*jsArray)
+	if en, isObj := t.props["en"].(*jsObject); isObj && op != nil && len(t.props["ops"].(*jsArray).elems) == 0 && rubyIsEnum(en) && rubyStopsOnNil(en.props["op"]) {
+		if full, isArr := en.props["items"].(*jsArray); isArr {
+			its = full
+		}
+	}
+	c := rubyMkLazy(t.props["kind"].(string), its, t.props["lo"].(float64), t.props["hi"],
 		t.props["excl"] == true, lazy, desc)
 	ops := &jsArray{elems: append([]interface{}{}, t.props["ops"].(*jsArray).elems...)}
 	if op != nil {
@@ -135,6 +142,11 @@ func (rt *jsrt) rubyLazyPull(t *jsObject, n int, emit func(interface{}, bool) bo
 	excl := t.props["excl"] == true
 	st := &rubyLazyState{out: []interface{}{}, n: n, cnt: make([]int, len(ops)), on: make([]bool, len(ops)),
 		buf: make([][]interface{}, len(ops)), done: n == 0, stopAt: -1, emit: emit}
+	for _, o := range ops {
+		if op := o.(*jsObject); op.props["k"] == "take" && op.props["n"] == float64(0) {
+			st.done = true
+		}
+	}
 	if kind == "each" && !st.done {
 		ev := rt.rubyLazyDrive(t.props["src"], func(v interface{}, m bool) bool {
 			rt.rubyLazyRun(st, ops, v, m, 0)
@@ -352,6 +364,7 @@ func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{},
 	}
 }
 
+// Twin of rangeLazy in ruby-interpreter.abnf, which states the rule.
 func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
 	d := "#<Enumerator::Lazy: " + rt.rubyInspect(r) + ">"
 	hi := r.props["end"]
@@ -367,10 +380,19 @@ func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
 		lz.set("ev", r)
 		return lz
 	}
-	if _, loStr := r.props["begin"].(string); loStr && hi == jsNull {
+	_, loStr := r.props["begin"].(string)
+	loF, loFlo := r.props["begin"].(jsFlo)
+	if loStr || loFlo {
 		lz := rubyMkLazy("each", &jsArray{}, 0, jsNull, false, true, d)
 		lz.set("src", r)
 		lz.set("ev", r)
+		if loFlo {
+			if isUndefOrNull(r.props["end"]) {
+				lz.set("hi", math.Inf(1))
+			} else {
+				lz.set("hi", rubyFloatStepSize(loF.f, rubyToF(r.props["end"]), 1, r.props["excl"] == true))
+			}
+		}
 		return lz
 	}
 	lz := rubyMkLazy("arr", rt.rubyRangeToArr(r), 0, jsNull, false, true, d)
@@ -729,6 +751,10 @@ func rubyLazyCount(t *jsObject) float64 {
 		} else {
 			c = math.Inf(1)
 		}
+	case "each":
+		if hi, ok := t.props["hi"].(float64); ok {
+			c = hi
+		}
 	}
 	for _, o := range t.props["ops"].(*jsArray).elems {
 		if c < 0 {
@@ -759,6 +785,9 @@ func rubyLazyCount(t *jsObject) float64 {
 // rubyLazySizeVal is a Lazy's or stream Enumerator's #size. Twin of lazySize in
 // ruby-interpreter.abnf.
 func rubyLazySizeVal(rt *jsrt, t *jsObject) interface{} {
+	if rubyEnumNoSize(t) {
+		return jsNull
+	}
 	c := rubyLazyCount(t)
 	if c == -2 {
 		rubyFloDomain(rt, math.Inf(1))
@@ -918,6 +947,9 @@ func (rt *jsrt) rubyAseqArgs(args []interface{}) string {
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
 }
+
+// rubyStopsOnNil is rbaStopsOnNil of lib/ruby-arr.js, which states the rule.
+func rubyStopsOnNil(op interface{}) bool { return op == "take_while" || op == "drop_while" }
 
 // rubyRerunsMethod is rbaRerunsMethod of lib/ruby-arr.js, which states the rule.
 func rubyRerunsMethod(name string) bool {
@@ -1662,6 +1694,31 @@ func rubyIsIntV(v interface{}) bool {
 	return false
 }
 
+// rubyFloatStepSize is rbnFloatStepSize of lib/ruby-num.js, which states the rule.
+func rubyFloatStepSize(beg, end, unit float64, excl bool) float64 {
+	n := (end - beg) / unit
+	err := (math.Abs(beg) + math.Abs(end) + math.Abs(end-beg)) / math.Abs(unit) * 0x1p-52
+	if err > 0.5 {
+		err = 0.5
+	}
+	if excl {
+		if n <= 0 {
+			return 0
+		}
+		if n < 1 {
+			n = 0
+		} else {
+			n = math.Floor(n - err)
+		}
+	} else {
+		if n < 0 {
+			return 0
+		}
+		n = math.Floor(n + err)
+	}
+	return n + 1
+}
+
 // rubyFloatStep is the doubles a Range#step over Floats visits
 // (ruby_float_step). Twin of rbnFloatStep in lib/ruby-num.js.
 func rubyFloatStep(beg, end, unit float64, excl bool) []float64 {
@@ -1672,26 +1729,7 @@ func rubyFloatStep(beg, end, unit float64, excl bool) []float64 {
 		}
 		return out
 	}
-	n := (end - beg) / unit
-	err := (math.Abs(beg) + math.Abs(end) + math.Abs(end-beg)) / math.Abs(unit) * 0x1p-52
-	if err > 0.5 {
-		err = 0.5
-	}
-	if excl {
-		if n <= 0 {
-			return out
-		}
-		if n < 1 {
-			n = 0
-		} else {
-			n = math.Floor(n - err)
-		}
-	} else {
-		if n < 0 {
-			return out
-		}
-		n = math.Floor(n + err)
-	}
+	n := rubyFloatStepSize(beg, end, unit, excl) - 1
 	for i := 0.0; i <= n; i++ {
 		d := float64(i*unit) + beg
 		if (unit >= 0 && end < d) || (unit < 0 && d < end) {
@@ -3051,7 +3089,7 @@ func (rt *jsrt) rubyArrEnumMore(t *jsArray, name string, pos []interface{}, blk 
 		if len(cur.elems) > 0 {
 			out.elems = append(out.elems, cur)
 		}
-		return rubyMkEnum(out)
+		return rubyMkEnumOp(out, "gen")
 	case "chunk":
 		// A nil or :_separator key drops the element, :_alone makes it a chunk of
 		// its own, and any other Symbol starting with `_' is reserved.
@@ -3084,7 +3122,7 @@ func (rt *jsrt) rubyArrEnumMore(t *jsArray, name string, pos []interface{}, blk 
 				out.elems = append(out.elems, cur)
 			}
 		}
-		return rubyMkEnum(out)
+		return rubyMkEnumOp(out, "gen")
 	}
 	// chain
 	out := &jsArray{elems: append([]interface{}{}, t.elems...)}

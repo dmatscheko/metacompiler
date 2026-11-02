@@ -5948,10 +5948,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // materialized array, membership stays lazy (an endless range has no array).
     function rangeMethod(t, name, args, blk) {
         if (name == "lazy") { return rangeLazy(t) }
-        // with_index / with_object are Enumerator's, not Enumerable's.
-        if (name == "with_index" || name == "with_object") { noMethod(t, name) }
-        // dup / clone answer a new Range (Object#dup), never the receiver.
-        if (name == "dup" || name == "clone") { return mkRange(t.lo, t.hi, t.excl) }
+        // with_index / with_object are Enumerator's, not Enumerable's, and index /
+        // rindex are Array's.
+        if (name == "with_index" || name == "with_object" || name == "index" || name == "rindex") { noMethod(t, name) }
+        // dup / clone answer a new Range (Object#dup), never the receiver; clone
+        // keeps the frozen flag #freeze set. Twins: rbRangeMethod, rubyRangeMethod.
+        if (name == "dup" || name == "clone") {
+            var rcp = mkRange(t.lo, t.hi, t.excl)
+            if (name == "clone" && t.__fz === true) { rcp.__fz = true }
+            return rcp
+        }
+        if (name == "freeze") { t.__fz = true; return t }
         if (name == "step" || name == "%") { return rangeStep(t, name, args, blk) }
         // Enumerable#each_entry yields each value as one, which for a Range is #each.
         if (name == "each_entry" && blk != null) { name = "each" }
@@ -6055,7 +6062,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // A Float range cannot be walked but has a size: the count of the
             // values lo, lo + 1, ... (rubyRangeLen in abnf/jsrt.go).
             if (isFlo(t.lo) && (name == "size" || name == "length" || name == "count")) {
-                return Math.max(0, Math.floor(toF(t.hi) - (t.excl === true ? 1 : 0) - toF(t.lo)) + 1)
+                return rbnFloatStepSize(t.lo.f, toF(t.hi), 1, t.excl === true)
             }
             var ra = anytype
             ra = rangeToA(t)
@@ -8178,7 +8185,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (v.__rlazy === true && v.kind == "each") { return null }
             if (v.__rco === true && name != null) { return null }
             if (v.__rdefer === true) { enumForce(v) }
-            if (name != null && enumUnsized(v)) { return null }
+            if (name != null && enumNoSize(v)) { return null }
             return v.items.length
         }
         // A Range's size is its element COUNT; a Range object here has no .length.
@@ -9761,17 +9768,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "public_methods" && args.length > 0 && !rtest(args[0]) && !isUserObj(target) && !isClassObj(target) && typeof target != "function") {
             return mcall(classOf(target), "public_instance_methods", [false], null)
         }
-        // Object#method on a builtin value: a Method that re-dispatches by name, or
-        // MRI's NameError when the value does not respond to it. Twins: the
-        // "method" arms of rubyMethod in abnf/jsrt.go and rbMethod in
-        // lib/ruby-rt.metajs.
-        if (name == "method" && !isUserObj(target) && !isClassObj(target) && typeof target != "function") {
+        // Object#method on a builtin value, a Proc or a Method: a Method that
+        // re-dispatches through #send, so an operator (`1.method(:+)`) runs as
+        // `1.send(:+, x)` does, or MRI's NameError when the value does not respond
+        // to it. Twins: the "method" arms of rubyMethod in abnf/jsrt.go and
+        // rbMethod in lib/ruby-rt.metajs.
+        if (name == "method" && !isUserObj(target) && !isClassObj(target)) {
             var bmn = rstr(args[0])
             var bcn = classOf(target).__name
             if (!rbResponds(bcn, bmn)) { raiseErr(name, "NameError", "undefined method `" + bmn + "' for class `" + bcn + "'") }
             var brecv = anytype
             brecv = target
-            var bf = function() { return mcall(brecv, bmn, argsArray(arguments), takeMethodValBlk()) }
+            var bf = function() { return mcall(brecv, "send", [mkSym(bmn)].concat(argsArray(arguments)), takeMethodValBlk()) }
             var bar = rbBuiltinArity(bcn, bmn)
             if (bar < 0) { markArity(bf, 0 - bar - 1, 0, true) } else { markArity(bf, bar, 0, false) }
             return markMethodVal(bf, bcn, bmn)
@@ -9787,7 +9795,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // instance carry their own flag.
         if (name == "frozen?") {
             if (target === null || target === undefined || typeof target == "boolean") { return true }
-            if (isUserObj(target) || isEnum(target)) { return target.__fz === true }
+            if (isUserObj(target) || isEnum(target) || isRange(target)) { return target.__fz === true }
             if (isBin(target)) { return target.__fz === true }
             return isRStr(target) ? target.__fz : (isSym(target) || isNumV(target))
         }
@@ -9843,7 +9851,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isBig(target)) { return bigMethod(target, name, args, blk) }
         if (isNumV(target) && typeof target != "number") { return numberMethod(target, name, args, blk) }
         if (isSym(target)) {
-            if (name == "to_s" || name == "name" || name == "id2name") { return target.s }
+            if (name == "to_s" || name == "id2name") { return target.s }
             if (name == "to_sym") { return target }
             if (name == "inspect") { return symInspect(target.s) }
             if (name == "length" || name == "size") { return charCount(target.s) }
@@ -10860,7 +10868,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             || n == "inject" || n == "reduce" || n == "all?" || n == "any?" || n == "none?"
             || n == "one?" || n == "first" || n == "take" || n == "drop"
             || n == "take_while" || n == "drop_while" || n == "each_slice"
-            || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip" || n == "each_entry"
+            || n == "each_cons" || n == "empty?" || n == "zip" || n == "each_entry"
             || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
             || n == "find_all" || n == "cycle" || n == "chunk_while" || n == "lazy"
             || n == "grep" || n == "grep_v" || n == "minmax_by" || n == "slice_before"
@@ -10893,6 +10901,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // whose pending op is map, so `h.map.with_index { }` answers the MAPPED list,
     // not the receiver.
     function mkEnum(items) { return {__renum: true, items: items, pos: 0, op: "each"} }
+    // Op "gen" is an Enumerator over an Enumerator::Generator (chunk_while,
+    // slice_when, slice_before, slice_after, chunk): no #size, and #each with a
+    // block answers nil. Twins: rbMkEnumOp, rubyMkEnumOp.
     function mkEnumOp(items, op) { return {__renum: true, items: items, pos: 0, op: op} }
     // What made an Enumerator, for #inspect: the receiver as the program wrote it (a
     // Range or Hash, not the Array it delegated to), the method and its arguments -
@@ -10950,6 +10961,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the Enumerator, which stands for MRI's ArithmeticSequence. Twins:
     // rubyEnumEachVal in abnf/jsrt.go, rbEnumEachVal in lib/ruby-rt.metajs.
     function enumEachVal(t, results) {
+        if (t.op == "gen") { return null }
         var m = t.meth
         if (typeof m != "string" || m == "step") { return t }
         if (m == "each_slice" || m == "each_cons" || m == "cycle") { return null }
@@ -10969,6 +10981,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // and #each with a block runs the method. Twins: rubyEnumUnsized in
     // abnf/jsrt.go, rbEnumUnsized in lib/ruby-rt.metajs.
     function enumUnsized(t) { return rbaUnsizedOp(t.op) || t.op == "index" || t.op == "rindex" }
+    // #size is nil for an unsized or "gen" Enumerator and for one made, through
+    // any chain of Enumerators, from a Range that is not numeric: MRI's
+    // range_enum_size is the Range's #size. Twins: rubyEnumNoSize in abnf/jsrt.go, rbEnumNoSize in
+    // lib/ruby-rt.metajs.
+    function enumNoSize(t) {
+        var e = anytype
+        e = t
+        while (isEnum(e)) {
+            if (enumUnsized(e) || e.op == "gen") { return true }
+            e = e.__rlazy === true && e.en !== undefined ? e.en : e.src
+        }
+        return isRange(e) && !isNumV(e.lo)
+    }
     function isEnum(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__renum === true
     }
@@ -10994,14 +11019,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A Lazy's or stream Enumerator's #size, from rbaLazyCount. Twins:
     // rubyLazySizeVal in abnf/jsrtrubystr.go, rbLazySize in lib/ruby-rt.metajs.
     function lazySize(t) {
+        if (enumNoSize(t)) { return null }
         var inf = Math.pow(2, 1024)
         var c = rbaLazyCount(t, inf)
         if (c == 0 - 2) { floDomainGuard(inf) }
         if (c < 0) { return null }
         return c == inf ? mkFlo(inf) : c
     }
+    // The first op on the Lazy of a blockless take_while / drop_while answers a
+    // value to that method, so it sees all of them (rbaStopsOnNil). Twins:
+    // rbLazyCopy, rubyLazyCopy.
     function lazyCopy(t, op, lazy, desc) {
-        var c = mkLazy(t.kind, t.items, t.lo, t.hi, t.excl, lazy, desc)
+        var c = mkLazy(t.kind, op !== null && t.ops.length == 0 && isEnum(t.en) && rbaStopsOnNil(t.en.op) ? t.en.items : t.items, t.lo, t.hi, t.excl, lazy, desc)
         c.ops = t.ops.slice(0)
         if (op !== null) { c.ops.push(op) }
         c.src = t.src
@@ -11041,8 +11070,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             })
         })
     }
-    // Range#lazy: an Integer range is walked one value at a time, an endless
-    // String range is pulled from its own #each; any other is materialized first.
+    // Range#lazy: an Integer range is walked one value at a time, a String or
+    // Float range is pulled from its own #each, which raises for a Float one
+    // only once a value is asked for; any other is materialized first. A Float
+    // range's Lazy keeps the range's size in hi (rbaLazyCount), a String one's
+    // has none. Twins: rbRangeLazy, rubyRangeLazy.
     function rangeLazy(r) {
         var d = "#<Enumerator::Lazy: " + rinspect(r) + ">"
         var hi = anytype
@@ -11050,9 +11082,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isFlo(hi) && toF(hi) > 0 && toF(hi) - toF(hi) != 0) { hi = null }
         var lz = anytype
         if (typeof r.lo == "number" && (hi === null || typeof hi == "number")) { lz = mkLazy("range", [], r.lo, hi, r.excl === true, true, d) }
-        else if (typeof r.lo == "string" && hi === null) {
+        else if (typeof r.lo == "string" || isFlo(r.lo)) {
             lz = mkLazy("each", [], 0, null, false, true, d)
             lz.src = r
+            if (isFlo(r.lo)) { lz.hi = r.hi === null || r.hi === undefined ? Math.pow(2, 1024) : rbnFloatStepSize(r.lo.f, toF(r.hi), 1, r.excl === true) }
         } else { lz = mkLazy("arr", rangeToA(r), 0, null, false, true, d) }
         lz.ev = r
         return lz
@@ -11280,13 +11313,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name != "inspect" && name != "to_s" && name != "class") { enumForce(t) }
         }
         var items = t.items
+        // A blockless take_while / drop_while (rbaStopsOnNil); its Lazy sees the
+        // first value until an op is added (lazyCopy). Twins: rbEnumMethod,
+        // rubyEnumMethod.
+        if (rbaStopsOnNil(t.op) && blk != null && rbaRerunsMethod(name)) {
+            var wix = 0
+            if (name == "with_index" && args.length > 0) { wix = Math.trunc(toF(args[0])) }
+            var wmemo = args.length > 0 ? args[0] : null
+            var wst = anytype
+            wst = arrayMethod(items, t.op, [], function(x) {
+                var wr = anytype
+                wr = blockCall(blk, [x, name == "with_index" || name == "each_with_index" ? wix : wmemo])
+                wix = wix + 1
+                return wr
+            })
+            return name == "with_object" || name == "each_with_object" ? wmemo : wst
+        }
+        if (rbaStopsOnNil(t.op) && !(name == "each" && blk != null) && items.length > 1) { items = [items[0]] }
         if (name == "lazy") {
             var elz = mkLazy("arr", items.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + enumInspect(t) + ">")
             elz.en = t
             return elz
         }
         if (name == "to_a" || name == "entries" || name == "force") { return items.slice(0) }
-        if (name == "size" && enumUnsized(t)) { return null }
+        if (name == "size" && enumNoSize(t)) { return null }
         if (name == "size" || name == "length" || name == "count") {
             if (args.length == 0 && blk == null) { return items.length }
         }
@@ -11333,7 +11383,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var w = 0; w < items.length; w++) { blockCall(blk, [items[w], memo]) }
             return memo
         }
-        // Everything else is Enumerable, and an eager Enumerator IS its element list.
+        // Everything else is Enumerable, and an eager Enumerator IS its element
+        // list; index / rindex are Array's. Twins: rbEnumMethod, rubyEnumMethod.
+        if (name == "index" || name == "rindex") { noMethod(t, name) }
         return delegArr(items, t, name, args, blk)
     }
     function arrayMethod(t, name, args, blk) {
@@ -11596,14 +11648,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var cn = 0
             for (i = 0; i < t.length; i++) { if (rubyEq(t[i], args[0])) { cn = cn + 1 } }
             return cn
-        }
-        if (name == "tally") {
-            var td = {__dict: true, keys: [], vals: []}
-            for (i = 0; i < t.length; i++) {
-                var tix = dictFind(td, t[i])
-                if (tix < 0) { dictSet(td, rsText(t[i]), 1) } else { td.vals[tix] = td.vals[tix] + 1 }
-            }
-            return td
         }
         // Array#to_h: every element (or the block's answer for it) is a [key, value]
         // pair; a later duplicate key overwrites. Twin of rbArrToH / rubyArrToH.
@@ -12037,7 +12081,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var cb = rtest(blockCall(blk, [t[i], t[i + 1]]))
                 ckeep.push(name == "chunk_while" ? cb : !cb)
             }
-            return rbaChunks(t, ckeep)
+            return mkEnumOp(rbaChunks(t, ckeep), "gen")
         }
         // grep / grep_v keep the elements the pattern's === accepts (rejects),
         // mapped through the block when there is one.
@@ -12054,7 +12098,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "slice_before" || name == "slice_after") {
             var sflag = []
             for (i = 0; i < t.length; i++) { sflag.push(rtest(blk == null ? caseEq(args[0], t[i]) : blockCall(blk, [t[i]]))) }
-            return mkEnum(rbaSliceAt(t, sflag, name == "slice_after"))
+            return mkEnumOp(rbaSliceAt(t, sflag, name == "slice_after"), "gen")
         }
         if (name == "chunk") {
             var ckeys = []
@@ -12071,7 +12115,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 ckeys.push(ck)
                 ckinds.push(ckind)
             }
-            return mkEnum(rbaChunk(t, ckeys, ckinds, rubyEq))
+            return mkEnumOp(rbaChunk(t, ckeys, ckinds, rubyEq), "gen")
         }
         if (name == "chain") {
             var chn = t.slice(0)

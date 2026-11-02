@@ -4945,10 +4945,9 @@ function rbRangeArr(lo, hi, excl) {
     }
     var l = rbToF(lo)
     var h = rbToF(hi)
-    if (excl) { h = h - 1 }
     var k = 0
     var i = l
-    while (i <= h && k < 10000000) {
+    while ((excl ? i < h : i <= h) && k < 10000000) {
         out.push(i)
         i = i + 1
         k = k + 1
@@ -5005,22 +5004,20 @@ function rbRangeNumeric(r) {
     return typeof r["begin"] != "string"
 }
 // THE ARITHMETIC HERE MUST BE rbRangeArr'S, EXACTLY. rbRangeArr walks `i = lo;
-// while (i <= hi) { push(i); i = i + 1 }', so element i is lo + i and the count is
-// floor(hi - lo) + 1 - NOT trunc(hi) - trunc(lo) + 1, which is the same for
-// integers and differs for a FLOAT range: `(1.5..3.5).size' is 3. Walking a
-// Float range raises TypeError (rbRangeWalkable), so rbRangeAt does too.
-function rbRangeSpan(r) {
-    var hi = rbToF(r["end"])
-    if (r["excl"] === true) { hi = hi - 1 }
-    return hi - rbToF(r["begin"])
-}
+// while (i <= hi) { push(i); i = i + 1 }' (i < hi when exclusive), so element i
+// is lo + i and the count is floor(hi - lo) + 1 (ceil(hi - lo)) - NOT
+// trunc(hi) - trunc(lo) + 1, which is the same for integers and differs for a
+// FLOAT end: `(1.5..3.5).size' is 3 and so is `(1...3.5).size'. Walking a Float
+// range raises TypeError (rbRangeWalkable), so rbRangeAt does too.
 function rbRangeLen(r) {
     if (rbRangeUnbounded(r)) { return Math.pow(2, 1024) }
     if (rtIsNil(r["end"]) || rtIsNil(r["begin"])) {
         fail("cannot take the length of an endless range")
     }
     if (!rbRangeNumeric(r)) { return rbRangeToArr(r).length }
-    var n = Math.floor(rbRangeSpan(r)) + 1
+    if (rbIsFlo(r["begin"])) { return rbnFloatStepSize(rbToF(r["begin"]), rbToF(r["end"]), 1, r["excl"] === true) }
+    var d = rbToF(r["end"]) - rbToF(r["begin"])
+    var n = r["excl"] === true ? Math.ceil(d) : Math.floor(d) + 1
     if (n < 0) { return 0 }
     return n
 }
@@ -5055,7 +5052,7 @@ function rbRangeMethod(t, name, args) {
     if (name == "lazy") { return rbRangeLazy(t) }
     if (name == "step" || name == "%") { return rbRangeStep(t, name, args) }
     // Twin of the with_index arm of rangeMethod in ruby-interpreter.abnf.
-    if (name == "with_index" || name == "with_object") { rbNoMethod(t, name) }
+    if (name == "with_index" || name == "with_object" || name == "index" || name == "rindex") { rbNoMethod(t, name) }
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
     var endless = rtIsNil(t["end"]) || rtIsNil(t["begin"])
@@ -5132,11 +5129,15 @@ function rbRangeMethod(t, name, args) {
         return rbIsObj(iof) && iof["__rbuiltin"] === "Range"
     }
     if (name == "nil?") { return false }
-    if (name == "frozen?") { return false }
     if (name == "hash") { return rbHashOf(t) }
     if (name == "object_id") { return rbObjectId(t) }
-    if (name == "freeze" || name == "itself") { return t }
-    if (name == "dup" || name == "clone") { return js_rrangeopen(t["begin"], t["end"], t["excl"]) }
+    if (name == "freeze") { t["__fz"] = true; return t }
+    if (name == "itself") { return t }
+    if (name == "dup" || name == "clone") {
+        var rcp = js_rrangeopen(t["begin"], t["end"], t["excl"])
+        if (name == "clone" && t["__fz"] === true) { rcp["__fz"] = true }
+        return rcp
+    }
     if (name == "eql?") { return rbEql(t, rbArgAt(args, 0)) }
     if (name == "equal?") { return rbIdenticalP(t, rbArgAt(args, 0)) }
     if (name == "==") {
@@ -6986,6 +6987,7 @@ function rbEnumFinish(t, items, results) {
 // in ruby-interpreter.abnf, which states the rule, and rubyEnumEachVal in
 // abnf/jsrt.go.
 function rbEnumEachVal(t, results) {
+    if (t["op"] == "gen") { return null }
     var m = t["meth"]
     if (typeof m != "string" || m == "step") { return t }
     if (m == "each_slice" || m == "each_cons" || m == "cycle") { return null }
@@ -7085,8 +7087,12 @@ function rbLazyEachVal(t) {
     if (t["ops"].length > 0) { return null }
     return t["ev"]
 }
+// Twin of lazyCopy in ruby-interpreter.abnf, which states the rule.
 function rbLazyCopy(t, op, lazy, desc) {
-    var c = rbMkLazy(t["kind"], t["items"], t["lo"], t["hi"], t["excl"], lazy, desc)
+    var its = t["items"]
+    var en = t["en"]
+    if (op !== null && t["ops"].length == 0 && rbIsEnum(en) && rbaStopsOnNil(en["op"])) { its = en["items"] }
+    var c = rbMkLazy(t["kind"], its, t["lo"], t["hi"], t["excl"], lazy, desc)
     c["ops"] = rtCopyArr(t["ops"])
     if (op !== null) { c["ops"].push(op) }
     c["src"] = t["src"]
@@ -7153,6 +7159,7 @@ function rbLazyDrive(src, step) {
     })
     return js_rcatch(tag, function() { return rbMethod(src, "each", [each]) })
 }
+// Twin of rangeLazy in ruby-interpreter.abnf, which states the rule.
 function rbRangeLazy(r) {
     var d = "#<Enumerator::Lazy: " + rbInspect(r) + ">"
     var hi = anytype
@@ -7161,9 +7168,13 @@ function rbRangeLazy(r) {
     var lz = anytype
     if (typeof r["begin"] == "number" && (hi === null || typeof hi == "number")) {
         lz = rbMkLazy("range", [], r["begin"], hi, r["excl"] === true, true, d)
-    } else if (typeof r["begin"] == "string" && hi === null) {
+    } else if (typeof r["begin"] == "string" || rbIsFlo(r["begin"])) {
         lz = rbMkLazy("each", [], 0, null, false, true, d)
         lz["src"] = r
+        if (rbIsFlo(r["begin"])) {
+            if (rtIsNil(r["end"])) { lz["hi"] = Math.pow(2, 1024) }
+            else { lz["hi"] = rbnFloatStepSize(rbToF(r["begin"]), rbToF(r["end"]), 1, r["excl"] === true) }
+        }
     } else {
         lz = rbMkLazy("arr", rbRangeToArr(r), 0, null, false, true, d)
     }
@@ -7184,6 +7195,7 @@ function rbLazyOut(t, lz, name) {
 }
 // Twin of lazySize in ruby-interpreter.abnf.
 function rbLazySize(t) {
+    if (rbEnumNoSize(t)) { return null }
     var inf = Math.pow(2, 1024)
     var c = rbaLazyCount(t, inf)
     if (c == 0 - 2) { rbFloDomain(inf) }
@@ -7414,6 +7426,16 @@ function rbRcallIndexed(t, name, args) {
 }
 // Twin of enumUnsized in ruby-interpreter.abnf.
 function rbEnumUnsized(t) { return rbaUnsizedOp(t["op"]) || t["op"] == "index" || t["op"] == "rindex" }
+// Twin of enumNoSize in ruby-interpreter.abnf, which states the rule.
+function rbEnumNoSize(t) {
+    var e = anytype
+    e = t
+    while (rbIsEnum(e)) {
+        if (rbEnumUnsized(e) || e["op"] == "gen") { return true }
+        if (e["__rlazy"] === true && e["en"] !== undefined) { e = e["en"] } else { e = e["src"] }
+    }
+    return rbIsRange(e) && !rbIsNum(e["begin"])
+}
 function rbEnumMethod(t, name, args) {
     // Twin of the freeze arm of enumMethod in ruby-interpreter.abnf.
     if (name == "freeze") {
@@ -7459,13 +7481,30 @@ function rbEnumMethod(t, name, args) {
     var items = t["items"]
     var blk = rbBlockOf(args)
     var nPos = rbNPos(args)
+    // Twin of the rbaStopsOnNil arms of enumMethod in ruby-interpreter.abnf.
+    if (rbaStopsOnNil(t["op"]) && blk !== null && rbaRerunsMethod(name)) {
+        var wix = 0
+        if (name == "with_index" && nPos > 0) { wix = Math.trunc(rbToF(rbPosAt(args, nPos, 0))) }
+        var wmemo = rbPosAt(args, nPos, 0)
+        var wobj = name == "with_object" || name == "each_with_object"
+        var wst = anytype
+        wst = rbArrayMethod(items, t["op"], [js_rblkwrap(function(x) {
+            var wr = anytype
+            if (wobj) { wr = rbCall2(blk, x, wmemo) } else { wr = rbCall2(blk, x, wix) }
+            wix = wix + 1
+            return wr
+        })])
+        if (wobj) { return wmemo }
+        return wst
+    }
+    if (rbaStopsOnNil(t["op"]) && !(name == "each" && blk !== null) && items.length > 1) { items = [items[0]] }
     if (name == "lazy") {
         var elz = rbMkLazy("arr", rtCopyArr(items), 0, null, false, true, "#<Enumerator::Lazy: " + rbEnumInspect(t) + ">")
         elz["en"] = t
         return elz
     }
     if (name == "to_a" || name == "entries" || name == "force") { return rtCopyArr(items) }
-    if (name == "size" && rbEnumUnsized(t)) { return null }
+    if (name == "size" && rbEnumNoSize(t)) { return null }
     if (name == "size" || name == "length" || name == "count") {
         if (nPos == 0 && blk === null) { return items.length }
     }
@@ -7513,6 +7552,7 @@ function rbEnumMethod(t, name, args) {
         return memo
     }
     // Everything else is Enumerable, and an eager Enumerator IS its element list.
+    if (name == "index" || name == "rindex") { rbNoMethod(t, name) }
     return rbDelegArr(items, t, name, args)
 }
 // rubyArrayMethod (rbArrayMethod, below the Hash surface). select and reject use
@@ -7608,7 +7648,7 @@ function rbHashEnumName(n) {
         || n == "inject" || n == "reduce" || n == "all?" || n == "any?" || n == "none?"
         || n == "one?" || n == "first" || n == "take" || n == "drop"
         || n == "take_while" || n == "drop_while" || n == "each_slice"
-        || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip" || n == "each_entry"
+        || n == "each_cons" || n == "empty?" || n == "zip" || n == "each_entry"
         || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
         || n == "find_all" || n == "cycle" || n == "chunk_while" || n == "lazy"
         || n == "grep" || n == "grep_v" || n == "minmax_by" || n == "slice_before"
@@ -8193,17 +8233,6 @@ function rbArrayMethod(t, name, args) {
         }
         return cn
     }
-    if (name == "tally") {
-        var td = rbNewDict()
-        var ti = 0
-        while (ti < t.length) {
-            var tix = rbDictFind(td["keys"], t[ti])
-            if (tix < 0) { rbDictSet(td, t[ti], 1) }
-            else { td["vals"][tix] = td["vals"][tix] + 1 }
-            ti = ti + 1
-        }
-        return td
-    }
     // Array#to_h. Twin of rubyArrayMethod's to_h in abnf/jsrt.go.
     if (name == "to_h") {
         var hd = rbNewDict()
@@ -8783,7 +8812,7 @@ function rbArrayMethod(t, name, args) {
             if (name == "chunk_while") { ckeep.push(cb) } else { ckeep.push(!cb) }
             ci = ci + 1
         }
-        return rbaChunks(t, ckeep)
+        return rbMkEnumOp(rbaChunks(t, ckeep), "gen")
     }
     // grep / grep_v keep the elements the pattern's === accepts (rejects), mapped
     // through the block when there is one.
@@ -8808,7 +8837,7 @@ function rbArrayMethod(t, name, args) {
             if (blk === null) { sflag.push(rbTruthy(js_rxwhen(rbPosAt(args, nPos, 0), t[shi]))) } else { sflag.push(rbTruthy(rbCall1(blk, t[shi]))) }
             shi = shi + 1
         }
-        return rbMkEnum(rbaSliceAt(t, sflag, name == "slice_after"))
+        return rbMkEnumOp(rbaSliceAt(t, sflag, name == "slice_after"), "gen")
     }
     if (name == "chunk") {
         var ckeys = []
@@ -8831,7 +8860,7 @@ function rbArrayMethod(t, name, args) {
             ckinds.push(ckind)
             cki = cki + 1
         }
-        return rbMkEnum(rbaChunk(t, ckeys, ckinds, rbEq))
+        return rbMkEnumOp(rbaChunk(t, ckeys, ckinds, rbEq), "gen")
     }
     if (name == "chain") {
         var chn = rtCopyArr(t)
@@ -9294,10 +9323,11 @@ function rbMethod(target, name, args) {
     if (name == "is_a?" || name == "kind_of?") {
         if (rbClassName(target) != "" && !rbUserObj(target)) { return rbIsA(target, rbArgAt(args, 0)) }
     }
-    // Object#method on a builtin value: a Method that re-dispatches by name, or
+    // Object#method on a builtin value, a Proc or a Method: a Method that
+    // re-dispatches through #send, or
     // MRI's NameError when the value does not respond to it. Twin of the "method"
     // arm of rubyMethod in abnf/jsrt.go.
-    if (name == "method" && !rbUserObj(target) && !rbIsFn(target) && !(rbIsObj(target) && target["__isclass"] === true)) {
+    if (name == "method" && !rbUserObj(target) && !(rbIsObj(target) && target["__isclass"] === true)) {
         var bkind = rbValueClassName(target)
         if (bkind != "") { return rbBuiltinMethodVal(target, bkind, rbStr(rbArgAt(args, 0))) }
     }
@@ -9410,7 +9440,7 @@ function rbMethod(target, name, args) {
     // number are frozen.
     if (name == "frozen?") {
         if (rtIsNil(target) || target === true || target === false) { return true }
-        if (rbUserObj(target) || rbIsEnum(target)) { return target["__fz"] === true }
+        if (rbUserObj(target) || rbIsEnum(target) || rbIsRange(target)) { return target["__fz"] === true }
         return rbIsSym(target) || rbIsNum(target)
     }
 
@@ -9499,7 +9529,7 @@ function rbMethod(target, name, args) {
     }
     if (rbIsSym(target)) {
         var sn = target["s"]
-        if (name == "to_s" || name == "id2name" || name == "name") { return sn }
+        if (name == "to_s" || name == "id2name") { return sn }
         if (name == "to_sym") { return target }
         if (name == "length" || name == "size") { return rbCharCount(sn) }
         if (name == "inspect") { return rbSymInspect(sn) }
@@ -10003,7 +10033,7 @@ function js_rlen(v, name) {
         if (name !== null && v["__rlazy"] === true) { return rbLazyMethod(v, name, []) }
         if (name !== null && v["__rco"] === true) { return null }
         if (v["__rdefer"] === true) { rbEnumForce(v) }
-        if (name !== null && rbEnumUnsized(v)) { return null }
+        if (name !== null && rbEnumNoSize(v)) { return null }
         return v["items"].length
     }
     // A Range's length is its ELEMENT COUNT, computed arithmetically rather than by
@@ -12570,10 +12600,10 @@ function rbBuiltinMethodVal(recv, kind, name) {
         rbRaiseErr("method", "NameError", "undefined method `" + name + "' for class `" + kind + "'")
     }
     var w = function() {
-        var args = []
+        var args = [rbSym(name)]
         var i = 0
         while (i < arguments.length) { args.push(arguments[i]); i = i + 1 }
-        return js_rxmcall(recv, name, args)
+        return rbMethod(recv, "send", args)
     }
     var ar = rbBuiltinArity(kind, name)
     if (ar < 0) { js_rarity(w, 0 - ar - 1, 0, true) } else { js_rarity(w, ar, 0, false) }

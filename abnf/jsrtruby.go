@@ -139,7 +139,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			// ArithmeticSequence's may be Infinity, and a Lazy or stream
 			// Enumerator counts through its ops: rubyEnumMethod answers them.
 			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rco"] != true &&
-				v.(*jsObject).props["__rlazy"] != true && rubyAseqOf(v) == nil && !rubyEnumUnsized(v.(*jsObject)))
+				v.(*jsObject).props["__rlazy"] != true && rubyAseqOf(v) == nil && !rubyEnumNoSize(v.(*jsObject)))
 		}
 		if counted {
 			return pylen(a[:1])
@@ -2239,7 +2239,7 @@ var rubyRespondNames = map[string][]string{
 		"valid_encoding?"},
 	"Symbol": {"<", "<=", "<=>", ">", ">=", "[]", "capitalize", "downcase", "empty?", "equal?",
 		"frozen?", "id2name", "instance_of?", "instance_variables", "is_a?", "kind_of?", "length",
-		"name", "next", "nil?", "public_send", "send", "size", "succ", "swapcase", "to_proc",
+		"next", "nil?", "public_send", "send", "size", "succ", "swapcase", "to_proc",
 		"to_sym", "upcase"},
 	"Array": {"&", "*", "+", "-", "<<", "<=>", "[]", "all?", "any?", "append", "assoc",
 		"chain", "chunk", "clear", "clone", "collect", "collect!", "collect_concat", "combination", "compact",
@@ -2253,7 +2253,7 @@ var rubyRespondNames = map[string][]string{
 		"partition", "permutation", "pop", "prepend", "product", "public_send", "push", "reduce",
 		"reject", "reject!", "reverse", "reverse!", "reverse_each", "rindex", "rotate", "sample",
 		"select", "select!", "send", "shift", "shuffle", "shuffle!", "size", "slice", "slice_after", "slice_before", "sort",
-		"sort!", "sort_by", "sort_by!", "sum", "take", "take_while", "tally", "to_a", "to_h", "uniq",
+		"sort!", "sort_by", "sort_by!", "sum", "take", "take_while", "to_a", "to_h", "uniq",
 		"uniq!", "unshift", "values_at", "zip", "|"},
 	"Hash": {"<", "<=", "<=>", ">", ">=", "[]", "all?", "any?", "assoc", "chain", "chunk", "clear", "clone",
 		"collect", "collect_concat", "count", "default", "delete", "delete_if", "detect", "drop",
@@ -2265,7 +2265,7 @@ var rubyRespondNames = map[string][]string{
 		"kind_of?", "length", "map", "max", "max_by", "member?", "merge", "merge!", "min", "min_by",
 		"minmax", "minmax_by", "nil?", "none?", "one?", "partition", "public_send", "reduce", "reject",
 		"reject!", "select", "select!", "send", "size", "slice_after", "slice_before", "sort", "sort_by", "sum", "take",
-		"take_while", "tally", "to_a", "to_h", "transform_keys", "transform_values", "uniq",
+		"take_while", "to_a", "to_h", "transform_keys", "transform_values", "uniq",
 		"update", "values", "values_at", "zip"},
 	"Range": {"<=>", "all?", "any?", "begin", "chain", "chunk", "clone", "collect", "collect_concat", "count",
 		"cover?", "cycle", "detect", "drop", "drop_while", "dup", "each", "each_cons",
@@ -2275,7 +2275,7 @@ var rubyRespondNames = map[string][]string{
 		"itself", "kind_of?", "last", "lazy", "map", "max", "max_by", "member?", "min", "min_by",
 		"minmax", "minmax_by", "nil?", "none?", "object_id", "one?", "partition", "public_send", "reduce",
 		"reject", "reverse_each", "select", "send", "size", "slice_after", "slice_before", "sort", "sort_by", "step", "sum",
-		"take", "take_while", "tally", "to_a", "uniq", "zip"},
+		"take", "take_while", "to_a", "uniq", "zip"},
 	"NilClass": {"&", "<=>", "^", "equal?", "frozen?", "instance_of?", "instance_variables",
 		"is_a?", "kind_of?", "nil?", "public_send", "send", "to_a", "to_f", "to_i", "|"},
 	"TrueClass": {"&", "<=>", "^", "equal?", "frozen?", "instance_of?", "instance_variables",
@@ -2301,7 +2301,7 @@ var rubyRespondNames = map[string][]string{
 		"instance_of?", "instance_variables", "is_a?", "itself", "kind_of?", "lazy", "map", "max",
 		"max_by", "member?", "min", "min_by", "minmax", "minmax_by", "next", "nil?", "none?", "one?", "partition", "peek",
 		"public_send", "reduce", "reject", "reverse_each", "rewind", "select", "send", "size",
-		"slice_after", "slice_before", "sort", "sort_by", "sum", "take", "take_while", "tally", "to_a", "uniq", "with_index",
+		"slice_after", "slice_before", "sort", "sort_by", "sum", "take", "take_while", "to_a", "uniq", "with_index",
 		"with_object", "zip"},
 	"Enumerator::ArithmeticSequence": {"<=>", "all?", "any?", "begin", "chain", "chunk", "clone",
 		"collect", "collect_concat", "count", "cycle", "detect", "drop", "drop_while", "dup",
@@ -2312,7 +2312,7 @@ var rubyRespondNames = map[string][]string{
 		"member?", "min", "min_by", "minmax", "minmax_by", "next", "nil?", "none?", "one?",
 		"partition", "peek", "public_send", "reduce", "reject", "reverse_each", "rewind", "select",
 		"send", "size", "slice_after", "slice_before", "sort", "sort_by", "step", "sum", "take",
-		"take_while", "tally", "to_a", "uniq", "with_index", "with_object", "zip"},
+		"take_while", "to_a", "uniq", "with_index", "with_object", "zip"},
 	"Enumerator::Lazy": {"<=>", "all?", "any?", "chunk_while", "clone", "collect",
 		"collect_concat", "count", "detect", "drop", "drop_while", "dup", "each", "each_cons",
 		"each_slice", "each_with_index", "each_with_object", "entries", "eql?", "equal?", "filter",

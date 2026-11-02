@@ -225,6 +225,23 @@ function rbnRoundHalf(x, s, mode) {
     return x
 }
 
+// How many doubles rbnFloatStep visits for a finite unit (ruby_float_step_size),
+// which is also the #size of a Float range's Enumerator. Go twin:
+// rubyFloatStepSize in abnf/jsrtrubystr.go.
+function rbnFloatStepSize(beg, end, unit, excl) {
+    var n = (end - beg) / unit
+    var err = (Math.abs(beg) + Math.abs(end) + Math.abs(end - beg)) / Math.abs(unit) * Math.pow(2, 0 - 52)
+    if (err > 0.5) { err = 0.5 }
+    if (excl) {
+        if (n <= 0) { return 0 }
+        if (n < 1) { n = 0 } else { n = Math.floor(n - err) }
+    } else {
+        if (n < 0) { return 0 }
+        n = Math.floor(n + err)
+    }
+    return n + 1
+}
+
 // The doubles a Range#step over Floats visits (ruby_float_step in numeric.c): the
 // count is decided once, allowing for the rounding error of (end - beg) / unit,
 // so the last step is neither lost nor added, and no value passes the end.
@@ -234,16 +251,7 @@ function rbnFloatStep(beg, end, unit, excl) {
         if (unit > 0 ? beg <= end : beg >= end) { out.push(beg) }
         return out
     }
-    var n = (end - beg) / unit
-    var err = (Math.abs(beg) + Math.abs(end) + Math.abs(end - beg)) / Math.abs(unit) * Math.pow(2, 0 - 52)
-    if (err > 0.5) { err = 0.5 }
-    if (excl) {
-        if (n <= 0) { return out }
-        if (n < 1) { n = 0 } else { n = Math.floor(n - err) }
-    } else {
-        if (n < 0) { return out }
-        n = Math.floor(n + err)
-    }
+    var n = rbnFloatStepSize(beg, end, unit, excl) - 1
     var i = 0
     while (i <= n) {
         var d = i * unit + beg
