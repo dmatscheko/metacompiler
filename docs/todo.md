@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1171** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1172** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,11 +103,9 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1169 kotlin (compiler): class property vs top-level object of the same name, `kotlin.io.println` · P3 · KT · IN PROGRESS (KT worker, round 56) [V]
-Found while closing T-1168; oracle kotlinc 2.2.21. Compiler only (run and native); the interpreter matches kotlinc.
-- A class property loses to a top-level object of the same name inside a method:
-  `class Box(val tag: String)` / `object foo { val tag = "obj" }` / `class Holder { val foo = Box("prop"); fun run() { println(foo.tag) } }` / `fun main() { println(foo.tag); Holder().run() }` — kotlinc "obj" then "prop"; run/native "obj" twice. Probable cause: ktGlobShadow considers only top-level funs and vals, not objects (check classes and enum classes too).
-- `kotlin.io.println("x")` (and `kotlin.io.print`) abort with "unknown name: kotlin.io.println": println is a program-scope binding the package handle's ktPkgMember cannot reach. Check other fully-qualified stdlib spellings (`kotlin.math.abs`, `kotlin.collections.listOf`) the same way.
+### T-1171 kotlin: range type constructors (IntRange, LongRange, CharRange) · P3 · KT · OPEN [V]
+Found while closing T-1169; oracle kotlinc 2.2.21. All engines.
+- `IntRange(1, 3)` as a constructor call fails: interpreter "call of a non function: IntRange"; run/native "call of a non function value: [object Object]". kotlinc prints `1..3`, and `kotlin.ranges.IntRange(1, 3).toList()` gives `[1, 2, 3]`. The type name is bound only as a value carrying the companion constants (`IntRange.EMPTY`), not as a callable. Check `LongRange(1L, 3L)`, `CharRange('a', 'c')`, `IntProgression.fromClosedRange(1, 9, 2)`, `.first/.last/.step`, `is IntRange`, and that `IntRange.EMPTY` still works.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1214,6 +1212,7 @@ T-1163 ruby: include into Object, implicit-self builtins in reopened classes, br
 T-1165 kotlin: direct `java.lang.System.x()` calls in the compiler — merged e2c27fb4: java.lang.System.x() calls in the compiler, System.out (println/print/references) in both engines; master four-leg probe matches kotlinc 2.2.21
 T-1168 kotlin: System.err, `java` name shadowing in qualified java.lang rewrites — merged c274ffc6: System.err in all engines, a program binding named java (or own object System) hides java.lang.System in the compiler; master four-leg probe matches kotlinc 2.2.21 on stdout and stderr
 T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local nameref (compiler), `export +x` — merged d715bc7a: hidden NAME[SUB] array locals, compiler callee through caller's local nameref (emitted only for nameref names), declaration option-word errors; master probe matches bash 5.3
+T-1169 kotlin (compiler): class property vs top-level object of the same name, `kotlin.io.println` — merged 00293308: a member property hides a same-named top-level class/enum/object in the compiler, fully-qualified kotlin.io.println/print and kotlin.text.Regex; master four-leg probe matches kotlinc 2.2.21
 
 # Settled — do not re-open
 
