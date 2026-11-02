@@ -107,7 +107,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) · P3 · KT · OPEN [V]
+### T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) · P3 · KT · IN PROGRESS (KT worker, round 42) [V]
 
 Found while working T-1138. The oracle is kotlinc 2.2.21 (stdlib only).
 
