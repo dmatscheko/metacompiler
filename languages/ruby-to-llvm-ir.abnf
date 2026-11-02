@@ -2944,6 +2944,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var ljMsg = callExt(lje, "js_arr_new", [])
                 callExt(lje, "js_arr_push", [ljMsg, emitStr(lje, "break from proc-closure")])
                 var ljE = callExt(lje, "js_rnew", [callExt(lje, "js_rclass", [emitStr(lje, "LocalJumpError")]), ljMsg])
+                callExt(lje, "js_set", [ljE, emitStr(lje, "__rreason"), callExt(lje, "js_sym", [emitStr(lje, "break")])])
+                callExt(lje, "js_set", [ljE, emitStr(lje, "__rexit_value"), v])
                 callExt(lje, "js_rraise", [ljE, hUndef])
                 lje.NewRet(hUndef)
                 return {b: deadBlock(), v: hNull}
@@ -7465,53 +7467,66 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rnosuper", [emitIvarSelf(b), emitStr(b, curMethName)])}
             }
             if (curClsName == "") { return notImplExpr("super outside of a class body", 0)(b) }
-            var clsName = curClsName
-            // A method that overrides an included module's reaches that one under the
-            // key emitMethods stored it at, from the class down; any other walks
-            // __super, and a miss there is js_rsuper's NoMethodError.
-            var methName = curSuperKey != "" ? curSuperKey : curMethName
-            var ownPs = curMethPs
-            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
-            var supV = curSuperKey != "" ? clsV : emitSuperStart(b, clsV)
-            // A class method's super is the one above the class itself (a prepend
-            // moves only the instance methods down).
-            if (curMethSing) {
-                methName = "$s$" + curMethName
-                supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
-            }
-            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-            var argsV = callExt(b, "js_arr_new", [])
-            if (explicit) {
-                var ea = emitArgs(b, unwrapArgs(argTs))
-                b = ea.b
-                argsV = ea.v
-            } else {
-                // The values the parameters hold now: the positional ones (a *rest
-                // spliced), then the keyword ones as the trailing keyword Hash, **rest's
-                // pairs first (MRI's order), then the method's own block. Twin of
-                // currentParamValues in ruby-interpreter.abnf.
-                var kwD = null
-                var kwNs = []
-                for (var k = 0; k < ownPs.length; k++) {
-                    var p = typeof ownPs[k] == "string" ? {name: ownPs[k]} : ownPs[k]
-                    if (p.blockp === true) { continue }
-                    if (p.kw === true) { kwNs.push(p.name); continue }
-                    var pv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.name)])
-                    if (p.kwrest === true) {
+            // A literal block or &expr is the block super passes (`&nil' none),
+            // and a `break' in a literal one ends the super call; without one the
+            // method's own block goes on, with or without arguments. Twin of
+            // makeSuper in ruby-interpreter.abnf.
+            var blkGiven = hasBlockArg(argTs)
+            var emitSup = function(b) {
+                var clsName = curClsName
+                // A method that overrides an included module's reaches that one under the
+                // key emitMethods stored it at, from the class down; any other walks
+                // __super, and a miss there is js_rsuper's NoMethodError.
+                var methName = curSuperKey != "" ? curSuperKey : curMethName
+                var ownPs = curMethPs
+                var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+                var supV = curSuperKey != "" ? clsV : emitSuperStart(b, clsV)
+                // A class method's super is the one above the class itself (a prepend
+                // moves only the instance methods down).
+                if (curMethSing) {
+                    methName = "$s$" + curMethName
+                    supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+                }
+                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+                var argsV = callExt(b, "js_arr_new", [])
+                if (explicit) {
+                    var ea = emitArgs(b, unwrapArgs(argTs))
+                    b = ea.b
+                    argsV = ea.v
+                    if (!blkGiven) { b = emitPushBlock(b, argsV) }
+                } else {
+                    // The values the parameters hold now: the positional ones (a *rest
+                    // spliced), then the keyword ones as the trailing keyword Hash, **rest's
+                    // pairs first (MRI's order), then the method's own block. Twin of
+                    // currentParamValues in ruby-interpreter.abnf.
+                    var kwD = null
+                    var kwNs = []
+                    for (var k = 0; k < ownPs.length; k++) {
+                        var p = typeof ownPs[k] == "string" ? {name: ownPs[k]} : ownPs[k]
+                        if (p.blockp === true) { continue }
+                        if (p.kw === true) { kwNs.push(p.name); continue }
+                        var pv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.name)])
+                        if (p.kwrest === true) {
+                            if (kwD == null) { kwD = callExt(b, "js_dict_new", []) }
+                            b = emitMergeDict(b, kwD, pv)
+                        } else if (p.splat === true) { b = emitSpliceInto(b, argsV, pv) }
+                        else { callExt(b, "js_arr_push", [argsV, pv]) }
+                    }
+                    for (var kn = 0; kn < kwNs.length; kn++) {
                         if (kwD == null) { kwD = callExt(b, "js_dict_new", []) }
-                        b = emitMergeDict(b, kwD, pv)
-                    } else if (p.splat === true) { b = emitSpliceInto(b, argsV, pv) }
-                    else { callExt(b, "js_arr_push", [argsV, pv]) }
+                        callExt(b, "js_rset", [kwD, callExt(b, "js_sym", [emitStr(b, kwNs[kn])]),
+                                               callExt(b, "js_scope_get", [curScopeV, emitStr(b, kwNs[kn])])])
+                    }
+                    if (kwD != null) { callExt(b, "js_arr_push", [argsV, kwD]) }
+                    if (blkGiven) {
+                        var eb = emitArgs(b, argTs)
+                        b = emitSpliceInto(eb.b, argsV, eb.v)
+                    } else { b = emitPushBlock(b, argsV) }
                 }
-                for (var kn = 0; kn < kwNs.length; kn++) {
-                    if (kwD == null) { kwD = callExt(b, "js_dict_new", []) }
-                    callExt(b, "js_rset", [kwD, callExt(b, "js_sym", [emitStr(b, kwNs[kn])]),
-                                           callExt(b, "js_scope_get", [curScopeV, emitStr(b, kwNs[kn])])])
-                }
-                if (kwD != null) { callExt(b, "js_arr_push", [argsV, kwD]) }
-                b = emitPushBlock(b, argsV)
+                return {b: b, v: callExt(b, "js_rsuper", [supV, selfV, emitStr(b, methName), argsV])}
             }
-            return {b: b, v: callExt(b, "js_rsuper", [supV, selfV, emitStr(b, methName), argsV])}
+            if (blkGiven) { return emitBlkBreakCall(b, emitSup) }
+            return emitSup(b)
         }
     }
     // Pass the running method's block on: argsV gains its block marker, if any.

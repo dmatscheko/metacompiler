@@ -7022,28 +7022,53 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		// Without a block they answer an Enumerator over the numbers they would yield.
 		npos, nblk := rubyBlockArgs(args)
 		nl := &jsArray{}
-		if name != "times" && len(npos) == 0 {
+		if name != "times" && name != "step" && len(npos) == 0 {
 			rt.rubyRaiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)")
 		}
 		switch name {
 		// Numeric#step(limit, by = 1): Integers, or doubles when the limit or the
 		// step is a Float. Twin of the arm in ruby-interpreter.abnf.
 		case "step":
-			var by interface{} = float64(1)
-			if len(npos) > 1 {
-				by = npos[1]
+			var lim, by interface{} = jsNull, float64(1)
+			sp := npos
+			var last interface{} = jsUndef
+			if len(npos) > 0 {
+				last = npos[len(npos)-1]
+			}
+			if keys, vals, isDict := dictParts(last); isDict {
+				sp = npos[:len(npos)-1]
+				if i := rt.rubyDictFind(keys, jsSym{s: "to"}); i >= 0 {
+					lim = vals.elems[i]
+				}
+				if i := rt.rubyDictFind(keys, jsSym{s: "by"}); i >= 0 {
+					by = vals.elems[i]
+				}
+			}
+			if len(sp) > 0 {
+				lim = sp[0]
+			}
+			if len(sp) > 1 {
+				by = sp[1]
 			}
 			if rubyToF(by) == 0 {
 				rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0")
 			}
 			_, fb := by.(jsFlo)
 			_, ft := t.(jsFlo)
-			if _, fl := npos[0].(jsFlo); fb || fl || ft {
-				for _, d := range rubyFloatStep(x, rubyToF(npos[0]), rubyToF(by), false) {
+			if lf, isFlo := lim.(jsFlo); isUndefOrNull(lim) || (isFlo && math.IsInf(lf.f, 1) == (rubyToF(by) > 0) && math.IsInf(lf.f, 0)) {
+				se := rubyStepForever(x, rubyToF(by), fb || ft, "#<Enumerator: "+rt.rubyInspect(t)+":step"+rt.rubyInspectArgs(npos)+">")
+				if nblk == nil {
+					return se, true
+				}
+				rt.rubyMethod(se, "each", []interface{}{rubyBlkWrap(nblk)})
+				return t, true
+			}
+			if _, fl := lim.(jsFlo); fb || fl || ft {
+				for _, d := range rubyFloatStep(x, rubyToF(lim), rubyToF(by), false) {
 					nl.elems = append(nl.elems, jsFlo{f: d})
 				}
 			} else {
-				for v, lim, b := x, rubyToF(npos[0]), rubyToF(by); (b > 0 && v <= lim) || (b < 0 && v >= lim); v += b {
+				for v, lim, b := x, rubyToF(lim), rubyToF(by); (b > 0 && v <= lim) || (b < 0 && v >= lim); v += b {
 					nl.elems = append(nl.elems, v)
 				}
 			}
@@ -7496,6 +7521,16 @@ func (rt *jsrt) rubyRangeToArr(r *jsObject) *jsArray {
 	return rt.rubyRangeArr(lo, hi, excl)
 }
 
+// rubyRangeUnbounded: an Integer begin and an end of nil or +Infinity.
+func rubyRangeUnbounded(r *jsObject) bool {
+	if _, isInt := r.props["begin"].(float64); !isInt {
+		return false
+	}
+	hi := r.props["end"]
+	f, isFlo := hi.(jsFlo)
+	return isUndefOrNull(hi) || (isFlo && math.IsInf(f.f, 1))
+}
+
 func rubyRangeNumeric(r *jsObject) bool {
 	_, isStr := r.props["begin"].(string)
 	return !isStr
@@ -7521,6 +7556,9 @@ func rubyRangeSpan(r *jsObject) float64 {
 
 func (rt *jsrt) rubyRangeLen(r *jsObject) float64 {
 	lo, hi := r.props["begin"], r.props["end"]
+	if rubyRangeUnbounded(r) {
+		return math.Inf(1)
+	}
 	if isUndefOrNull(lo) || isUndefOrNull(hi) {
 		rt.fail("cannot take the length of an endless range")
 	}
@@ -7569,12 +7607,42 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	}
 	pos, blk := rubyBlockArgs(args)
 	endless := isUndefOrNull(t.props["begin"]) || isUndefOrNull(t.props["end"])
-	// A blockless each_slice / each_cons on an endless Integer range is an
-	// Enumerator that pulls one value at a time. Twin of the arm in rangeMethod.
-	if _, num := t.props["begin"].(float64); num && isUndefOrNull(t.props["end"]) && blk == nil && rubySliceOp(name) != "" {
-		if sn := int(math.Trunc(rubyToF(argAt(pos, 0)))); sn > 0 {
-			return rubySliceEnum(rt.rubyRangeLazy(t).(*jsObject), name, sn, false,
+	// An Integer range ending in nil or +Infinity has no Array, so its block
+	// methods (rbaRangeStreams of lib/ruby-arr.js), #step and each_slice /
+	// each_cons run on an Enumerator that makes one value at a time. Twin of the
+	// arm in rangeMethod.
+	if rubyRangeUnbounded(t) {
+		if blk != nil && rubyRangeStreams(name) {
+			en := rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), nil, false, "#<Enumerator: "+rt.rubyInspect(t)+":each>")
+			if sv := rt.rubyLazyMethod(en, name, args); name != "each" {
+				return sv
+			}
+			return t
+		}
+		if name == "size" && len(pos) == 0 {
+			return jsFlo{f: math.Inf(1)}
+		}
+		var ue *jsObject
+		lo := t.props["begin"].(float64)
+		// A Float end or step makes Float values, as a Float range's #step does.
+		if by := argAt(pos, 0); name == "step" && len(pos) > 0 && rubyToF(by) > 0 {
+			_, fe := t.props["end"].(jsFlo)
+			_, fs := by.(jsFlo)
+			ue = rubyStepForever(lo, rubyToF(by), fe || fs, "#<Enumerator: "+rt.rubyInspect(t)+":step"+rt.rubyInspectArgs(pos)+">")
+		}
+		if sn := int(math.Trunc(rubyToF(argAt(pos, 0)))); rubySliceOp(name) != "" && len(pos) > 0 && sn > 0 {
+			ue = rubySliceEnum(rt.rubyRangeLazy(t).(*jsObject), name, sn, false,
 				"#<Enumerator: "+rt.rubyInspect(t)+":"+name+"("+strconv.Itoa(sn)+")>")
+		}
+		if ue != nil && blk == nil {
+			return ue
+		}
+		if ue != nil {
+			rt.rubyMethod(ue, "each", []interface{}{rubyBlkWrap(blk)})
+			if name == "step" {
+				return t
+			}
+			return jsNull
 		}
 	}
 	switch name {
@@ -11278,6 +11346,18 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if o, isObj := target.(*jsObject); isObj && rubyExcInst(o) {
 			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
 				if r, had := o.props["__rresult"]; had {
+					return r
+				}
+				return jsNull
+			}
+		}
+	// LocalJumpError#reason / #exit_value: what the raising `break' recorded, nil
+	// for one built by LocalJumpError.new. Twin of the LocalJumpError methods in
+	// ruby-interpreter.abnf and rbMethod in lib/ruby-rt.metajs.
+	case "reason", "exit_value":
+		if o, isObj := target.(*jsObject); isObj && rubyExcInst(o) && rt.rubyIsA(target, rt.rubyBuiltinClass("LocalJumpError")) {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				if r, had := o.props["__r"+name]; had {
 					return r
 				}
 				return jsNull

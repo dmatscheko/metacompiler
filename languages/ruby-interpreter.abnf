@@ -5937,14 +5937,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // materialized array, membership stays lazy (an endless range has no array).
     function rangeMethod(t, name, args, blk) {
         if (name == "lazy") { return rangeLazy(t) }
-        // A blockless each_slice / each_cons on an endless Integer range is an
-        // Enumerator that pulls one value at a time. Twins: rbRangeMethod,
-        // rubyRangeMethod.
-        if (rbaSliceOp(name) != "" && blk == null && typeof t.lo == "number" && (t.hi === null || t.hi === undefined) &&
-            Math.trunc(toF(args[0])) > 0) {
-            var rsn = Math.trunc(toF(args[0]))
-            return lazyCopy(rangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
-                "#<Enumerator: " + rinspect(t) + ":" + name + "(" + rsn + ")>")
+        // An Integer range ending in nil or +Infinity has no Array, so its block
+        // methods (rbaRangeStreams), #step and each_slice / each_cons run on an
+        // Enumerator that makes one value at a time, which a break, a hit or
+        // first(n) ends. Twins: rbRangeMethod, rubyRangeMethod.
+        if (typeof t.lo == "number" && (t.hi === null || t.hi === undefined || (isFlo(t.hi) && toF(t.hi) > 0 && toF(t.hi) - toF(t.hi) != 0))) {
+            if (blk != null && rbaRangeStreams(name)) {
+                var sv = anytype
+                sv = mcall(lazyCopy(rangeLazy(t), null, false, "#<Enumerator: " + rinspect(t) + ":each>"), name, args, blk)
+                return name == "each" ? t : sv
+            }
+            if (name == "size" && args.length == 0) { return mkFlo(Math.pow(2, 1024)) }
+            var ue = anytype
+            ue = null
+            // A Float end or step makes Float values, as a Float range's #step does.
+            if (name == "step" && args.length > 0 && toF(args[0]) > 0) {
+                ue = stepForever(t.lo, args[0], isFlo(t.hi) || isFlo(args[0]), "#<Enumerator: " + rinspect(t) + ":step" + inspectArgs(args) + ">")
+            }
+            if (rbaSliceOp(name) != "" && args.length > 0 && Math.trunc(toF(args[0])) > 0) {
+                var rsn = Math.trunc(toF(args[0]))
+                ue = lazyCopy(rangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
+                    "#<Enumerator: " + rinspect(t) + ":" + name + "(" + rsn + ")>")
+            }
+            if (ue !== null && blk == null) { return ue }
+            if (ue !== null) {
+                mcall(ue, "each", [], blk)
+                return name == "step" ? t : null
+            }
         }
         if (name == "to_a" || name == "entries" || name == "to_ary") { return rangeToA(t) }
         if (name == "include?" || name == "member?" || name == "cover?" || name == "===") { return rangeCover(t, args[0]) }
@@ -6041,20 +6060,63 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // Numeric#step(limit, by = 1): Integers, or doubles when any of the three is a
     // Float (rbnFloatStep). Twins: the step arms of rbNumMethod and rubyNumMore.
+    // The limit and the step come positionally or as to: / by:.
     function numStep(t, args, blk) {
+        var pos = args
+        var lim = anytype
         var sby = anytype
-        sby = args.length > 1 ? args[1] : 1
+        lim = null
+        sby = 1
+        if (args.length > 0 && isDict(args[args.length - 1])) {
+            pos = args.slice(0, args.length - 1)
+            var kd = args[args.length - 1]
+            var ki = dictFind(kd, mkSym("to"))
+            if (ki >= 0) { lim = kd.vals[ki] }
+            ki = dictFind(kd, mkSym("by"))
+            if (ki >= 0) { sby = kd.vals[ki] }
+        }
+        if (pos.length > 0) { lim = pos[0] }
+        if (pos.length > 1) { sby = pos[1] }
         if (toF(sby) == 0) { raiseErr("step", "ArgumentError", "step can't be 0") }
+        // A nil limit, or an infinite one the step runs toward, never ends
+        // (num_step's inf), and the values stay Integers unless self or the step
+        // is a Float.
+        if (lim === null || lim === undefined || (isFlo(lim) && toF(lim) - toF(lim) != 0 && (toF(lim) > 0) == (toF(sby) > 0))) {
+            var se = anytype
+            se = stepForever(t, sby, isFlo(t) || isFlo(sby), "#<Enumerator: " + rinspect(t) + ":step" + inspectArgs(args) + ">")
+            if (blk == null) { return se }
+            mcall(se, "each", [], blk)
+            return t
+        }
         var sl = []
-        if (isFlo(sby) || isFlo(args[0]) || isFlo(t)) {
-            var sf = rbnFloatStep(toF(t), toF(args[0]), toF(sby), false)
+        if (isFlo(sby) || isFlo(lim) || isFlo(t)) {
+            var sf = rbnFloatStep(toF(t), toF(lim), toF(sby), false)
             for (var sfi = 0; sfi < sf.length; sfi++) { sl.push(mkFlo(sf[sfi])) }
         } else {
-            sl = rbnIntStep(t, toF(args[0]), toF(sby))
+            sl = rbnIntStep(t, toF(lim), toF(sby))
         }
         if (blk == null) { return enumAt(mkEnum(sl), t, "step", args) }
         for (var ski = 0; ski < sl.length; ski++) { blockCall(blk, [sl[ski]]) }
         return t
+    }
+    // The never-ending step from beg by `by': an Enumerator that makes each value
+    // as it is pulled - a Float one as i * by + beg (ruby_float_step) - so a break
+    // or first(n) ends it. Twins: rbStepForever in lib/ruby-rt.metajs,
+    // rubyStepForever in abnf/jsrtrubystr.go.
+    function stepForever(beg, by, flo, desc) {
+        var b = toF(beg)
+        var u = toF(by)
+        var e = mkLazy("range", [], 0, null, false, false, desc)
+        if (flo) { e.ops.push({k: "map", f: function(i) { return mkFlo(i * u + b) }, n: 0}) }
+        else { e.ops.push({k: "map", f: function(i) { return b + i * u }, n: 0}) }
+        return e
+    }
+    // "(a, b)" of the arguments' #inspect, "" for none.
+    function inspectArgs(args) {
+        if (args.length == 0) { return "" }
+        var ia = []
+        for (var i = 0; i < args.length; i++) { ia.push(rinspect(args[i])) }
+        return "(" + ia.join(", ") + ")"
     }
     // [a, *b, c]: a splat element splices an array in (a non-array splats as itself).
     function makeArray(items) {
@@ -7984,7 +8046,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return v.items.length
         }
         // A Range's size is its element COUNT; a Range object here has no .length.
-        if (isRange(v)) { return rangeToA(v).length }
+        if (isRange(v)) { return rangeMethod(v, "size", [], null) }
         if (v === null || v === undefined) { fail("length of nil") }
         // A String's length is in CHARACTERS (a surrogate pair is one), the way the
         // compiled halves' js_pylen counts it.
@@ -9227,7 +9289,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (isRat(t)) { return ratDigitOp(t, dmode, dnd) }
             return numDigitOp(toF(t), null, false, dmode, dnd)
         }
-        if (name == "step" && args.length > 0 && isFlo(t)) { return numStep(t, args, blk) }
+        if (name == "step" && isFlo(t)) { return numStep(t, args, blk) }
         if (name == "zero?") { return toF(t) == 0 }
         if (name == "positive?") { return toF(t) > 0 }
         if (name == "negative?") { return toF(t) < 0 }
@@ -9726,7 +9788,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "pow" && args.length < 2) { return binAs(name, "**", target, args[0]) }
             // Without a block, times / upto / downto answer an Enumerator over the
             // numbers they would yield.
-            if (name == "step" && args.length > 0) { return numStep(target, args, blk) }
+            if (name == "step") { return numStep(target, args, blk) }
             if ((name == "upto" || name == "downto") && args.length == 0) {
                 raiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)")
             }
@@ -12415,7 +12477,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (r.brk === true) {
                         if (dm) { return r.v }
                         if (home == null || home == undefined || home.live !== true) {
-                            raiseErr("", "LocalJumpError", "break from proc-closure")
+                            var lj = anytype
+                            lj = mkExc(hostGlobals["LocalJumpError"], "break from proc-closure")
+                            lj.__rreason = mkSym("break")
+                            lj.__rexit_value = r.v
+                            throw {__exc: true, v: lj}
                         }
                         throw {__blkbrk: true, v: r.v, home: home}
                     }
@@ -14065,43 +14131,59 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var mn = anytype
             mn = getVar("$mname")
             var args = anytype
+            var sb = splitBlock(argTs)
             if (explicit) {
-                args = evalArgList(splitBlock(argTs).args)
+                args = evalArgList(sb.args)
             } else {
                 args = currentParamValues(getVar("$sparams"))
             }
             if (mn == null || mn == undefined) { fail("super called outside of a method") }
-            if (self !== null && self !== undefined && self.__isclass === true && dc != null && dc != undefined) {
-                return singSuper(self, dc, mn, args)
+            // A literal block or &expr is the block super passes (`&nil' none);
+            // without one it passes the method's own block, with or without
+            // arguments. Twin of the super arm of ruby-to-llvm-ir.abnf.
+            var blk = anytype
+            var home = null
+            if (sb.blk != null) {
+                home = blkHome()
+                blk = sb.blk(home)
+            } else {
+                blk = methodBlock()
             }
-            // A method defined in a prepended module supers into the class itself;
-            // a top-level def belongs to Object, which has nothing above it here.
-            var m = anytype
-            m = undefined
-            // A module's method supers into whatever FOLLOWS the module among the
-            // ancestors of self's class: a later included module, or the class's
-            // superclass chain. The module is matched by name, as prependOwners is.
-            var after = dc != null && dc != undefined && dc.__ismodule === true && isUserObj(self) ? ancestorsOf(self.__class) : []
-            var ai = 0
-            while (ai < after.length && after[ai].__name !== dc.__name) { ai = ai + 1 }
-            if (ai < after.length) {
-                for (var aj = ai + 1; aj < after.length && typeof m != "function"; aj++) { m = lookupOwn(after[aj], mn) }
-            } else if (dc != null && dc != undefined) {
-                m = hasOwn(prependOwners, "$" + dc.__name) ? lookupOwn(prependOwners["$" + dc.__name], mn) : undefined
-                // The modules the owner includes sit right above it, the last one nearest.
-                var mx = dc.__mixins == undefined ? 0 : dc.__mixins.length
-                while (typeof m != "function" && mx > 0) {
-                    mx = mx - 1
-                    m = lookupOwn(dc.__mixins[mx], mn)
-                }
-                if (typeof m != "function") { m = lookupMethod(dc.__super, mn) }
-            }
-            // Object#method_missing, which a `super' in a method_missing reaches:
-            // NoMethodError for the missing name.
-            if (typeof m != "function" && mn == "method_missing" && args.length > 0) { noMethod(self, rstr(args[0])) }
-            if (typeof m != "function") { return superBuiltin(self, mn, args) }
-            return m.apply(undefined, concat2impl([self], args))
+            if (home == null) { return superCall(self, dc, mn, args, blk) }
+            return catchBlkBreak(function() { return superCall(self, dc, mn, args, blk) }, home)
         }
+    }
+    function superCall(self, dc, mn, args, blk) {
+        if (self !== null && self !== undefined && self.__isclass === true && dc != null && dc != undefined) {
+            return singSuper(self, dc, mn, args, blk)
+        }
+        // A method defined in a prepended module supers into the class itself;
+        // a top-level def belongs to Object, which has nothing above it here.
+        var m = anytype
+        m = undefined
+        // A module's method supers into whatever FOLLOWS the module among the
+        // ancestors of self's class: a later included module, or the class's
+        // superclass chain. The module is matched by name, as prependOwners is.
+        var after = dc != null && dc != undefined && dc.__ismodule === true && isUserObj(self) ? ancestorsOf(self.__class) : []
+        var ai = 0
+        while (ai < after.length && after[ai].__name !== dc.__name) { ai = ai + 1 }
+        if (ai < after.length) {
+            for (var aj = ai + 1; aj < after.length && typeof m != "function"; aj++) { m = lookupOwn(after[aj], mn) }
+        } else if (dc != null && dc != undefined) {
+            m = hasOwn(prependOwners, "$" + dc.__name) ? lookupOwn(prependOwners["$" + dc.__name], mn) : undefined
+            // The modules the owner includes sit right above it, the last one nearest.
+            var mx = dc.__mixins == undefined ? 0 : dc.__mixins.length
+            while (typeof m != "function" && mx > 0) {
+                mx = mx - 1
+                m = lookupOwn(dc.__mixins[mx], mn)
+            }
+            if (typeof m != "function") { m = lookupMethod(dc.__super, mn) }
+        }
+        // Object#method_missing, which a `super' in a method_missing reaches:
+        // NoMethodError for the missing name.
+        if (typeof m != "function" && mn == "method_missing" && args.length > 0) { noMethod(self, rstr(args[0])) }
+        if (typeof m != "function") { return superBuiltin(self, mn, args) }
+        return applyMethod(m, self, args, blk)
     }
     function lookupOwn(cls, name) { return hasOwn(cls, name) ? cls[name] : undefined }
     // Class#new: a fresh instance, initialized. Twins: rubyNew in abnf/jsrtruby.go,
@@ -14122,12 +14204,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // constructs, and the hooks (#inherited, #included, ...) are empty. Twins:
     // js_rsuper / rubySuperBuiltin in abnf/jsrtruby.go, js_rsuper / rbSuperBuiltin
     // in lib/ruby-rt.metajs.
-    function singSuper(self, dc, mn, args) {
+    function singSuper(self, dc, mn, args, blk) {
         var m = anytype
         m = dc.__ismodule === true ? undefined : lookupMethod(dc.__super, "$s$" + mn)
         if (typeof m != "function" && dc.__ismodule !== true) { m = lookupMethod(dc.__super, "$x$" + mn) }
-        if (typeof m == "function") { return m.apply(undefined, concat2impl([self], args)) }
-        if (mn == "new") { return newInstance(self, args, currentBlock()) }
+        if (typeof m == "function") { return applyMethod(m, self, args, blk) }
+        if (mn == "new") { return newInstance(self, args, blk) }
         if (isHookName(mn)) { return null }
         noSuper(self, mn)
     }
@@ -16030,6 +16112,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["StopIteration"]["result"] = function() {
         var self = arguments[0]
         return hasOwn(self, "__rresult") ? self.__rresult : null
+    }
+    // What the raising `break' recorded (makeBlock); nil on LocalJumpError.new.
+    hostGlobals["LocalJumpError"]["reason"] = function() {
+        var self = arguments[0]
+        return hasOwn(self, "__rreason") ? self.__rreason : null
+    }
+    hostGlobals["LocalJumpError"]["exit_value"] = function() {
+        var self = arguments[0]
+        return hasOwn(self, "__rexit_value") ? self.__rexit_value : null
     }
     excBase["cause"] = function() {
         var self = arguments[0]

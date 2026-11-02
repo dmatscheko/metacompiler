@@ -2275,6 +2275,72 @@ def s171
         [1].map { lambda { break 9 }.call } == [9])
 end
 
+# ===== SECTION 172: LocalJumpError#reason and #exit_value =====
+# The LocalJumpError a stray `break' raises records why (:break) and the value
+# it carried; one built by LocalJumpError.new has neither, and no other
+# exception class answers the two. /usr/bin/ruby 2.6 settles each.
+def s172keep(&b); b; end
+def s172
+  v = [1, [:a, 2]]
+  e1 = begin; proc { break v[0] }.call; rescue LocalJumpError => e; [e.reason, e.exit_value]; end
+  st = s172keep { break v[1] }
+  e2 = begin; st.call; rescue LocalJumpError => e; [e.reason, e.exit_value, e.message]; end
+  check("lje172a", e1 == [:break, 1] && e2 == [:break, [:a, 2], "break from proc-closure"])
+  e3 = begin; RuntimeError.new.reason; rescue NoMethodError => e; e.class; end
+  check("lje172b", LocalJumpError.new("x").reason.nil? && LocalJumpError.new.exit_value.nil? && e3 == NoMethodError)
+end
+
+# ===== SECTION 173: super passes a literal block =====
+# super with a literal block or &expr passes that block, &nil passes none, and
+# without one super passes the method's own block whether or not it lists
+# arguments. A `break' in the literal block ends the super call. Class methods
+# and initialize too. /usr/bin/ruby 2.6 settles each.
+class S173A
+  def f(x); r = block_given? ? yield(x) : :nob; [:a, r]; end
+  def self.cm(x); yield(x) * 10; end
+  def initialize(n = 0); @b = block_given? ? yield(n) : :none; end
+  attr_reader :b
+end
+class S173B < S173A
+  def f(x); super { |v| v * 2 }; end
+  def self.cm(x); super(x) { |v| v + 2 }; end
+  def initialize(n); super { |m| m * 3 }; end
+end
+class S173C < S173A; def f(x); super(x + 1) { |v| break v * 7 }; end; end
+class S173D < S173A; def f(x); super(x); end; end
+class S173E < S173A; def f(x); super(x, &nil); end; end
+class S173F < S173A; def f(x); [x].map { |q| super(q) }; end; end
+def s173
+  v = [5, 4]
+  check("sup173a", S173B.new(v[1]).f(v[0]) == [:a, 10] && S173B.new(v[1]).f(v[0]) { |q| q + 100 } == [:a, 10] &&
+        S173C.new.f(v[0]) == 42 && S173B.cm(v[1]) == 60 && S173B.new(v[1]).b == 12)
+  check("sup173b", S173D.new.f(v[0]) { |q| q + 100 } == [:a, 105] && S173D.new.f(v[0]) == [:a, :nob] &&
+        S173E.new.f(v[0]) { |q| q + 7 } == [:a, :nob] && S173F.new.f(v[0]) { |q| q * 2 } == [[:a, 10]])
+end
+
+# ===== SECTION 174: ranges and steps without an end =====
+# An Integer range ending in nil or Float::INFINITY, and Numeric#step with no
+# limit, a nil one or an infinite one it steps toward, make one value at a time:
+# a break, a find hit, a take_while stop or first(n) ends them. A Float end or
+# step makes Floats. #size of such a range is Infinity. /usr/bin/ruby 2.6
+# settles each.
+def s174
+  v = [1, nil, Float::INFINITY, 50, 2, 3]
+  r = (v[0]..v[1])
+  ri = (v[0]..v[2])
+  check("inf174a", ri.each { |i| break i if i * i > v[3] } == 8 && r.each { |i| break i if i * i > v[3] } == 8 &&
+        ri.find { |i| i % 7 == 0 } == 7 && r.each_with_index { |x, i| break [x, i] if i == 2 } == [3, 2] &&
+        r.map { |x| break x * 10 if x > 2; x } == 30 && r.take_while { |x| x < 4 } == [1, 2, 3] &&
+        r.select { |x| break x if x > 4; x.odd? } == 5)
+  check("inf174b", r.size == Float::INFINITY && ri.size == Float::INFINITY &&
+        r.each_slice(v[4]) { |s| break s if s[0] > 2 } == [3, 4] && r.step(v[5]) { |x| break x if x > 5 } == 7 &&
+        ri.step(v[5]) { |x| break x if x > 5 } == 7.0 && r.step(v[4]).first(3) == [1, 3, 5])
+  check("inf174c", v[0].step { |i| break i if i > 3 } == 4 && v[0].step(v[1], v[4]).first(3) == [1, 3, 5] &&
+        10.step(v[1], -v[5]) { |i| break i if i < 0 } == -2 && v[0].step(by: v[4]) { |i| break i if i > 6 } == 7 &&
+        v[0].step(v[2], 0.5) { |i| break i if i > 2 } == 2.5 && v[0].step(-v[2], 1) { |i| break i } == 1 &&
+        v[0].step(by: v[5], to: 7).to_a == [1, 4, 7])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -2325,5 +2391,8 @@ s168() # SECTION-CALL 168
 s169() # SECTION-CALL 169
 s170() # SECTION-CALL 170
 s171() # SECTION-CALL 171
+s172() # SECTION-CALL 172
+s173() # SECTION-CALL 173
+s174() # SECTION-CALL 174
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

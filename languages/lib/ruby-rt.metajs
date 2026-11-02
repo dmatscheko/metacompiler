@@ -4932,6 +4932,13 @@ function rbRangeToArr(r) {
 // are ARITHMETIC for the numeric case on purpose: for-in, splat and destructuring
 // all ask for the length once and then index element by element, so materializing
 // inside rbRangeAt would make every one of them quadratic.
+// An Integer begin and an end of nil or +Infinity.
+function rbRangeUnbounded(r) {
+    if (typeof r["begin"] != "number") { return false }
+    var hi = r["end"]
+    if (rtIsNil(hi)) { return true }
+    return rbIsFlo(hi) && rbToF(hi) > 0 && rbToF(hi) - rbToF(hi) != 0
+}
 function rbRangeNumeric(r) {
     return typeof r["begin"] != "string"
 }
@@ -4948,6 +4955,7 @@ function rbRangeSpan(r) {
     return hi - rbToF(r["begin"])
 }
 function rbRangeLen(r) {
+    if (rbRangeUnbounded(r)) { return Math.pow(2, 1024) }
     if (rtIsNil(r["end"]) || rtIsNil(r["begin"])) {
         fail("cannot take the length of an endless range")
     }
@@ -4987,13 +4995,33 @@ function rbRangeMethod(t, name, args) {
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
     var endless = rtIsNil(t["end"]) || rtIsNil(t["begin"])
-    // A blockless each_slice / each_cons on an endless Integer range is an
-    // Enumerator that pulls one value at a time. Twin of the arm in rangeMethod.
-    if (rbaSliceOp(name) != "" && blk === null && typeof t["begin"] == "number" && rtIsNil(t["end"])) {
+    // An Integer range ending in nil or +Infinity has no Array, so its block
+    // methods (rbaRangeStreams), #step and each_slice / each_cons run on an
+    // Enumerator that makes one value at a time. Twin of the arm in rangeMethod.
+    if (rbRangeUnbounded(t)) {
+        if (blk !== null && rbaRangeStreams(name)) {
+            var sv = rbLazyMethod(rbLazyCopy(rbRangeLazy(t), null, false, "#<Enumerator: " + rbInspect(t) + ":each>"), name, args)
+            if (name == "each") { return t }
+            return sv
+        }
+        if (name == "size" && npos == 0) { return rbMkFlo(Math.pow(2, 1024)) }
+        var ue = anytype
+        ue = null
+        // A Float end or step makes Float values, as a Float range's #step does.
+        if (name == "step" && npos > 0 && rbToF(args[0]) > 0) {
+            ue = rbStepForever(t["begin"], rbToF(args[0]), rbIsFlo(t["end"]) || rbIsFlo(args[0]),
+                "#<Enumerator: " + rbInspect(t) + ":step" + rbInspectArgs(args, npos) + ">")
+        }
         var rsn = Math.trunc(rbToF(rbArgAt(args, 0)))
-        if (rsn > 0) {
-            return rbLazyCopy(rbRangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
+        if (rbaSliceOp(name) != "" && npos > 0 && rsn > 0) {
+            ue = rbLazyCopy(rbRangeLazy(t), {k: rbaSliceOp(name), f: null, n: rsn}, false,
                 "#<Enumerator: " + rbInspect(t) + ":" + name + "(" + rsn + ")>")
+        }
+        if (ue !== null && blk === null) { return ue }
+        if (ue !== null) {
+            rbLazyMethod(ue, "each", [js_rblkwrap(blk)])
+            if (name == "step") { return t }
+            return null
         }
     }
     // Membership stays LAZY - it is the one part that an endless range can answer,
@@ -5977,22 +6005,43 @@ function rbNumMethod(t, name, args) {
         }
         return t
     }
-    // Numeric#step(limit, by = 1). Twin of the arm in ruby-interpreter.abnf.
-    if (name == "step" && rbNPos(args) > 0) {
+    // Numeric#step([limit [, by]]) or step(to:, by:). Twin of numStep in
+    // ruby-interpreter.abnf, which states the rule.
+    if (name == "step") {
         var sblk = rbBlockOf(args)
+        var sn = rbNPos(args)
+        var lim = anytype
         var sby = anytype
-        sby = rbNPos(args) > 1 ? args[1] : 1
+        lim = null
+        sby = 1
+        if (sn > 0 && rbIsDict(args[sn - 1])) {
+            var kd = args[sn - 1]
+            sn = sn - 1
+            var ki = rbDictFind(kd["keys"], rbSym("to"))
+            if (ki >= 0) { lim = kd["vals"][ki] }
+            ki = rbDictFind(kd["keys"], rbSym("by"))
+            if (ki >= 0) { sby = kd["vals"][ki] }
+        }
+        if (sn > 0) { lim = args[0] }
+        if (sn > 1) { sby = args[1] }
         if (rbToF(sby) == 0) { rbRaiseErr(name, "ArgumentError", "step can't be 0") }
+        if (rtIsNil(lim) || (rbIsFlo(lim) && rbToF(lim) - rbToF(lim) != 0 && (rbToF(lim) > 0) == (rbToF(sby) > 0))) {
+            var se = rbStepForever(x, rbToF(sby), rbIsFlo(t) || rbIsFlo(sby),
+                "#<Enumerator: " + rbInspect(t) + ":step" + rbInspectArgs(args, rbNPos(args)) + ">")
+            if (sblk === null) { return se }
+            rbLazyMethod(se, "each", [js_rblkwrap(sblk)])
+            return t
+        }
         var sl = []
-        if (rbIsFlo(sby) || rbIsFlo(args[0]) || rbIsFlo(t)) {
-            var sf = rbnFloatStep(x, rbToF(args[0]), rbToF(sby), false)
+        if (rbIsFlo(sby) || rbIsFlo(lim) || rbIsFlo(t)) {
+            var sf = rbnFloatStep(x, rbToF(lim), rbToF(sby), false)
             var sfi = 0
             while (sfi < sf.length) {
                 sl.push(rbMkFlo(sf[sfi]))
                 sfi = sfi + 1
             }
         } else {
-            sl = rbnIntStep(x, rbToF(args[0]), rbToF(sby))
+            sl = rbnIntStep(x, rbToF(lim), rbToF(sby))
         }
         if (sblk === null) { return rbEnumAt(rbMkEnum(sl), t, name, args) }
         var ski = 0
@@ -6861,6 +6910,24 @@ function rbLazyCopy(t, op, lazy, desc) {
     c["ev"] = t["ev"]
     c["en"] = t["en"]
     return c
+}
+// Twin of stepForever in ruby-interpreter.abnf, which states the rule.
+function rbStepForever(beg, by, flo, desc) {
+    var e = rbMkLazy("range", [], 0, null, false, false, desc)
+    if (flo) { e["ops"].push({k: "map", f: function(i) { return rbMkFlo(i * by + beg) }, n: 0}) }
+    else { e["ops"].push({k: "map", f: function(i) { return beg + i * by }, n: 0}) }
+    return e
+}
+// "(a, b)" of the first n arguments' #inspect, "" for none.
+function rbInspectArgs(args, n) {
+    if (n == 0) { return "" }
+    var ia = []
+    var i = 0
+    while (i < n) {
+        ia.push(rbInspect(args[i]))
+        i = i + 1
+    }
+    return "(" + ia.join(", ") + ")"
 }
 function rbLazyFirst(t, n) { return rbaLazyFirst(t, n, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, null) }
 function rbLazyScan(t, hit) { return rbaLazyScan(t, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, hit) }
@@ -9055,6 +9122,12 @@ function rbMethod(target, name, args) {
     if (name == "result" && rbExcInst(target) && rbFindMethod(target, name) === undefined) {
         if (target["__rresult"] === undefined) { return null }
         return target["__rresult"]
+    }
+    // LocalJumpError#reason / #exit_value. Twin of the "reason" arm in abnf/jsrt.go.
+    if ((name == "reason" || name == "exit_value") && rbExcInst(target) && rbIsA(target, rbBuiltinClass("LocalJumpError")) && rbFindMethod(target, name) === undefined) {
+        var lj = target["__r" + name]
+        if (lj === undefined) { return null }
+        return lj
     }
     // Exception#cause: what js_rraiseat recorded, nil for an exception never raised.
     if (name == "cause") {

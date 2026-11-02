@@ -672,6 +672,45 @@ func rubySliceOp(name string) string {
 	return ""
 }
 
+// rubyStepForever is stepForever of ruby-interpreter.abnf, which states the rule.
+func rubyStepForever(beg, by float64, flo bool, desc string) *jsObject {
+	e := rubyMkLazy("range", &jsArray{}, 0, jsNull, false, false, desc)
+	f := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+		i := rubyToF(argAt(a, 0))
+		// float64() keeps Go from fusing the product into an FMA the other
+		// engines do not make.
+		if flo {
+			return jsFlo{f: float64(i*by) + beg}
+		}
+		return beg + float64(i*by)
+	}}
+	e.set("ops", &jsArray{elems: []interface{}{rubyLazyOpOf("map", f, 0)}})
+	return e
+}
+
+// rubyInspectArgs is inspectArgs of ruby-interpreter.abnf: "(a, b)", "" for none.
+func (rt *jsrt) rubyInspectArgs(args []interface{}) string {
+	if len(args) == 0 {
+		return ""
+	}
+	parts := make([]string, len(args))
+	for i, a := range args {
+		parts[i] = rt.rubyInspect(a)
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// rubyRangeStreams is rbaRangeStreams of lib/ruby-arr.js, which states the rule.
+func rubyRangeStreams(name string) bool {
+	switch name {
+	case "each", "each_with_index", "each_with_object", "find", "detect", "find_index", "any?", "all?", "none?":
+		return true
+	case "drop_while", "uniq", "chunk_while", "slice_when":
+		return false
+	}
+	return rubyLazyOp(name) != ""
+}
+
 // rubySliceEnum is the Enumerator of a blockless each_slice(n) / each_cons(n) on
 // t, desc its #inspect. Twin of the arm in rbLazyMethod / rbRangeMethod.
 func rubySliceEnum(t *jsObject, name string, n int, lazy bool, desc string) *jsObject {

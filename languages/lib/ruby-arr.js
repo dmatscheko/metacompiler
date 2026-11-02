@@ -242,6 +242,16 @@ function rbaSliceOp(name) {
     return ""
 }
 
+// The block methods of an Integer range without an end that MRI answers one
+// element at a time, so a break, a hit or a take_while stop can end them: they
+// run on the Enumerator #lazy walks. Go twin: rubyRangeStreams in
+// abnf/jsrtrubystr.go.
+function rbaRangeStreams(name) {
+    return name == "each" || name == "each_with_index" || name == "each_with_object" || name == "find"
+        || name == "detect" || name == "find_index" || name == "any?" || name == "all?" || name == "none?"
+        || (rbaLazyOp(name) != "" && name != "drop_while" && name != "uniq" && name != "chunk_while" && name != "slice_when")
+}
+
 // Array#insert's splice position on an array of n (rb_ary_insert): -1 is the end
 // and another negative one counts from after the last element. -1 when it lies
 // before the start, which is IndexError "index POS too small for array; minimum:
