@@ -116,10 +116,47 @@ s156() {
   e=$( (s156q=(1); s156d 's156q[2]'; s156e 's156q[2]'; s156f) 2>&1)
   check cnp3 "$(s156s "$e")" 'a 0;declare -n w="s156q[2]";declare -a s156q=([0]="1");b 0;declare -a s156q=([0]="1");c 0;declare -a s156q=([0]="1");'
 }
+# ===== SECTION 157: declarations, readonly and run-time stores through a computed nameref =====
+# A readonly given through a function's computed nameref holds for stores by the variable's
+# own name and for eval's and arithmetic's run-time stores; export and readonly refuse a
+# nameref to NAME[SUB] as an identifier and store through it, other declarations outside a
+# function give their attributes to the array; a function's `local -n w=''` still makes w a
+# plain local. Every expected value is bash 5.3's.
+s157() {
+  local e
+  s157s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; case $l in "warning: w: circular name reference") l=c ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s157a() { local -n w=$1; readonly w; }
+  e=$( (s157x=4; s157a s157x; s157x=5; echo "a $? $s157x") 2>&1; (s157x=4; s157a s157x; (( s157x = 6 )); echo "b $? $s157x") 2>&1)
+  check crn1 "$(s157s "$e")" 's157x: readonly variable;s157x: readonly variable;b 1 4;'
+  s157b() { local -n w=w; w=q declare -p w; }
+  s157c() { local -n w=$1; w=q declare -p w; declare -p w; }
+  e=$( (s157b) 2>&1; s157q=(1 2); s157c 's157q[1]' 2>&1)
+  check crn2 "$(s157s "$e")" 'local: warning: w: circular name reference;c;c;declare -x w="q";declare -x w="q";declare -n w="s157q[1]";'
+  s157d() { local -n w=$1; declare -r w; declare -p w; }
+  s157e() { local -n w=$1; readonly w; export w=5; echo "d $?"; declare -p w s157q; }
+  s157f() { local -n w=$1; declare -rx w=3; declare -p s157y; }
+  e=$( (s157q=(1 2 3); s157d 's157q[2]'; s157e 's157q[2]') 2>&1; (s157y=1; s157f s157y; declare -p s157y) 2>&1)
+  check crn3 "$(s157s "$e")" 'declare -n w="s157q[2]";readonly: `s157q[2]'"'"': not a valid identifier;export: `s157q[2]'"'"': not a valid identifier;d 0;declare -n w="s157q[2]";declare -a s157q=([0]="1" [1]="2" [2]="5");declare -rx s157y="3";declare -- s157y="1";'
+  e=$( (s157q=(1 2 3); declare -g -n r='s157q[2]'; export r=5; declare -g -i r=2+3; declare -g -u r; declare -p s157q r) 2>&1; (s157q=(1 2 3); declare -g -n r='s157q[2]'; declare -g -r r=4; echo "e $?"; declare -p s157q) 2>&1)
+  check crn4 "$(s157s "$e")" 'export: `s157q[2]'"'"': not a valid identifier;declare -aiu s157q=([0]="1" [1]="2" [2]="5");declare -n r="s157q[2]";s157q: readonly variable;e 0;declare -ar s157q=([0]="1" [1]="2" [2]="3");'
+  e=$( (s='s157y'; declare -g -n r=$s; declare -g -i r=2+3; readonly r; declare -p r s157y) 2>&1)
+  check crn5 "$(s157s "$e")" 'declare -n r="s157y";declare -ir s157y="5";'
+  s157i() { local -n w=$1; declare -r w; declare -p w s157y; }
+  e=$( (s157y=1; s157i s157y) 2>&1)
+  check crn8 "$(s157s "$e")" 'declare -n w="s157y";declare -r s157y;'
+  s157j() { local -n w=$1; eval "$2"; echo "f $?"; }
+  s157g() { local -n w=$1; (( $2 )); echo "g $? $s157z"; }
+  e=$( (readonly s157z=1; s157j s157z 'w=8') 2>&1; (readonly s157z=1; s157g s157z 'w = 9') 2>&1; (s157a s157y; s='s157y=7'; eval "$s"; echo no) 2>&1)
+  check crn6 "$(s157s "$e")" 's157z: readonly variable;s157z: readonly variable;g 1 1;s157y: readonly variable;'
+  s157h() { local -n w=''; echo "h $?"; declare -p w; w=5; }
+  e=$( (s157h; echo "${w-unset}") 2>&1)
+  check crn7 "$(s157s "$e")" 'local: `'"'"': not a valid identifier;h 1;declare -- w;unset;'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
 s155  # SECTION-CALL 155
 s156  # SECTION-CALL 156
+s157  # SECTION-CALL 157
 echo "full: $checks checks, $fails failures"
 exit $fails

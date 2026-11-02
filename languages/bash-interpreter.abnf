@@ -3566,6 +3566,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var tg = refTarget(names[k])
                 // A function's declaration of its own nameref to an element does nothing.
                 if (tg.indexOf("[") > 0 && localizes()) { return }
+                // export and readonly refuse the element as a name, status 0, and a value
+                // is still stored through the nameref, taking no attribute (bash 5.3).
+                if (tg.indexOf("[") > 0 && (kw == "export" || kw == "readonly") && flags.split("-").join("") == "" && plus == "" && (asgs[k] == null || asgs[k].lit == null)) {
+                    diagErr(kw + ": `" + tg + "': not a valid identifier\n")
+                    if (asgs[k] != null) { runAssignV(asgs[k], false, v, true) }
+                    return
+                }
+                // -r makes the array readonly first, which then refuses the value, bare.
+                if (tg.indexOf("[") > 0 && setRo && asgs[k] != null && asgs[k].lit == null && !attrOn(roVars, tg.slice(0, tg.indexOf("[")))) {
+                    var sv = asgs[k], own0 = names[k]
+                    asgs[k] = null
+                    names[k] = tg.slice(0, tg.indexOf("["))
+                    declOwn = own0
+                    declOneN(k, null)
+                    declOwn = ""
+                    names[k] = own0
+                    asgs[k] = sv
+                    diagErr(tg.slice(0, tg.indexOf("[")) + ": readonly variable\n")
+                    return
+                }
                 if (tg.indexOf("[") > 0) { tg = tg.slice(0, tg.indexOf("[")) }
                 if (tg != "" && tg != names[k]) {
                     var own = names[k]
@@ -3617,6 +3637,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // A value that names no variable is refused, and nothing is declared (bashRefBad).
             var refBad = (isRef && asgs[k] != null && asgs[k].lit == null && asgs[k].idxT == null) ? bashRefBad(kw, v) : ""
+            // A function's local of an empty one is still made, unset and no nameref, under
+            // the other attributes (bash 5.3).
+            if (refBad != "" && v == "" && localizes()) {
+                diagErr(refBad)
+                var ra = asgs[k]
+                asgs[k] = null
+                isRef = false
+                declOneN(k, null)
+                isRef = true
+                asgs[k] = ra
+                roFail = true
+                return
+            }
             if (refBad != "") { diagErr(refBad); roFail = true; return }
             if (isRef) { noRef = noRef + 1 }
             declOneN(k, v)
@@ -7184,15 +7217,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!undo) { storeAttr(nm, v, false); continue }
             if (rawSeen) { v = normBytes(v) }
             // A builtin's binding through a nameref is the variable it names; through a
-            // circular one, after the lookup's warning, it is a plain variable of that name
-            // hiding the nameref while the builtin runs (bash's temporary environment).
+            // circular one, after the lookup's warning, or one naming NAME[SUB], it is a
+            // plain variable of that name hiding the nameref while the builtin runs (bash's
+            // temporary environment).
             var unref = false
             if (!frame && anyRef && noRef == 0 && attrOn(refVars, nm)) {
                 refQuiet = true
                 var pt = refTarget(nm)
                 refQuiet = false
                 if (pt == "") { diagErr("warning: " + nm + ": circular name reference\n"); unref = true }
-                else if (!isElemRef(pt)) { nm = pt }
+                else if (isElemRef(pt)) { unref = true }
+                else { nm = pt }
             }
             if (frame) {
                 // For a FUNCTION the bindings are the call's frame (runPrefixed): what the

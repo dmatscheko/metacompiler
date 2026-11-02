@@ -310,9 +310,13 @@ int rt_push_local(int id);
 int rt_pop_locals(int d);
 int rt_ro_bind(int id);
 int rt_ro_now(int id, int g);
+int rt_ro_reg(char *nm, int *f);
+int rt_ro_name(char *nm);
 int rt_atmark(char *nm, int at);
 int rt_nref_atmark(char *n, int at, int d);
 int rt_nref_roex(char *n, int x);
+int rt_nref_dpre(char *n, int at, int x, int kw, int hasv);
+int rt_nref_dpost(char *n, int at, int x);
 int rt_nref_elemend(char *n);
 int rt_dyn_at(char *nm);
 int rt_dyn_atn(char *n);
@@ -1830,7 +1834,7 @@ long ar_store(char *nm, char *key, long v)
         rt_berr("", rt_strcat(rt_strcat(rt_strcat(ar_pfx(), "`"), nm), "[]'"), "not a valid identifier");
         return v;
     }
-    rt_ar_nset(nm, key, rt_int2str(v), 0, nm);
+    rt_ar_nset(nm, key, rt_int2str(v), rt_ro_name(nm), nm);
     return v;
 }
 
@@ -7077,8 +7081,9 @@ int rt_nref_elemend(char *n)
 
 /* export (x 1) or readonly of a function's nameref n whose target is known only
  * when it runs: the variable its chain ends at takes it, or n itself when it
- * has no value, its chain is circular or ends at NAME[SUB]. Twin of the nameref
- * arm of declOne in bash-interpreter.abnf. */
+ * has no value or its chain is circular. One that ends at NAME[SUB] is refused
+ * as "not a valid identifier", and the status stays 0. Twin of the nameref arm
+ * of declOne in bash-interpreter.abnf. */
 int rt_nref_roex(char *n, int x)
 {
     char *t = n;
@@ -7086,11 +7091,71 @@ int rt_nref_roex(char *n, int x)
         nref_quiet = nref_quiet + 1;
         t = rt_nref_end(n);
         nref_quiet = nref_quiet - 1;
-        if (t == 0 || rt_indbr(t) > 0) t = n;
+        if (t != 0 && rt_indbr(t) > 0) {
+            rt_berr(x != 0 ? "export" : "readonly", rt_strcat(rt_strcat("`", t), "'"), "not a valid identifier");
+            return 0;
+        }
+        if (t == 0) t = n;
     }
     rt_varslot_new(t);
     if (x != 0) return rt_xmark(t, 1);
     return rt_atmark(t, 8);
+}
+
+/* A declaration that makes no local, through the nameref n whose target is
+ * known only when it runs, with the attributes at (rt_atmark's, 8 readonly) and
+ * x (export): the variable its chain ends at takes them, the -i, -u and -l
+ * before the value (hasv) is stored through n, readonly and export after it
+ * (rt_nref_dpost). One that ends at NAME[SUB] gives them all to the array NAME
+ * first, so that its readonly refuses the value, bare and with status 0; export
+ * and readonly (kw 1) refuse it instead as "not a valid identifier" and give
+ * nothing. Answers 0 for a nameref with no value or a circular chain, which the
+ * emitter's other paths take; 1 to store the value and then rt_nref_dpost; 2
+ * to store it alone; 3 when nothing is left to do. Twin of the nameref arm of
+ * declOne in bash-interpreter.abnf. */
+int rt_nref_dpre(char *n, int at, int x, int kw, int hasv)
+{
+    char *t;
+    int i;
+    if (rt_nref_void(n) != 0) return 0;
+    nref_quiet = nref_quiet + 1;
+    t = rt_nref_end(n);
+    nref_quiet = nref_quiet - 1;
+    if (t == 0) return 0;
+    i = rt_indbr(t);
+    if (i <= 0) {
+        rt_varslot_new(t);
+        rt_atmark(t, at & 7);
+        return 1;
+    }
+    if (kw != 0) {
+        rt_nref_roex(n, x);
+        return 2;
+    }
+    t = rt_substr(t, 0, i);
+    if (rt_varslot_new(t) < 0) return 3;
+    if (hasv != 0 && (at & 8) != 0 && (rt_dyn_at(t) & 8) == 0) {
+        rt_atmark(t, at);
+        if (x != 0) rt_xmark(t, 1);
+        rt_berr("", t, "readonly variable");
+        return 3;
+    }
+    rt_atmark(t, at);
+    if (x != 0) rt_xmark(t, 1);
+    return 2;
+}
+
+/* The readonly (at & 8) and export (x) rt_nref_dpre leaves for after the value. */
+int rt_nref_dpost(char *n, int at, int x)
+{
+    char *t;
+    nref_quiet = nref_quiet + 1;
+    t = rt_nref_end(n);
+    nref_quiet = nref_quiet - 1;
+    if (t == 0) return 0;
+    if ((at & 8) != 0) rt_atmark(t, 8);
+    if (x != 0) rt_xmark(t, 1);
+    return 0;
 }
 
 /* ${!REF} of the nameref n: the name its chain ends at, or n's own value when
@@ -8689,6 +8754,46 @@ int rt_ro_now(int id, int g)
     return (rt_arr_marks(varnames[id]) & 64) != 0 ? 1 : 0;
 }
 
+/* The names a declaration anywhere in the program makes readonly, each with its
+ * ro_ flag, registered when the program starts (rt_ro_reg), for the stores
+ * whose names are known only when they run: a computed eval's
+ * (rt_eval_assign) and arithmetic's (ar_store). */
+char **ro_tn;
+int **ro_tf;
+int ro_tc;
+int ro_tcap;
+int rt_ro_reg(char *nm, int *f)
+{
+    if (ro_tc == ro_tcap) {
+        ro_tcap = ro_tcap == 0 ? 16 : ro_tcap * 2;
+        ro_tn = (char **)rt_xgrow("readonly names", (char *)ro_tn, (long)ro_tcap * 8);
+        ro_tf = (int **)rt_xgrow("readonly names", (char *)ro_tf, (long)ro_tcap * 8);
+    }
+    ro_tn[ro_tc] = nm;
+    ro_tf[ro_tc] = f;
+    ro_tc = ro_tc + 1;
+    return 0;
+}
+
+/* 8 when the variable a store to the name nm lands on is readonly as this
+ * runs, else 0: a run-time readonly mark (rt_atmark), or the binding in effect
+ * of a name rt_ro_reg lists (rt_ro_now). */
+int rt_ro_name(char *nm)
+{
+    int k;
+    int id;
+    if (ro_tc == 0 && at_any == 0) return 0;
+    nm = rt_nref_base(nm);
+    if ((rt_dyn_at(nm) & 8) != 0) return 8;
+    for (k = 0; k < ro_tc; k++) {
+        if (rt_streq(ro_tn[k], nm) == 0) continue;
+        id = rt_varslot(nm);
+        if (id < 0) return *ro_tf[k] != 0 ? 8 : 0;
+        return rt_ro_now(id, *ro_tf[k]) != 0 ? 8 : 0;
+    }
+    return 0;
+}
+
 /* Is entry t of the frame starting at depth d one of the call's locals, as
  * `local` lists them: no prefix binding no `local` claimed, nor the frame's
  * first entry of fn, the $FUNCNAME rt_fn_enter saved. */
@@ -9427,8 +9532,8 @@ int rt_nref_unref(char *n)
 
 /* A builtin's prefix binding of v to the nameref n, undone with the command's
  * locals (rt_pop_locals): bash's temporary environment binds the variable n's
- * chain ends at - n itself for one ending at an element - or, through a
- * circular chain, after the lookup's warning, a plain n hiding the nameref. A
+ * chain ends at, or a plain n hiding the nameref for one ending at an element
+ * and, after the lookup's warning, through a circular chain. A
  * readonly variable it lands on (at & 8) keeps its value, naming n. Twin of
  * applyPrefix in bash-interpreter.abnf. */
 int rt_prefix_ref(char *n, char *v, int at)
@@ -9448,7 +9553,7 @@ int rt_prefix_ref(char *n, char *v, int at)
      * become a nameref's value, or a full table): nothing to bind. */
     if (i < 0) return 0;
     rt_push_local(i);
-    if (t == 0) rt_nmark(n, 0);
+    if (t == 0 || rt_indbr(t) > 0) rt_nmark(n, 0);
     t = varnames[i];
     rt_xmark(t, 1);
     gvars[i] = v;
@@ -9813,9 +9918,10 @@ int rt_unset_name(char *n)
  * NAME=VALUE words separated by blanks, `;` and newlines, with comments. A
  * VALUE takes the shell's quoting - '...', "...", backslashes - and stops at
  * the first unquoted blank, `;` or newline; a `#` starting a word starts a
- * comment. Answers 0 when the whole string ran, 1 at the first thing that is
- * not an assignment or would need an expansion ($, a backquote, a leading
- * `~`, an operator), which the emitter reports. */
+ * comment. Answers 0 when the whole string ran or a readonly variable refused
+ * its value (arith_err, rt_ro_name), 1 at the first thing that is not an
+ * assignment or would need an expansion ($, a backquote, a leading `~`, an
+ * operator), which the emitter reports. */
 int rt_eval_assign(char *s)
 {
     int len = rt_strlen(s);
@@ -9825,6 +9931,7 @@ int rt_eval_assign(char *s)
     int o;
     int c;
     char *v;
+    char *nm;
     while (1) {
         while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
         if (s[i] == 0) return 0;
@@ -9883,7 +9990,10 @@ int rt_eval_assign(char *s)
             i = i + 1;
         }
         v[o] = 0;
-        rt_setvar_byname(rt_substr(s, start, vs - 1 - start), v, 0, 0);
+        nm = rt_substr(s, start, vs - 1 - start);
+        /* A readonly variable refuses its value and abandons the line. */
+        rt_setvar_byname(nm, v, 0, rt_ro_name(nm));
+        if (arith_err != 0) return 0;
         while (s[i] == 32 || s[i] == 9) i = i + 1;
         if (s[i] == 59) i = i + 1;
     }
