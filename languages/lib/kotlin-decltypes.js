@@ -1729,7 +1729,11 @@ var ktStrStrFns = {"$uppercase": true, "$lowercase": true, "$trim": true, "$subs
 function ktMethodTy(ty, name, call) {
     var base = ktBaseName(ty)
     if (ty.charAt(ty.length - 1) == "?") { return "" }
-    if (ktClassExt["$" + base] != undefined) { return ktFunRets["$" + name] != undefined ? ktFunRet(name) : "" }
+    if (ktClassExt["$" + base] != undefined) {
+        var own = ktOwnFunRet(base, name)
+        if (own != undefined) { return own }
+        return ktFunRets["$" + name] != undefined ? ktFunRet(name) : ""
+    }
     var args = ktTrimWs(call)
     if (name == "toString" && args == "()") { return "String" }
     if (ktNumConvFns["$" + name] != undefined && args == "()" && (base == "String" || ktNumTy(base) != "")) { return ktNumConvFns["$" + name] }
@@ -1929,7 +1933,10 @@ function ktElemOfTy(ty) {
 // The program's functions by name, for a call's static type: {ty} the written
 // result type, Unit for a block body, or {ex, at} an expression body's text and
 // offset, typed on first use. Declarations of one name that disagree answer "".
+// ktFunDecls keeps every declaration of a name, so a method call on a receiver of a
+// known class takes that class's own declaration (ktMethodTy).
 var ktFunRets = {}
+var ktFunDecls = {}
 function ktNoteFunRet(raw, at) {
     var i = raw.indexOf("fun")
     if (i < 0) { return }
@@ -1966,11 +1973,27 @@ function ktNoteFunRet(raw, at) {
         f.at = at + i + 1
     }
     var old = ktFunRets["$" + name]
-    if (old != undefined && old.pos != at && !(old.ex == "" && f.ex == "" && old.ty == f.ty)) { f = {ty: "", ex: "", at: 0, pos: -1} }
+    var all = ktFunDecls["$" + name]
+    if (all == undefined) { all = []; ktFunDecls["$" + name] = all }
+    var seen = false
+    for (var k = 0; k < all.length; k++) { if (all[k].pos == at) { seen = true } }
+    if (!seen) { all.push(f) }
+    if (old != undefined && old.pos != at && !(old.ex == "" && f.ex == "" && old.ty == f.ty)) {
+        ktFunRets["$" + name] = {ty: "", ex: "", at: 0, pos: -1}
+        return
+    }
     ktFunRets["$" + name] = f
 }
-function ktFunRet(name) {
-    var f = ktFunRets["$" + name]
+function ktFunRet(name) { return ktFunRetTy(ktFunRets["$" + name]) }
+// The result type of the method `name` that class cls itself declares (cls is the
+// innermost class around the declaration), undefined when it declares none.
+function ktOwnFunRet(cls, name) {
+    var l = ktFunDecls["$" + name]
+    if (l == undefined) { return undefined }
+    for (var i = 0; i < l.length; i++) { if (ktClassAt(l[i].pos) == cls) { return ktFunRetTy(l[i]) } }
+    return undefined
+}
+function ktFunRetTy(f) {
     if (f.ex != "") {
         var ex = f.ex
         f.ex = ""

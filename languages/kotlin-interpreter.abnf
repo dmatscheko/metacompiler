@@ -10689,13 +10689,35 @@ NotMemberKw = :script(~~ "pure";
         return undefined
     }
     function registerFun(f) {
-        var cl = makeFunClosure(f)
+        registerFunAs(f, f.name, f.params)
+        var rp = kVarargRefParams(f.params)
+        if (rp != null) { registerFunAs(f, f.name + "$vref", rp) }
+    }
+    function registerFunAs(f, key, params) {
+        var cl = makeFunClosure(f, params)
         // Its arity, which `::f is FunctionN` tests (as makeLambda's). Twin of
         // makeFunStmt in kotlin-to-llvm-ir.abnf.
-        if (f.params.length > 0) { cl = fnMetaSet(cl, "", f.params.length) }
+        if (params.length > 0) { cl = fnMetaSet(cl, "", params.length) }
         fnRefFns.push(cl)
         fnRefNames.push(f.name)
-        globalScope[f.name] = cl
+        globalScope[key] = cl
+    }
+    // A reference to a function with a vararg parameter is a KFunction whose
+    // parameter IS the array: `val r = ::f; r(intArrayOf(1, 2))` binds xs to that
+    // array, and the parameters after it are positional. So such a function also
+    // binds, under name$vref, a closure over this parameter list - the vararg one
+    // made plain - which `::name` (makeBareRef) answers. null when there is no vararg.
+    // Twin of makeFunStmt in kotlin-to-llvm-ir.abnf.
+    function kVarargRefParams(params) {
+        var out = null
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (typeof p != "string" && p.vararg) {
+                if (out == null) { out = params.slice(0) }
+                out[i] = {pname: p.pname, def: p.def, vararg: false, ty: ""}
+            }
+        }
+        return out
     }
     // The index operator's argument list. Kotlin's `a[i, j]` is `get(i, j)` and
     // `a[i, j] = v` is `set(i, j, v)`: a wider list evaluates to a {__kmidx} key,
@@ -10747,20 +10769,25 @@ NotMemberKw = :script(~~ "pure";
     // a lambda, so it sees the enclosing locals; the name is declared before the body
     // captures it, so it can recurse. `this` stays whatever the enclosing scope holds.
     function makeLocalFunStmt(f) {
+        var rp = kVarargRefParams(f.params)
         return function() {
             var captured = scopes.slice(0)
-            declVar(f.name, function() {
-                var base = captured.slice(0)
-                base.push({})
-                return kRetAdopt(f, runFrame(base, undefined, false, f.params, arguments, 0, f.body))
-            })
+            declVar(f.name, makeLocalFunClosure(f, f.params, captured))
+            if (rp != null) { declVar(f.name + "$vref", makeLocalFunClosure(f, rp, captured)) }
         }
     }
-    function makeFunClosure(f) {
+    function makeLocalFunClosure(f, params, captured) {
+        return function() {
+            var base = captured.slice(0)
+            base.push({})
+            return kRetAdopt(f, runFrame(base, undefined, false, params, arguments, 0, f.body))
+        }
+    }
+    function makeFunClosure(f, params) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return kRetAdopt(f, invokeBody(f.params, f.body, undefined, "this", args))
+            return kRetAdopt(f, invokeBody(params, f.body, undefined, "this", args))
         }
     }
     function makeMethodClosure(f) {
@@ -12493,6 +12520,8 @@ NotMemberKw = :script(~~ "pure";
                     if (topVal || typeof raw != "function" && !(raw !== null && typeof raw == "object" && raw.__isclass === true)) {
                         return propRefOf(kVarHolder(sc[i], name), name)
                     }
+                    // A function with a vararg parameter (kVarargRefParams).
+                    if (ho.call(sc[i], name + "$vref")) { return sc[i][name + "$vref"] }
                     return kCtorRefOf(vr())
                 }
             }

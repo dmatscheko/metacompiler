@@ -7023,11 +7023,17 @@ fun s159() {
 // arguments is inferred from the argument's static type, also in a call nested in
 // another reified function's body. An anonymous object's KClass has a null
 // simpleName and qualifiedName, its java class the simpleName "" (kotlinc 2.2.21 on
-// java 24).
+// java 24). A method's result type is its receiver's class's own declaration, also
+// where another class declares a method of the name with another result type.
 class Q160(val v: Int) {
     val n = 5
     fun m(): Int = v
     fun own() = this.v.javaClass.name
+    fun k(x: Int): Long = x.toLong()
+}
+class R160 {
+    fun m(): List<Int> = listOf(1)
+    fun k(x: Int): Any = x
 }
 interface S160
 fun f160(): Int = 3
@@ -7074,6 +7080,10 @@ fun s160() {
     val o = object : S160 {}
     check("anon160g", o::class.simpleName == null && o::class.qualifiedName == null && o.javaClass.simpleName == "" &&
         o::class.java.simpleName == "")
+    val r = R160()
+    check("jstat160h", q.m().javaClass.name == "int" && Q160(3).m().javaClass.name == "int" &&
+        q.k(2).javaClass.name == "long" && r.k(2).javaClass.name == "java.lang.Integer" &&
+        r.m().javaClass.simpleName == "SingletonList")
 }
 
 // ===== SECTION 161: reified calls of functions declared later =====
@@ -8230,6 +8240,29 @@ fun s184() {
         (oi::f is Function1<*, *>) && !(oi::f is Function2<*, *, *>) && (oi::f)(4) == 8 && Q184().f(1, 2) == 1)
 }
 
+// ===== SECTION 185: references to vararg functions =====
+// A reference to a function with a vararg parameter is a KFunction whose parameter
+// is the array itself: the call binds that array (the callee sees the caller's
+// array), and the parameters after a vararg that is not the last are positional.
+fun fx185(vararg xs: Int) = xs.sum()
+fun fs185(vararg ss: String) = ss.joinToString("|")
+fun fp185(p: String, vararg xs: Int) = p + xs.size + xs.sum()
+fun fw185(vararg xs: Int): Int { xs[0] = 99; return xs.size }
+
+fun s185() {
+    val r = ::fx185
+    val q = ::fd184
+    val s = ::fs185
+    check("vref185a", r(intArrayOf(1, 2)) == 3 && q(intArrayOf(9, 8), "R") == "9,8R" && q.invoke(intArrayOf(7), "Z") == "7Z" &&
+        s(arrayOf("a", "b")) == "a|b" && (::fp185)("x", intArrayOf(3, 4, 5)) == "x312" && fx185(1, 2, 3) == 6 &&
+        listOf(intArrayOf(1, 2), intArrayOf(3)).map(::fx185) == listOf(3, 3) && ::fx185.name == "fx185")
+    fun loc(vararg xs: Int) = xs.size * 10
+    val a = intArrayOf(1, 2)
+    val w = ::fw185
+    check("vref185b", (::loc)(intArrayOf(4, 5, 6)) == 30 && loc(1, 2) == 20 && w(a) == 2 && a[0] == 99 &&
+        listOf(intArrayOf(1), intArrayOf(1, 2, 3)).map(::loc) == listOf(10, 30))
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8412,6 +8445,7 @@ fun main() {
     s182() // SECTION-CALL 182
     s183() // SECTION-CALL 183
     s184() // SECTION-CALL 184
+    s185() // SECTION-CALL 185
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

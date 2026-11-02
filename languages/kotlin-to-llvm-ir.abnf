@@ -6994,18 +6994,42 @@ KwContract  = "contract" KwEnd ;
     function makeFunStmt(f, top) {
         funNames["$" + f.name] = true
         if (top) { topFunNames["$" + f.name] = true; topDeclList.push(f.name) }
+        var va = f.sig.varargAt >= 0 && f.sig.vlate != true
+        if (!va) { plainFunNames["$" + f.name] = true }
         return function(b) {
-            var idx = emitFunc(f.params, f.body, false, false, f.sig)
-            defPos(b, f.pos)
-            var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
-            // A top-level function records its arity, which `::f is FunctionN` tests
-            // (as makeLambda's). Twin of registerFun in kotlin-interpreter.abnf.
-            if (top && f.params.length > 0) {
-                cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, f.params.length)])
+            b = emitFunDecl(b, f, top, f.name, f.sig)
+            // A reference to a function whose LAST parameter is a vararg is a
+            // KFunction whose parameter IS the array, which is the binding a late
+            // vararg's signature (vlate) already makes: so a referenced one is also
+            // emitted with that signature, under name$vref, and `::name` answers it
+            // (vrefName). Twin of kVarargRefParams in kotlin-interpreter.abnf.
+            if (va && bareRefNames["$" + f.name] == true && plainFunNames["$" + f.name] != true) {
+                var s = f.sig
+                b = emitFunDecl(b, f, top, f.name + "$vref",
+                                {params: s.params, defs: s.defs, tys: s.tys, varargAt: s.varargAt, vlate: true, rty: s.rty})
             }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name), cloV])
             return b
         }
+    }
+    function emitFunDecl(b, f, top, key, sig) {
+        var idx = emitFunc(f.params, f.body, false, false, sig)
+        defPos(b, f.pos)
+        var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
+        // A top-level function records its arity, which `::f is FunctionN` tests
+        // (as makeLambda's). Twin of registerFun in kotlin-interpreter.abnf.
+        if (top && f.params.length > 0) {
+            cloV = callExt(b, "js_jsfnmeta", [cloV, emitStr(b, ""), emitNum(b, f.params.length)])
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, key), cloV])
+        return b
+    }
+    // The names a bare `::name` spells, and the names some function without a
+    // trailing vararg declares: `::name` answers name$vref only for a name every
+    // declaration of which has one.
+    var bareRefNames = {}
+    var plainFunNames = {}
+    function vrefName(name) {
+        return bareRefNames["$" + name] == true && plainFunNames["$" + name] != true && funNames["$" + name] == true
     }
     // A top-level extension function: an IR function with the receiver in the
     // instance slot (isInstance binds args[0] to `this`), declared as "ext$name" and
@@ -8610,7 +8634,12 @@ KwContract  = "contract" KwEnd ;
     // reference. All three decisions are made by js_ktbareref, the twin of makeBareRef /
     // kCtorRefOf in kotlin-interpreter.abnf, so the two halves cannot drift apart.
     function makeBareRef(name) {
+        bareRefNames["$" + name] = true
         return function(b) {
+            if (vrefName(name)) {
+                var fv = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name + "$vref")])
+                return {b: b, v: callExt(b, "js_ktnameval", [fv, emitStr(b, name)])}
+            }
             var rv = b.NewCall(rtBareRef(), [curScopeV, emitStr(b, name), bareRefProp(name)])
             // A constructor reference takes the primary constructor's parameters.
             if (ktClassKind(name) == 1) {
