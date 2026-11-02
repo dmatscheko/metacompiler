@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1174 kotlin: javaClass of a range's Long bound · P3 · KT · OPEN [V]
+### T-1174 kotlin: javaClass of a range's Long bound · P3 · KT · IN PROGRESS (KT worker, round 58) [V]
 Found while closing T-1171; oracle kotlinc 2.2.21.
 - `(1L..4L).last.javaClass` prints "class java.lang.Long" in the interpreter; kotlinc prints "long" (`longArrayOf(5L)[0].javaClass` is already right). Check run and native too, and the same for `.first`, `IntRange.first/last` ("int"), `CharRange.first` ("char"), `LongProgression.step`, and `.javaClass.name`. Static result types of range/progression members are the likely gap (kotlin-decltypes.js).
 
