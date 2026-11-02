@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1152** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1153** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -147,16 +147,17 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1150 bash: compiler nameref attribute placement, circular-vs-depth message, compile-time readonly leaking out of subshells and dynamic calls · P3 · SH · IN PROGRESS (SH worker, round 47) [V]
-
-Found while working T-1146. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-
-1. Compiler: a non-circular nameref with an unknown target takes -i/-u/-l itself. bash gives `declare -n w="x"`, with -i landing on x; we give `declare -in w="x"`. This is a lexical attribute limit: decide at run time whether the target resolves.
-2. Both engines: an assignment `w=(q)` or `w=q` through a circular local nameref whose global is readonly prints "maximum nameref depth (8) exceeded" where bash prints "circular name reference". Check the exact message sequence with the oracle.
-3. Compiler: a compile-time readonly made by a function that runs inside a subshell leaks into code after the subshell. Later functions see "readonly variable", and `declare -p` shows -r. A subshell must restore the readonly state, as it does for the run-time flags.
-4. Compiler: a readonly set by a dynamically called function sets roFlag, and nothing clears it when that function returns. Check whether a `local` that the function then makes readonly is undone correctly when it returns (bash: the readonly dies with the local).
-
-Verify with `tests/probe.sh bash` on all four legs, and diff the `.err` files. New sections go in tests/bash-test-full.7.sh.
+### T-1152 bash: circular/computed nameref stores, readonly and attribute leftovers · P3 · SH · OPEN [V]
+Found while closing T-1150; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Both engines' compiler leg: `t() { local -n v=v; (( v = 3 )); echo "in $v"; }; readonly v=9; t` — oracle and interpreter print `local: warning: v: circular name reference`, `local: v: readonly variable`, `v: readonly variable`, `in 9`; run/native miss the arithmetic-store refusal and print `in 3` (pre-existing on main).
+- Compiler: readonly through a circular or computed nameref is not refused for the prefix assignment `w=q echo`, `read -a`, `mapfile`, `for w in`, or `eval 'w=q'`.
+- Compiler: `local -n w=$1; readonly w` (or `export w`) acts on the nameref instead of the target (circular and non-circular).
+- Both engines: `${w[1]:=q}` through a circular nameref misses two warnings and does not adopt the global scalar as element 0; the compiler also does not refuse it when the global is readonly; `${w[@]:=q}` gives no "bad array subscript".
+- Compiler: `w3[1]=q` through a circular nameref with global `w3=g` loses g as element 0 (oracle `([0]="g" [1]="q")`).
+- Interpreter: prefix assignment `w6=q echo x` through a circular nameref prints an extra warning and sets the nameref's value to "g".
+- Interpreter: array assignment through a nameref to a readonly non-circular target names the target; the oracle names the nameref (`w: readonly variable`).
+- Both engines: `local -i w=3` through a nameref to `arr[2]` — oracle sets nothing, status 0, `declare -p arr` not found.
+- Compiler lexical limits to record or lift: a direct by-name store after a computed nameref's -i/-u/-l; a readonly inside an untaken branch.
 
 # C — C subset
 
@@ -1212,6 +1213,7 @@ T-1145 ruby: uncaught-exception report via $stderr, (1..).take, big Integer#step
 T-1147 kotlin: non-last vararg parameters, same-named nested class/object across owners (compiled), nested-object bound-ref arity (interp) — merged 2900b17f: non-last vararg parameters (caller packs the vararg slot, named args + trailing lambda placed after it, source-order evaluation kept; callee skips rest-collection) in both engines, nested class/object same simple name resolved by binary name in compiled code, nested-object method arity under goja (kNestedRec keeps the original value); 4-leg probe matches kotlinc 2.2.21; kotlin gates + gen-all green; bench IR byte-identical to base
 T-1146 bash: declaration message ordering and redirects, local -r/-a merges, readonly of circular nameref, warning counts, valueless -g nameref subscript, compiler lexical-readonly limits — merged 1efac3fd: declaration message order across literal operands, redirect hides only the builtin message, readonly local + -a/-A merges, readonly of circular local nameref on the global, local w=w warning count, -g subscript store on valueless local nameref, compiler readonly-by-later-code via per-call noLocal + run-time check, run-time-circular local -i attrs, line numbers of functions defined in $( ) (bash-lines.js); 4-leg probe matches bash 5.3 stdout + stderr incl. comsub line numbers; bash gates green; bench -0.02%
 T-1149 kotlin: function reference to a vararg function called with an array, interpreter by-name static return type — merged 4fa25278: vararg function references bind the array directly ($vref twin with the vararg as a plain parameter, top-level and local, in both engines), method result static types from the receiver class's own declaration (ktFunDecls/ktOwnFunRet) with name fallback; 4-leg probe matches kotlinc 2.2.21 (array identity defect found and filed P2); kotlin gates green; bench IR byte-identical
+T-1150 bash: compiler nameref attribute placement, circular-vs-depth message, compile-time readonly leaking out of subshells and dynamic calls — merged acfdc0f7: function readonly lifetime, circular-nameref readonly warnings, -i/-u/-l through computed namerefs; master four-leg probes match bash 5.3 except a pre-existing arithmetic-store case (filed)
 
 # Settled — do not re-open
 
