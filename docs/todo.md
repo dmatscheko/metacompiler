@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1153** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1154** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,19 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.size, Object instance methods + top-level define_method, uncaught-exception backtrace "from" lines · P3 · RB · IN PROGRESS (RB worker, round 63) [V]
-
-Found while working T-1145. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8. All engines are affected.
-
-1. `Kernel#then` and its alias `yield_self` are missing: `1.then { |x| x + 1 }` raises NoMethodError. MRI 2.6 has both (`1.respond_to?(:then)` is true). Without a block they return an Enumerator whose size is nil (check with the oracle).
-2. `(1..3).take("x")` and `(1..).take("x")` raise TypeError "no implicit conversion of String into Integer" in MRI. Ours answer `[]`. Check Array#take, first and drop with the same arguments.
-3. `(2**70).times.size` is 1180591620717411303424 in MRI; ours give Infinity, because the stream's size cannot hold a big bound.
-4. Object instance methods: `class Object; def zz; 1; end; end` followed by `zz` or `3.zz` defines public Object methods in MRI. Ours raise NoMethodError or NameError. The same applies to a top-level `x = define_method(:dm) { … }`, which returns `:dm` in MRI. This is a larger feature; plan the method-lookup fallback so it adds nothing to the dispatch hot path.
-5. The uncaught-exception report has no backtrace "from" lines. MRI writes "\tfrom file:N:in `meth'\n" for each outer frame. Only do this if the frames can be recovered without a cost on every call (for example from the existing site of the frame's entry). Otherwise record it as a limit in the code.
-
-Not to do: `warn uplevel: N` (N >= 2) inside a method needs per-call site tracking, and the rescue-clause uplevel line is an MRI 2.6 line-table artifact. Both are recorded as limits.
-
-Verify with `tests/probe.sh ruby` on all four legs, and diff the `.err` files.
+### T-1153 ruby: big-Integer ranges, NaN vs bignum, Object-method self, float counts · P3 · RB · OPEN [V]
+Found while closing T-1148; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6.
+- `upto`/`downto`/`step` with a big-Integer bound hang instead of iterating or returning an Enumerator with the exact size.
+- Comparisons of Float::NAN against a big Integer (`<`, `<=>`, `==`) disagree with MRI.
+- Interpreter: a method a program adds to `Object` sees the wrong self on nil — `class Object; def greet; "hi #{self.class}"; end; end; p nil.greet` prints `"hi Object"`; MRI and the compiler print `"hi NilClass"`.
+- `first(n)` with a huge n on a lazy enumerator loops instead of finishing.
+- Interpreter: `"abc" * 2.9` gives `"abcabcabc"`; MRI truncates the count like NUM2LONG (`"abcabc"`). The compiler already agrees; check the other interpreter count-arg sites the same way.
 
 # JS — JavaScript and TypeScript
 
@@ -1214,6 +1208,7 @@ T-1147 kotlin: non-last vararg parameters, same-named nested class/object across
 T-1146 bash: declaration message ordering and redirects, local -r/-a merges, readonly of circular nameref, warning counts, valueless -g nameref subscript, compiler lexical-readonly limits — merged 1efac3fd: declaration message order across literal operands, redirect hides only the builtin message, readonly local + -a/-A merges, readonly of circular local nameref on the global, local w=w warning count, -g subscript store on valueless local nameref, compiler readonly-by-later-code via per-call noLocal + run-time check, run-time-circular local -i attrs, line numbers of functions defined in $( ) (bash-lines.js); 4-leg probe matches bash 5.3 stdout + stderr incl. comsub line numbers; bash gates green; bench -0.02%
 T-1149 kotlin: function reference to a vararg function called with an array, interpreter by-name static return type — merged 4fa25278: vararg function references bind the array directly ($vref twin with the vararg as a plain parameter, top-level and local, in both engines), method result static types from the receiver class's own declaration (ktFunDecls/ktOwnFunRet) with name fallback; 4-leg probe matches kotlinc 2.2.21 (array identity defect found and filed P2); kotlin gates green; bench IR byte-identical
 T-1150 bash: compiler nameref attribute placement, circular-vs-depth message, compile-time readonly leaking out of subshells and dynamic calls — merged acfdc0f7: function readonly lifetime, circular-nameref readonly warnings, -i/-u/-l through computed namerefs; master four-leg probes match bash 5.3 except a pre-existing arithmetic-store case (filed)
+T-1148 ruby: Kernel#then/yield_self, take with non-Integer, big Integer#times.size, Object instance methods + top-level define_method, uncaught-exception backtrace "from" lines — merged 45589482: Kernel#then, NUM2LONG count args, exact big times.size, program methods on Object; master probes match ruby 2.6 in run/native, interp gaps pre-existing (filed)
 
 # Settled — do not re-open
 
