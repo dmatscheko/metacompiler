@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1139** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1140** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -146,21 +146,23 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, other stores to circular array nameref, valueless readonly nameref stores, nested brackets in computed decl operands · P3 · SH · IN PROGRESS (SH worker, round 43) [V]
+### T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list assignment parse, quoted compound values, reads through circular array nameref, path-length-dependent frozen step cost · P3 · SH · OPEN [V]
 
-Found while working T-1131. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+Found while working T-1134. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
-1. `NAME[SUB]=(list)`, in all engines. Bash prints `e[1]: cannot assign list to array member` and abandons the line. As a plain assignment it declares nothing. Under declare, local, export or readonly, NAME is left as `declare -a e`. We assign element 0 = x and continue.
-2. export/readonly through a function's circular local nameref, as in `f(){ local -n w9=w9; export w9=q; }`. Bash prints a "circular" warning, `maximum nameref depth (8) exceeded`, another "circular" warning, and then creates a global `declare -x w9="q"`. readonly gives `-r` the same way. A bare `export w12` gives the global `-x` after two "circular" warnings. Our interpreter abandons the line, so the function's later output is lost. Our compiler puts `-x` on the local nameref (`declare -nx`) instead of on the global.
-3. Other stores to a circular array nameref (`local -n w=w; declare w=(x y)`). Bash leaves the array unchanged for `(( w = 5 ))`, `w[1]=q` and `w+=(p)`. All our engines change it. `${w:=dd}` changes it in the interpreter only.
-4. Valueless readonly nameref, in all engines.
-   - `declare -nr r6; r6=5`: bash says ``r6: `5': not a valid identifier``; we say `r6: readonly variable`. Check the exact text with the oracle.
-   - `(( r10 = 3 ))`: bash says ``((: `3': not a valid identifier`` with status 0; we say readonly, with status 1.
-5. Nested brackets in a computed declaration operand (interpreter, and rt_decl_word in bash-rt.c). `k='c6[x y]'; declare -n c10["$k"]` gives `c10[c6[x y]]: reference variable cannot be an array` in bash; the interpreter reports "not a valid identifier". `declare 'c10[a[1]]=x'` is refused as well. The cause is that bashDeclOperand and rt_decl_word stop at the first `]`.
+1. A list-to-array-member line whose internal declaration fails (`declare -A ia[k]=(x)` on an indexed ia) should print a bare `ia: cannot convert…` message; ours keeps the `declare: ` prefix. Inside a function, bash reports twice and continues.
+2. `declare r[1]=(x)` on a global nameref to an unset variable should turn the nameref itself into an array; ours turns its target into one.
+3. The prefix assignment `x=1 e[2]=(y) echo hi` fails to parse. bash prints ``e[2]': not a valid identifier`` and runs the command.
+4. Quoted compound values: `declare 'w[1]=(x)'` should warn "quoted compound array assignment deprecated". Under -a/-A, a run-time value `(x y)` should be treated as a compound assignment; we store it literally.
+5. Reads through a circular array nameref (`${w:=dd}`, `$w`) should fail with "invalid variable name for name reference" and abandon the line. Ours reads elements, and the interpreter (`[]`) and the compiler (`[x]`) disagree with each other.
+6. In the compiler, `local w=(q)` on a circular nameref drops the -n attribute.
+7. A failed `${NAME:=WORD}` store gives status 2 in bash 5.3, even for an ordinary readonly variable; ours gives 1.
+8. `declare q[1]=3` and `read -a q` on a nameref with no value should warn "removing nameref attribute" and turn q into an array; ours keeps -n.
+9. Performance: the bash interpreter's frozen step cost for a full-syntax test file grows strongly with the length of the file's path. Part 6 needed 11M steps at a short relative path, 81M at test.sh's work path, and about 140M at a scratchpad path. The suspect is the per-section stderr helpers (`${l#*: line }`) scanning lines that start with the script path, which is a pattern-removal cost that is quadratic or worse in the line length. Measure with a long path, find where the steps go, and make `${var#pattern}` / `${var%pattern}` with a leading or trailing `*` linear when the rest of the pattern is a literal. This is a fix to the algorithm, not an optimizer pass. Test parts 5–7 then gain real headroom.
 
-Note: `test -nt/-ot/-ef` between two *existing different* files answers false by design, because there is no file-time model.
+Not to be emulated: in bash, after a scalar store to an array nameref, a later `declare w+=(z)` silently does nothing, and `for w in a` on one segfaults bash.
 
-Verify with `tests/probe.sh bash` on all four legs, and diff the `.err` files.
+Verify with `tests/probe.sh bash` on all four legs, and diff the `.err` files. New sections go in tests/bash-test-full.7.sh.
 
 # C — C subset
 
@@ -1203,6 +1205,7 @@ T-1132 ruby: take_while.first/next, String/Float range lazy sizes, Proc/Method#m
 T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level lateinit isInitialized, ::f for a lambda-holding val — merged da2fe104: array class = least common supertype of the elements (class/interface/enum/exception/library graphs), kotlin.* and lambda FunctionN element classes, compiled top-level lateinit isInitialized, ::f for a lambda-holding val is a property ref, Box::name prints property, array simpleName; static-typing residues documented; 4-leg probe matches kotlinc 2.2.21; kotlin gates green; bench +0.03% (under the 1.05% noise floor)
 T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index, Float-range eager enumerator sizes, endless Range#size — merged e9110a33: -@/+@/~ by name (send/method), Integer << >> ~ in respond/arity tables, Hash#index with deprecation warning (compiled via js_rhidxwarn at .index sites), Float-range eager enumerators with sizes, Range#size per MRI range_size separated from the for-in trip count (endless -> Infinity, non-numeric -> nil); 4-leg probe matches ruby 2.6 stdout + stderr except the multi-line call-site line (filed); matrix 605/605; bench +0.04%
 T-1136 kotlin: uninitialized top-level lateinit read, lambda `is FunctionN`, lambda javaClass.name, array ::class — merged b2479ff9: uninitialized lateinit reads throw (top-level/local/template; check only at lateinit reads when null, js_ktlatechk), stray top-level lateinit flag no longer leaks onto the next class property, lambda/function arity for is FunctionN (implicit it, receivers, !is, when), null is List<*>? true, lambda javaClass.name relation, array ::class names; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench +0.03%
+T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, other stores to circular array nameref, valueless readonly nameref stores, nested brackets in computed decl operands — merged c92fc735: NAME[SUB]=(list) abandons the line (declares array under declare/local/export/readonly), export/readonly through circular local nameref act on the global with bash's warnings, stores to circular array nameref leave it alone, value-before-readonly check for valueless readonly namerefs, nested-bracket subscripts in declaration operands; full-syntax ratchet split into 7 parts (part 5 was pushed over the brake); 4-leg probe + stderr match bash 5.3; matrix 605/605; bench -0.04%
 
 # Settled — do not re-open
 
