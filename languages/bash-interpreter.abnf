@@ -7802,8 +7802,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return 1
     }
     var testNumOps = {"-eq": "==", "-ne": "!=", "-lt": "<", "-le": "<=", "-gt": ">", "-ge": ">="}
+    // An operand of test's -eq ... -ge, which takes bash's legal_number, not arithmetic:
+    // white space, one optional sign, decimal digits that fit an intmax_t, white space.
+    // Anything else is "integer expected", reported once, and tst.err makes the test
+    // command's status 2. Twin of rt_test_int in bash-rt.c.
+    var tst = {who: "test", err: false}
+    function isCSpace(c) { return c == 32 || (c >= 9 && c <= 13) }
+    function testInt(s) {
+        var i = 0, j = s.length
+        while (i < j && isCSpace(s.charCodeAt(i))) { i = i + 1 }
+        while (j > i && isCSpace(s.charCodeAt(j - 1))) { j = j - 1 }
+        var d = (i < j && (s.charAt(i) == "-" || s.charAt(i) == "+")) ? i + 1 : i
+        var k = d
+        while (k < j && s.charCodeAt(k) >= 48 && s.charCodeAt(k) <= 57) { k = k + 1 }
+        var z = d
+        while (z < j - 1 && s.charAt(z) == "0") { z = z + 1 }
+        var lim = (s.charAt(i) == "-") ? "9223372036854775808" : "9223372036854775807"
+        var ds = s.slice(z, j)
+        if (k == d || k < j || ds.length > 19 || (ds.length == 19 && ds > lim)) {
+            if (!tst.err) { diagErr(tst.who + ": " + s + ": integer expected\n") }
+            tst.err = true
+            return 0
+        }
+        return arStr(s.slice(i, j))
+    }
     function testBinary(l, op, r) {
-        if (hasOwn(testNumOps, op)) { return arIsZero(arOp(testNumOps[op], arStr(l), arStr(r))) ? 1 : 0 }
+        if (hasOwn(testNumOps, op)) { return arIsZero(arOp(testNumOps[op], testInt(l), testInt(r))) ? 1 : 0 }
         if (op == "=" || op == "==") { return (l == r) ? 0 : 1 }
         if (op == "!=") { return (l != r) ? 0 : 1 }
         if (op == "<") { return (l < r) ? 0 : 1 }
@@ -7859,7 +7883,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a.length == 0) { return 1 }
         if (a.length == 1) { return (a[0] != "") ? 0 : 1 }
         var st = {i: 0}
-        return tstOr(a, st)
+        tst.who = cmd
+        tst.err = false
+        var r = tstOr(a, st)
+        return tst.err ? 2 : r
     }
 
     // Dispatch a command by its (already expanded) name. Returns an int status, or {ret: n}

@@ -131,10 +131,10 @@ trap 'guard_reap; rm -rf "$OUT"' EXIT
 #   go, bash, under the IR interpreter's step brake): tests/<lang>-test-full.<ext>,
 #   ruby     tests/<lang>-test-full.2.<ext> and tests/<lang>-test-full.3.<ext>, the
 #            kinds `full`, `full.2` and `full.3`; go, bash and python also have
-#            full.4, bash and python full.5, python full.6 (CRLF line endings), full.7
+#            full.4, bash and python full.5 and full.6 (python's with CRLF line endings), full.7
 #            and full.8.
 #   lua, java, php  have tests/<lang>-test-full.2.<ext> beside the ratchet, for the same reason.
-ROWS="bash:sh:full,features,full.2,full.3,full.4,full.5 batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2,full.3,full.4 java:java:full,features,full.2 kotlin:kt
+ROWS="bash:sh:full,features,full.2,full.3,full.4,full.5,full.6 batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2,full.3,full.4 java:java:full,features,full.2 kotlin:kt
       js:js:full,features,full.2,full.3,full.4.mjs
       lua:lua:full,features,full.2 metajs:js php:php:full,features,full.2 python:py:full,features,full.2,full.3,full.4,full.5,full.6,full.7,full.8 ruby:rb:full,features,full.2,full.3 swift:swift typescript:ts
       lisp:txt:features tinyc:txt:features"

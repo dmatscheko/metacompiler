@@ -1140,6 +1140,52 @@ int rt_berr(char *what, char *name, char *msg)
     return 0;
 }
 
+/* An operand of test's -eq ... -ge, which takes bash's legal_number, not
+ * arithmetic: white space, one optional sign, decimal digits that fit an
+ * intmax_t, white space. Anything else is "WHO: S: integer expected", reported
+ * once, and test_err makes the test command's status 2 (emitTest). Twin of
+ * testInt in bash-interpreter.abnf. */
+int test_err;
+long rt_test_slow(char *s, char *who);
+/* The common operand, up to 18 plain digits, read without the general scan. */
+long rt_test_int(char *s, char *who)
+{
+    int i = 0;
+    long v = 0;
+    while (i < 18 && s[i] >= 48 && s[i] <= 57) {
+        v = v * 10 + (long)((int)s[i] - 48);
+        i = i + 1;
+    }
+    if (i > 0 && s[i] == 0) return v;
+    return rt_test_slow(s, who);
+}
+long rt_test_slow(char *s, char *who)
+{
+    int i = 0, d, nd = 0, cmp = 0;
+    long v = 0, sign = 1;
+    char *lim = "9223372036854775807";
+    while (s[i] == 32 || (s[i] >= 9 && s[i] <= 13)) i = i + 1;
+    if (s[i] == 45 || s[i] == 43) {
+        if (s[i] == 45) { sign = -1; lim = "9223372036854775808"; }
+        i = i + 1;
+    }
+    d = i;
+    while (s[i] == 48) i = i + 1;
+    while (s[i] >= 48 && s[i] <= 57) {
+        if (cmp == 0 && nd < 19) cmp = (int)s[i] - (int)lim[nd];
+        v = v * 10 + (long)((int)s[i] - 48);
+        nd = nd + 1;
+        i = i + 1;
+    }
+    while (s[i] == 32 || (s[i] >= 9 && s[i] <= 13)) i = i + 1;
+    if (s[i] != 0 || s[d] < 48 || s[d] > 57 || nd > 19 || (nd == 19 && cmp > 0)) {
+        if (test_err == 0) rt_berr(who, s, "integer expected");
+        test_err = 1;
+        return 0;
+    }
+    return sign * v;
+}
+
 /* ${v:off:len} with a negative len that ends before off: bash's "substring
  * expression < 0", which abandons the command like an arithmetic error. */
 int rt_suberr(int bad, int len)
@@ -5038,6 +5084,7 @@ char *nref_cstart;    /* the name the last circular chain rt_nref_end met starte
 int nref_glob;        /* 1 + the slot rt_nref_glob put the global binding in effect for, else 0 */
 char *nref_circ;      /* the circular nameref an element store waits to drop (rt_nref_circ) */
 int nref_ckeep;       /* 1: nref_circ names the global rt_nref_glob put in effect, kept */
+int nref_gbase;       /* 1: the last rt_nref_base answered a global through a circular chain */
 
 void *realloc(void *p, unsigned long n);
 
@@ -8695,15 +8742,24 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
 }
 
 /* The variable a store through n lands on: the end of its nameref chain, less
- * any [SUB] ("" for a circular chain, which the store itself reports). */
+ * any [SUB]. A circular chain that closes on a local stores the global variable
+ * n (rt_nref_gstore), and nref_gbase says so, since the local has the same name;
+ * any other is "", which the store itself reports. */
 char *rt_nref_base(char *n)
 {
     int i;
+    char *t;
+    nref_gbase = 0;
     if (nref_any != 0) {
         nref_quiet = nref_quiet + 1;
-        n = rt_nref_end(n);
+        t = rt_nref_end(n);
         nref_quiet = nref_quiet - 1;
-        if (n == 0) return empty;
+        if (t == 0) {
+            if (rt_nref_close(n) < 0) return empty;
+            nref_gbase = 1;
+            return n;
+        }
+        n = t;
     }
     i = rt_indbr(n);
     if (i > 0) return rt_substr(n, 0, i);

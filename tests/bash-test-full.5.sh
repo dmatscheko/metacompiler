@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Full-syntax test: Bash (the practical POSIX-plus-bash shell language) - part 5
-# of 5, sections 90 on; a new section goes here. SECTION 96's grown table alone takes
-# ~20M of the step brake. The split is explained in tests/bash-test-full.sh.
+# of 6, sections 90 to 128. SECTION 96's grown table alone takes ~20M of the step
+# brake. The split is explained in tests/bash-test-full.sh.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 # of the default matrix. The goal of the metacompiler is to support the full

@@ -1578,6 +1578,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gAbort = rtGlobal("abort_flag", i32)
     var gArithErr = rtGlobal("arith_err", i32)   // an arithmetic or substring error (rt_arith_fail)
     var gCondErr = rtGlobal("cond_err", i32)   // a [[ ]] that could not be evaluated
+    var gTestErr = rtGlobal("test_err", i32)   // a test operand that is no integer (rt_test_int)
 
     // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
     // standard error channel, 2 = discarded. Which channel a redirection routes a command to is
@@ -1694,6 +1695,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `varnames`; the emitter only fills that table in main's entry block.
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1, 0, 0])
     var rtNrefBase = rtDecl("rt_nref_base", true, [1])
+    var gNrefGbase = rtGlobal("nref_gbase", i32)
     var rtNrefElems = rtDecl("rt_nref_elems", true, [1, 0])
     var rtNrefEnd = rtDecl("rt_nref_end", true, [1])
     var rtNrefUnglob = rtDecl("rt_nref_unglob", false, [])
@@ -1892,6 +1894,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtInt2str = rtDecl("rt_int2str", true, [3])
     // i64 rt_str2int(i8* s): leading spaces/tabs, one +/- sign, digits until non-digit.
     var rtStr2int = rtDecl("rt_str2int", 3, [1])
+    // i64 rt_test_int(i8* s, i8* who): an integer operand of test / [, or test_err.
+    var rtTestInt = rtDecl("rt_test_int", 3, [1, 1])
     // i64 rt_arith(i8* expr): the arithmetic evaluator for an expression that only exists at
     // run time; rt_idiv / rt_ipow are / % and ** with bash's error cases. Any of them can
     // raise arith_err (see languages/lib/bash-rt.c).
@@ -4159,18 +4163,39 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The attributes of the variable a store through the name nv (an i8*) lands on, picked at
     // run time (rt_nref_base) from every name the tables know: they are lexical here (manual
     // 7.9), and a nameref's or a computed name's target is known only when it runs. With ro,
-    // a readonly variable adds 8.
+    // a readonly variable adds 8. A circular chain that closes on a local of this function
+    // lands on the global variable of that name (nref_gbase), under the attributes its
+    // `local` saved (globalAttrs).
     function refAttrs(b, nv, ro) {
         var land = null
+        var circ = null
         var at = zero
         var k
         for (k = 0; k < varIdList.length; k++) {
             var bits = elemAttrs(varIdList[k]) + ((ro && attrOn(roVars, varIdList[k])) ? 8 : 0)
-            if (bits == 0) { continue }
-            if (land == null) { land = b.NewCall(rtNrefBase, nv) }
-            at = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [land, gepStr(b, varIdList[k])]), zero), llvm.constant.NewInt(i32, bits), at)
+            var gb = globalAttrs(varIdList[k], ro)
+            if (bits == gb) { gb = -1 }
+            if (bits == 0 && gb < 0) { continue }
+            if (land == null) {
+                land = b.NewCall(rtNrefBase, nv)
+                circ = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gNrefGbase), zero)
+            }
+            var eq = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [land, gepStr(b, varIdList[k])]), zero)
+            if (bits != 0) { at = b.NewSelect(eq, llvm.constant.NewInt(i32, bits), at) }
+            if (gb >= 0) { at = b.NewSelect(b.NewAnd(eq, circ), llvm.constant.NewInt(i32, gb), at) }
         }
         return at
+    }
+    // The elemAttrs bits (plus 8 for readonly, with ro) the variable nm had where this
+    // function's code first made it a local, or -1 when it is no local here.
+    function globalAttrs(nm, ro) {
+        if (!locOwn("$" + nm)) { return -1 }
+        var u
+        for (u = curFrame.undo; u < attrUndo.length; u++) {
+            var e = attrUndo[u]
+            if (e.name == nm) { return (e.i ? 1 : 0) + (e.u ? 2 : 0) + (e.l ? 4 : 0) + ((ro && e.r) ? 8 : 0) }
+        }
+        return -1
     }
     // The scalarAttrLetters of the name nv holds when it runs, chosen as refAttrs chooses.
     function attrLettersAt(b, nv) {
@@ -4634,9 +4659,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = joinB
                 } else { freshLocal(b, j) }
             }
-            // -n takes away -i, -u, -l and -c; a case attribute given with it stays. Without
-            // a value, a set variable may still be refused when this runs (rt_nref_noarr),
-            // which these compile-time attributes cannot follow: they stay then.
+            // -n takes away -i, -u, -l and -c; a case attribute given with it stays.
+            // LIMIT: without a value, an existing variable takes the -n only when it is
+            // unset or names a variable when this runs (rt_nref_noarr refuses the rest).
+            // These compile-time attributes cannot follow that and stay, so
+            // `local -i n; local -n n` keeps -i where bash drops it.
             if (isRef && (asgs[j] != null || fresh)) { intVars["$" + names[j]] = false; upVars["$" + names[j]] = false; loVars["$" + names[j]] = false }
             if (integer) { intVars["$" + names[j]] = true }
             var cl = bashDeclCase(caseLetter(names[j]), flags, plus)
@@ -5430,21 +5457,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "-c") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 3))) }
         return one
     }
-    // A numeric operand of test: rt_str2int's value, read at compile time when the word is a
-    // literal decimal number that a double holds exactly.
+    // A numeric operand of test: read at compile time when the word is a literal decimal
+    // number that a double holds exactly, else rt_test_int's (tc.who names the command in
+    // its diagnostic, tc.rt records that emitTest must look at test_err).
+    var tc = {who: "test", rt: false}
     function testInt(b, w) {
         var t = w.c
-        if (t == undefined) { return b.NewCall(rtStr2int, w.v) }
-        var i = (t.charAt(0) == "-" || t.charAt(0) == "+") ? 1 : 0
-        if (t.length == i || t.length - i > 15) { return b.NewCall(rtStr2int, w.v) }
+        var i = (t != undefined && (t.charAt(0) == "-" || t.charAt(0) == "+")) ? 1 : 0
         var n = 0
         var j
-        for (j = i; j < t.length; j++) {
-            var cc = t.charCodeAt(j)
-            if (cc < 48 || cc > 57) { return b.NewCall(rtStr2int, w.v) }
-            n = n * 10 + (cc - 48)
+        if (t != undefined && t.length > i && t.length - i <= 15) {
+            for (j = i; j < t.length && n >= 0; j++) {
+                var cc = t.charCodeAt(j)
+                n = (cc < 48 || cc > 57) ? -1 : n * 10 + (cc - 48)
+            }
+            if (n >= 0) { return llvm.constant.NewInt(i64, (t.charAt(0) == "-") ? -n : n) }
         }
-        return llvm.constant.NewInt(i64, (t.charAt(0) == "-") ? -n : n)
+        tc.rt = true
+        return b.NewCall(rtTestInt, [w.v, gepStr(b, tc.who)])
     }
     function testBinaryIR(b, l, op, r) {
         if (op == "=" || op == "==") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [l.v, r.v]), zero)) }
@@ -5526,7 +5556,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return b
         }
         var st = {i: 0}
-        storeStatus(b, tcOr(b, vals, st))
+        tc.who = cmd
+        tc.rt = false
+        var res = tcOr(b, vals, st)
+        // An operand that is no integer makes the status 2, whatever the rest answered.
+        if (tc.rt) {
+            res = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gTestErr), zero), llvm.constant.NewInt(i32, 2), res)
+            b.NewStore(zero, gTestErr)
+        }
+        storeStatus(b, res)
         // An arithmetic error in a -v subscript abandons the line. Twin of the test arm of
         // runCommand in bash-interpreter.abnf.
         return emitAbortCheck(b)
@@ -6699,7 +6737,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var yes = curF.NewBlock(""), next = curF.NewBlock("")
             var no = (query == "V") ? curF.NewBlock("") : next
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, kd.any, zero), yes, no)
-            var line = (query == "V") ? emitDescribe(yes, r.v, lit, kd, false) : yes.NewCall(rtStrcat, [r.v, gepStr(yes, "\n")])
+            var ybox = {b: yes}
+            var line = (query == "V") ? emitDescribe(ybox, r.v, lit, kd, false, "command") : yes.NewCall(rtStrcat, [r.v, gepStr(yes, "\n")])
+            yes = ybox.b
             yes.NewCall(rtPrints, line)
             yes.NewBr(next)
             if (query == "V") {
@@ -6735,7 +6775,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = kd.b
             var yes = curF.NewBlock(""), no = curF.NewBlock(""), next = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, kd.any, zero), yes, no)
-            yes.NewCall(rtPrints, emitDescribe(yes, r.v, lit, kd, terse))
+            var ybox = {b: yes}
+            var desc = emitDescribe(ybox, r.v, lit, kd, terse, "type")
+            yes = ybox.b
+            yes.NewCall(rtPrints, desc)
             yes.NewBr(next)
             if (!terse) { emitDiag(no, no.NewCall(rtStrcat, [no.NewCall(rtStrcat, [gepStr(no, "type: "), r.v]), gepStr(no, ": not found\n")])) }
             no.NewBr(next)
@@ -6756,28 +6799,53 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The line `type` prints for nameV, which is something (kd from emitKind): the kind alone
     // when terse, else "NAME is a shell keyword", "NAME is a function" and the definition in
-    // force, or "NAME is a shell builtin".
-    function emitDescribe(b, nameV, lit, kd, terse) {
+    // force, or "NAME is a shell builtin". box.b is the block, moved on past the stop a
+    // definition the printer does not model makes (emitFnTextOf); who names the builtin.
+    function emitDescribe(box, nameV, lit, kd, terse, who) {
+        var b = box.b
         var isKw = b.NewICmp(llvm.enum.IPredNE, kd.kw, zero)
         var isFn = b.NewICmp(llvm.enum.IPredNE, kd.fn, zero)
         if (terse) { return b.NewSelect(isKw, gepStr(b, "keyword\n"), b.NewSelect(isFn, gepStr(b, "function\n"), gepStr(b, "builtin\n"))) }
-        var fnPart = b.NewCall(rtStrcat, [gepStr(b, " is a function\n"), b.NewCall(rtStrcat, [emitFnTextOf(b, nameV, lit), gepStr(b, "\n")])])
+        var text = emitFnTextOf(box, nameV, lit, isFn, who)
+        b = box.b
+        var fnPart = b.NewCall(rtStrcat, [gepStr(b, " is a function\n"), b.NewCall(rtStrcat, [text, gepStr(b, "\n")])])
         var tail = b.NewSelect(isKw, gepStr(b, " is a shell keyword\n"), b.NewSelect(isFn, fnPart, gepStr(b, " is a shell builtin\n")))
         return b.NewCall(rtStrcat, [nameV, tail])
     }
     // The definition in force of the function nameV names, as bash prints it, or "" when none
     // is. lit: the name when it is a literal word; a computed one is compared with every name
-    // the program defines.
-    function emitFnTextOf(b, nameV, lit) {
+    // the program defines. When isFn holds and the definition is one the printer does not
+    // model, the shell stops then (emitPrintStop) instead of refusing the program.
+    function emitFnTextOf(box, nameV, lit, isFn, who) {
+        var b = box.b
         var acc = gepStr(b, "")
+        var stop = null, err = ""
         var i
         for (i = 0; i < declaredFuncList.length; i++) {
             var fn = declaredFuncList[i]
             if (lit != undefined && fn != lit) { continue }
-            var hit = b.NewAnd(b.NewCall(rtStreq, [nameV, gepStr(b, fn)]), b.NewZExt(fnIsDefined(b, fn), i32))
-            acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, hit, zero), emitFnText(b, fn), acc)
+            var hit = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(b.NewCall(rtStreq, [nameV, gepStr(b, fn)]), b.NewZExt(fnIsDefined(b, fn), i32)), zero)
+            var bad = emitFnTextBad(b, fn)
+            if (bad != null) {
+                var sb = b.NewAnd(hit, bad.v)
+                stop = (stop == null) ? sb : b.NewOr(stop, sb)
+                err = bad.err
+            }
+            acc = b.NewSelect(hit, emitFnText(b, fn, bad != null), acc)
         }
+        if (stop != null) { box.b = emitPrintStop(b, b.NewAnd(isFn, stop), who, err) }
         return acc
+    }
+    // Stops the shell with status 2 when cond holds: printing a function body that holds err,
+    // which the printer does not model, for the builtin who. Answers the block that goes on.
+    function emitPrintStop(b, cond, who, err) {
+        var stopB = curF.NewBlock(""), goB = curF.NewBlock("")
+        b.NewCondBr(cond, stopB, goB)
+        emitOnStderr(stopB, gepStr(stopB, c.file + ": " + who + ": printing a function body that holds " + err + " cannot be compiled\n"))
+        stopB.NewStore(llvm.constant.NewInt(i32, 2), gExitCode)
+        stopB.NewStore(one, gExited)
+        stopB.NewBr(viaUnwind(curExit, curExitRd))
+        return goB
     }
     // The definition of fn in force (fnk_fn picks it) as bash prints it. A definition the
     // printer does not model is refused here, where printing it is compiled - unless lazy:
@@ -6853,15 +6921,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var tr = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(b.NewLoad(i32, fnSlot(fn)), trB), zero)
             var shown = (tOn && names.length == 0) ? b.NewAnd(def, tr) : def
             var bad = (q == "f" && names.length == 0) ? emitFnTextBad(b, fn) : null
-            if (bad != null) {
-                var stopB = curF.NewBlock(""), goB = curF.NewBlock("")
-                b.NewCondBr(b.NewAnd(shown, bad.v), stopB, goB)
-                emitOnStderr(stopB, gepStr(stopB, c.file + ": " + kw + ": printing a function body that holds " + bad.err + " cannot be compiled\n"))
-                stopB.NewStore(llvm.constant.NewInt(i32, 2), gExitCode)
-                stopB.NewStore(one, gExited)
-                stopB.NewBr(viaUnwind(curExit, curExitRd))
-                b = goB
-            }
+            if (bad != null) { b = emitPrintStop(b, b.NewAnd(shown, bad.v), kw, bad.err) }
             var line = null
             if (q == "f") {
                 line = b.NewCall(rtStrcat, [emitFnText(b, fn, bad != null), gepStr(b, "\n")])
