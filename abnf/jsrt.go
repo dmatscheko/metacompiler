@@ -7553,7 +7553,7 @@ func (rt *jsrt) rubyRangeWalkable(r *jsObject) {
 
 // rubyRangeUnbounded: an Integer begin and an end of nil or +Infinity.
 func rubyRangeUnbounded(r *jsObject) bool {
-	if _, isInt := r.props["begin"].(float64); !isInt {
+	if !rubyIsIntV(r.props["begin"]) {
 		return false
 	}
 	hi := r.props["end"]
@@ -7620,6 +7620,10 @@ func (rt *jsrt) rubyRangeAt(r *jsObject, i int) interface{} {
 	if rubyRangeWide(r.props["begin"], r.props["end"]) {
 		return rt.rubyBin("+", r.props["begin"], float64(i))
 	}
+	// An unbounded range from a big Integer counts on in exact Integers.
+	if b, isBig := r.props["begin"].(*jsBigInt); isBig {
+		return rt.rubyBin("+", b, float64(i))
+	}
 	return rubyToF(r.props["begin"]) + float64(i)
 }
 
@@ -7666,6 +7670,14 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		for {
 			rt.call(blk, jsUndef, []interface{}{lo})
 			lo = rubyStrSucc(lo)
+		}
+	}
+	// An unbounded range from a big Integer walks exact Integers the same way.
+	if b, isBig := t.props["begin"].(*jsBigInt); isBig && rubyRangeUnbounded(t) && name == "each" && blk != nil {
+		var c interface{} = b
+		for {
+			rt.call(blk, jsUndef, []interface{}{c})
+			c = rt.rubyBin("+", c, float64(1))
 		}
 	}
 	// A Float range cannot be walked, but without a block it answers the same
@@ -7788,6 +7800,9 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 			return out
 		}
 	case "last":
+		if isUndefOrNull(t.props["end"]) {
+			rt.rubyRaiseErr("last", "RangeError", "cannot get the last element of endless range")
+		}
 		if len(pos) == 0 {
 			return t.props["end"]
 		}

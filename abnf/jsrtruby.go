@@ -4094,7 +4094,95 @@ func (rt *jsrt) rubyHidxWarn() {
 	if at := strings.LastIndex(site, ":in `"); at >= 0 {
 		site = site[:at]
 	}
-	fmt.Fprint(warnWriter, site+": warning: Hash#index is deprecated; use Hash#key\n")
+	rt.rubyWarnWrite(site + ": warning: Hash#index is deprecated; use Hash#key\n")
+}
+
+// rubyWarnWrite writes a warning the way MRI's rb_write_error_str does: through
+// $stderr's #write, so a program that assigns its own object there captures it.
+// Twin of warnWrite in ruby-interpreter.abnf and rbWarnWrite in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyWarnWrite(s string) {
+	rt.rubyMethod(rt.rubyGlobals["stderr"], "write", []interface{}{&jsRStr{s: s}})
+}
+
+// rubyWarn is Kernel#warn (js_rwarn): the messages as IO#puts would write them,
+// one write, nothing at all for no message. A trailing Hash of Symbol keys is
+// the options, of which only uplevel: exists. frame is the running method's,
+// block's or lambda's entry site (nil when it had none) and undefined at the
+// top level. Twin of kernelWarn in ruby-interpreter.abnf, which states the
+// uplevel rule, and rbWarn in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyWarn(args []interface{}, frame interface{}) {
+	pos, _ := rubyBlockArgs(args)
+	var level interface{} = jsNull
+	if n := len(pos); n > 0 {
+		if keys, vals, isDict := dictParts(pos[n-1]); isDict && rubyAllSymKeys(keys) {
+			pos = pos[:n-1]
+			var bad []string
+			for i, k := range keys.elems {
+				if ks := k.(jsSym).s; ks == "uplevel" {
+					level = vals.elems[i]
+				} else {
+					bad = append(bad, ks)
+				}
+			}
+			if len(bad) == 1 {
+				rt.rubyRaiseErr("warn", "ArgumentError", "unknown keyword: "+bad[0])
+			} else if len(bad) > 1 {
+				rt.rubyRaiseErr("warn", "ArgumentError", "unknown keywords: "+strings.Join(bad, ", "))
+			}
+		}
+	}
+	if len(pos) == 0 {
+		return
+	}
+	text := ""
+	if !isUndefOrNull(level) {
+		lv := math.Trunc(rt.rubyImplicitInt("warn", level, ""))
+		if lv < 0 {
+			rt.rubyRaiseErr("warn", "ArgumentError", fmt.Sprintf("negative level (%d)", int64(lv)))
+		}
+		var site interface{} = jsNull
+		if lv == 0 || (lv == 1 && frame == jsUndef) {
+			if rt.rubySiteFn != nil {
+				site = rt.call(rt.rubySiteFn, jsUndef, nil)
+			}
+		} else if lv == 1 {
+			site = frame
+		} else if frame != jsUndef {
+			rt.rubyRaiseErr("warn", "NotImplementedError", fmt.Sprintf("warn uplevel: %d inside a method or block is not supported", int64(lv)))
+		}
+		text = "warning: "
+		if !isUndefOrNull(site) {
+			s := rt.rubyStr(site)
+			if at := strings.LastIndex(s, ":in `"); at >= 0 {
+				s = s[:at]
+			}
+			text = s + ": warning: "
+		}
+	}
+	var puts func(v interface{})
+	puts = func(v interface{}) {
+		if arr, isArr := v.(*jsArray); isArr {
+			for _, e := range arr.elems {
+				puts(e)
+			}
+			return
+		}
+		text += rubyPutsLine(rt.rubyStr(v))
+	}
+	for _, v := range pos {
+		puts(v)
+	}
+	rt.rubyWarnWrite(text)
+}
+
+func rubyAllSymKeys(keys *jsArray) bool {
+	for _, k := range keys.elems {
+		if _, isSym := k.(jsSym); !isSym {
+			return false
+		}
+	}
+	return true
 }
 
 // rubySliceSize is the size argument of each_slice / each_cons. Twin of
@@ -5026,6 +5114,30 @@ func init() {
 		// it once. Twin of js_rsitefn in lib/ruby-rt.metajs.
 		m["js_rsitefn"] = func(a []uint64) uint64 {
 			rt.rubySiteFn = u(a[0])
+			return w(jsUndef)
+		}
+		// js_rwarn(args, frame): Kernel#warn, answering nil.
+		m["js_rwarn"] = func(a []uint64) uint64 {
+			args, _ := u(a[0]).(*jsArray)
+			if args == nil {
+				args = &jsArray{}
+			}
+			rt.rubyWarn(args.elems, u(a[1]))
+			return w(jsNull)
+		}
+		// js_rioset(name, v): $stdout = v / $stderr = v, which MRI refuses for a
+		// value without #write. Twin of ioGlobalSet in ruby-interpreter.abnf and
+		// js_rioset in lib/ruby-rt.metajs.
+		m["js_rioset"] = func(a []uint64) uint64 {
+			name, v := rt.toString(u(a[0])), u(a[1])
+			if o, isObj := v.(*jsObject); isObj && o.props["__rio"] != nil {
+				rt.rubyGlobals[name] = v
+				return w(jsUndef)
+			}
+			if !rubyTruthy(rt.rubyRespond(v, []interface{}{jsSym{s: "write"}})) {
+				rt.rubyRaiseErr("", "TypeError", "$"+name+" must have write method, "+rubyOwnerName(v)+" given")
+			}
+			rt.rubyGlobals[name] = v
 			return w(jsUndef)
 		}
 		// Unary plus: the identity on a number, String#+@ on a String.

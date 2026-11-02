@@ -2549,6 +2549,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function stmtAt(items) { return {spos: items[0], st: items[1]} }
     // A class-body statement is not part of a Body, so it marks its own site.
     function sitedStmt(m) { return function() { rbSitePos = m.spos; return m.st() } }
+    // A method, block, lambda or class body records the site it was entered at in
+    // its scope's "$rsite" slot, which is what Kernel#warn's uplevel: 1 names;
+    // none is found at the top level. Twin of rbFrameSite in
+    // ruby-to-llvm-ir.abnf.
+    function frameScope() {
+        var fs = {}
+        fs["$rsite"] = rbSitePos
+        return fs
+    }
+    function frameSite() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "$rsite")) { return scopes[i]["$rsite"] }
+        }
+        return undefined
+    }
     // Every def's source span with its name, so a site can name its method the way
     // the compiler half does at emit time (curMethName).
     var defRanges = []
@@ -3139,6 +3154,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Any other object is `coll.each { body }`: its own #each, run as its
             // to_enum Enumerator one yield at a time.
             if (isUserObj(coll)) { return forInRun(toEnum(coll, []), tgts, whole, body) }
+            // An unbounded Integer range has no Array: its values are made one at a
+            // time until a break ends the loop.
+            if (isRange(coll) && rangeUnbounded(coll)) {
+                var fc = anytype
+                fc = coll.lo
+                while (true) {
+                    var fst = forStep(tgts, whole, body, fc)
+                    if (fst.sig != undefined) { return fst.sig }
+                    if (fst.stop) { return fst.v }
+                    fc = numBin("+", fc, 1)
+                }
+            }
             var seq = []
             var en = isEnum(coll)
             if (Array.isArray(coll)) { seq = coll }
@@ -6031,6 +6058,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 sc = rbsSucc(sc)
             }
         }
+        // An unbounded range from a big Integer walks exact Integers the same way.
+        if (isBig(t.lo) && rangeUnbounded(t) && name == "each" && blk != null) {
+            var bc = anytype
+            bc = t.lo
+            while (true) {
+                blockCall(blk, [bc])
+                bc = numBin("+", bc, 1)
+            }
+        }
         // An Integer range ending in nil or +Infinity, or an endless String range,
         // has no Array, so its block methods (rbaRangeStreams), a blockless #each
         // or #each_entry, first(n) and each_slice / each_cons run on an Enumerator
@@ -6098,6 +6134,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return fo
         }
+        if (name == "last" && (t.hi === null || t.hi === undefined)) { raiseErr("last", "RangeError", "cannot get the last element of endless range") }
         if (name == "last" && args.length == 0) { return t.hi }
         if (name == "exclude_end?") { return t.excl }
         if (name == "to_s") { return rangeText(t, false) }
@@ -6143,7 +6180,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // An Integer begin and an end of nil or +Infinity: no Array, only a stream.
     function rangeUnbounded(t) {
-        return typeof t.lo == "number" && (t.hi === null || t.hi === undefined || (isFlo(t.hi) && toF(t.hi) > 0 && toF(t.hi) - toF(t.hi) != 0))
+        return (typeof t.lo == "number" || isBig(t.lo)) && (t.hi === null || t.hi === undefined || (isFlo(t.hi) && toF(t.hi) > 0 && toF(t.hi) - toF(t.hi) != 0))
     }
     // Range#step(n = 1) and Range#%, the same method under the name m. Without a
     // block a numeric range answers an ArithmeticSequence whatever the step,
@@ -6301,14 +6338,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return t.items.slice(Math.max(0, n - ln))
     }
     // The never-ending step from beg by `by': an Enumerator that makes each value
-    // as it is pulled - a Float one as i * by + beg (ruby_float_step) - so a break
-    // or first(n) ends it. Twins: rbStepForever in lib/ruby-rt.metajs,
-    // rubyStepForever in abnf/jsrtrubystr.go.
+    // as it is pulled - a Float one as i * by + beg (ruby_float_step), one from a
+    // big Integer in exact Integers - so a break or first(n) ends it. Twins:
+    // rbStepForever / rbStepForeverBig in lib/ruby-rt.metajs, rubyStepForever in
+    // abnf/jsrtrubystr.go.
     function stepForever(beg, by, flo, desc) {
         var b = toF(beg)
         var u = toF(by)
         var e = mkLazy("range", [], 0, null, false, false, desc)
         if (flo) { e.ops.push({k: "map", f: function(i) { return mkFlo(i * u + b) }, n: 0}) }
+        else if (isBig(beg)) { e.ops.push({k: "map", f: function(i) { return numBin("+", beg, numBin("*", i, by)) }, n: 0}) }
         else { e.ops.push({k: "map", f: function(i) { return b + i * u }, n: 0}) }
         return e
     }
@@ -10650,7 +10689,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // in rubyHashMethod (abnf/jsrt.go) and rbHashMethod (lib/ruby-rt.metajs).
         if (name == "key" || name == "index") {
             if (args.length != 1) { raiseErr(name, "ArgumentError", "wrong number of arguments (given " + args.length + ", expected 1)") }
-            if (name == "index" && rbSitePos >= 0) { eprint(c.file + ":" + c.lineOf(rbSitePos) + ": warning: Hash#index is deprecated; use Hash#key\n") }
+            if (name == "index" && rbSitePos >= 0) { warnWrite(c.file + ":" + c.lineOf(rbSitePos) + ": warning: Hash#index is deprecated; use Hash#key\n") }
             for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return keyOut(target.keys[ky]) } }
             return null
         }
@@ -11189,10 +11228,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         })
     }
     // Range#lazy: an Integer range is walked one value at a time, a String or
-    // Float range is pulled from its own #each, which raises for a Float one
-    // only once a value is asked for; any other is materialized first. A Float
-    // range's Lazy keeps the range's size in hi (rbaLazyCount), a String one's
-    // has none. Twins: rbRangeLazy, rubyRangeLazy.
+    // Float range, or an unbounded one from a big Integer, is pulled from its own
+    // #each, which raises for a Float one only once a value is asked for; any
+    // other is materialized first. A Float or big Integer range's Lazy keeps the
+    // range's size in hi (rbaLazyCount), a String one's has none. Twins:
+    // rbRangeLazy, rubyRangeLazy.
     function rangeLazy(r) {
         var d = "#<Enumerator::Lazy: " + rinspect(r) + ">"
         var hi = anytype
@@ -11200,10 +11240,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isFlo(hi) && toF(hi) > 0 && toF(hi) - toF(hi) != 0) { hi = null }
         var lz = anytype
         if (typeof r.lo == "number" && (hi === null || typeof hi == "number")) { lz = mkLazy("range", [], r.lo, hi, r.excl === true, true, d) }
-        else if (typeof r.lo == "string" || isFlo(r.lo)) {
+        else if (typeof r.lo == "string" || isFlo(r.lo) || (isBig(r.lo) && hi === null)) {
             lz = mkLazy("each", [], 0, null, false, true, d)
             lz.src = r
             if (isFlo(r.lo)) { lz.hi = r.hi === null || r.hi === undefined ? Math.pow(2, 1024) : rbnFloatStepSize(r.lo.f, toF(r.hi), 1, r.excl === true) }
+            if (isBig(r.lo)) { lz.hi = Math.pow(2, 1024) }
         } else { lz = mkLazy("arr", rangeToA(r), 0, null, false, true, d) }
         lz.ev = r
         return lz
@@ -12771,7 +12812,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     blkSelfFor = null
                     scopes.push({self: blkSelf})
                 }
-                scopes.push({})
+                scopes.push(frameScope())
                 // MRI names a lambda's frame "block in ...", which this model does
                 // not, so an argument count raised here carries no site.
                 var site = rbSitePos
@@ -12860,7 +12901,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     blkSelfFor = null
                     scopes.push({self: blkSelf})
                 }
-                scopes.push({})
+                scopes.push(frameScope())
                 blkBind(params, posParams, simple, args)
                 if (hasKw) { bindKw(params, kw) }
                 var site = rbSitePos
@@ -13117,6 +13158,67 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         ioWrite(io, putsLine(rstr(v)), isBin(v))
     }
+    // A warning goes through $stderr's #write, as MRI's rb_write_error_str does,
+    // so a program that assigns its own object there captures it. Twins:
+    // rubyWarnWrite in abnf/jsrtruby.go, rbWarnWrite in lib/ruby-rt.metajs.
+    function warnWrite(s) { mcall(rubyGlobals["stderr"], "write", [mkRStr(s)], null) }
+    // $stdout = v / $stderr = v: MRI refuses a value without #write. Twins:
+    // js_rioset in abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    function ioGlobalCheck(name, v) {
+        if (v !== null && typeof v == "object" && v.__rio !== undefined) { return }
+        if (!rtest(mcall(v, "respond_to?", [mkSym("write")], null))) {
+            raiseErr("", "TypeError", "$" + name + " must have write method, " + classOf(v).__name + " given")
+        }
+    }
+    // Kernel#warn: the messages as IO#puts would write them, in one write, and
+    // nothing at all for no message. A trailing Hash of Symbol keys is the
+    // options, of which only uplevel: exists. uplevel: 0 names the running
+    // statement and 1 the site the running frame (frameSite) was entered at; at
+    // the top level MRI counts the main frame twice, so 1 names the running
+    // statement and anything more no site at all. A level past 1 inside a frame
+    // needs the call stack's sites, which no engine keeps, and is refused. Twins:
+    // rubyWarn in abnf/jsrtruby.go, rbWarn in lib/ruby-rt.metajs.
+    function kernelWarn(args) {
+        var pos = args
+        var level = anytype
+        level = null
+        if (pos.length > 0 && isDict(pos[pos.length - 1]) && allSymKeys(pos[pos.length - 1])) {
+            var opts = pos[pos.length - 1]
+            pos = pos.slice(0, pos.length - 1)
+            var bad = []
+            for (var k = 0; k < opts.keys.length; k++) {
+                if (opts.keys[k].s == "uplevel") { level = opts.vals[k] } else { bad.push(opts.keys[k].s) }
+            }
+            if (bad.length == 1) { raiseErr("warn", "ArgumentError", "unknown keyword: " + bad[0]) }
+            if (bad.length > 1) { raiseErr("warn", "ArgumentError", "unknown keywords: " + bad.join(", ")) }
+        }
+        if (pos.length == 0) { return null }
+        var text = ""
+        if (level !== null && level !== undefined) {
+            var lv = Math.trunc(implicitInt("warn", level, ""))
+            if (lv < 0) { raiseErr("warn", "ArgumentError", "negative level (" + lv + ")") }
+            var fsite = anytype
+            fsite = frameSite()
+            var site = -1
+            if (lv == 0 || (lv == 1 && fsite === undefined)) { site = rbSitePos }
+            else if (lv == 1) { site = fsite }
+            else if (fsite !== undefined) { raiseErr("warn", "NotImplementedError", "warn uplevel: " + lv + " inside a method or block is not supported") }
+            text = site >= 0 ? c.file + ":" + c.lineOf(site) + ": warning: " : "warning: "
+        }
+        for (var i = 0; i < pos.length; i++) { text += warnLines(pos[i]) }
+        warnWrite(text)
+        return null
+    }
+    function warnLines(v) {
+        if (!Array.isArray(v)) { return putsLine(rstr(v)) }
+        var out = ""
+        for (var i = 0; i < v.length; i++) { out += warnLines(v[i]) }
+        return out
+    }
+    function allSymKeys(h) {
+        for (var i = 0; i < h.keys.length; i++) { if (!isSym(h.keys[i])) { return false } }
+        return true
+    }
     // Module#instance_method on a user class: an UnboundMethod, {__rubm: name,
     // __rown: the owner text of its #inspect, __rmod: owned by Enumerable,
     // __rcls: the class}, of a method the class defines or inherits or of an
@@ -13244,7 +13346,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // writing the parenthesised value itself is not an assignable form in Ruby.
         if (ref.texpr != undefined) { fail("cannot assign to a parenthesized expression") }
         if (ref.sconst != undefined) { rubySet(ref.sconst, v); return }
-        if (ref.gvar != undefined) { scopePut(rubyGlobals, ref.gvar, v); return }
+        if (ref.gvar != undefined) {
+            if (ref.gvar == "stdout" || ref.gvar == "stderr") { ioGlobalCheck(ref.gvar, v) }
+            scopePut(rubyGlobals, ref.gvar, v)
+            return
+        }
         if (ref.cvar != undefined) { setCvar(ref.cvar, v); return }
         if (ref.ivar != undefined) {
             ivarPut(ivarSelf(), ref.ivar, v)
@@ -13689,6 +13795,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // constants (Ruby's lexical scope), but not its locals ($cgate).
             scopes = curClass === null ? [globalScope, modScope] : saved.concat([modScope])
             declVar("$cgate", true)
+            declVar("$rsite", rbSitePos)
             declVar("self", mod)
             curClass = mod
             curVis = "public"
@@ -14009,6 +14116,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         declVar("$blk", currentBlock())
         declVar("$defclass", fn.owner)
         declVar("$mname", fn.name)
+        declVar("$rsite", rbSitePos)
         // The parameters are bound at the def's own line, which is where MRI reports
         // an argument count or a default that raised; the caller's site is current
         // again for the depth check below, as it is in the compiled half's js_call.
@@ -14858,6 +14966,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var clsScope = {}
             scopes = curClass === null ? [globalScope, clsScope] : saved.concat([clsScope])
             declVar("$cgate", true)
+            declVar("$rsite", rbSitePos)
             declVar("self", cls)
             curClass = cls
             curVis = "public"
@@ -16777,6 +16886,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return ia
     }
     hostGlobals["pp"] = hostGlobals["p"]
+    hostGlobals["warn"] = function() { return kernelWarn(argsArray(arguments)) }
     hostGlobals["raise"] = function() { throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], rstr(arguments[0])) } }
     // Kernel#loop: an endless loop whose only exit is a break out of the block (which
     // arrives here as the non-local break makeCall catches, so `loop { break 42 }` is 42).

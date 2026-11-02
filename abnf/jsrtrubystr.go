@@ -382,10 +382,14 @@ func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
 	}
 	_, loStr := r.props["begin"].(string)
 	loF, loFlo := r.props["begin"].(jsFlo)
-	if loStr || loFlo {
+	_, loBig := r.props["begin"].(*jsBigInt)
+	if loStr || loFlo || (loBig && hi == jsNull) {
 		lz := rubyMkLazy("each", &jsArray{}, 0, jsNull, false, true, d)
 		lz.set("src", r)
 		lz.set("ev", r)
+		if loBig {
+			lz.set("hi", math.Inf(1))
+		}
 		if loFlo {
 			if isUndefOrNull(r.props["end"]) {
 				lz.set("hi", math.Inf(1))
@@ -838,10 +842,15 @@ func rubySliceOp(name string) string {
 }
 
 // rubyStepForever is stepForever of ruby-interpreter.abnf, which states the rule.
-func rubyStepForever(beg, by float64, flo bool, desc string) *jsObject {
+func rubyStepForever(begV interface{}, by float64, flo bool, desc string) *jsObject {
 	e := rubyMkLazy("range", &jsArray{}, 0, jsNull, false, false, desc)
+	beg := rubyToF(begV)
+	big, isBig := begV.(*jsBigInt)
 	f := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
 		i := rubyToF(argAt(a, 0))
+		if isBig && !flo {
+			return rt.rubyBin("+", big, rt.rubyBin("*", i, by))
+		}
 		// float64() keeps Go from fusing the product into an FMA the other
 		// engines do not make.
 		if flo {
@@ -881,7 +890,7 @@ func (rt *jsrt) rubyRangeStep(t *jsObject, m string, args []interface{}) interfa
 	case u < 0:
 		e = rubyMkEnum(&jsArray{})
 	case num && (u == 0 || isUndefOrNull(hi) || rubyRangeUnbounded(t)):
-		e = rubyStepForever(rubyToF(lo), u, flo, desc)
+		e = rubyStepForever(lo, u, flo, desc)
 	case strLo && isUndefOrNull(hi):
 		e = rubyLazyCopy(rt.rubyRangeLazy(t).(*jsObject), rubyLazyOpOf("step", jsNull, int(math.Trunc(u))), false,
 			"#<Enumerator: "+rt.rubyInspect(t)+":"+m+rt.rubyInspectArgs(pos)+">")

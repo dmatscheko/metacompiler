@@ -2814,6 +2814,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return sv
     }
     function rbSiteBack(b, sv) { if (sv !== null) { rbSiteStore(b, sv) } }
+    // A site as a String, nil when there is none.
+    function rbSiteStr(b, sv) {
+        var hasB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, sv.n, handle(0)), hasB, joinB)
+        var sv2 = callExt(hasB, "js_str_mem", [sv.p, sv.n])
+        hasB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, b), llvm.ir.NewIncoming(sv2, hasB)])}
+    }
+    // The site the running method, block, lambda or class body was entered at,
+    // which is what Kernel#warn's uplevel: 1 names; undefined at the top level
+    // (the frame buildMain's body closure opens). The emitter's own closures
+    // (begin/rescue bodies, a rescue modifier, a block's break catcher) are not
+    // Ruby frames: from inside one the frame's site is read from its scope slot
+    // "$rsite", which emitFunc fills in that frame's prologue only once something
+    // asked for it. Twin of the "$rsite" scope slot in ruby-interpreter.abnf.
+    function rbFrameSite(b) {
+        var fr = curFrame
+        while (fr !== null && !fr.real && !fr.top) { fr = fr.up }
+        if (fr === null || fr.top) { return {b: b, v: hUndef} }
+        if (fr === curFrame && curSiteSave !== null) { return rbSiteStr(b, curSiteSave) }
+        fr.wantSite = true
+        return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$rsite")])}
+    }
     // An exception the runtime raised takes its first backtrace frame where it is
     // caught: js_rsite combines the running site, still the raising statement's,
     // with the builtin method the exception names. Emitted at the entry of every
@@ -4432,7 +4456,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return b
         }
         if (ref.gvar != undefined) {
-            callExt(b, "js_rgset", [emitStr(b, ref.gvar), v])
+            callExt(b, ref.gvar == "stdout" || ref.gvar == "stderr" ? "js_rioset" : "js_rgset", [emitStr(b, ref.gvar), v])
             return b
         }
         if (ref.cvar != undefined) {
@@ -5709,6 +5733,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return randT(b)
             }
         }
+        // Kernel#warn: js_rwarn writes the messages through $stderr, given the
+        // running frame's entry site for uplevel: (rbFrameSite).
+        if (name == "warn" && !hasBlockArg(args)) {
+            var warnArgs = args
+            var warnT = function(b) {
+                var ewa = emitArgs(b, warnArgs)
+                var fs = rbFrameSite(ewa.b)
+                callExt(fs.b, "js_rwarn", [ewa.v, fs.v])
+                return {b: fs.b, v: hNull}
+            }
+            var warnFallback = makePlainCall(name, warnArgs)
+            return function(b) {
+                if (rubyAllMethods["$warn"] === true) { return warnFallback(b) }
+                if (selfMethod(curClsName, "warn")) { return warnFallback(b) }
+                return warnT(b)
+            }
+        }
         // Kernel#printf and Kernel#p, both of which a program may shadow with a def
         // of its own - so unlike format/sprintf above, the test is made INSIDE the
         // emitted closure, where rubyAllMethods is complete (a def anywhere in the
@@ -6271,7 +6312,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             preB = b
             startB = f.NewBlock("")
             b = startB
-            curFrame = {tag: idx, nb: f.Blocks.length, pre: [], up: savedFrame}
+            curFrame = {tag: idx, nb: f.Blocks.length, pre: [], up: savedFrame, top: isCtl === true,
+                        real: isMethod === true || isBlock === true || declBlk === true || sitePos !== undefined,
+                        wantSite: false}
         }
         // A block body starts its own basic block, so `redo' has somewhere to branch
         // back to that is AFTER the parameter binding (redo keeps the bindings).
@@ -6286,6 +6329,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (preB !== null) {
             for (var fp = 0; fp < curFrame.pre.length; fp++) {
                 callExt(preB, "js_scope_decl", [curScopeV, emitStr(preB, curFrame.pre[fp]), hUndef])
+            }
+            if (curFrame.wantSite) {
+                var fsr = rbSiteStr(preB, curSiteSave)
+                preB = fsr.b
+                callExt(preB, "js_scope_decl", [curScopeV, emitStr(preB, "$rsite"), fsr.v])
             }
             preB.NewBr(startB)
         }
@@ -7682,8 +7730,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (!local && name == "rand" && rubyAllMethods["$rand"] !== true && !selfMethod(curClsName, "rand")) {
                 return {b: b, v: callExt(b, "js_rrand", [callExt(b, "js_arr_new", [])])}
             }
-            // A bare `p' / `pp' prints nothing and answers nil.
-            if (!local && (name == "p" || name == "pp") && rubyAllMethods["$" + name] !== true && !selfMethod(curClsName, name)) {
+            // A bare `p' / `pp' / `warn' prints nothing and answers nil.
+            if (!local && (name == "p" || name == "pp" || name == "warn") && rubyAllMethods["$" + name] !== true && !selfMethod(curClsName, name)) {
                 return {b: b, v: hNull}
             }
             // Inside a method body a bare name that is a method of the SAME class (or

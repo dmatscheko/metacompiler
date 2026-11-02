@@ -5041,7 +5041,7 @@ function rbRangeWalkable(r) {
 // inside rbRangeAt would make every one of them quadratic.
 // An Integer begin and an end of nil or +Infinity.
 function rbRangeUnbounded(r) {
-    if (typeof r["begin"] != "number") { return false }
+    if (typeof r["begin"] != "number" && !rbIsBig(r["begin"])) { return false }
     var hi = r["end"]
     if (rtIsNil(hi)) { return true }
     return rbIsFlo(hi) && rbToF(hi) > 0 && rbToF(hi) - rbToF(hi) != 0
@@ -5093,7 +5093,10 @@ function rbRangeAt(r, i) {
     rbRangeWalkable(r)
     if (i < 0 || i >= rbRangeLen(r)) { fail("range index out of range: " + i) }
     if (rbRangeWide(r["begin"], r["end"])) { return rbBin("+", r["begin"], i) }
-    return rbToF(r["begin"]) + i
+    // An unbounded range from a big Integer counts on in exact Integers.
+    var lo = r["begin"]
+    if (typeof lo == "number") { return lo + i }
+    return rbBin("+", lo, i)
 }
 
 // Two ranges are == when their endpoints and their exclusivity are; MRI compares
@@ -5130,6 +5133,15 @@ function rbRangeMethod(t, name, args) {
         while (true) {
             rbCall1(blk, sc)
             sc = rbsSucc(sc)
+        }
+    }
+    // An unbounded range from a big Integer walks exact Integers the same way.
+    if (rbIsBig(t["begin"]) && rbRangeUnbounded(t) && name == "each" && blk !== null) {
+        var bc = anytype
+        bc = t["begin"]
+        while (true) {
+            rbCall1(blk, bc)
+            bc = rbBin("+", bc, 1)
         }
     }
     // A Float range cannot be walked, but without a block it answers the same
@@ -5180,6 +5192,7 @@ function rbRangeMethod(t, name, args) {
     // the Array's, so those fall through to the delegation below.
     if (name == "end") { return t["end"] }
     if (name == "first" && npos == 0) { return t["begin"] }
+    if (name == "last" && rtIsNil(t["end"])) { rbRaiseErr("last", "RangeError", "cannot get the last element of endless range") }
     if (name == "last" && npos == 0) { return t["end"] }
     // first(n) from an Integer takes one element at a time, so an endless or
     // infinite range answers too. Twin of the arm in rangeMethod.
@@ -5275,6 +5288,7 @@ function rbRangeStep(t, m, args) {
     var desc = "((" + rbInspect(t) + ")." + m + rbInspectArgs(args, npos) + ")"
     var e = anytype
     if (u < 0) { e = rbMkEnum([]) }
+    else if (num && !flo && rbIsBig(lo) && (rtIsNil(hi) || rbRangeUnbounded(t))) { e = rbStepForeverBig(lo, u, desc) }
     else if (num && (u == 0 || rtIsNil(hi) || rbRangeUnbounded(t))) { e = rbStepForever(rbToF(lo), u, flo, desc) }
     else if (typeof lo == "string" && rtIsNil(hi)) {
         e = rbLazyCopy(rbRangeLazy(t), {k: "step", f: null, n: Math.trunc(u)}, false, "#<Enumerator: " + rbInspect(t) + ":" + m + rbInspectArgs(args, npos) + ">")
@@ -7175,6 +7189,12 @@ function rbStepForever(beg, by, flo, desc) {
     else { e["ops"].push({k: "map", f: function(i) { return beg + i * by }, n: 0}) }
     return e
 }
+// rbStepForever from a big Integer, in exact Integers.
+function rbStepForeverBig(beg, by, desc) {
+    var e = rbMkLazy("range", [], 0, null, false, false, desc)
+    e["ops"].push({k: "map", f: function(i) { return rbBin("+", beg, rbBin("*", i, by)) }, n: 0})
+    return e
+}
 // "(a, b)" of the first n arguments' #inspect, "" for none.
 function rbInspectArgs(args, n) {
     if (n == 0) { return "" }
@@ -7236,9 +7256,10 @@ function rbRangeLazy(r) {
     var lz = anytype
     if (typeof r["begin"] == "number" && (hi === null || typeof hi == "number")) {
         lz = rbMkLazy("range", [], r["begin"], hi, r["excl"] === true, true, d)
-    } else if (typeof r["begin"] == "string" || rbIsFlo(r["begin"])) {
+    } else if (typeof r["begin"] == "string" || rbIsFlo(r["begin"]) || (rbIsBig(r["begin"]) && hi === null)) {
         lz = rbMkLazy("each", [], 0, null, false, true, d)
         lz["src"] = r
+        if (rbIsBig(r["begin"])) { lz["hi"] = Math.pow(2, 1024) }
         if (rbIsFlo(r["begin"])) {
             if (rtIsNil(r["end"])) { lz["hi"] = Math.pow(2, 1024) }
             else { lz["hi"] = rbnFloatStepSize(rbToF(r["begin"]), rbToF(r["end"]), 1, r["excl"] === true) }
@@ -10181,7 +10202,88 @@ function rbHidxWarn() {
     var at = s.length - 5
     while (at >= 0 && s.slice(at, at + 5) != ":in `") { at = at - 1 }
     if (at >= 0) { s = s.slice(0, at) }
-    eprint(s + ": warning: Hash#index is deprecated; use Hash#key\n")
+    rbWarnWrite(s + ": warning: Hash#index is deprecated; use Hash#key\n")
+}
+// A warning goes through $stderr's #write. Twin of rubyWarnWrite in
+// abnf/jsrtruby.go, which states the rule.
+function rbWarnWrite(s) {
+    rbMethod(rbGlobals["$stderr"], "write", [rbMkRStr(s, false)])
+    return undefined
+}
+// Kernel#warn. Twins: rubyWarn in abnf/jsrtruby.go and kernelWarn in
+// ruby-interpreter.abnf, which states the uplevel rule.
+function js_rwarn(args, frame) {
+    var pos = rbPosArgs(args)
+    var level = anytype
+    level = null
+    if (pos.length > 0 && rbIsDict(pos[pos.length - 1]) && rbAllSymKeys(pos[pos.length - 1])) {
+        var opts = pos[pos.length - 1]
+        pos = pos.slice(0, pos.length - 1)
+        var bad = []
+        var k = 0
+        while (k < opts["keys"].length) {
+            if (opts["keys"][k]["s"] == "uplevel") { level = opts["vals"][k] } else { bad.push(opts["keys"][k]["s"]) }
+            k = k + 1
+        }
+        if (bad.length == 1) { rbRaiseErr("warn", "ArgumentError", "unknown keyword: " + bad[0]) }
+        if (bad.length > 1) { rbRaiseErr("warn", "ArgumentError", "unknown keywords: " + bad.join(", ")) }
+    }
+    if (pos.length == 0) { return null }
+    var text = ""
+    if (!rtIsNil(level)) {
+        var lv = Math.trunc(rbImplicitInt("warn", level, ""))
+        if (lv < 0) { rbRaiseErr("warn", "ArgumentError", "negative level (" + rbIntText(lv) + ")") }
+        var site = anytype
+        site = null
+        if (lv == 0 || (lv == 1 && frame === undefined)) {
+            if (rbSiteFns.length > 0) { site = rbSiteFns[0]() }
+        } else if (lv == 1) {
+            site = frame
+        } else if (frame !== undefined) {
+            rbRaiseErr("warn", "NotImplementedError", "warn uplevel: " + rbIntText(lv) + " inside a method or block is not supported")
+        }
+        text = "warning: "
+        if (!rtIsNil(site)) {
+            var s = rbStr(site)
+            var at = s.length - 5
+            while (at >= 0 && s.slice(at, at + 5) != ":in `") { at = at - 1 }
+            if (at >= 0) { s = s.slice(0, at) }
+            text = s + ": warning: "
+        }
+    }
+    var i = 0
+    while (i < pos.length) {
+        text = text + rbWarnLines(pos[i])
+        i = i + 1
+    }
+    rbWarnWrite(text)
+    return null
+}
+function rbWarnLines(v) {
+    if (!rbIsArr(v)) { return rbPutsLine(rbStr(v)) }
+    var out = ""
+    var i = 0
+    while (i < v.length) {
+        out = out + rbWarnLines(v[i])
+        i = i + 1
+    }
+    return out
+}
+function rbAllSymKeys(h) {
+    var i = 0
+    while (i < h["keys"].length) {
+        if (!rbIsSym(h["keys"][i])) { return false }
+        i = i + 1
+    }
+    return true
+}
+// $stdout = v / $stderr = v. Twin of js_rioset in abnf/jsrtruby.go.
+function js_rioset(name, v) {
+    var n = rbStr(name)
+    if (!(typeof v == "object" && !rtIsNil(v) && v["__rio"] !== undefined) && !rbTruthy(js_rrespond(v, [rbSym("write")]))) {
+        rbRaiseErr("", "TypeError", "$" + n + " must have write method, " + rbOwnerName(v) + " given")
+    }
+    return rbGset(n, v)
 }
 // ~x is -(x+1) at any size, which is one negate and one decrement on the box.
 function js_rbnot(v) {

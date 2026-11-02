@@ -1,4 +1,4 @@
-# Full-syntax test: Ruby - part 3, SECTIONs 97 to 121. tests/ruby-test-full.rb
+# Full-syntax test: Ruby - part 3, SECTIONs 97 to 123. tests/ruby-test-full.rb
 # leaves the -frozen interpreter leg too little of the IR interpreter's step
 # brake (-max-steps, 100M per call) for them; see that file for the
 # conventions.
@@ -924,6 +924,94 @@ def s121
         Encoding::UTF_8.inspect == "#<Encoding:UTF-8>" && "abc".b.encoding.to_s == "ASCII-8BIT")
 end
 
+# ===== SECTION 122: Kernel#warn; warnings through $stderr's #write =====
+# warn writes its messages as IO#puts would (an Array one line per element, nil
+# an empty line, no newline doubled) in ONE call of $stderr's #write, nothing for
+# no message or an empty Array, and answers nil. uplevel: 0 prefixes the calling
+# line, 1 the line that called the running method or block (at the top level,
+# the calling line again), and a trailing Hash of Symbol keys is the options.
+# Hash#index's deprecation warning goes the same way. $stderr only takes an
+# object with #write. /usr/bin/ruby 2.6 settles each.
+class S122Sink
+  attr_reader :got
+  def initialize; @got = []; end
+  def write(*s); @got.concat(s); 0; end
+end
+def s122up
+  warn "old", uplevel: 1
+end
+def s122
+  v = ["hi", ["x", ["y"]], nil, 2.5, :s, "nl\n"]
+  k = S122Sink.new
+  saved = $stderr
+  $stderr = k
+  r = warn(v[0])
+  warn(v[1], v[2], v[3])
+  warn
+  warn([])
+  warn(v[4], v[5])
+  $stderr = saved
+  check("wn122a", r.nil? && k.got == ["hi\n", "x\ny\n\n2.5\n", "", "s\nnl\n"])
+  k = S122Sink.new
+  $stderr = k
+  ln = __LINE__; warn "now", uplevel: 0
+  s122up
+  s122up; l2 = __LINE__
+  [1].each { |i| warn "blk", uplevel: 1 }; l3 = __LINE__
+  h = {1 => 2}
+  h.index(2); l4 = __LINE__
+  warn "a", "b", uplevel: 0.9
+  e = []
+  begin; warn("x", uplevel: -1); rescue ArgumentError => x; e << x.message; end
+  begin; warn("x", foo: 1); rescue ArgumentError => x; e << x.message; end
+  begin; warn("x", uplevel: :q); rescue TypeError => x; e << x.message; end
+  warn("y", {"k" => 1})
+  $stderr = saved
+  f = __FILE__
+  check("wn122b", k.got[0] == "#{f}:#{ln}: warning: now\n" && k.got[1] == "#{f}:#{ln + 1}: warning: old\n" &&
+        k.got[2] == "#{f}:#{l2}: warning: old\n" && k.got[3] == "#{f}:#{l3}: warning: blk\n" &&
+        k.got[4] == "#{f}:#{l4}: warning: Hash#index is deprecated; use Hash#key\n" &&
+        k.got[5] == "#{f}:#{l4 + 1}: warning: a\nb\n" && k.got[6] == "y\n{\"k\"=>1}\n" && k.got.size == 7)
+  check("wn122c", e == ["negative level (-1)", "unknown keyword: foo", "no implicit conversion of Symbol into Integer"])
+  m = []
+  begin; $stderr = 5; rescue TypeError => x; m << x.message; end
+  begin; $stdout = Object.new; rescue TypeError => x; m << x.message; end
+  check("wn122d", m == ["$stderr must have write method, Integer given", "$stdout must have write method, Object given"] &&
+        $stderr.equal?(STDERR) && $stdout.equal?(STDOUT))
+end
+
+# ===== SECTION 123: an unbounded Range from a big Integer =====
+# (2**70..) and (2**70..Float::INFINITY) walk exact Integers one at a time:
+# each, for, first(n), lazy, step, each_slice, Enumerator#next, and #size is
+# Infinity. #last of an endless range raises RangeError. /usr/bin/ruby 2.6
+# settles each.
+def s123
+  b = [2**70][0]
+  w = []
+  (b..).each { |x| w << x; break if w.size == 2 }
+  f = []
+  for x in (b..Float::INFINITY)
+    f << x
+    break if f.size == 2
+  end
+  check("bg123a", w == [b, b + 1] && f == w && (b..).first(2) == w && (b..Float::INFINITY).first(2) == w &&
+        (b..).size == Float::INFINITY && (b..Float::INFINITY).size == Float::INFINITY)
+  e = (b..).each
+  check("bg123b", (b..).lazy.map { |x| x * 2 }.first(2) == [2 * b, 2 * b + 2] && (b..).step(3).first(2) == [b, b + 3] &&
+        (b..).each_slice(2).first(2) == [[b, b + 1], [b + 2, b + 3]] && e.next == b && e.next == b + 1 &&
+        (b..).find { |x| x % 7 == 0 } == b + 5 && (b..).each_with_index.first(2) == [[b, 0], [b + 1, 1]])
+  g = []
+  for x in (1..)
+    g << x
+    break if g.size == 2
+  end
+  m = []
+  [(b..), (1..)].each { |r| begin; r.last; rescue RangeError => x; m << x.message; end }
+  begin; (b..).last(2); rescue RangeError => x; m << x.message; end
+  check("bg123c", g == [1, 2] && m == ["cannot get the last element of endless range"] * 3 &&
+        (1..Float::INFINITY).last == Float::INFINITY)
+end
+
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -949,5 +1037,7 @@ s118() # SECTION-CALL 118
 s119() # SECTION-CALL 119
 s120() # SECTION-CALL 120
 s121() # SECTION-CALL 121
+s122() # SECTION-CALL 122
+s123() # SECTION-CALL 123
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
