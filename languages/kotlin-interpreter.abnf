@@ -4019,7 +4019,8 @@ NotMemberKw = :script(~~ "pure";
                 dest = kCastDest(base)
                 if (!opt) { nullName = ktNullCastType(tname, dest) }
             }
-            if (v === null || v === undefined) {
+            // undefined is Unit, an object like any other.
+            if (v === null) {
                 if (nullName != "") { kThrowExc("NullPointerException", "null cannot be cast to non-null type " + nullName) }
                 return v
             }
@@ -6002,6 +6003,14 @@ NotMemberKw = :script(~~ "pure";
         for (var i = 0; i < es.length; i++) { kSetAdd(s, es[i]) }
         return s
     }
+    // toSet / toMutableSet / toHashSet of the elements es. toSet is emptySet() or a
+    // SingletonSet by the count of es - not of the distinct elements - as every
+    // receiver's toSet and toMap decide by their element count (_Collections.kt,
+    // _Sequences.kt). Twin of ktToSet in abnf/jsrtkotlin.go and of the toSet arms
+    // of ktSeqMethodK and ktSetMethod in languages/lib/kotlin-rt.metajs.
+    function kToSet(name, es) {
+        return kJvmTagged(kSetFrom(es), name == "toSet" ? kJvmSmall(es.length, "Set") : "")
+    }
     // A set whose elements are ALREADY distinct (a map's keys, its entries), so the
     // quadratic uniqueness scan is skipped.
     function kSetOfDistinct(es) {
@@ -6367,7 +6376,10 @@ NotMemberKw = :script(~~ "pure";
             return {v: kChar(sv.charCodeAt(name == "last" ? n - 1 : 0))}
         }
         if (name == "toCharArray") { return {v: arrKindSet(kChars(sv), ktaKindOf("Char"))} }
-        if (name == "toList") { return {v: kChars(sv)} }
+        if (name == "toList") {
+            var tcl = kChars(sv)
+            return {v: arrKindSet(tcl, ktSizedKind(0, name, tcl.length, tcl.length, false))}
+        }
         if (name == "trim" || name == "trimStart" || name == "trimEnd") {
             var tl = name != "trimEnd"
             var tr = name != "trimStart"
@@ -6969,10 +6981,15 @@ NotMemberKw = :script(~~ "pure";
         return {v: bits == "0" ? w : tz}
     }
     function jxkClass(v) {
+        if (v === undefined) { return "kotlin.Unit" }
         if (Array.isArray(v)) {
             var ak = arrKind(v)
             if (ak >= 5) { return ktaClasses[ak - 5] }
             if (ak != 1) { return kArrJvmClass(v) }
+            // An Array's class is its builder's element type's (ktArrBuilderClass),
+            // else the one its elements share.
+            var ap = arrProps(v)
+            if (ap !== undefined && ap.__jc !== undefined) { return ap.__jc }
             var ecs = []
             for (var i = 0; i < v.length; i++) { if (v[i] !== null && v[i] !== undefined) { ecs.push(jxkClass(v[i])) } }
             return ktaRefClass(ecs)
@@ -7507,7 +7524,7 @@ NotMemberKw = :script(~~ "pure";
             }
             return {v: out}
         }
-        if (name == "toSet" || name == "toMutableSet" || name == "toHashSet") { return {v: kSetFrom(es)} }
+        if (name == "toSet" || name == "toMutableSet" || name == "toHashSet") { return {v: kToSet(name, es)} }
         if (name == "toSortedSet") { return {v: kTreeSet(es, args[0])} }
         if (name == "reversed" || name == "asReversed") {
             out = []
@@ -7635,6 +7652,8 @@ NotMemberKw = :script(~~ "pure";
                 if (!kIsPair(pr)) { fail(name + "() needs a Pair") }
                 kMapPut(am, pr.first, pr.second)
             }
+            // toMap is sized as toSet is (kToSet).
+            if (name == "toMap") { kJvmTagged(am, kJvmSmall(arrKind(es) == 2 ? am.keys.length : es.length, "Map")) }
             return {v: am}
         }
         if (name == "joinToString") {
@@ -8215,12 +8234,16 @@ NotMemberKw = :script(~~ "pure";
         if (name == "toList") {
             var pl = []
             for (i = 0; i < m.keys.length; i++) { pl.push(kPair(m.keys[i], m.vals[i])) }
-            return {v: pl}
+            return {v: arrKindSet(pl, ktSizedKind(0, name, pl.length, pl.length, false))}
         }
+        // toMap, and the read-only answers of plus and minus, are emptyMap() / a
+        // SingletonMap by their size (Maps.kt's optimizeReadOnlyMap): minus by what is
+        // left, plus on an empty map by its argument's pair count - a Sequence's by
+        // what was put - and plus of a map never.
         if (name == "toMap" || name == "toMutableMap") {
             var out = kMakeMap()
             for (i = 0; i < m.keys.length; i++) { kMapPut(out, m.keys[i], m.vals[i]) }
-            return {v: out}
+            return {v: name == "toMap" ? kJvmTagged(out, kJvmSmall(m.keys.length, "Map")) : out}
         }
         if (name == "clear") {
             kArrSetTo(m.keys, [])
@@ -8263,7 +8286,10 @@ NotMemberKw = :script(~~ "pure";
             } else if (Array.isArray(add)) {
                 for (i = 0; i < add.length; i++) { if (kIsPair(add[i])) { kMapPut(pm, add[i].first, add[i].second) } }
             } else if (kIsPair(add)) { kMapPut(pm, add.first, add.second) }
-            return {v: name == "plus" ? pm : undefined}
+            if (name != "plus") { return {v: undefined} }
+            if (Array.isArray(add) && arrKind(add) == 2) { return {v: kJvmTagged(pm, kJvmSmall(pm.keys.length, "Map"))} }
+            if (m.keys.length > 0 || kIsMap(add)) { return {v: pm} }
+            return {v: kJvmTagged(pm, kJvmSmall(Array.isArray(add) ? add.length : 1, "Map"))}
         }
         if (name == "minus") {
             var drop = []
@@ -8274,7 +8300,7 @@ NotMemberKw = :script(~~ "pure";
                 for (var dk = 0; dk < drop.length; dk++) { if (kEqVals(drop[dk], m.keys[i])) { hit = true } }
                 if (!hit) { kMapPut(mm, m.keys[i], m.vals[i]) }
             }
-            return {v: mm}
+            return {v: kJvmTagged(mm, kJvmSmall(mm.keys.length, "Map"))}
         }
         return kSeqMethodK(kViewOf(kElems(m), m), name, args, "Collection")
     }
@@ -8351,7 +8377,7 @@ NotMemberKw = :script(~~ "pure";
             }
             return {v: keep}
         }
-        if (name == "toSet" || name == "toMutableSet" || name == "toHashSet") { return {v: kSetFrom(s.keys)} }
+        if (name == "toSet" || name == "toMutableSet" || name == "toHashSet") { return {v: kToSet(name, s.keys)} }
         if (name == "toSortedSet") { return {v: kTreeSet(s.keys, args[0])} }
         // A set is a Collection: the same answer kinds as a values view's (kind 3).
         // The elements are handed over linked to the set, or to the map a keys /
@@ -8366,6 +8392,7 @@ NotMemberKw = :script(~~ "pure";
         }
         if (sq != null && Array.isArray(sq.v) && sq.v !== s.keys) {
             var sk = kResultKind(3, name)
+            if (sk == 0) { sk = ktSizedKind(3, name, sq.v.length, s.keys.length, false) }
             if (sk != 0) { arrKindSet(sq.v, sk) }
         }
         return sq
@@ -8837,11 +8864,11 @@ NotMemberKw = :script(~~ "pure";
             if (name == "component1") { return target.first }
             if (name == "component2") { return target.second }
             if (name == "component3" && target.third !== undefined) { return target.third }
-            // Pair.toList() / Triple.toList(): [a, b] / [a, b, c].
+            // Pair.toList() / Triple.toList(): listOf(a, b) / listOf(a, b, c).
             if (name == "toList") {
                 var pl2 = [target.first, target.second]
                 if (target.third !== undefined) { pl2.push(target.third) }
-                return pl2
+                return arrKindSet(pl2, 4)
             }
             // Pair/Triple are data classes in Kotlin, so equals/hashCode are structural.
             if (name == "equals") { return kEq(target, args[0], false) }
@@ -8984,7 +9011,7 @@ NotMemberKw = :script(~~ "pure";
                 return false
             }
             var kqm = kSeqMethodK(tgt, name, args, tgtKind)
-            if (kqm != null) { return kKindOut(tgt, name, kqm.v, tgtKind) }
+            if (kqm != null) { return kKindOut(tgt, name, kqm.v, tgtKind, name == "slice" && isRange(args[0])) }
             return mfallback(tgt, name, args, "list")
         }
         if (target.__class != undefined) {
@@ -9092,7 +9119,7 @@ NotMemberKw = :script(~~ "pure";
     // both still win, exactly as in Kotlin: neither reaches this function.
     function defaultToString(target) {
         if (kIsThrowable(target)) { return kThrowableStr(target) }
-        return target.__class.__name + "@1"
+        return (target.__class === kAnyClass ? "java.lang.Object" : target.__class.__name) + "@1"
     }
     // The structural hash of a value, CONSISTENT with kEq: two values that compare
     // equal hash equally. Kotlin's own recipe - the 31 * h + component fold over the
@@ -9161,6 +9188,8 @@ NotMemberKw = :script(~~ "pure";
                 for (var k = 0; k < dp.length; k++) { h = (Math.imul(31, h) + kHash(kfield(v, dp[k]))) | 0 }
                 return h
             }
+            // Any()'s hash is the 1 its toString prints (ktElemHash's fallback).
+            if (cls === kAnyClass) { return 1 }
             return strHash(cls.__name)
         }
         return 0
@@ -12489,6 +12518,7 @@ NotMemberKw = :script(~~ "pure";
     // class's simpleName is ""; an interface's is marked iface (kKClassKw). Twin
     // of ktClassOfDesc in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kClassOfDesc(d) {
+        if (d === kAnyClass) { return kKClass("Any") }
         var o = anytype
         var bn = anytype
         bn = d.__bname
@@ -13188,15 +13218,16 @@ NotMemberKw = :script(~~ "pure";
         return recv == 1 || recv >= 5 ? -4 : 4
     }
     var kSortedNames = ["sorted", "sortedDescending", "sortedBy", "sortedByDescending", "sortedWith"]
-    // Tags a member call's fresh array answer with the kind kResultKind gives it. A
-    // range (rkind "Collection") is an Iterable but no Collection, so its sorted copy
-    // stays an ArrayList.
-    function kKindOut(recv, name, out, rkind) {
+    // Tags a member call's fresh array answer with the kind kResultKind gives it, or
+    // else the one its size gives it (ktSizedKind). A range (rkind "Collection") is an
+    // Iterable but no Collection, so its sorted copy stays an ArrayList.
+    function kKindOut(recv, name, out, rkind, ranged) {
         if (Array.isArray(out) && out !== recv) {
             var ak = arrKind(recv)
             var rk = kResultKind(ak, name)
             if (rk == 4 && rkind == "Collection") { rk = 0 }
             if (ak >= 5 && name == "sortedDescending" && out.length == 0) { rk = 4 }
+            if (rk == 0) { rk = ktSizedKind(ak, name, out.length, recv.length, ranged === true) }
             if (rk != 0) { arrKindSet(out, rk) }
         }
         return out
@@ -13354,8 +13385,10 @@ NotMemberKw = :script(~~ "pure";
         var t = resolveAlias(tname.split("<")[0])
         var opt = false
         if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1); opt = true }
-        if (v === null || v === undefined) { return opt }
+        if (v === null) { return opt }
         if (t == "Any" || t == "Object") { return true }
+        // undefined is Unit, an object of no other type.
+        if (v === undefined) { return t == "Unit" }
         if (t == "Comparable") { return kIsComparable(v) }
         var mk = ktMarkerName(t)
         if (mk != "") {
@@ -13570,6 +13603,14 @@ NotMemberKw = :script(~~ "pure";
         }
     }
     installThrowables()
+    // Any() is a plain java.lang.Object: equal only to itself, hashed and printed
+    // (java.lang.Object@1, defaultToString) as an instance of a class with no members
+    // of its own. Twin of ktAnyDesc in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    var kAnyClass = newDescriptor("Any", [])
+    kAnyClass.__bname = "java.lang.Object"
+    kAnyClass.__ctor = function() { kTakeNamed() }
+    globalScope["Any"] = kAnyClass
 
     // ----- Throwable#toString and the launcher's uncaught-exception line -----
     // Kotlin inherits java.lang.Throwable#toString unchanged: the BINARY class name
@@ -13663,6 +13704,16 @@ NotMemberKw = :script(~~ "pure";
             body = function() {
                 if (pending) { kAdoptGenericArgs(name, targl, args); pending = false }
                 return direct()
+            }
+        }
+        // An Array builder's explicit element type fixes its JVM class
+        // (ktArrBuilderClass). Twin of makeCall in kotlin-to-llvm-ir.abnf.
+        var ajc = ktArrBuilderClass(name, start == 2 ? items[1].targs : undefined)
+        if (ajc != "") {
+            var built = body
+            body = function() {
+                var a = built()
+                return Array.isArray(a) && arrKind(a) == 1 ? kArrClassed(a, ajc) : a
             }
         }
         // A builder call's elements retyped by its explicit type arguments

@@ -200,6 +200,22 @@ func ktIsIntegral(v interface{}) bool {
 // One compile runs one program, so a package-level holder is per-program.
 var ktArithExcCls *jsObject
 
+// ktAnyDesc is the class of what Any() builds, a plain java.lang.Object: equal only
+// to itself, hashed and printed (java.lang.Object@1, ktpObj) as an instance of a
+// class with no members of its own. Twin of kAnyClass in kotlin-interpreter.abnf and
+// ktAnyDesc in languages/lib/kotlin-rt.metajs.
+var ktAnyCls *jsObject
+
+func ktAnyDesc() *jsObject {
+	if ktAnyCls == nil {
+		ktAnyCls = newJSObject()
+		ktAnyCls.set("__isclass", true)
+		ktAnyCls.set("__name", "Any")
+		ktAnyCls.set("__bname", "java.lang.Object")
+	}
+	return ktAnyCls
+}
+
 // ktExcHier is the builtin throwable hierarchy, built once per program. It is what
 // `Exception("m")` / `IllegalStateException("m")` construct: the Kotlin compiler
 // grammar has no user class for them. The chain is Kotlin's own
@@ -1556,12 +1572,13 @@ func init() {
 		// js_ktcast(v, T, dst) is `v as T` for a judged T (dst is its JVM class,
 		// chosen by the emitter): a ClassCastException with java's message when v is
 		// not a T. A function value passes, and so does null: the emitter has
-		// already raised the NullPointerException for a non-null T. Twin of makeCast
-		// in kotlin-interpreter.abnf and js_ktcast in languages/lib/kotlin-rt.metajs.
+		// already raised the NullPointerException for a non-null T. Unit (undefined)
+		// is judged like any other value. Twin of makeCast in kotlin-interpreter.abnf
+		// and js_ktcast in languages/lib/kotlin-rt.metajs.
 		m["js_ktcast"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			t := rt.toString(u(a[1]))
-			if isUndefOrNull(v) {
+			if v == jsNull {
 				return a[0]
 			}
 			if isCallable(v) || ktIsType(v, t) {
@@ -1603,6 +1620,11 @@ func init() {
 		}
 		m["js_ktis"] = func(a []uint64) uint64 {
 			v := u(a[0])
+			// Unit is the undefined value: an Any and a Unit, of no other type.
+			if _, isUnit := v.(jsUndefT); isUnit {
+				b := ktTypeBase(rt.toString(u(a[1])))
+				return boolH(b == "Any" || b == "Unit")
+			}
 			if mk := ktMarkerName(ktTypeBase(rt.toString(u(a[1])))); mk != "" {
 				if is, ok := ktMarkerIs(v, mk); ok {
 					return boolH(is)
@@ -2069,7 +2091,14 @@ func init() {
 						if lst.kind >= ktArrPrim && mname == "sortedDescending" && len(out.elems) == 0 {
 							k = ktArrFixed
 						}
-						if k != 0 && !(k == ktArrFixed && recvKind == ktKindColl) {
+						if k == ktArrFixed && recvKind == ktKindColl {
+							k = 0
+						}
+						if k == 0 {
+							k = ktSizedKind(lst.kind, mname, len(out.elems), len(lst.elems),
+								mname == "slice" && ktIsRange(argAt(arr.elems, 0)))
+						}
+						if k != 0 {
 							out.kind = k
 						}
 					}
@@ -2397,6 +2426,16 @@ func init() {
 				return w(ktRecvStack[len(ktRecvStack)-1])
 			}
 			return w(ktGlobalFn(rt, name))
+		}
+		// js_ktarrclassed(a, jc) records on an Array the JVM class jc its builder's
+		// explicit element type fixes (ktArrBuilderClass in lib/kotlin-decltypes.js).
+		// Twin of makeCall in kotlin-interpreter.abnf and js_ktarrclassed in
+		// languages/lib/kotlin-rt.metajs.
+		m["js_ktarrclassed"] = func(a []uint64) uint64 {
+			if arr, isArr := u(a[0]).(*jsArray); isArr && arr.kind == ktArrArray {
+				ktArrClassed(arr, rt.toString(u(a[1])))
+			}
+			return a[0]
 		}
 		// js_ktadoptel(coll, vty, kty): see ktAdoptEl.
 		m["js_ktadoptel"] = func(a []uint64) uint64 {
@@ -3635,7 +3674,8 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 	case "toCharArray":
 		return &jsArray{elems: chars(), kind: ktaKindOf("Char")}, true
 	case "toList":
-		return &jsArray{elems: chars()}, true
+		cs := chars()
+		return &jsArray{elems: cs, kind: ktSizedKind(0, name, len(cs), len(cs), false)}, true
 	case "trim", "trimStart", "trimEnd":
 		if len(args) > 0 {
 			return rt.ktTrimBy(s, name != "trimEnd", name != "trimStart", args), true
@@ -4232,12 +4272,19 @@ func ktFormat(rt *jsrt, f string, args []interface{}) string {
 // kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
 func ktJvmClass(v interface{}) interface{} {
 	switch t := v.(type) {
+	case jsUndefT:
+		return "kotlin.Unit"
 	case *jsArray:
 		if t.kind >= ktArrPrim {
 			return ktaClasses[t.kind-ktArrPrim]
 		}
 		if t.kind != ktArrArray {
 			return ktArrJvmClass(t)
+		}
+		// An Array's class is its builder's element type's (js_ktarrclassed), else
+		// the one its elements share.
+		if p, isObj := t.props.(*jsObject); isObj && p.props["__jc"] != nil {
+			return p.props["__jc"]
 		}
 		var ecs []string
 		for _, e := range t.elems {
@@ -4504,6 +4551,9 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 	name, _ := cls.props["__name"].(string)
 	if name == "" {
 		return "", false
+	}
+	if cls == ktAnyDesc() {
+		name = "java.lang.Object"
 	}
 	return name + "@1", true
 }
@@ -5082,6 +5132,18 @@ func (rt *jsrt) ktSetFrom(es []interface{}) *jsObject {
 	s := ktMakeSet()
 	for _, e := range es {
 		rt.ktSetAdd(s, e)
+	}
+	return s
+}
+
+// ktToSet is toSet / toMutableSet / toHashSet of the elements es: toSet is
+// emptySet() or a SingletonSet by the count of es. Twin of kToSet in
+// kotlin-interpreter.abnf, which has the rule, and of the toSet arms of
+// ktSeqMethodK and ktSetMethod in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktToSet(name string, es []interface{}) *jsObject {
+	s := rt.ktSetFrom(es)
+	if name == "toSet" {
+		ktJvmTagged(s, "setOf", len(es))
 	}
 	return s
 }
@@ -6386,7 +6448,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return arr(out), true
 	case "toSet", "toMutableSet", "toHashSet":
-		return rt.ktSetFrom(es), true
+		return rt.ktToSet(name, es), true
 	case "toSortedSet":
 		return rt.ktTreeSet(es, argAt(args, 0)), true
 	case "reversed", "asReversed":
@@ -6576,7 +6638,12 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 				rt.ktMapPut(m, po.props["first"], po.props["second"])
 			}
 		}
-		return m, true
+		// Sized as toSet is (ktToSet); a Sequence's by what was put.
+		n := len(es)
+		if mk, _, _ := dictParts(m); o.kind == ktArrSeq {
+			n = len(mk.elems)
+		}
+		return ktJvmTagged(m, "mapOf", n), true
 	case "joinToString":
 		// (separator, prefix, postfix, limit, truncated, transform), each slot by its
 		// position and undefined for one the call left out; a function in any slot is
@@ -7451,7 +7518,7 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 		}
 		return out, true
 	case "toSet", "toMutableSet", "toHashSet":
-		return rt.ktSetFrom(keys.elems), true
+		return rt.ktToSet(name, keys.elems), true
 	case "toSortedSet":
 		return rt.ktTreeSet(keys.elems, argAt(args, 0)), true
 	}
@@ -7472,7 +7539,11 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 	}
 	// A set is a Collection: the same answer kinds as a values view's.
 	if out, isOut := v.(*jsArray); isOut && out != keys {
-		if k := ktResultKind(ktArrVals, name); k != 0 {
+		k := ktResultKind(ktArrVals, name)
+		if k == 0 {
+			k = ktSizedKind(ktArrVals, name, len(out.elems), len(keys.elems), false)
+		}
+		if k != 0 {
 			out.kind = k
 		}
 	}
@@ -7889,11 +7960,16 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			p.set("second", vals.elems[i])
 			out[i] = p
 		}
-		return &jsArray{elems: out}, true
+		return &jsArray{elems: out, kind: ktSizedKind(0, name, len(out), len(out), false)}, true
+	// toMap and the read-only plus / minus are sized as in kMapMethod in
+	// kotlin-interpreter.abnf, which has the rules.
 	case "toMap", "toMutableMap":
 		out := ktMakeMap()
 		for i := range keys.elems {
 			rt.ktMapPut(out, keys.elems[i], vals.elems[i])
+		}
+		if name == "toMap" {
+			ktJvmTagged(out, "mapOf", len(keys.elems))
 		}
 		return out, true
 	case "clear":
@@ -7966,6 +8042,20 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 		if name == "putAll" {
 			return jsUndef, true
 		}
+		switch add := f.(type) {
+		case *jsArray:
+			if add.kind == ktArrSeq {
+				ok, _, _ := dictParts(out)
+				return ktJvmTagged(out, "mapOf", len(ok.elems)), true
+			}
+			if len(keys.elems) == 0 {
+				return ktJvmTagged(out, "mapOf", len(add.elems)), true
+			}
+		case *jsObject:
+			if _, _, isDict := dictParts(add); !isDict && len(keys.elems) == 0 {
+				return ktJvmTagged(out, "mapOf", 1), true
+			}
+		}
 		return out, true
 	case "minus":
 		drop := []interface{}{f}
@@ -7984,7 +8074,8 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 				rt.ktMapPut(out, k, vals.elems[i])
 			}
 		}
-		return out, true
+		ok, _, _ := dictParts(out)
+		return ktJvmTagged(out, "mapOf", len(ok.elems)), true
 	}
 	// map/filter/forEach/any/... over the entry sequence, linked to the map so
 	// that the iterating ones fail fast when it changes.
@@ -10253,6 +10344,12 @@ const ktMapBuilderClass = "kotlin.collections.builders.MapBuilder"
 // ktGlobalFn is the VALUE of one global builder name.
 func ktGlobalFn(rt *jsrt, name string) interface{} {
 	switch name {
+	case "Any":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			o := newJSObject()
+			o.set("__class", ktAnyDesc())
+			return o
+		})
 	case "Math":
 		return ktJavaMath(rt)
 	case "Delegates":
@@ -10815,8 +10912,8 @@ func ktPairMethod(o *jsObject, name string) (interface{}, bool) {
 			return v, true
 		}
 	case "toList":
-		// Pair.toList() / Triple.toList(): [a, b] / [a, b, c].
-		out := &jsArray{elems: []interface{}{o.props["first"], o.props["second"]}}
+		// Pair.toList() / Triple.toList(): listOf(a, b) / listOf(a, b, c).
+		out := &jsArray{elems: []interface{}{o.props["first"], o.props["second"]}, kind: ktArrFixed}
 		if v, ok := o.props["third"]; ok {
 			out.elems = append(out.elems, v)
 		}
@@ -11600,6 +11697,42 @@ func ktResultKind(recv int, name string) int {
 var ktSortedNames = map[string]bool{"sorted": true, "sortedDescending": true,
 	"sortedBy": true, "sortedByDescending": true, "sortedWith": true}
 
+// ktSizedKind is the kind a member's fresh List of n elements takes when
+// kotlin-stdlib answers it by its size: ktArrFixed for an EmptyList or a
+// SingletonList at n 0 or 1, ktArrAsList, or 0 for an ArrayList. recv is the
+// receiver's kind, total its size, ranged whether slice was given a range. Twin of
+// ktSizedKind in languages/lib/kotlin-math.js, which has the rules.
+func ktSizedKind(recv int, name string, n, total int, ranged bool) int {
+	arr := recv == ktArrArray || recv >= ktArrPrim
+	switch {
+	case name == "slice":
+		if n == 0 {
+			return ktArrFixed
+		}
+		if arr {
+			if ranged {
+				return ktArrAsList
+			}
+			return 0
+		}
+		if ranged && n == 1 {
+			return ktArrFixed
+		}
+		return 0
+	case (name == "reversed" && arr) || (name == "takeLastWhile" && n != total):
+		if n == 0 {
+			return ktArrFixed
+		}
+		return 0
+	case ktSizedNames[name] && n <= 1:
+		return ktArrFixed
+	}
+	return 0
+}
+
+var ktSizedNames = map[string]bool{"toList": true, "take": true, "drop": true, "takeLast": true,
+	"dropLast": true, "takeLastWhile": true, "dropLastWhile": true, "reversed": true, "distinct": true}
+
 // The Sequence members whose answer is again a Sequence.
 var ktSeqKeepsKind = map[string]bool{
 	"map": true, "mapNotNull": true, "mapIndexed": true, "mapIndexedNotNull": true,
@@ -12067,6 +12200,9 @@ func ktEnumDecl(v interface{}) *jsObject {
 // interface's is marked iface (ktKClassKw). Twin of kClassOfDesc in
 // kotlin-interpreter.abnf.
 func ktClassOfDesc(d *jsObject) *jsObject {
+	if d == ktAnyDesc() {
+		return ktClassLit("Any")
+	}
 	var o *jsObject
 	if bn, ok := d.props["__bname"].(string); ok && bn != "" {
 		o = ktJavaClass(bn)

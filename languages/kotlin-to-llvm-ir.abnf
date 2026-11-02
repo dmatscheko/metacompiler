@@ -4424,7 +4424,8 @@ KwContract  = "contract" KwEnd ;
             if (nullName != "") {
                 var npeB = curF.NewBlock("")
                 var okB = curF.NewBlock("")
-                cb.NewCondBr(truthy(cb, callExt(cb, "js_eq", [r.v, hNull])), npeB, okB)
+                // Strict: Unit (undefined) is not null.
+                cb.NewCondBr(truthy(cb, callExt(cb, "js_seq", [r.v, hNull])), npeB, okB)
                 callExt(npeB, "js_throw", [callExt(npeB, "js_ktnewexc", [emitStr(npeB, "NullPointerException"),
                     emitStr(npeB, "null cannot be cast to non-null type " + nullName)])])
                 npeB.NewRet(hUndef)
@@ -5465,6 +5466,17 @@ KwContract  = "contract" KwEnd ;
         // arguments (listOf<Long>(1, 2)).
         var bty = (classNames["$" + name] == undefined && funNames["$" + name] != true) ? ktBuilderType(name, targs) : ""
         var direct = makeCallBody(name, args)
+        // An Array builder's explicit element type fixes its JVM class
+        // (ktArrBuilderClass). Twin of makeCall in kotlin-interpreter.abnf.
+        var ajc = (classNames["$" + name] == undefined && funNames["$" + name] != true && at == 2) ?
+            ktArrBuilderClass(name, items[1].targs) : ""
+        if (ajc != "") {
+            var built = direct
+            direct = function(b) {
+                var ra = built(b)
+                return {b: ra.b, v: callExt(ra.b, "js_ktarrclassed", [ra.v, emitStr(ra.b, ajc)])}
+            }
+        }
         // The callee's reified type arguments, and a generic's literals retyped by its
         // explicit type arguments - ident<Long>(5) - are read at emit time, because
         // the declaration may come later in the file.
@@ -9098,7 +9110,7 @@ KwContract  = "contract" KwEnd ;
         // handle, the {first, second[, third]} Pair, the {__sb} StringBuilder box -
         // are shapes whose whole member surface already lives in jsrtkotlin.go, so
         // the declaration is the entire port.
-        var ktBuilders = ["mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf",
+        var ktBuilders = ["Any", "mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf",
                           "emptyMap", "buildMap", "buildList", "buildSet", "buildString", "Pair", "Triple",
                           "with", "run", "repeat", "StringBuilder", "String", "generateSequence",
                           // stdlib top-level functions; their twins are the hostGlobals

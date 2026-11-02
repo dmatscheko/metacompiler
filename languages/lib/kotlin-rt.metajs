@@ -1054,6 +1054,20 @@ function ktExcHierarchy() {
 // ktIsBuiltinExc (jsrtkotlin.go 220): a name the hierarchy above provides.
 function ktIsBuiltinExc(name) { return ktExcHierarchy()[name] !== undefined }
 
+// ktAnyDesc (jsrtkotlin.go): the class of what Any() builds, a plain
+// java.lang.Object.
+var ktAnyCls = undefined
+
+function ktAnyDesc() {
+    if (ktAnyCls !== undefined) { return ktAnyCls }
+    var o = {}
+    o["__isclass"] = true
+    o["__name"] = "Any"
+    o["__bname"] = "java.lang.Object"
+    ktAnyCls = o
+    return o
+}
+
 // ktExcClass (jsrtkotlin.go 225): the ArithmeticException descriptor a divide by
 // zero throws.
 var ktArithExcCls = undefined
@@ -2775,6 +2789,7 @@ function k2Obj(o, depth) {
     var name = cls["__name"]
     if (typeof name != "string") { return undefined }
     if (name.length == 0) { return undefined }
+    if (cls === ktAnyDesc()) { return "java.lang.Object@1" }
     return name + "@1"
 }
 
@@ -3408,7 +3423,10 @@ function k2StrMethod2(s, name, args) {
         return ktChar(s.charCodeAt(0))
     }
     if (name == "toCharArray") { return arrKindSet(ktChars(s), ktaKindOf("Char")) }
-    if (name == "toList") { return ktChars(s) }
+    if (name == "toList") {
+        var tcl = ktChars(s)
+        return arrKindSet(tcl, ktSizedKind(0, name, tcl.length, tcl.length, false))
+    }
     if (name == "trim" || name == "trimStart" || name == "trimEnd") {
         if (args.length > 0) { return k2TrimBy(s, name != "trimEnd", name != "trimStart", args) }
         return k2TrimSide(s, name != "trimEnd", name != "trimStart")
@@ -4202,6 +4220,7 @@ function ktArrClassed(a, jc) {
     return a
 }
 function jxkClass(v) {
+    if (v === undefined) { return "kotlin.Unit" }
     if (k4IsCursor(v)) {
         if (v["__jc"] !== undefined) { return v["__jc"] }
     }
@@ -4209,6 +4228,12 @@ function jxkClass(v) {
         var ak = arrKind(v)
         if (ak >= 5) { return ktaClasses[ak - 5] }
         if (ak != 1) { return ktArrJvmClass(v) }
+        // An Array's class is its builder's element type's (js_ktarrclassed), else
+        // the one its elements share.
+        var ap = arrProps(v)
+        if (ap !== undefined) {
+            if (ap["__jc"] !== undefined) { return ap["__jc"] }
+        }
         var ecs = []
         var i = 0
         while (i < v.length) {
@@ -5167,7 +5192,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         }
         return out
     }
-    if (name == "toSet") { return k3SetFrom(es) }
+    if (name == "toSet") { return ktJvmTagged(k3SetFrom(es), "setOf", es.length) }
     if (name == "toMutableSet") { return k3SetFrom(es) }
     if (name == "toHashSet") { return k3SetFrom(es) }
     if (name == "toSortedSet") { return ktTreeSet(es, args[0]) }
@@ -5283,7 +5308,9 @@ function ktSeqMethodK(arr, name, args, kind) {
         for (i = 0; i < es.length; i = i + 1) {
             if (ktIsPair(es[i])) { ktMapPut(mp, es[i]["first"], es[i]["second"]) }
         }
-        return mp
+        // Sized as toSet is; a Sequence's by what was put.
+        if (arrKind(arr) == 2) { return ktJvmTagged(mp, "mapOf", ktMapKeys(mp).length) }
+        return ktJvmTagged(mp, "mapOf", es.length)
     }
     if (name == "joinToString") {
         // (separator, prefix, postfix, limit, truncated, transform) by slot; a
@@ -6034,7 +6061,7 @@ function ktSetMethod(s, name, args) {
         }
         return out
     }
-    if (name == "toSet") { return k3SetFrom(keys) }
+    if (name == "toSet") { return ktJvmTagged(k3SetFrom(keys), "setOf", keys.length) }
     if (name == "toMutableSet") { return k3SetFrom(keys) }
     if (name == "toHashSet") { return k3SetFrom(keys) }
     if (name == "toSortedSet") { return ktTreeSet(keys, args[0]) }
@@ -6052,6 +6079,7 @@ function ktSetMethod(s, name, args) {
     }
     if (ktIsArr(sq) && sq !== keys) {
         var sk = ktResultKind(3, name)
+        if (sk == 0) { sk = ktSizedKind(3, name, sq.length, keys.length, false) }
         if (sk != 0) { arrKindSet(sq, sk) }
     }
     return sq
@@ -6233,11 +6261,14 @@ function ktMapMethod(m, name, args) {
         for (i = 0; i < keys.length; i = i + 1) {
             out.push({first: keys[i], second: vals[i]})
         }
-        return out
+        return arrKindSet(out, ktSizedKind(0, name, out.length, out.length, false))
     }
+    // toMap and the read-only plus / minus are sized as in kMapMethod in
+    // kotlin-interpreter.abnf, which has the rules.
     if (name == "toMap" || name == "toMutableMap") {
         out = ktMakeMap()
         for (i = 0; i < keys.length; i = i + 1) { ktMapPut(out, keys[i], vals[i]) }
+        if (name == "toMap") { return ktJvmTagged(out, "mapOf", keys.length) }
         return out
     }
     if (name == "clear") {
@@ -6304,6 +6335,13 @@ function ktMapMethod(m, name, args) {
             }
         }
         if (name == "putAll") { return undefined }
+        if (ktIsArr(f)) {
+            if (arrKind(f) == 2) { return ktJvmTagged(out, "mapOf", ktMapKeys(out).length) }
+            if (keys.length == 0) { return ktJvmTagged(out, "mapOf", f.length) }
+        }
+        else {
+            if (keys.length == 0 && !rtIsDictObj(f)) { return ktJvmTagged(out, "mapOf", 1) }
+        }
         return out
     }
     if (name == "minus") {
@@ -6317,7 +6355,7 @@ function ktMapMethod(m, name, args) {
             }
             if (!b) { ktMapPut(out, keys[i], vals[i]) }
         }
-        return out
+        return ktJvmTagged(out, "mapOf", ktMapKeys(out).length)
     }
     // map/filter/forEach/any/... over the entry sequence.
     return ktSeqMethodK(k4ViewOf(ktElems(m), m), name, args, "Collection")
@@ -7029,6 +7067,11 @@ function k4bSetMember(o, key, val) {
 // integral number is an Int AND a Long; a box carries its real type, so it is
 // answered here and everything else falls through unchanged.
 function ktIsType(v, tname) {
+    // Unit is the undefined value: an Any and a Unit, of no other type.
+    if (v === undefined) {
+        var ut = k4bStripQ(k4bStripAngle(tname))
+        return ut == "Any" || ut == "Unit"
+    }
     if (typeof v != "number") {
         var bt = k4bStripQ(k4bStripAngle(tname))
         if (bt == "Comparable") { return ktIsCmp(v) }
@@ -7217,7 +7260,7 @@ function js_ktis(v, tname) { return ktIsType(v, tname) }
 // is not a T. null passes: the emitter has already raised the NullPointerException
 // for a non-null T.
 function js_ktcast(v, tname, dst) {
-    if (rtIsNil(v)) { return v }
+    if (v === null) { return v }
     if (typeof v == "function" || ktIsType(v, tname)) { return v }
     ktRaise("ClassCastException", ktMutCastMsg(v, tname, jvmCceMsg(jxkClass(v), dst)))
     return v
@@ -7930,6 +7973,7 @@ function ktEnumDecl(v) {
 // The KClass of a declared type, the java class its binary name names. Twin of
 // ktClassOfDesc in abnf/jsrtkotlin.go, which has the rules.
 function ktClassOfDesc(d) {
+    if (d === ktAnyDesc()) { return ktClassLit("Any") }
     var o = k4bClassOfDescName(d)
     if (d["__isiface"] === true) { o["iface"] = true }
     return o
@@ -8363,6 +8407,14 @@ function k4bAdoptAll(arr, ty) {
 function js_ktadoptfn(f, ty) {
     if (typeof f != "function") { return f }
     return function() { return k4bAdoptOne(f.apply(undefined, arguments), ty) }
+}
+// jsrtkotlin.go js_ktarrclassed: an Array's JVM class, fixed by its builder's
+// explicit element type.
+function js_ktarrclassed(a, jc) {
+    if (Array.isArray(a)) {
+        if (arrKind(a) == 1) { ktArrClassed(a, jc) }
+    }
+    return a
 }
 
 function js_ktadoptel(v, vty, kty) {
@@ -9154,10 +9206,10 @@ function ktPairMethod(o, name) {
         return KT_MISS
     }
     if (name == "toList") {
-        // Pair.toList() / Triple.toList(): [a, b] / [a, b, c].
+        // Pair.toList() / Triple.toList(): listOf(a, b) / listOf(a, b, c).
         var out = [o["first"], o["second"]]
         if (k4Own(o, "third")) { out.push(o["third"]) }
-        return out
+        return arrKindSet(out, 4)
     }
     return KT_MISS
 }
@@ -9729,6 +9781,7 @@ function ktJvmTagged(o, builder, n) {
 // Everything it answers is a closure, because js_ktglobal hands the value to the
 // emitted scope and the call site is an ordinary call.
 function ktGlobalFn(name) {
+    if (name == "Any") { return function () { return {__class: ktAnyDesc()} } }
     if (name == "Math") { return k4JavaMath() }
     if (name == "PriorityQueue") { return function (a0, a1) { return ktNewPq(a0, a1) } }
     if (name == "ArrayList" || name == "HashSet" || name == "LinkedHashSet" || name == "HashMap" || name == "LinkedHashMap"
@@ -10467,6 +10520,7 @@ function ktSmcall(recv, name, args) {
                 // emptyList().
                 if (lk == 4 && rvKind == "Collection") { lk = 0 }
                 if (rk >= 5 && name == "sortedDescending" && lv.length == 0) { lk = 4 }
+                if (lk == 0) { lk = ktSizedKind(rk, name, lv.length, rv.length, name == "slice" && ktIsRange(ktArg(as, 0))) }
                 if (lk != 0) { arrKindSet(lv, lk) }
             }
             return lv

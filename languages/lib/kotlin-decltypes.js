@@ -138,6 +138,35 @@ function ktBuilderType(name, targs) {
     return kind + "<" + targs.join(",") + ">"
 }
 
+// The JVM class of the Array an Array builder called with an explicit element type
+// builds (emptyArray<Int>() is [Ljava.lang.Integer;), which its elements cannot
+// tell when there are none or when the type is wider than they are; raw is the
+// call's `<...>`. "" for any other call, and for an element type outside
+// ktArrElemJvm, whose elements decide.
+var ktArrBuilders = {"$emptyArray": true, "$arrayOf": true, "$arrayOfNulls": true, "$Array": true}
+function ktArrBuilderClass(name, raw) {
+    if (ktArrBuilders["$" + name] != true || raw == undefined || raw.length < 2) { return "" }
+    var args = ktSplitTArgs(raw.substring(1, raw.length - 1))
+    if (args.length != 1) { return "" }
+    var e = ktArrElemJvm(args[0])
+    return e == "" ? "" : "[" + e
+}
+// The JVM descriptor of an array element type: L<class>; for Any, a builtin value
+// type or a collection interface (ktCastLang), [<descriptor> for an Array of one;
+// "" for any other type (a type parameter, a program type).
+function ktArrElemJvm(t) {
+    var s = (t.length > 0 && t.charAt(t.length - 1) == "?") ? t.substring(0, t.length - 1) : t
+    if (s.substring(0, 6) == "Array<" && s.charAt(s.length - 1) == ">") {
+        var inner = ktArrElemJvm(s.substring(6, s.length - 1))
+        return inner == "" ? "" : "[" + inner
+    }
+    var lt = s.indexOf("<")
+    var base = lt < 0 ? s : s.substring(0, lt)
+    if (base == "Any") { return "Ljava.lang.Object;" }
+    var jc = ktCastLang["$" + base]
+    return jc == undefined ? "" : "L" + jc + ";"
+}
+
 // The declared names and their static types, for the sites that retype by a NAME
 // (an assignment, an indexed write, a method argument, an elvis operand). Each
 // declaration is kept with its source offset, and every finished body (a function,

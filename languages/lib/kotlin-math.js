@@ -829,6 +829,27 @@ function ktaRefClass(classes) {
     return "[L" + c + ";"
 }
 
+// The kind a member's fresh List of n elements takes when kotlin-stdlib answers it
+// through emptyList() / listOf(e) / toList() by its size (_Collections.kt,
+// _Arrays.kt, _Sequences.kt): 4 an EmptyList or a SingletonList at n 0 or 1, -4 an
+// Arrays$ArrayList, 0 an ArrayList. recv is the receiver's kind, total its size,
+// ranged whether slice was given a range. An Array's reversed, and a slice by an
+// index list, are emptyList() or an ArrayList; an Array's slice by a range is an
+// asList; a takeLastWhile short of the whole receiver is an ArrayList. Go twin:
+// ktSizedKind in abnf/jsrtkotlin.go.
+function ktSizedKind(recv, name, n, total, ranged) {
+    var arr = recv == 1 || recv >= 5
+    if (name == "slice") {
+        if (n == 0) { return 4 }
+        if (arr) { return ranged ? 0 - 4 : 0 }
+        return ranged && n == 1 ? 4 : 0
+    }
+    if ((name == "reversed" && arr) || (name == "takeLastWhile" && n != total)) { return n == 0 ? 4 : 0 }
+    if (ktSizedNames.indexOf(" " + name + " ") < 0) { return 0 }
+    return n <= 1 ? 4 : 0
+}
+var ktSizedNames = " toList take drop takeLast dropLast takeLastWhile dropLastWhile reversed distinct "
+
 // The read-only collection classes a cast to a Mutable type exposes, as the codes
 // ktRoRule takes: LB ListBuilder, L1 Collections$SingletonList, LA Arrays$ArrayList,
 // SB SetBuilder, S1 Collections$SingletonSet, MB MapBuilder, M1

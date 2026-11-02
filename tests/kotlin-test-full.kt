@@ -7678,6 +7678,58 @@ fun s174() {
     check("mark174e", marks == "R-- R-S RCS R-S R-- --- -CS --- -CS -CS --S -CS --S --S --- --S --S -C- --S --- --S --S --- R-S ")
 }
 
+// ===== SECTION 175: Unit as Any, Any(), read-only answers by size, an Array builder's class =====
+// Unit is an object like any other: `as Any` keeps it and only null fails a non-null
+// cast. Any() is a plain java.lang.Object, equal only to itself. kotlin-stdlib
+// answers toList, take, drop, reversed, distinct, toSet, toMap, a map's minus, ...
+// through emptyList() / listOf(e) / emptySet() / emptyMap() and the Singleton
+// classes at size 0 or 1, whose read-only rules a cast to a Mutable type then meets.
+// An Array builder's explicit element type fixes the array's JVM class.
+fun unit175(): Any? = Unit
+fun cn175(x: Any): String = x.javaClass.name.removePrefix("java.util.").removePrefix("kotlin.collections.")
+
+fun s175() {
+    val n = listOf(0, 1, 2, 3)
+    check("unit175a", (unit175() as Any).toString() == "kotlin.Unit" && unit175() is Any && unit175() is Unit &&
+        unit175() as? String == null && unit175() != null &&
+        uoe170 { unit175() as String }.startsWith("C:class kotlin.Unit cannot be cast to class java.lang.String"))
+    val a = Any()
+    val b = Any()
+    check("any175b", a == a && a != b && !a.equals(b) && a.toString() == "java.lang.Object@" + a.hashCode().toString(16) &&
+        a.javaClass.name == "java.lang.Object" && a::class.simpleName == "Any" && setOf(a, b, a).size == 2 &&
+        mapOf(a to n[1])[b] == null && listOf(b, a).indexOf(a) == 1)
+    val l0 = n.filter { it > 5 }
+    val l1 = n.filter { it == 1 }
+    val l2 = n.filter { it > 1 }
+    check("ro175c", cn175(l0.toList()) == "EmptyList" && cn175(l1.toList()) == "Collections\$SingletonList" &&
+        cn175(l2.toList()) == "ArrayList" && cn175(n.take(n[1])) == "Collections\$SingletonList" &&
+        cn175(n.take(n[0])) == "EmptyList" && cn175(n.drop(n[3])) == "Collections\$SingletonList" &&
+        cn175(n.takeLast(n[2])) == "ArrayList" && cn175(n.dropLast(n[3])) == "Collections\$SingletonList" &&
+        cn175(l1.reversed()) == "Collections\$SingletonList" && cn175(l1.toTypedArray().reversed()) == "ArrayList" &&
+        cn175(listOf(n[1], n[1]).distinct()) == "Collections\$SingletonList" && cn175(l1.sorted()) == "Collections\$SingletonList" &&
+        cn175(n.slice(n[1]..n[1])) == "Collections\$SingletonList" && cn175(n.slice(listOf(n[1]))) == "ArrayList" &&
+        cn175(n.toTypedArray().slice(n[1]..n[2])) == "Arrays\$ArrayList" && cn175("a".toList()) == "Collections\$SingletonList" &&
+        cn175((n[1]..n[1]).toList()) == "Collections\$SingletonList" && cn175(l1.asSequence().toList()) == "Collections\$SingletonList" &&
+        cn175((n[1] to n[2]).toList()) == "Arrays\$ArrayList" && cn175(n.filter { it > 5 }) == "ArrayList")
+    val m1 = mapOf(n[1] to n[2])
+    val m2 = mapOf(n[1] to n[2], n[3] to n[0])
+    check("ro175d", cn175(l0.toSet()) == "EmptySet" && cn175(l1.toSet()) == "Collections\$SingletonSet" &&
+        cn175(listOf(n[1], n[1]).toSet()) == "LinkedHashSet" && cn175(setOf(n[1], n[2]).filter { it == 1 }.toSet()) == "Collections\$SingletonSet" &&
+        cn175(listOf(n[1] to n[2]).toMap()) == "Collections\$SingletonMap" && cn175(m2.toMap()) == "LinkedHashMap" &&
+        cn175(m2 - n[1]) == "Collections\$SingletonMap" && cn175(m1 - n[1]) == "EmptyMap" &&
+        cn175(emptyMap<Int, Int>() + (n[1] to n[2])) == "Collections\$SingletonMap" && cn175(m1 + (n[3] to n[0])) == "LinkedHashMap" &&
+        cn175(m1.toList()) == "Collections\$SingletonList" && cn175(m2.keys.toList()) == "ArrayList" &&
+        cn175(l0.toMutableList()) == "ArrayList")
+    check("ro175e", uoe170 { (l1.toList() as MutableList<Int>).add(n[2]) } == "Unull" &&
+        uoe170 { l0.toList() as MutableList<Int> } == "C:kotlin.collections.EmptyList cannot be cast to kotlin.collections.MutableList" &&
+        uoe170 { (l1.toSet() as MutableSet<Int>).add(n[2]) } == "Unull" &&
+        (l2.toList() as MutableList<Int>).add(n[1]) && (n.take(n[2]) as MutableList<Int>).size == 2)
+    check("arr175f", emptyArray<Int>().javaClass.name == "[Ljava.lang.Integer;" &&
+        emptyArray<String>().javaClass.name == "[Ljava.lang.String;" && arrayOf<Any>(n[1]).javaClass.name == "[Ljava.lang.Object;" &&
+        arrayOfNulls<Int>(n[2]).javaClass.name == "[Ljava.lang.Integer;" && emptyArray<List<Int>>().javaClass.name == "[Ljava.util.List;" &&
+        emptyArray<Array<Int>>().javaClass.name == "[[Ljava.lang.Integer;" && arrayOf(n[1]).javaClass.name == "[Ljava.lang.Integer;")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -7850,6 +7902,7 @@ fun main() {
     s172() // SECTION-CALL 172
     s173() // SECTION-CALL 173
     s174() // SECTION-CALL 174
+    s175() // SECTION-CALL 175
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
