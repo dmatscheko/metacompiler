@@ -154,7 +154,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, other stores to circular array nameref, valueless readonly nameref stores, nested brackets in computed decl operands · P3 · SH · OPEN [V]
+### T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, other stores to circular array nameref, valueless readonly nameref stores, nested brackets in computed decl operands · P3 · SH · IN PROGRESS (SH worker, round 43) [V]
 
 Found while working T-1131. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
