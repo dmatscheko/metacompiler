@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1120** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1121** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,17 +69,14 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for step · P3 · RB · IN PROGRESS (RB worker, round 53) [V]
+### T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endless-range enumerators without a block; Range#%; ArithmeticSequence#hash · P3 · RB · OPEN [V]
 
-Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8. Every engine says "cannot convert an endless range to an array" for these:
-- `(2.5..).each {}` must raise TypeError "can't iterate from Float".
-- `("a"..).each { |v| break v if v.size > 1 }` gives "aa": an endless String range iterates with String#succ.
-- `(1..nil).each_entry { |s| break s if s > 2 }` gives 3.
-
-ArithmeticSequence:
-- `1.step(10, 3)` without a block, and `(1..10).step(3)`, return an ArithmeticSequence. `p` shows `(1.step(10, 3))` / `((1..10).step(3))`; ours shows `#<Enumerator: 1:step(10, 3)>`.
-- `1.step(10, 0)` without a block returns `(1.step(10, 0))` instead of raising "step can't be 0".
-- Check which ArithmeticSequence methods 2.6 has (begin/end/step/exclude_end?/first/last/size/to_a/==) and model the class name and inspect output.
+Oracle: /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8.
+- The most important item: converting an endless range to an array raises RangeError "cannot convert endless range to an array" in MRI, which `rescue` can catch. Ours is an uncatchable host failure worded "an endless range". Example: `begin; (1..).to_a; rescue RangeError => e; p e.message; end`.
+- `("a"..).step(2).first(2)` gives ["a", "c"], and `(1..).each_entry.first(2)` (no block) gives [1, 2]. Both abort in our engines.
+- `(1..10) % 3` gives ((1..10).%(3)), since Range#% is step; ours raises NoMethodError.
+- `1.step(10, 3).hash == 1.step(10, 3).hash` is true; ours is false. rubyResponds has no Enumerator::ArithmeticSequence entry.
+- `1.step(Float::INFINITY, 2).first(2)` gives [1.0, 3.0] (blockless: Float values; with a block: Integers). Ours gives [1, 3].
 
 # JS — JavaScript and TypeScript
 
@@ -1171,6 +1168,7 @@ T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReve
 T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-word bad substitution; circular-nameref ${#r[@]} warnings — DONE r36 (4746419a): declare -c/-t, linear star-led prefix/suffix strip in bash-rt.c (full.5 temp-dir steps 84M->59M), case/[[ ]] expansion errors abandon the command, circular-nameref warning counts; master-probed (174-line strip matrix vs bash 5.3)
 T-1113 ruby: LocalJumpError#reason/#exit_value; `super` with a literal block (interp); endless Range#each hangs — DONE r52 (78148037): LocalJumpError#reason/#exit_value, super with a literal block / &nil / implicit block in both engines, endless Integer ranges and Numeric#step (nil/INF limit, to:/by:) via lazy one-value enumerators; master-probed vs ruby 2.6
 T-1116 kotlin: subList as a live view; MutableList/MutableMap replaceAll; primitive asList cast — DONE r34 (847bd188): subList as a live two-way window on the __lnk mechanism (structural parent change -> CME on next use), List/Map replaceAll, primitive asList read-only (CCE on cast); master-probed vs kotlinc 2.2.21. Stale index-read/for CME left (hot path) -> follow-up
+T-1118 ruby: endless Float/String ranges, each_entry, ArithmeticSequence for step — DONE r53 (fd4ce498): Enumerator::ArithmeticSequence (inspect/class/begin/end/step/last/size/==), endless String ranges, Float-range TypeError, each_entry, MRI's split Range#step messages; master-probed vs ruby 2.6
 
 # Settled — do not re-open
 
