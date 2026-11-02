@@ -114,7 +114,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1106 kotlin: Set.indices; read-only builder results not frozen against cast mutation; ListBuilder/MapBuilder javaClass · P3 · KT · OPEN [V]
+### T-1106 kotlin: Set.indices; read-only builder results not frozen against cast mutation; ListBuilder/MapBuilder javaClass · P3 · KT · IN PROGRESS (KT worker, round 31) [V]
 
 Oracle: kotlinc 2.2.21. All three engines differ:
 - `println(setOf(4,5,6).indices)` prints `0..2`; ours prints `kotlin.Unit`. The property table already lists S for indices, so only the field read is missing.
