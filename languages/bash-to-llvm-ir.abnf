@@ -1996,6 +1996,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtNrefNoArr = rtDecl("rt_nref_noarr", false, [1, 1, 0])
     var rtNrefDrop = rtDecl("rt_nref_drop", false, [1])
     var rtNrefSelfBad = rtDecl("rt_nref_self_bad", false, [1, 1])
+    var rtNrefIsarr = rtDecl("rt_nref_isarr", false, [1, 0])
     var rtNrefFstore = rtDecl("rt_nref_fstore", false, [1, 1])
     var rtArrList = rtDecl("rt_arr_list", true, [1, 1, 0, 0])
     // The scalar-aware quartet, EXPANSION SITES ONLY - see languages/lib/bash-rt.c.
@@ -2759,7 +2760,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             pickedE = atJ.NewPhi([llvm.ir.NewIncoming(atV, atB), llvm.ir.NewIncoming(one1, b)])
                             b = atJ
                         }
-                        b.NewCall(rtArrIset, [nmOf(b), kk, pickedE])
+                        // Through a nameref that is an array it is refused (rt_nref_isarr).
+                        // Twin of elemOpValue in bash-interpreter.abnf.
+                        if (attrOn(refVars, name)) {
+                            var raB = curF.NewBlock(""), rsB = curF.NewBlock("")
+                            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefIsarr, [gepStr(b, name), one]), zero), raB, rsB)
+                            rsB.NewCall(rtArrIset, [nmOf(rsB), kk, pickedE])
+                            var rjB = curF.NewBlock("")
+                            raB.NewBr(rjB)
+                            rsB.NewBr(rjB)
+                            b = rjB
+                        }
+                        else { b.NewCall(rtArrIset, [nmOf(b), kk, pickedE]) }
                     }
                     if (idxO == "?") {
                         var qmsg = gepStr(b, idxColon ? "parameter null or not set" : "parameter not set")
@@ -4038,6 +4050,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // assoc: the statement is a `declare -A`; otherwise the name's binding decides when it
     // runs (rt_isassoc), which only a literal must know beforehand (emitArrayLit).
     function emitAssign(b, a, assoc, mk) {
+        // A store through a nameref that is an array changes nothing (rt_nref_isarr): an
+        // element or a literal one is refused, which abandons the line or fails the builtin
+        // (a.soft), and a declaration's scalar is reported, where its literal is the
+        // nameref's own. Twin of runAssign and runAssignV in bash-interpreter.abnf.
+        var whole = a.lit == null && a.idxT == null
+        if (!attrOn(refVars, a.name) || (litDecl ? a.lit != null : whole)) { return emitAssignTo(b, a, assoc, mk) }
+        var isA = b.NewCall(rtNrefIsarr, [gepStr(b, a.name), whole ? llvm.constant.NewInt(i32, 2) : one])
+        var noB = curF.NewBlock(""), goB = curF.NewBlock(""), joinB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, isA, zero), noB, goB)
+        if (!whole && a.soft != undefined) { noB.NewStore(noB.NewOr(noB.NewLoad(i32, a.soft), noB.NewCall(rtTakeSubbad)), a.soft) }
+        else if (!whole) { noB = emitAbortCheck(noB) }
+        noB.NewBr(joinB)
+        emitAssignTo(goB, a, assoc, mk).NewBr(joinB)
+        return joinB
+    }
+    function emitAssignTo(b, a, assoc, mk) {
         var nm = gepStr(b, a.name)
         var viaRef = attrOn(refVars, a.name)
         var al = (a.lit == null && a.idxT == null) ? refAlias(a.name) : null
@@ -4258,7 +4286,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var mk = keep ? heapMark(b) : null
             for (k = 0; k < as.length; k++) {
                 // A readonly name abandons the command line, as an arithmetic error does; a
-                // nameref, by what its chain ends at when it runs (refRoAbort).
+                // nameref, by what its chain ends at when it runs (refRoAbort). NAME[SUB]=(list)
+                // abandons it before that check.
+                if (as[k].idxT != null && as[k].lit != null) {
+                    emitDiag(b, gepStr(b, as[k].name + "[" + as[k].isrc + "]: cannot assign list to array member\n"))
+                    b.NewStore(one, gArithErr)
+                    return emitAbortCheck(b)
+                }
                 if (!attrOn(refVars, as[k].name) && roRefused(b, as[k].name, "")) { b.NewStore(one, gArithErr); return emitAbortCheck(b) }
                 b = refRoAbort(b, as[k].name)
                 b = emitAssign(b, as[k], false, mk)
@@ -4527,6 +4561,40 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nrefDone = false
         // Set while declOne runs again past the self-reference check it has emitted.
         var selfDone = false
+        // export and readonly of a function's circular local nameref, its chain known here,
+        // act on the global variable of the name, after bash's warnings. Twin of
+        // declCircGlob in bash-interpreter.abnf, which has the cases.
+        var circGlobDone = false
+        var declCircGlob = function(b, j, v) {
+            var nm = names[j]
+            var circW = "warning: " + nm + ": circular name reference\n"
+            var maxW = "warning: " + nm + ": maximum nameref depth (8) exceeded\n"
+            var a = asgs[j]
+            if (a == null) {
+                emitDiag(b, gepStr(b, circW))
+                if (!(kw == "export" && flags.indexOf("n") >= 0)) {
+                    var id = llvm.constant.NewInt(i32, getVarId(nm))
+                    b.NewCall(rtGlobSwap, id)
+                    var none = b.NewAnd(b.NewICmp(llvm.enum.IPredEQ, loadVar(b, nm), unsetPtr(b)),
+                                        b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtArrAny, gepStr(b, nm)), zero))
+                    b.NewCall(rtGlobSwap, id)
+                    var mxB = curF.NewBlock(""), goB = curF.NewBlock("")
+                    b.NewCondBr(none, mxB, goB)
+                    emitDiag(mxB, gepStr(mxB, maxW))
+                    mxB.NewBr(goB)
+                    b = goB
+                }
+            }
+            else if (a.lit != null) { emitDiag(b, gepStr(b, circW)); emitDiag(b, gepStr(b, circW)); emitDiag(b, gepStr(b, circW)) }
+            else { emitDiag(b, gepStr(b, maxW)); emitDiag(b, gepStr(b, circW)) }
+            var sg = global
+            global = true
+            circGlobDone = true
+            b = declAt(b, j, v)
+            circGlobDone = false
+            global = sg
+            return b
+        }
         // The value of assignment a, expanded now unless v already holds it.
         var declValue = function(b, a, v) {
             if (v != null) { return {b: b, v: v} }
@@ -4589,6 +4657,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         return sEnd
                     }
                 }
+            }
+            if (!circGlobDone && (kw == "export" || kw == "readonly") && curFrame != null && locOwn("$" + names[j]) && refLoops(names[j])) {
+                return declCircGlob(b, j, v)
             }
             // A function's own nameref whose chain, known here, is circular is looked up
             // twice, each a warning. Without -n, the attributes and the value then go to the
@@ -4747,6 +4818,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
             if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0) && attrOn(roVars, names[j])) {
                 emitDiag(b, gepStr(b, roWho + ((asgs[j] != null && roWho != "" && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n"))
+                // export still exports it (bash 5.3: readonly z=1; export z=2 leaves -rx).
+                if (kw == "export" && xCode > 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), one]) }
                 roFail = true
                 return b
             }
@@ -5143,7 +5216,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { core.push(bashDeclPlusOp(core, it, makeConst)) }
             else { reds.push(it) }
         }
-        return makeDecl(core, reds)
+        var le = bashDeclListElem(core)
+        if (le == null) { return makeDecl(core, reds) }
+        // Twin of makeDeclR in bash-interpreter.abnf.
+        var pre = makeDecl(le.items, [])
+        return function(b) {
+            b = pre(b)
+            var ok = curF.NewBlock(""), join = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gStatus), zero), ok, join)
+            emitDiag(ok, gepStr(ok, le.lbl + ": cannot assign list to array member\n"))
+            ok.NewBr(join)
+            join.NewStore(one, gArithErr)
+            return emitAbortCheck(join)
+        }
     }
     // src: the item as written, which a declaration with a computed operand re-reads.
     function mkDeclItem(items, src) { return {a: parseAssign(items), src: src} }
@@ -6492,6 +6577,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             ifs = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ifsRaw, unsetPtr(b)), gepStr(b, " \t\n"), ifsRaw)
         }
         var merge = curF.NewBlock("")
+        // Through a nameref that is an array the store is refused (rt_nref_isarr), the record
+        // read. Twin of readBuiltin in bash-interpreter.abnf.
+        if (arrName != null && attrOn(refVars, arrName)) {
+            var raBad = curF.NewBlock(""), raGo = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefIsarr, [gepStr(b, arrName), zero]), zero), raBad, raGo)
+            emitDiag(raBad, gepStr(raBad, "read: `': not a valid identifier\n"))
+            storeStatusI(raBad, 1)
+            raBad.NewBr(merge)
+            b = raGo
+        }
         if (arrName != null) {
             b.NewCall(rtArrClear, gepStr(b, arrName))
             b.NewCall(rtArrMark, gepStr(b, arrName))
@@ -7565,13 +7660,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                                   llvm.constant.NewInt(i32, getVarId("FUNCNAME"))])
                         }
                     } else {
-                        // Without -n, an element of the array a nameref names.
+                        // Without -n, an element of the array a nameref names; through one that
+                        // is an array, nothing (rt_nref_isarr).
                         var unm = gepStr(b, sp0.name)
-                        if (!un && attrOn(refVars, sp0.name)) { unm = b.NewCall(rtNrefBase, unm) }
-                        ust = b.NewOr(ust, b.NewCall(rtArrUnset, [unm, gepStr(b, sp0.key)]))
+                        var uaB = null
+                        if (!un && attrOn(refVars, sp0.name)) {
+                            uaB = curF.NewBlock("")
+                            var usB = curF.NewBlock("")
+                            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefIsarr, [unm, zero]), zero), uaB, usB)
+                            b = usB
+                            unm = b.NewCall(rtNrefBase, unm)
+                        }
+                        var urc = b.NewCall(rtArrUnset, [unm, gepStr(b, sp0.key)])
                         // An arithmetic error in the subscript abandons the line at once. Twin
                         // of the unset arm of runCommand in bash-interpreter.abnf.
                         b = emitAbortCheck(b)
+                        if (uaB != null) {
+                            var ujB = curF.NewBlock("")
+                            b.NewBr(ujB)
+                            uaB.NewBr(ujB)
+                            urc = ujB.NewPhi([llvm.ir.NewIncoming(urc, b), llvm.ir.NewIncoming(zero, uaB)])
+                            b = ujB
+                        }
+                        ust = b.NewOr(ust, urc)
                     }
                 }
                 storeStatus(b, ust)

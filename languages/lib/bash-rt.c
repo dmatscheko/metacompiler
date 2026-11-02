@@ -333,6 +333,7 @@ int rt_nref_close(char *n);
 int rt_nref_gstore(char *n);
 int rt_nref_gset(char *n, char *v, int app, int at);
 int rt_nref_fstore(char *n, char *v);
+int rt_nref_isarr(char *n, int sub);
 int rt_nref_unglob(void);
 char *rt_nref_gread(void);
 int rt_unset_name(char *n);
@@ -6335,6 +6336,10 @@ int rt_mf_begin(char *who, char *nm, char *dlm, char *cnt, char *org, char *skp,
         rt_berr("", nm, "readonly variable");
         return 1;
     }
+    if (rt_nref_isarr(nm, 0) != 0) {
+        rt_berr(who, "`'", "not a valid identifier");
+        return 1;
+    }
     if (rt_isassoc(nm) != 0) {
         rt_berr(who, nm, "not an indexed array");
         return 1;
@@ -6745,6 +6750,22 @@ int rt_nref_fstore(char *n, char *v)
     return 1;
 }
 
+/* Is n a nameref that is an array (a function's circular one given an array
+ * literal)? It names no variable bash can follow: a store to it changes
+ * nothing, and an element store (sub 1) is refused as one to the name "" -
+ * "not a valid identifier", arith_err and sub_bad; sub 2 reports it alone, as
+ * arithmetic does. Twin of refIsArr and refArrBad in bash-interpreter.abnf. */
+int rt_nref_isarr(char *n, int sub)
+{
+    if (nref_any == 0 || (rt_arr_marks(n) & 32) == 0 || rt_arr_any(n) == 0) return 0;
+    if (sub != 0) rt_berr("", rt_strcat(ar_pfx(), "`'"), "not a valid identifier");
+    if (sub == 1) {
+        arith_err = 1;
+        sub_bad = 1;
+    }
+    return 1;
+}
+
 /* A store that lands on the nameref n itself (its value unset or empty) must name
  * a variable, NAME or NAME[SUB]: otherwise bash's "not a valid identifier" (under
  * the storing builtin's ar_pfx), arith_err and sub_bad, and 1. Twin of refSelfBad
@@ -6890,7 +6911,9 @@ char *rt_nref_name(char *n, int own)
  * bash-interpreter.abnf. */
 int rt_unset_ref(char *n, int ro)
 {
-    char *e = rt_nref_end(n);
+    char *e;
+    if (rt_nref_isarr(n, 0) != 0) return 0;
+    e = rt_nref_end(n);
     if (e == 0) {
         rt_nref_end(n);
         rt_arr_clear(n);
@@ -8958,10 +8981,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
     char *old;
     at = at & 7;
     if (nref_any != 0) {
-        /* A nameref that is an array (a function's circular one given an array
-         * literal) names no variable bash can follow: the store changes nothing.
-         * Twin of runAssignV in bash-interpreter.abnf. */
-        if ((rt_arr_marks(n) & 32) != 0 && rt_arr_any(n) != 0) return 0;
+        if (rt_nref_isarr(n, 0) != 0) return 0;
         if (rt_nref_gstore(n) != 0) return rt_nref_gset(n, v, app, at | bi | ro);
         n = rt_nref_end(n);
         if (n == 0) {
@@ -9236,6 +9256,7 @@ int rt_ar_nset(char *nm, char *k, char *v, int at)
 {
     int i = -1;
     int r;
+    if (rt_nref_isarr(nm, k != 0 ? 2 : 0) != 0) return 0;
     if (nref_any != 0 && (rt_arr_marks(nm) & 32) != 0 && rt_nref_end(nm) == 0) {
         i = rt_nref_glob(nm);
         if (k == 0 && i >= 0 && rt_arr_any(varnames[i]) == 0) {
@@ -9398,18 +9419,22 @@ int rt_vset(char *s, int cond)
 }
 
 /* `unset WORD` where the word came out of an expansion: NAME[SUB] removes the
- * element (rt_arr_unset), NAME the variable and its array. The answer is the
- * status. */
+ * element (rt_arr_unset), NAME the variable and its array; through a nameref
+ * that is an array, nothing (rt_nref_isarr). The answer is the status. */
 int rt_unset_name(char *n)
 {
     int len = rt_strlen(n);
     int i = 0;
+    char *nm;
     if (len > 2 && n[len - 1] == 93) {
         while (i < len && n[i] != 91) i = i + 1;
         if (i > 0 && i < len - 1) {
-            return rt_arr_unset(rt_substr(n, 0, i), rt_substr(n, i + 1, len - i - 2));
+            nm = rt_substr(n, 0, i);
+            if (rt_nref_isarr(nm, 0) != 0) return 0;
+            return rt_arr_unset(nm, rt_substr(n, i + 1, len - i - 2));
         }
     }
+    if (rt_nref_isarr(n, 0) != 0) return 0;
     rt_setvar_byname(n, &unset_marker[0], 0, 0);
     rt_arr_clear(n);
     rt_xmark(n, 0);

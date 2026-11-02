@@ -3346,6 +3346,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return
             }
             if (selfV) { diagErr(kw + ": warning: " + names[k] + ": circular name reference\n") }
+            if (declCircGlob(k, v)) { return }
             var plainV = asgs[k] == null || (asgs[k].lit == null && asgs[k].idxT == null && asgs[k].op != "+=")
             // A function's own nameref whose chain is circular is looked up twice, each a
             // warning. Without -n, the attributes and the value then go to the nameref itself
@@ -3446,6 +3447,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (plus.indexOf("n") >= 0) { refVars["$" + names[k]] = false }
         }
+        // export and readonly of a function's circular local nameref act on the global
+        // variable of the name (refGlobal), after bash 5.3's lookups warn: a value maximum
+        // depth, then circular; an array literal circular three times; no value circular, then
+        // maximum depth when it creates the global. Twin of declCircGlob in
+        // bash-to-llvm-ir.abnf.
+        var declCircGlob = function(k, v) {
+            var nm = names[k]
+            if (!anyRef || (kw != "export" && kw != "readonly") || !attrOn(refVars, nm) || refGlobal(nm) == "") { return false }
+            var circW = "warning: " + nm + ": circular name reference\n"
+            var maxW = "warning: " + nm + ": maximum nameref depth (8) exceeded\n"
+            if (asgs[k] == null) {
+                diagErr(circW)
+                var had = {v: false}
+                onGlobal(nm, function() { had.v = isSetVar(nm) || isArr(nm) })
+                if (!had.v && !(kw == "export" && flags.indexOf("n") >= 0)) { diagErr(maxW) }
+            }
+            else if (asgs[k].lit != null) { diagErr(circW); diagErr(circW); diagErr(circW) }
+            else { diagErr(maxW); diagErr(circW) }
+            onGlobal(nm, function() { declOneN(k, v) })
+            return true
+        }
         // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
         // function declare a function-local name (value AND attributes restored on return)
         // unless -g is given; `export` and `readonly` always act on the global.
@@ -3459,6 +3481,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var shown = (declOwn != "") ? declOwn : names[k]
             if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0 || roAttr) && attrOn(roVars, names[k])) {
                 diagErr(roWho + ((asgs[k] != null && roWho != "") ? shown : names[k]) + ": readonly variable\n")
+                // export still exports it (bash 5.3: readonly z=1; export z=2 leaves -rx).
+                if (kw == "export" && flags.indexOf("n") < 0) { exVars["$" + names[k]] = true }
                 roFail = true
                 return
             }
@@ -3753,7 +3777,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { core.push(bashDeclPlusOp(core, it, makeConst)) }
             else { reds.push(it) }
         }
-        return makeDecl(core, reds, ln)
+        var le = bashDeclListElem(core)
+        if (le == null) { return makeDecl(core, reds, ln) }
+        // The first declaration's own failure abandons the line with no more said. Twin of
+        // makeDeclR in bash-to-llvm-ir.abnf.
+        var pre = makeDecl(le.items, [], ln)
+        return function() {
+            var st = pre()
+            if (typeof st == "object") { return st }
+            if (st == 0) { diagErr(le.lbl + ": cannot assign list to array member\n") }
+            abortSignal = {ret: 1, isExit: 1, soft: 1}
+            return takeAbort()
+        }
     }
     // src: the item as written, which a declaration with a computed operand re-reads.
     function mkDeclItem(items, src) { return {a: parseAssign(items), src: src} }
@@ -4592,6 +4627,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o == "+") { return blank ? "" : dfltWord(wordT) }
         if (o == "=") {
             // The default is stored, and expands, under the array's attributes.
+            // Read through a nameref that is an array, no element is set.
+            if (refIsArr(name)) { refArrBad(); return "" }
             if (blank) { var d = elemVal(name, null, (wordT != null) ? wordJoin(wordT()) : ""); if (!arithErr) { arrSet(name, sub, d) }; return d }
             return v
         }
@@ -5383,6 +5420,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // for a scalar and on the nameref itself, which stops being one, for an element. Twin
     // of rt_ar_nset.
     function arSet(name, key, s) {
+        // An element store reports refArrBad's error and goes on (bash 5.3).
+        if (refIsArr(name)) {
+            if (key != null) { diagErr(arPfx + "`': not a valid identifier\n") }
+            return
+        }
         if (anyRef && attrOn(refVars, name) && refTarget(name) == "") {
             var gn = refGlobal(name)
             if (key == null && gn != "") {
@@ -6337,8 +6379,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             cmdSubRan = false
             var k
             for (k = 0; k < as.length; k++) {
-                // A readonly name abandons the command line, as an arithmetic error does.
-                if (roRefused(as[k].name, "")) { abortSignal = {ret: 1, isExit: 1, soft: 1} }
+                // A readonly name abandons the command line, as an arithmetic error does, and
+                // so, before that check, does NAME[SUB]=(list).
+                if (as[k].idxT != null && as[k].lit != null) {
+                    diagErr(as[k].lbl + "[" + as[k].isrc + "]: cannot assign list to array member\n")
+                    abortSignal = {ret: 1, isExit: 1, soft: 1}
+                }
+                else if (roRefused(as[k].name, "")) { abortSignal = {ret: 1, isExit: 1, soft: 1} }
                 else { runAssign(as[k], false, false) }
                 var ab = takeAbort()
                 if (ab != null) { return ab }
@@ -6402,6 +6449,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // array literal reports an element as applyArrayLit says. Twin of the emitAbortCheck in
     // emitAssign.
     function runAssign(a, assoc, decl) {
+        if (!decl && a.circ != true && refIsArr(a.name)) {
+            if (a.idxT != null || a.lit != null) { refArrBad() }
+            return
+        }
         if (anyRef && a.circ != true && refGlobStore(a)) {
             onRefGlobal(a.name, function() { runAssign(a, assoc, decl) })
             return
@@ -6477,11 +6528,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         arPfx = svp
         return k
     }
-    // The same, with the value already expanded. A scalar store to a nameref that is an
-    // array (a function's circular one given an array literal) changes nothing: its value
-    // names no variable bash can follow (bash 5.3). Twin of rt_setvar_byname.
+    // The same, with the value already expanded.
     function runAssignV(a, assoc, v, decl) {
-        if (anyRef && noRef == 0 && a.idxT == null && a.lit == null && attrOn(refVars, a.name) && isArr(a.name)) { return }
+        // A declaration's scalar value is reported, and its status stays 0 (bash 5.3).
+        if (a.lit == null && refIsArr(a.name)) {
+            if (a.idxT != null) { refArrBad() } else if (decl) { diagErr(arPfx + "`': not a valid identifier\n") }
+            return
+        }
         a = refAssign(a)
         if (a == null) { return }
         if (a.glob == true) {
@@ -6520,6 +6573,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         storeAttr(a.name, v, false)
     }
+    // A NAMEREF THAT IS AN ARRAY (a function's circular one given an array literal) names no
+    // variable bash can follow (bash 5.3): a store to it changes nothing, and an element or
+    // array literal store is refused as one to the name "" (refArrBad), which abandons the
+    // line or fails the builtin that stored. A declaration's literal is the nameref's own.
+    // bash names the bytes of its array's header instead of "". Twin of rt_nref_isarr.
+    function refIsArr(name) { return anyRef && noRef == 0 && attrOn(refVars, name) && isArr(name) }
+    function refArrBad() {
+        diagErr(arPfx + "`': not a valid identifier\n")
+        arithErr = true
+        subBad = true
+    }
     // A store that lands on a nameref itself (its value unset or empty) must name a
     // variable, NAME or NAME[SUB]: otherwise bash's "not a valid identifier", which abandons
     // the line, or fails the builtin that stored (subBad). Twin of rt_nref_self_bad.
@@ -6536,6 +6600,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ${v:=w} store this way too. Answers the stored text. Twin of emitStoreAttr in
     // bash-to-llvm-ir.abnf.
     function storeAttr(name, v, bi) {
+        if (anyRef) {
+            var bn = isElemRef(name) ? splitSubscript(name).name : name
+            if (refIsArr(bn)) {
+                if (bn != name) { refArrBad() }
+                return ""
+            }
+        }
         if (anyRef && refGlobStore({name: name, idxT: null, lit: null})) {
             var gs = {v: ""}
             onRefGlobal(name, function() { gs.v = storeAttr(name, v, bi) })
@@ -7407,6 +7478,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o.c != null && (qn == null || qn <= 0)) { diagErr(who + ": " + o.c + ": invalid callback quantum\n"); return 1 }
         if (!isIdentText(nm)) { diagErr(who + ": `" + nm + "': not a valid identifier\n"); return 1 }
         if (roRefused(nm, "")) { return 1 }
+        if (refIsArr(nm)) { diagErr(who + ": `': not a valid identifier\n"); return 1 }
         if (assocFact(nm, false)) { diagErr(who + ": " + nm + ": not an indexed array\n"); return 1 }
         if (o.O == null) { unsetVar(nm); arrNew(nm, false) } else { arrAdopt(nm); arrEnsure(nm, false) }
         arrs[arrKey(nm)].lit = true
@@ -7519,6 +7591,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rec = readRec(o.raw, o.dlm, o.nch)
         if (badArr) { return 1 }
         if (arrName != null && roRefused(arrName, "")) { return 1 }
+        if (arrName != null && refIsArr(arrName)) { diagErr("read: `': not a valid identifier\n"); return 1 }
         if (arrName == null && names.length == 0 && roRefused("REPLY", "")) { return 2 }
         var st = rec.eof ? 1 : 0
         // -N splits nothing, as an empty IFS.
@@ -8127,6 +8200,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (; ui < args.length; ui++) {
                 if (uf) { if (isFunc(args[ui])) { setFunc(args[ui], null, null, null) }; continue }
                 var sp = splitSubscript(args[ui])
+                // Through a nameref that is an array it finds nothing to unset.
+                if (!un && refIsArr(sp.name)) { continue }
                 // Without -n, unset acts on the variable a nameref names; through a circular
                 // chain on the nameref itself, as -n does, after bash 5.3 looked the chain up
                 // twice (two warnings).

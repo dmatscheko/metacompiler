@@ -171,6 +171,34 @@ s134() {
   e="$e $([ /usr -ef /usr ]; echo -n $?; [[ /dev/null -ef /dev/null ]]; echo -n $?; test / -ef /dev; echo -n $?; o=-ef; [ "$p" $o "$p" ]; echo -n $?; [ /usr -nt /usr ]; echo -n $?; [[ / -ot / ]]; echo -n $?)"
   check rox8 "$e" '010101 001111'
 }
+# ===== SECTION 135: list values for array members, stores to circular array namerefs =====
+# NAME[SUB]=(list) is refused and abandons the line, after a declaration has made NAME an
+# array. export and readonly of a function's circular local nameref act on the global. A
+# store to a circular nameref that holds an array leaves the array as it was; its
+# declaration's own list still lands. Every expected value is bash 5.3's, less the byte
+# bash prints between the quotes.
+s135() {
+  local e
+  s135s() { local l; while IFS= read -r l; do l=${l#*: line }; l=${l//$'\001'/}; printf '%s;' "${l#*: }"; done <<< "$1"; }
+  e=$( { s135a[1]=(x y); echo no; } 2>&1; echo "s=$?"; declare -p s135a 2>&1)
+  check alm1 "$(s135s "$e")" 's135a[1]: cannot assign list to array member;'
+  e=$(s135f() { local s135b[2]=(p); echo no; }; s135f 2>&1; echo "s=$?")
+  check alm2 "$(s135s "$e")" 's135b[2]: cannot assign list to array member;'
+  e=$(declare -A s135c; { declare -A s135c[k]=(v w); echo no; } 2>&1; declare -p s135c)
+  check alm3 "$(s135s "$e")" 's135c[k]: cannot assign list to array member;'
+  e=$(s135f() { export s135d[1]=(p q); echo no; }; s135f 2>&1; declare -p s135d 2>&1)
+  check alm4 "$(s135s "$e")" 's135d[1]: cannot assign list to array member;'
+  e=$(s135g() { local -n s135w=s135w; export s135w=q; declare -p s135w; local -n s135v=s135v; readonly s135v; export -n s135v; }; s135g 2>&1; declare -p s135w)
+  check alm5 "$(s135s "$e")" 'local: warning: s135w: circular name reference;warning: s135w: circular name reference;warning: s135w: maximum nameref depth (8) exceeded;warning: s135w: circular name reference;declare -n s135w="s135w";local: warning: s135v: circular name reference;warning: s135v: circular name reference;warning: s135v: circular name reference;warning: s135v: maximum nameref depth (8) exceeded;warning: s135v: circular name reference;declare -x s135w="q";'
+  e=$(s135g() { local -n s135u=s135u; readonly s135u=(x); }; s135g 2>&1; declare -p s135u)
+  check alm6 "$(s135s "$e")" 'local: warning: s135u: circular name reference;warning: s135u: circular name reference;warning: s135u: circular name reference;warning: s135u: circular name reference;warning: s135u: circular name reference;declare -ar s135u=([0]="x");'
+  e=$(readonly s135z=1; export s135z=2 2>/dev/null; declare -p s135z)
+  check alm7 "$e" 'declare -rx s135z="1"'
+  e=$(s135g() { local -n s135t=s135t; declare s135t=(x y); s135t[1]=q; echo no; }; s135g 2>&1; echo "s=$?")
+  check alm8 "$(s135s "$e")" 'local: warning: s135t: circular name reference;warning: s135t: circular name reference;warning: s135t: circular name reference;warning: s135t: circular name reference;warning: s135t: circular name reference;warning: s135t: circular name reference;`'"'"': not a valid identifier;'
+  e=$(s135g() { local -n s135q=s135q; declare s135q=(x y); (( s135q[1]=7 )); echo "s=$?"; let 's135q[0]=4'; echo "s=$?"; declare s135q[1]=z; echo "s=$?"; unset 's135q[1]' s135q; echo "s=$?"; read -a s135q <<< 'a b'; echo "s=$?"; declare s135q+=(z); declare -p s135q; }; s135g 2>/dev/null)
+  check alm9 "$e" $'s=0\ns=0\ns=1\ns=0\ns=1\ndeclare -an s135q=([0]="x" [1]="y" [2]="z")'
+}
 # ===== END SECTIONS =====
 
 s129  # SECTION-CALL 129
@@ -179,5 +207,6 @@ s131  # SECTION-CALL 131
 s132  # SECTION-CALL 132
 s133  # SECTION-CALL 133
 s134  # SECTION-CALL 134
+s135  # SECTION-CALL 135
 echo "full: $checks checks, $fails failures"
 exit $fails

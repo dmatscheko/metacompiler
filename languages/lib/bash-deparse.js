@@ -831,6 +831,34 @@ function bashDeclPlusOp(core, it, mkConst) {
     return {dyn: [mkConst(it.dflag)]}
 }
 
+// NAME[SUB]=(list) AS A DECLARATION OPERAND. bash meets it while the words are expanded,
+// before the builtin runs: it first declares NAME the way `declare NAME[SUB]` does, with the
+// declaration's -a/-A, -i/-l/-u and scope (local stays local; export, readonly and -g are
+// global), then reports "NAME[SUB]: cannot assign list to array member" and abandons the line
+// (bash 5.3: `declare -r q[1]=(x)` leaves `declare -a q`). items are a declaration's. Answers
+// null unless an operand is written so; else {items: that first declaration, lbl: the
+// message's NAME[SUB], SUB as written}.
+function bashDeclListElem(items) {
+    var kw = items[0].dkw
+    var fl = ""
+    var i
+    for (i = 1; i < items.length; i++) {
+        var it = items[i]
+        if (it.dflag != undefined && it.dflag.charAt(0) == "-") { fl = fl + it.dflag }
+        if (it.a == undefined || it.a.idxT == null || it.a.lit == null) { continue }
+        var o = (fl.indexOf("g") >= 0 || kw == "export" || kw == "readonly") ? "g" : ""
+        o = o + ((fl.indexOf("A") >= 0) ? "A" : ((fl.indexOf("a") >= 0) ? "a" : ""))
+        var t = "ilu"
+        var k
+        for (k = 0; k < t.length; k++) { if (fl.indexOf(t.charAt(k)) >= 0) { o = o + t.charAt(k) } }
+        var pre = [{dkw: (kw == "local") ? "local" : "declare"}]
+        if (o != "") { pre.push({dflag: "-" + o}) }
+        pre.push({dname: it.a.name, darr: it.a.name + "[0]"})
+        return {items: pre, lbl: it.a.name + "[" + it.a.isrc + "]"}
+    }
+    return null
+}
+
 // Does the subscript text of a NAME[SUB] string need expanding (a $, a quote, a backslash or
 // a backquote)? Without one it is its own expansion.
 function bashSubNeedsX(t) {
@@ -1015,7 +1043,9 @@ function bashDeclOperand(f, arr, quote, elem) {
     var opLen = (f.charAt(j) == "+" && f.charAt(j + 1) == "=") ? 2 : 1
     if (f.charAt(j) != "=" && opLen == 1) { return "" }
     var v = f.slice(j + opLen)
-    if (arr && v.length >= 2 && v.charAt(0) == "(" && v.charAt(v.length - 1) == ")") { return f.slice(0, j + opLen) + v }
+    // Under -a or -A such a value is the whole array's, whatever SUB says (bash 5.3:
+    // `declare -a 'w[2]=(x y)'` is w=(x y)).
+    if (arr && v.length >= 2 && v.charAt(0) == "(" && v.charAt(v.length - 1) == ")") { return f.slice(0, i) + f.slice(j, j + opLen) + v }
     return f.slice(0, j + opLen) + quote(v)
 }
 
