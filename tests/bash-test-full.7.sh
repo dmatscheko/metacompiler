@@ -429,6 +429,30 @@ s152() {
   e=$( (s152g) 2>&1; echo "s $?")
   check crr3 "$(s152s "$e")" 'local: warning: w: circular name reference;c;-;c;w: readonly variable;s 1;'
 }
+# ===== SECTION 153: -i, -u and -l declared through a function's computed nameref =====
+# `local -i w` of a nameref w whose value is a variable name gives the attribute to that
+# variable, made a local of the function when it is none; the nameref keeps only -n. Stores
+# through the nameref then use it. A nameref with no value, or one that refers to itself,
+# takes the attribute itself. Every expected value is bash 5.3's.
+s153() {
+  local e
+  s153f() { local -n w=$1; local -i w=3; echo "a $?"; declare -p w s153x; w=1+2; echo "b $w"; w+=4; echo "c $w"; }
+  e=$(s153f s153x 2>&1; echo "d ${s153x-unset}")
+  check cna1 "${e//$'\n'/;}" 'a 0;declare -n w="s153x";declare -i s153x="3";b 3;c 7;d unset'
+  s153g() { local -n w=$1; local -u w; w=abc; echo "e $w"; local -l w; w=DEF; echo "f $w"; declare -p w; }
+  s153h() { local -n w=$1; declare -u w=abc; read w <<< def; echo "g $s153y"; printf -v w %s ghi; echo "h $s153y"; }
+  e=$(s153g s153y 2>&1; s153h s153y 2>&1; echo "i ${s153y-unset}")
+  check cna2 "${e//$'\n'/;}" 'e ABC;f def;declare -n w="s153y";g DEF;h GHI;i unset'
+  s153k() { local s153q=5; s153m s153q; declare -p s153q; s153q=2+2; echo "j $s153q"; }
+  s153m() { local -n w=$1; declare -i w; w=6*7; echo "k $w"; }
+  s153n() { local -n w=$1; local -i w=3; (( w += 2 )); echo "l $s153z"; w=(7+1 2); declare -p s153z; }
+  e=$(s153k 2>&1; s153n s153z 2>&1)
+  check cna3 "${e//$'\n'/;}" 'k 42;declare -- s153q="5";j 2+2;l 5;declare -ai s153z=([0]="8" [1]="2")'
+  s153p() { local -n w=$1; local -i w=3; echo "m $?"; declare -p w; }
+  s153r() { local -n w=$1; local -i w=w; echo "n $?"; declare -p w; }
+  e=$(s153p w 2>/dev/null; s153r w 2>/dev/null; s153p "" 2>/dev/null)
+  check cna4 "${e//$'\n'/;}" 'm 1;declare -n w="w";n 1;declare -in w="w";m 0;declare -i w="3"'
+}
 # ===== END SECTIONS =====
 
 s135  # SECTION-CALL 135
@@ -449,5 +473,6 @@ s149  # SECTION-CALL 149
 s150  # SECTION-CALL 150
 s151  # SECTION-CALL 151
 s152  # SECTION-CALL 152
+s153  # SECTION-CALL 153
 echo "full: $checks checks, $fails failures"
 exit $fails

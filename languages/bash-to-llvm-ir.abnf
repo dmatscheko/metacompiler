@@ -2140,6 +2140,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtLocalHere = rtDecl("rt_local_here", false, [0, 0])
     var rtRoBind = rtDecl("rt_ro_bind", false, [0])
     var rtRoNow = rtDecl("rt_ro_now", false, [0, 0])
+    var rtDynAtn = rtDecl("rt_dyn_atn", false, [1])
+    var rtAtmark = rtDecl("rt_atmark", false, [1, 0])
+    var rtNrefAtmark = rtDecl("rt_nref_atmark", false, [1, 0, 0])
     var rtPushTmp = rtDecl("rt_push_tmp", false, [0])
     var rtFnEnter = rtDecl("rt_fn_enter", false, [0])
     var rtLocalNew = rtDecl("rt_local_new", false, [0, 0])
@@ -4293,6 +4296,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (bits != 0) { at = b.NewSelect(eq, llvm.constant.NewInt(i32, bits), at) }
             if (gb >= 0) { at = b.NewSelect(b.NewAnd(eq, circ), llvm.constant.NewInt(i32, gb), at) }
         }
+        // A function's -i, -u or -l through a computed nameref is a run-time mark.
+        at = b.NewOr(at, b.NewCall(rtDynAtn, nv))
         return at
     }
     // The elemAttrs bits (plus 8 for readonly, with ro) the variable nm had where this
@@ -4917,6 +4922,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // A chain known only when it runs (a computed target) is tested then (rt_nref_loops).
             if (!nrefDone && !circDone && !isRef && localHereJ && plus.indexOf("n") < 0 && circOk && attrOn(refVars, names[j]) === true) {
+                var lk = "$" + names[j]
+                var preAt = caseAtBits(names[j])
                 var lpB = curF.NewBlock(""), noB = curF.NewBlock(""), lpEnd = curF.NewBlock("")
                 b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefLoops, gepStr(b, names[j])), zero), lpB, noB)
                 if (a == null && flags == "") { lpB.NewCall(rtDeclCirc, [gepStr(lpB, kw), gepStr(lpB, names[j]), emptyPtr(lpB), zero]) }
@@ -4928,20 +4935,41 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (roFail) { lpB.NewStore(one, refuseP) }
                     roFail = svFail
                 }
+                // The -i, -u and -l each path gives the nameref itself are run-time marks on
+                // it (rt_atmark): the lexical ones stay as they were before the declaration.
+                lpB = atBack(lpB, names[j], preAt)
                 lpB.NewBr(lpEnd)
-                // The -i, -u and -l the nameref itself is shown with are the circular path's:
-                // on the other they go to a target this compiler cannot name (manual 7.9).
-                var lk = "$" + names[j]
-                var lpAt = [attrOn(intVars, names[j]), attrOn(upVars, names[j]), attrOn(loVars, names[j])]
                 refVars[lk] = true
+                // -i, -u and -l alone, of a plain value, go to the variable the chain ends at
+                // when that is a variable name, made a local of the call (rt_nref_atmark),
+                // and the value is stored through the nameref under them; any other target
+                // takes the path below.
+                var tAt = (flags.charAt(0) == "-" && flags.split("-").join("").split("i").join("").split("u").join("").split("l").join("") == "") ? caseAtFlags(flags) : 0
+                if (tAt != 0 && (a == null || (a.lit == null && a.idxT == null))) {
+                    var nv0 = gepStr(noB, names[j])
+                    var tv = null
+                    if (a != null) {
+                        var tr = declValue(noB, a, v)
+                        noB = tr.b
+                        tv = tr.v
+                    }
+                    var tgB = curF.NewBlock(""), otB = curF.NewBlock("")
+                    noB.NewCondBr(noB.NewICmp(llvm.enum.IPredNE, noB.NewCall(rtNrefAtmark, [nv0, llvm.constant.NewInt(i32, tAt), noB.NewLoad(i32, curFrame.depth)]), zero), tgB, otB)
+                    if (a != null) {
+                        var tnv = gepStr(tgB, names[j])
+                        tgB.NewCall(rtSetByName, [tnv, tv, (a.op == "+=") ? one : zero, refAttrs(tgB, tnv, true)])
+                        tgB = emitAbortCheck(tgB)
+                    }
+                    tgB.NewBr(lpEnd)
+                    noB = otB
+                    v = tv
+                }
                 circDone = true
                 noB = declOne(noB, j, v)
                 circDone = false
+                noB = atBack(noB, names[j], preAt)
                 noB.NewBr(lpEnd)
                 refVars[lk] = true
-                intVars[lk] = lpAt[0]
-                upVars[lk] = lpAt[1]
-                loVars[lk] = lpAt[2]
                 return lpEnd
             }
             var refChk = isRef && a != null && a.lit == null && a.idxT == null
@@ -5853,6 +5881,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (attrOn(roVars, name)) { out = out + "r" }
         if (attrOn(trVars, name)) { out = out + "t" }
         return out + caseLetter(name)
+    }
+    // The -i, -u and -l of NAME here, as rt_attrv's bits 1, 2 and 4.
+    function caseAtBits(name) {
+        return (attrOn(intVars, name) ? 1 : 0) + (attrOn(upVars, name) ? 2 : 0) + (attrOn(loVars, name) ? 4 : 0)
+    }
+    // The same bits of a declaration's options.
+    function caseAtFlags(flags) {
+        return ((flags.indexOf("i") >= 0) ? 1 : 0) + ((flags.indexOf("u") >= 0) ? 2 : 0) + ((flags.indexOf("l") >= 0) ? 4 : 0)
+    }
+    // What a path gave NAME of -i, -u and -l beyond pre becomes a run-time mark
+    // (rt_atmark), and the lexical attributes go back to pre.
+    function atBack(b, name, pre) {
+        var now = caseAtBits(name)
+        var add = (((now & 1) != 0 && (pre & 1) == 0) ? 1 : 0) + ((now & 6) != (pre & 6) ? (now & 6) : 0)
+        if (add != 0) { b.NewCall(rtAtmark, [gepStr(b, name), llvm.constant.NewInt(i32, add)]) }
+        intVars["$" + name] = (pre & 1) != 0
+        upVars["$" + name] = (pre & 2) != 0
+        loVars["$" + name] = (pre & 4) != 0
+        return b
     }
     // The case attribute's letter: c, l, u or none. Twin of caseLetter in
     // bash-interpreter.abnf.

@@ -310,6 +310,10 @@ int rt_push_local(int id);
 int rt_pop_locals(int d);
 int rt_ro_bind(int id);
 int rt_ro_now(int id, int g);
+int rt_atmark(char *nm, int at);
+int rt_nref_atmark(char *n, int at, int d);
+int rt_dyn_at(char *nm);
+int rt_dyn_atn(char *n);
 int rt_glob_swap(int id);
 int rt_unset_up(int id, int d, int fn);
 int rt_ls_drop(int id, int low, int from, int to);
@@ -6755,7 +6759,7 @@ int rt_xmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 8039;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & ~16;
     return 0;
 }
 
@@ -6775,7 +6779,7 @@ int rt_nmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 8023;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & ~32;
     return 0;
 }
 
@@ -6985,6 +6989,64 @@ int rt_nref_loops(char *n)
     return e == 0 ? 1 : 0;
 }
 
+/* RUN-TIME -i, -u AND -l are marks 128, 8192 and 16384 (at bits 1, 2 and 4, as
+ * rt_attrv takes them). The emitter's attributes are lexical; these are for a
+ * declaration through a function's nameref whose target is known only when it
+ * runs, which puts them on that target (rt_nref_atmark), or on the nameref
+ * itself when its chain is circular. rt_setvar_byname applies them to a store
+ * through a nameref and rt_xletters shows them; the local save stack and the
+ * subshell snapshot carry them with the other marks, and a fresh local or
+ * `unset` drops them. at_any stays 0 until one is set. */
+int at_any;
+int rt_atmark(char *nm, int at)
+{
+    int r;
+    if ((at & 7) == 0) return 0;
+    at_any = 1;
+    r = rt_ar_rec(nm);
+    if ((at & 1) != 0) ar_mk[r] = ar_mk[r] | 128;
+    /* -u and -l replace each other; both is -c. */
+    if ((at & 6) != 0) ar_mk[r] = (ar_mk[r] & ~24576) | ((at & 2) != 0 ? 8192 : 0) | ((at & 4) != 0 ? 16384 : 0);
+    return 0;
+}
+
+/* The rt_attrv bits of nm's run-time marks. */
+int rt_dyn_at(char *nm)
+{
+    int mk;
+    if (at_any == 0) return 0;
+    mk = rt_arr_marks(nm);
+    return ((mk & 128) != 0 ? 1 : 0) | ((mk & 8192) != 0 ? 2 : 0) | ((mk & 16384) != 0 ? 4 : 0);
+}
+
+/* The same of the variable a store through the name n lands on. */
+int rt_dyn_atn(char *n)
+{
+    if (at_any == 0) return 0;
+    return rt_dyn_at(rt_nref_base(n));
+}
+
+/* A function's declaration's -i, -u or -l (at) through the nameref n lands on
+ * the variable its chain ends at when that is a variable name: made a local of
+ * the call whose save stack starts at d unless it is one, marked, and 1. A
+ * nameref with no value, a circular chain and one that ends at NAME[SUB] answer
+ * 0, for the emitter's other paths. Twin of the nameref arm of declOne in
+ * bash-interpreter.abnf. */
+int rt_nref_atmark(char *n, int at, int d)
+{
+    char *t;
+    int id;
+    if (rt_nref_void(n) != 0) return 0;
+    nref_quiet = nref_quiet + 1;
+    t = rt_nref_end(n);
+    nref_quiet = nref_quiet - 1;
+    if (t == 0 || rt_indbr(t) > 0) return 0;
+    id = rt_varslot_new(t);
+    if (id >= 0 && rt_local_here(id, d) == 0) rt_local_new(id, d);
+    rt_atmark(t, at);
+    return 1;
+}
+
 /* ${!REF} of the nameref n: the name its chain ends at, or n's own value when
  * that is unset or empty. A circular chain is "invalid indirect expansion"
  * instead of the warning, which abandons the line. A computed nameref the
@@ -7041,6 +7103,12 @@ int rt_unset_ref(char *n, int ro)
 char *rt_xletters(char *nm, char *at) {
     int i = 0;
     int mk = rt_arr_marks(nm);
+    int d = rt_dyn_at(nm);
+    /* The run-time -i goes first; a run-time case letter goes last, unless the
+     * emitter's letters have one (rt_atmark). */
+    if ((d & 1) != 0 && rt_haschar(at, 105) == 0) at = rt_strcat("i", at);
+    if ((d & 6) != 0 && rt_haschar(at, 99) == 0 && rt_haschar(at, 108) == 0 && rt_haschar(at, 117) == 0)
+        at = rt_strcat(at, (d & 6) == 6 ? "c" : ((d & 4) != 0 ? "l" : "u"));
     if ((mk & 32) != 0) {
         while (at[i] != 0 && at[i] != 114 && at[i] != 116 && at[i] != 99 && at[i] != 108 && at[i] != 117) i = i + 1;
         at = rt_strcat(rt_strcat(rt_substr(at, 0, i), "n"), rt_substr(at, i, -1));
@@ -8459,7 +8527,7 @@ int rt_ls_restore(int t, int rows)
     }
     arr_rows = arr_rows - ar_n[r] + cnt;
     ar_n[r] = cnt;
-    ar_mk[r] = ls_amark[t] & 8055;
+    ar_mk[r] = ls_amark[t] & ~8;
     ar_srt[r] = (ls_amark[t] & 8) != 0 ? 0 : 1;
     rt_ar_khdrop(r);
     return 0;
@@ -9132,6 +9200,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
             arith_err = 1;
             return 0;
         }
+        if (at_any != 0) at = at | rt_dyn_at(n);
     }
     /* A readonly nameref with no value refuses one that names no variable as
      * any nameref does (rt_nref_self_bad), before it is readonly. */
@@ -9351,7 +9420,7 @@ char *rt_nref_arr(char *n, int lit, int sub)
     }
     i = rt_varslot_new(t);
     if (lit != 0) {
-        rt_arr_empty(t, 4112);
+        rt_arr_empty(t, 28816);
         if (i >= 0) gvars[i] = &unset_marker[0];
     } else if (i >= 0) rt_arr_adopt(t, i);
     return t;
@@ -9729,7 +9798,7 @@ int rt_decl_lit(char *nm, int id, char *v, int app, int at, int as)
     char *src;
     char *w;
     if (app == 0) {
-        rt_arr_empty(nm, 4112);
+        rt_arr_empty(nm, 28816);
         gvars[id] = &unset_marker[0];
     } else {
         rt_arr_adopt(nm, id);
