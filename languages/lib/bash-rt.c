@@ -344,6 +344,7 @@ int rt_vset(char *s, int cond);
 int rt_sub_empty(char *nm, char *k, char *lbl);
 int rt_eval_assign(char *s);
 int rt_decl_word(char *w, int d, int x, int at, char *who);
+int rt_decl_qcomp(char *nm, char *sub, char *op, char *v, int d, int x, int at, char *who, int mine);
 int rt_sub_close(char *w, int j);
 char *rt_decl_name(char *w);
 int rt_xmark(char *nm, int on);
@@ -9725,6 +9726,11 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
     vl = rt_strlen(v);
     nm = rt_substr(w, 0, i);
     id = rt_varslot_new(nm);
+    if (w[j] != 0) {
+        vl = rt_decl_qcomp(nm, sub != 0 ? rt_substr(w, i, j - i) : empty, app != 0 ? "+=" : "=", v, d, x, at, who, -1);
+        if (vl >= 0) return vl;
+        vl = rt_strlen(v);
+    }
     fresh = d >= 0 && id >= 0 && rt_local_here(id, d) == 0 ? 1 : 0;
     if ((at & 8) != 0 && (fresh != 0 || w[j] != 0)) {
         rt_berr(who, nm, "readonly variable");
@@ -9755,6 +9761,50 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
     if (sub != 0) rt_decl_arr(nm, id, d < 0 ? 1 : 0);
     rt_setvar_byname(arr != 0 && sub == 0 ? rt_strcat(nm, "[0]") : rt_substr(w, 0, j), v, app, at & 7);
     return rt_take_subbad() != 0 ? 3 : 0;
+}
+
+/* A declaration operand NAME SUB op V (SUB "[...]" or "", op "=" or "+=") whose value
+ * V is "(...)" without being written as an array literal. bash 5.3 assigns it as one to
+ * NAME when the declaration has -a or -A (at 16 / 48; SUB ignored) or, with no SUB, when
+ * NAME's binding is already an array, whose kind it keeps; a SUB on a name that is no
+ * array yet only warns, outside a local. export and readonly (who) keep V as text. d, x,
+ * at and who are rt_decl_word's; mine is -1 from rt_decl_word, which stores a -a/-A
+ * operand without SUB itself, else the declaration's own attributes (rt_decl_word's at
+ * bits), the only ones a NAME it makes a fresh local has. Answers -1 for an operand left
+ * to the caller, else rt_decl_word's answer. Twin of declQuoted in bash-interpreter.abnf. */
+int rt_decl_qcomp(char *nm, char *sub, char *op, char *v, int d, int x, int at, char *who, int mine)
+{
+    int vl = rt_strlen(v);
+    int arr = at & 48;
+    int id;
+    int r;
+    int isarr;
+    if (vl < 2 || v[0] != 40 || v[vl - 1] != 41) return -1;
+    if (rt_streq(who, "declare") == 0 && rt_streq(who, "typeset") == 0 && rt_streq(who, "local") == 0) return -1;
+    if (d == -2) {
+        id = rt_varslot_new(nm);
+        if (id < 0) return rt_decl_qcomp(nm, sub, op, v, -1, x, at, who, mine);
+        rt_glob_swap(id);
+        r = rt_decl_qcomp(nm, sub, op, v, -1, x, at, who, mine);
+        rt_glob_swap(id);
+        return r;
+    }
+    id = rt_varslot_new(nm);
+    r = rt_ar_find(nm);
+    isarr = r >= 0 && (ar_n[r] != 0 || (ar_mk[r] & 4099) != 0) ? 1 : 0;
+    if (d >= 0 && id >= 0 && rt_local_here(id, d) == 0) isarr = 0;
+    if (arr == 0 && sub[0] == 0 && isarr != 0) arr = rt_isassoc(nm) != 0 ? 48 : 16;
+    if (arr != 0) {
+        if (mine < 0 && sub[0] == 0 && (at & 48) != 0) return -1;
+        if (mine >= 0 && d >= 0 && id >= 0 && rt_local_here(id, d) == 0) {
+            rt_local_new(id, d);
+            at = mine;
+        }
+        return rt_decl_word(rt_strcat(rt_strcat(nm, op), v), d, x, at - (at & 48) + arr, who);
+    }
+    if (sub[0] != 0 && isarr == 0 && d < 0)
+        rt_berr("warning", rt_strcat(rt_strcat(rt_strcat(nm, sub), op), v), "quoted compound array assignment deprecated");
+    return -1;
 }
 
 /* A `read` with an operand that came out of an expansion (`read "$n"`), in the

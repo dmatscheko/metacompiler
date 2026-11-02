@@ -835,12 +835,16 @@ function bashDeclPlusOp(core, it, mkConst) {
 // before the builtin runs: it first declares NAME the way `declare NAME[SUB]` does, with the
 // declaration's -a/-A, -i/-l/-u and scope (local stays local; export, readonly and -g are
 // global), then reports "NAME[SUB]: cannot assign list to array member" and abandons the line
-// (bash 5.3: `declare -r q[1]=(x)` leaves `declare -a q`). items are a declaration's. Answers
-// null unless an operand is written so; else {items: that first declaration, lbl: the
-// message's NAME[SUB], SUB as written}.
-function bashDeclListElem(items) {
+// (bash 5.3: `declare -r q[1]=(x)` leaves `declare -a q`). That first declaration reports a
+// refused -a/-A conversion as a literal's does ("NAME: cannot convert ...", abandoning the
+// line at top level) and, in a function, goes on to the next such operand; when every one was
+// refused, the builtin reports each again ("declare: NAME: ...") and fails. items are a
+// declaration's. Answers one {pre: the first declaration, its operand marked {dlist}, late:
+// the builtin's, lbl: the message's NAME[SUB], SUB as written} per operand written so.
+function bashDeclListElems(items) {
     var kw = items[0].dkw
     var fl = ""
+    var out = []
     var i
     for (i = 1; i < items.length; i++) {
         var it = items[i]
@@ -851,12 +855,13 @@ function bashDeclListElem(items) {
         var t = "ilu"
         var k
         for (k = 0; k < t.length; k++) { if (fl.indexOf(t.charAt(k)) >= 0) { o = o + t.charAt(k) } }
-        var pre = [{dkw: (kw == "local") ? "local" : "declare"}]
-        if (o != "") { pre.push({dflag: "-" + o}) }
-        pre.push({dname: it.a.name, darr: it.a.name + "[0]"})
-        return {items: pre, lbl: it.a.name + "[" + it.a.isrc + "]"}
+        var head = [{dkw: (kw == "local") ? "local" : "declare"}]
+        if (o != "") { head.push({dflag: "-" + o}) }
+        var pre = head.concat([{dname: it.a.name, darr: it.a.name + "[0]", dlist: true}])
+        var late = head.concat([{dname: it.a.name, darr: it.a.name + "[0]"}])
+        out.push({pre: pre, late: late, lbl: it.a.name + "[" + it.a.isrc + "]"})
     }
-    return null
+    return out
 }
 
 // Does the subscript text of a NAME[SUB] string need expanding (a $, a quote, a backslash or

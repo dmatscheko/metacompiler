@@ -234,7 +234,11 @@ PrefixCommand <~~ push(makePrefixCmd(takeAll(), "" + lnPop())) ~~>
 AsgPrefix1  <~~ lnPush(up.pos) ~~> = AsgPrefix ;
 // A subscripted one (`a[1]=Q cmd`) parses too: bash refuses it when it runs (mkPrefixAsg).
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() [ AsgIdx ] AsgPOp :whitespace() [ NsWord ] ;
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() [ AsgIdx ] AsgPOp :whitespace() AsgPVal ;
+AsgPVal     = AsgPList | AsgWord ;
+// A list value is no array here: NAME takes the text "(W1 W2 ...)", each word expanded as an
+// assignment's value is (bash 5.3: x=5; e=($x "a  b") cmd gives cmd e="(5 a  b)").
+AsgPList    <~~ push(mkPrefixList(takeAll())) ~~> = "(" :whitespace(WsNL) { NsWord } ")" ;
 AsgPOp      <~~ push({pop: up.in}) ~~> = "+=" | AsgEq ;
 AsgEq       = "=" ;
 // NAME=VALUE... before a declaration builtin (makePrefixDecl has the rules).
@@ -1977,6 +1981,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (c > 0) { if (j <= 0) { return -1 }; j = j - chWBack(s, j); c = c - 1 }
         return j
     }
+    // L when pat is "*L" or "L*" with L free of pattern characters (a backslash quotes the
+    // next one), else null. L must not start with a low or end with a high surrogate, so an
+    // occurrence of it in a value always lies on character boundaries.
+    function starLiteral(pat) {
+        var n = pat.length
+        if (n == 0) { return null }
+        var lead = pat.charCodeAt(0) == 42
+        if (!lead && pat.charCodeAt(n - 1) != 42) { return null }
+        var to = lead ? n : n - 1
+        var eg = optExtglob || egForce
+        var out = ""
+        var i = lead ? 1 : 0
+        while (i < to) {
+            var c = pat.charCodeAt(i)
+            if (c == 42 || c == 63 || c == 91 || (c == 40 && eg)) { return null }
+            if (c == 92) { if (i + 1 >= to) { return null }; i = i + 1 }
+            out = out + pat.charAt(i)
+            i = i + 1
+        }
+        if (out.length > 0 && (out.charCodeAt(0) >= 56320 && out.charCodeAt(0) <= 57343)) { return null }
+        if (out.length > 0 && (out.charCodeAt(out.length - 1) >= 55296 && out.charCodeAt(out.length - 1) <= 56319)) { return null }
+        return out
+    }
     // Shortest / longest prefix or suffix of v that matches pat, removed. Candidates end on
     // character boundaries, so a surrogate pair is never split.
     function stripPat(v, pat, isPrefix, longest) {
@@ -1988,6 +2015,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return isPrefix ? v.slice(kf) : v.slice(0, kf)
             }
             return v
+        }
+        var lit = starLiteral(pat)
+        if (lit != null) {
+            // "*L" / "L*" with L literal: the candidates that match are exactly those whose
+            // far end touches an occurrence of L, so one indexOf finds the answer instead of
+            // a glob match per candidate (quadratic in v).
+            var lead = pat.charCodeAt(0) == 42
+            if (lead == isPrefix) {
+                var at = (longest == isPrefix) ? v.lastIndexOf(lit) : v.indexOf(lit)
+                if (at < 0) { return v }
+                return isPrefix ? v.slice(at + lit.length) : v.slice(0, at)
+            }
+            if (n < lit.length || (isPrefix ? v.slice(0, lit.length) : v.slice(n - lit.length)) != lit) { return v }
+            if (longest) { return "" }
+            return isPrefix ? v.slice(lit.length) : v.slice(0, n - lit.length)
         }
         var down = (longest == isPrefix)
         var k = down ? n : 0
@@ -3145,8 +3187,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (blank) {
                     var d = (wordT != null) ? wordJoin(wordT()) : ""
                     if (gp != "" && !refQuiet) { diagErr("warning: " + gp + ": maximum nameref depth (8) exceeded\n") }
-                    // A readonly NAME abandons the line, as an expansion error does.
-                    if (tn != null && roRefusedV(tn)) { arithErr = true; return "" }
+                    // A readonly NAME abandons the line with status 2 (bash 5.3), as an
+                    // expansion error does.
+                    if (tn != null && roRefusedV(tn)) { storeFail(); return "" }
                     if (tn != null) { d = storeAttr(tn, d, false) }
                     return d
                 }
@@ -3275,6 +3318,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var trace = (flags.indexOf("t") >= 0)
         var integer = (flags.indexOf("i") >= 0)
         var global = (flags.indexOf("g") >= 0)
+        // The first declaration of a NAME[SUB]=(list) operand (bashDeclListElems): it refuses
+        // a conversion as a literal's does, without the builtin's own report.
+        var listPre = items[items.length - 1].dlist != undefined
         // The kind and scope the literal of name k is assigned under: the declaration's own,
         // or those its marks add (k -1 restores them). lateOnly: the kind is the marks' alone,
         // so the builtin does not report a refused conversion again. Twin of lateFor in
@@ -3288,6 +3334,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             bareArr = ownFl.bareArr || kind
             global = ownFl.global || m.indexOf("g") >= 0
             lateOnly = !ownFl.bareArr && kind
+        }
+        // A value "(...)" not written as an array literal, which bash 5.3 assigns as one to
+        // NAME under -a or -A (a SUB ignored) or, with no SUB, when NAME's binding is already an
+        // array; a SUB on a name that is no array yet only warns, outside a local. The literal
+        // is assigned by a declaration of the operand alone. Answers whether operand k is done.
+        // Twin of rt_decl_qcomp in languages/lib/bash-rt.c.
+        var optText = ""
+        for (i = 1; i < items.length; i++) { if (items[i].dflag != undefined) { optText = optText + " " + items[i].dflag } }
+        var qcompiled = {}
+        var declQuoted = function(k, v) {
+            var aw = asgsWritten[k]
+            if (aw == null || aw.lit != null || aw.valT == null || v.length < 2 || v.charAt(0) != "(" || v.charAt(v.length - 1) != ")") { return false }
+            if (kw != "declare" && kw != "typeset" && kw != "local") { return false }
+            var nm = names[k]
+            var loc = localizes()
+            var arrNow = {v: false}
+            if (!(loc && !localHere(nm))) {
+                if (global && localFrames.length > 0) { onGlobal(nm, function() { arrNow.v = isArr(nm) }) } else { arrNow.v = isArr(nm) }
+            }
+            var sub = aw.idxT != null
+            if (!bareArr && (sub || !arrNow.v)) {
+                if (sub && !arrNow.v && !loc) { diagErr("warning: " + nm + "[" + aw.isrc + "]" + aw.op + v + ": quoted compound array assignment deprecated\n") }
+                return false
+            }
+            var text = kw + optText + " " + nm + aw.op + v
+            if (!hasOwn(qcompiled, "$" + text)) { qcompiled["$" + text] = compileSnippet(text, 0) }
+            var st = anytype
+            st = qcompiled["$" + text]()
+            if (typeof st == "object") { abortSignal = st }
+            else if (st != 0) { roFail = true }
+            return true
         }
         var lateDiag = function(at) {
             var q
@@ -3478,6 +3555,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // attributes (bash 5.3: f() { local a=5; local a; echo $a; } prints 5).
             var fresh = localize && !localHere(names[k])
             var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
+            if (listPre) { roWho = (global && fnDepth > 0) ? getVarVal("FUNCNAME") + ": " : "" }
             var shown = (declOwn != "") ? declOwn : names[k]
             if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0 || roAttr) && attrOn(roVars, names[k])) {
                 diagErr(roWho + ((asgs[k] != null && roWho != "") ? shown : names[k]) + ": readonly variable\n")
@@ -3493,7 +3571,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return
             }
             // -A of an indexed array, -a of an associative one, is refused. Twin of rt_arr_conv.
-            if (bareArr && !fresh && isArr(names[k]) && arrs[arrKey(names[k])].assoc != assoc && (asgs[k] == null || asgs[k].lit == null)) {
+            if (bareArr && !fresh && isArr(names[k]) && arrs[arrKey(names[k])].assoc != assoc && (asgs[k] == null || asgs[k].lit == null) && !listPre) {
                 diagErr(kw + ": " + shown + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n")
                 roFail = true
                 return
@@ -3506,7 +3584,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var cmsg = shown + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n"
                 if (fnDepth == 0) { diagErr(cmsg); abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
                 diagErr((global ? getVarVal("FUNCNAME") + ": " : "") + cmsg)
-                if (!lateOnly) { diagErr(kw + ": " + cmsg) }
+                if (!lateOnly && !listPre) { diagErr(kw + ": " + cmsg) }
                 roFail = true
                 return
             }
@@ -3644,7 +3722,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     continue
                 }
                 lateDiag(k)
-                if (asgs[k] == null || asgs[k].lit == null) { declAt(k, vals[k]) }
+                if (asgs[k] == null || asgs[k].lit == null) { if (!declQuoted(k, vals[k])) { declAt(k, vals[k]) } }
                 else if (lates[k].indexOf("g") >= 0 && localizes()) {
                     // A literal a -g mark sent to the global still declares the name here,
                     // unset (bash 5.3).
@@ -3777,17 +3855,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { core.push(bashDeclPlusOp(core, it, makeConst)) }
             else { reds.push(it) }
         }
-        var le = bashDeclListElem(core)
-        if (le == null) { return makeDecl(core, reds, ln) }
-        // The first declaration's own failure abandons the line with no more said. Twin of
-        // makeDeclR in bash-to-llvm-ir.abnf.
-        var pre = makeDecl(le.items, [], ln)
+        var les = bashDeclListElems(core)
+        if (les.length == 0) { return makeDecl(core, reds, ln) }
+        // Twin of makeDeclR in bash-to-llvm-ir.abnf.
+        // A refused first declaration abandons the line too, except in a function's declare,
+        // typeset or local.
+        var pres = []
+        var lates = []
+        var xr = core[0].dkw == "export" || core[0].dkw == "readonly"
+        for (i = 0; i < les.length; i++) { pres.push(makeDecl(les[i].pre, [], ln)); lates.push(makeDecl(les[i].late, [], ln)) }
         return function() {
-            var st = pre()
-            if (typeof st == "object") { return st }
-            if (st == 0) { diagErr(le.lbl + ": cannot assign list to array member\n") }
-            abortSignal = {ret: 1, isExit: 1, soft: 1}
-            return takeAbort()
+            var j
+            var st = anytype
+            for (j = 0; j < pres.length; j++) {
+                st = pres[j]()
+                if (typeof st == "object") { return st }
+                if (st == 0 || fnDepth == 0 || xr) {
+                    if (st == 0) { diagErr(les[j].lbl + ": cannot assign list to array member\n") }
+                    abortSignal = {ret: 1, isExit: 1, soft: 1}
+                    return takeAbort()
+                }
+            }
+            for (j = 0; j < lates.length; j++) {
+                st = lates[j]()
+                if (typeof st == "object") { return st }
+            }
+            return st
         }
     }
     // src: the item as written, which a declaration with a computed operand re-reads.
@@ -4629,6 +4722,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The default is stored, and expands, under the array's attributes.
             // Read through a nameref that is an array, no element is set.
             if (refIsArr(name)) { refArrBad(); return "" }
+            if (blank && roRefused(name, "")) { storeFail(); return "" }
             if (blank) { var d = elemVal(name, null, (wordT != null) ? wordJoin(wordT()) : ""); if (!arithErr) { arrSet(name, sub, d) }; return d }
             return v
         }
@@ -4858,7 +4952,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             uqStar = false
             r = bodyT()
             uqStar = svq
-            var st = runExitTrap(endStatus(r))
+            // An abandoned line ends it with status 1, whatever the line's own (bash 5.3: a
+            // refused ${NAME=WORD} store gives 2 in ( ) and 1 in $( )). Twin of subshellEnd in
+            // bash-to-llvm-ir.abnf.
+            var st = runExitTrap((typeof r == "object" && r.soft != undefined) ? 1 : endStatus(r))
             lnCtx = svLn
             restoreShellState(saved)
             localFrames = savedFrames
@@ -6454,6 +6551,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (sub)shell; an arithmetic or substring error ({soft}) abandons the command line - a
     // subshell treats it as any exit, a top-level line catches it (runProgram). Both leave
     // status 1. Twin of emitAbortCheck in bash-to-llvm-ir.abnf.
+    // A ${NAME=WORD} store that is refused abandons the line with status 2. Twin of
+    // arith_err 3 in emitAbortCheck in bash-to-llvm-ir.abnf.
+    function storeFail() {
+        arithErr = true
+        abortSignal = {ret: 2, isExit: 1, soft: 1}
+    }
     function takeAbort() {
         if (abortSignal != null) { var ab = abortSignal; abortSignal = null; arithErr = false; arSubErr = false; return ab }
         if (arithErr) { arithErr = false; arSubErr = false; subBad = false; return {ret: 1, isExit: 1, soft: 1} }
@@ -8628,15 +8731,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (typeof r == "object") {
                     if (r.soft == undefined) { return r }
                     takeAbort()
-                    r = 1
-                    setStatus(1)
+                    r = r.ret
+                    setStatus(r)
                     continue
                 }
                 var ab = takeAbort()
                 if (ab != null) {
                     if (ab.soft == undefined) { return ab }
-                    r = 1
-                    setStatus(1)
+                    r = ab.ret
+                    setStatus(r)
                 }
             }
             return r
@@ -9178,6 +9281,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // name and subscript as written): reported in its place among the others, its value is not
     // expanded, it binds nothing and the command still runs. Twin of mkPrefixAsg in
     // bash-to-llvm-ir.abnf.
+    // AsgPList: the word thunk of "(W1 W2 ...)". Twin of mkPrefixList in bash-to-llvm-ir.abnf.
+    function mkPrefixList(ws) {
+        return function() {
+            var out = "("
+            var i
+            for (i = 0; i < ws.length; i++) { out = out + ((i > 0) ? " " : "") + wordJoin(ws[i]()) }
+            return out + ")"
+        }
+    }
     function mkPrefixAsg(items) {
         var r = {aname: items[0].aname, op: "=", val: null, bad: null}
         var i
@@ -9529,8 +9641,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 eeDone = false
                 if (typeof r != "object" && optErrExit && r != 0 && condDepth == 0 && !done) { r = {ret: r, isExit: 1} }
                 if (typeof r == "object") {
-                    // An expansion error abandons the rest of its line, with status 1.
-                    if (r.soft != undefined) { setStatus(1); i = stmts.length; continue }
+                    // An expansion error abandons the rest of its line, with its status.
+                    if (r.soft != undefined) { setStatus(r.ret); i = stmts.length; continue }
                     if (r.isExit != undefined) { exit(runExitTrap(r.ret)) }
                     setStatus(r.ret)
                 }
@@ -9538,7 +9650,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             r = takeAbort()
             if (r != null) {
                 if (r.soft == undefined) { exit(runExitTrap(r.ret)) }
-                setStatus(1)
+                setStatus(r.ret)
             }
         }
         exit(runExitTrap(lastStatus))

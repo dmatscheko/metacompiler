@@ -224,7 +224,11 @@ PrefixCommand <~~ push(atLine(makePrefixCmd(takeAll()), lnPop())) ~~>
 AsgPrefix1  <~~ lnPush(up.pos) ~~> = AsgPrefix ;
 // A subscripted one (`a[1]=Q cmd`) parses too: bash refuses it when it runs (mkPrefixAsg).
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() [ AsgIdx ] AsgPOp :whitespace() [ NsWord ] ;
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() [ AsgIdx ] AsgPOp :whitespace() AsgPVal ;
+AsgPVal     = AsgPList | AsgWord ;
+// A list value is no array here: NAME takes the text "(W1 W2 ...)", each word expanded as an
+// assignment's value is (bash 5.3: x=5; e=($x "a  b") cmd gives cmd e="(5 a  b)").
+AsgPList    <~~ push(mkPrefixList(takeAll())) ~~> = "(" :whitespace(WsNL) { NsWord } ")" ;
 AsgPOp      <~~ push({pop: up.in}) ~~> = "+=" | AsgEq ;
 AsgEq       = "=" ;
 // NAME=VALUE... before a declaration builtin (makePrefixDecl has the rules).
@@ -1710,6 +1714,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // i32 rt_decl_word(i8* w, i32 d, i32 x, i32 at, i8* who): one computed operand of a
     // declaration, and i8* rt_decl_name(i8* w) the NAME it starts with (bash-rt.c).
     var rtDeclWord = rtDecl("rt_decl_word", false, [1, 0, 0, 0, 1])
+    var rtDeclQcomp = rtDecl("rt_decl_qcomp", false, [1, 1, 1, 1, 0, 0, 0, 1, 0])
     var rtDeclName = rtDecl("rt_decl_name", true, [1])
     // A read with a computed operand (rt_rd_parse in bash-rt.c).
     var rtRdParse = rtDecl("rt_rd_parse", false, [1])
@@ -2038,6 +2043,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrAmark = rtDecl("rt_arr_amark", false, [1])
     var rtArrConv = rtDecl("rt_arr_conv", false, [1, 1, 1, 0])
     var rtArrConvLit = rtDecl("rt_arr_convlit", false, [1, 1, 1, 0, 1, 0])
+    var rtBerr = rtDecl("rt_berr", false, [1, 1, 1])
     var rtArrEmpty = rtDecl("rt_arr_empty", false, [1, 0])
     var rtUnsetName = rtDecl("rt_unset_name", false, [1])
     var rtUnsetRef = rtDecl("rt_unset_ref", false, [1, 0])
@@ -2274,7 +2280,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curExitRd = savedExitRd
             var myTraps = trapList
             trapList = savedTraps
-            subEnd = subshellEnd(subEnd, myTraps, optSave)
+            subEnd = subshellEnd(subEnd, myTraps, optSave, true)
             subEnd = fnTouchEnd(ft, subEnd)
             var v = subEnd.NewCall(rtCapEnd, one)
             return {b: subEnd, v: v}
@@ -2763,7 +2769,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         }
                         // Through a nameref that is an array it is refused (rt_nref_isarr).
                         // Twin of elemOpValue in bash-interpreter.abnf.
-                        if (attrOn(refVars, name)) {
+                        if (roStore(name)) {
+                            var roB = curF.NewBlock(""), roJ = curF.NewBlock("")
+                            b.NewCondBr(blankE, roB, roJ)
+                            roRefused(roB, name, "")
+                            roB.NewStore(llvm.constant.NewInt(i32, 3), gArithErr)
+                            roB.NewBr(roJ)
+                            b = roJ
+                        }
+                        else if (attrOn(refVars, name)) {
                             var raB = curF.NewBlock(""), rsB = curF.NewBlock("")
                             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtNrefIsarr, [gepStr(b, name), one]), zero), raB, rsB)
                             rsB.NewCall(rtArrIset, [nmOf(rsB), kk, pickedE])
@@ -2998,8 +3012,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b.NewCondBr(blank, setB, joinB)
                 var sb = setB
                 var stored = d
-                // A readonly name abandons the line, as an expansion error does.
-                if (roRefusedV(sb, name)) { sb.NewStore(one, gArithErr) }
+                // A readonly name abandons the line with status 2 (arith_err 3), as an
+                // expansion error does.
+                if (roRefusedV(sb, name)) { sb.NewStore(llvm.constant.NewInt(i32, 3), gArithErr) }
                 else {
                     sb = emitStoreAttr(setB, name, d)
                     stored = sb.NewCall(rtGetByName, gepStr(sb, name))
@@ -4405,6 +4420,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var trace = (flags.indexOf("t") >= 0)
         var integer = (flags.indexOf("i") >= 0)
         var global = (flags.indexOf("g") >= 0)
+        // The first declaration of a NAME[SUB]=(list) operand. Twin of listPre in makeDecl in
+        // bash-interpreter.abnf.
+        var listPre = items[items.length - 1].dlist != undefined
         // The kind and scope the literal of name j is assigned under: the declaration's own,
         // or those its marks add (j -1 restores them). lateOnly: the kind is the marks' alone,
         // so the builtin does not report a refused conversion again. Twin of lateFor in
@@ -4786,7 +4804,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // Twin of the readonly check in declOneN in bash-interpreter.abnf.
             if (roAttr && attrOn(roVars, names[j])) {
                 var roW = (kw == "readonly" || kw == "export") ? "" : kw + ": "
-                emitDiag(b, gepStr(b, roW + ((a != null && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n"))
+                if (listPre) {
+                    var fnR = (global && curFrame != null) ? loadVar(b, "FUNCNAME") : emptyPtr(b)
+                    b.NewCall(rtBerr, [fnR, gepStr(b, names[j]), gepStr(b, "readonly variable")])
+                } else { emitDiag(b, gepStr(b, roW + ((a != null && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n")) }
                 roFail = true
                 return b
             }
@@ -4794,10 +4815,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var shown = gepStr(b, (declOwn != "") ? declOwn : names[j])
             if (refChk) { bad = b.NewCall(rtNrefBad, [gepStr(b, kw), v]) }
             else if (plusArr && !fresh) { bad = b.NewCall(rtArrPlus, [gepStr(b, kw), gepStr(b, names[j]), shown, (plus.indexOf("a") >= 0) ? one : zero, (plus.indexOf("A") >= 0) ? one : zero]) }
-            else if (bareArr && !fresh && (a == null || a.lit == null)) { bad = b.NewCall(rtArrConv, [gepStr(b, kw), gepStr(b, names[j]), shown, assoc ? one : zero]) }
+            else if (bareArr && !fresh && (a == null || a.lit == null) && !listPre) { bad = b.NewCall(rtArrConv, [gepStr(b, kw), gepStr(b, names[j]), shown, assoc ? one : zero]) }
             else if (bareArr && !fresh) {
                 var fnP = (global && curFrame != null) ? loadVar(b, "FUNCNAME") : emptyPtr(b)
-                bad = b.NewCall(rtArrConvLit, [gepStr(b, lateOnly ? "" : kw), gepStr(b, names[j]), shown, assoc ? one : zero, fnP, (curFrame != null) ? one : zero])
+                bad = b.NewCall(rtArrConvLit, [gepStr(b, (lateOnly || listPre) ? "" : kw), gepStr(b, names[j]), shown, assoc ? one : zero, fnP, (curFrame != null) ? one : zero])
             }
             if (bad == null) { return declOneBody(b, j, v) }
             var okB = curF.NewBlock(""), badB = curF.NewBlock(""), endB = curF.NewBlock("")
@@ -5016,6 +5037,43 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pre = {vals: []}
         // Written operand j, the o-th: declared, or, a literal being assigned with the words,
         // only what its marks refuse reported.
+        // A value "(...)" not written as an array literal: rt_decl_qcomp assigns it as one or
+        // warns, else (-1) operand j is declared as written. A value known here not to be
+        // one, and one with no SUB on a fresh local without -a or -A, need no check. Twin of
+        // declQuoted in bash-interpreter.abnf.
+        var quotedChk = function(j) {
+            var aw = asgsWritten[j]
+            var loc = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset")
+            var cv = (aw == null || aw.valT == null) ? null : aw.valT.c
+            if (aw == null || aw.lit != null || aw.valT == null || (kw != "declare" && kw != "typeset" && kw != "local")) { return false }
+            if (cv != undefined && (cv.length < 2 || cv.charAt(0) != "(" || cv.charAt(cv.length - 1) != ")")) { return false }
+            return aw.idxT != null || bareArr || !loc || locOwn("$" + names[j])
+        }
+        var anyQuoted = function() {
+            var q
+            for (q = 0; q < names.length; q++) { if (quotedChk(q)) { return true } }
+            return false
+        }
+        var declQuoted = function(b, j, v) {
+            if (!quotedChk(j) || refuseP == null) { return declAt(b, j, v) }
+            var aw = asgsWritten[j]
+            var loc = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset")
+            var vv = (v != null) ? v : gepStr(b, aw.valT.c)
+            var qB = curF.NewBlock(""), doB = curF.NewBlock(""), plainB = curF.NewBlock(""), endB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i8, vv), llvm.constant.NewInt(i8, 40)), qB, plainB)
+            var at = refAttrs(qB, gepStr(qB, names[j]), true)
+            var own = (bareArr ? (assoc ? 48 : 16) : 0) + (integer ? 1 : 0) + ((flags.indexOf("u") >= 0) ? 2 : 0) + ((flags.indexOf("l") >= 0) ? 4 : 0)
+            at = qB.NewOr(at, llvm.constant.NewInt(i32, own))
+            var sub = (aw.idxT != null) ? "[" + aw.isrc + "]" : ""
+            var rc = qB.NewCall(rtDeclQcomp, [gepStr(qB, names[j]), gepStr(qB, sub), gepStr(qB, aw.op), vv, declDepth(qB, loc), declX(qB), at, gepStr(qB, kw), llvm.constant.NewInt(i32, own)])
+            qB.NewCondBr(qB.NewICmp(llvm.enum.IPredEQ, rc, llvm.constant.NewInt(i32, -1)), plainB, doB)
+            doB.NewStore(doB.NewZExt(doB.NewICmp(llvm.enum.IPredNE, rc, zero), i32), refuseP)
+            doB = emitAbortCheck(doB)
+            doB.NewBr(endB)
+            plainB = declAt(plainB, j, v)
+            plainB.NewBr(endB)
+            return endB
+        }
         var declWritten = function(b, o, j) {
             // export and readonly take no NAME[SUB], with a value or without.
             var awj = asgsWritten[j]
@@ -5033,7 +5091,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return b
             }
             b = lateDiag(b, o)
-            if (asgs[j] == null || asgs[j].lit == null) { b = declAt(b, j, pre.vals[j]) }
+            if (asgs[j] == null || asgs[j].lit == null) { b = declQuoted(b, j, pre.vals[j]) }
             else if (lates[j].indexOf("g") >= 0 && !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset")) {
                 // A literal a -g mark sent to the global still declares the name here,
                 // unset (bash 5.3).
@@ -5157,7 +5215,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vals = []
             var anyRefName = false
             for (j = 0; j < names.length; j++) { if (attrOn(refVars, names[j])) { anyRefName = true } }
-            refuseP = (isRef || plusArr || bareArr || anyRefName || late != null) && !query ? slotOf(i32) : null
+            refuseP = (isRef || plusArr || bareArr || anyRefName || late != null || anyQuoted()) && !query ? slotOf(i32) : null
             if (refuseP != null) { b.NewStore(zero, refuseP) }
             for (j = 0; j < names.length && !query; j++) {
                 var a = asgs[j]
@@ -5217,18 +5275,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { core.push(bashDeclPlusOp(core, it, makeConst)) }
             else { reds.push(it) }
         }
-        var le = bashDeclListElem(core)
-        if (le == null) { return makeDecl(core, reds) }
+        var les = bashDeclListElems(core)
+        if (les.length == 0) { return makeDecl(core, reds) }
         // Twin of makeDeclR in bash-interpreter.abnf.
-        var pre = makeDecl(le.items, [])
+        var pres = []
+        var lates = []
+        for (i = 0; i < les.length; i++) { pres.push(makeDecl(les[i].pre, [])); lates.push(makeDecl(les[i].late, [])) }
+        var xr = core[0].dkw == "export" || core[0].dkw == "readonly"
         return function(b) {
-            b = pre(b)
-            var ok = curF.NewBlock(""), join = curF.NewBlock("")
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gStatus), zero), ok, join)
-            emitDiag(ok, gepStr(ok, le.lbl + ": cannot assign list to array member\n"))
-            ok.NewBr(join)
-            join.NewStore(one, gArithErr)
-            return emitAbortCheck(join)
+            var j
+            for (j = 0; j < pres.length; j++) {
+                b = pres[j](b)
+                var ok = curF.NewBlock(""), next = curF.NewBlock(""), join = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gStatus), zero), ok, next)
+                emitDiag(ok, gepStr(ok, les[j].lbl + ": cannot assign list to array member\n"))
+                ok.NewBr(join)
+                if (curFrame == null || xr) { next.NewBr(join) }
+                join.NewStore(one, gArithErr)
+                join = emitAbortCheck(join)
+                if (curFrame == null || xr) { b = join }
+                else { join.NewBr(next); b = next }
+            }
+            for (j = 0; j < lates.length; j++) { b = lates[j](b) }
+            return b
         }
     }
     // src: the item as written, which a declaration with a computed operand re-reads.
@@ -6002,8 +6071,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The end of a ( ) or $( ): its EXIT traps run, with $? the subshell's status and an
     // `exit` in one ending the subshell with that status; then the variables and options come
     // back and $? is the subshell's status.
-    function subshellEnd(subEnd, traps, optSave) {
+    // cs: a command substitution, which an abandoned line ends with status 1 whatever the
+    // line's own (bash 5.3: a refused ${NAME=WORD} store gives 2 in ( ) and 1 in $( )).
+    function subshellEnd(subEnd, traps, optSave, cs) {
         var b = subEnd
+        if (cs) {
+            var soft = b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gExited), llvm.constant.NewInt(i32, 2))
+            b.NewStore(b.NewSelect(soft, one, b.NewLoad(i32, gExitCode)), gExitCode)
+        }
         if (traps.length > 0) {
             var ex0 = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gExited), zero)
             storeStatus(b, b.NewSelect(ex0, b.NewLoad(i32, gExitCode), b.NewLoad(i32, gStatus)))
@@ -6062,7 +6137,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curExitRd = savedExitRd
             var myTraps = trapList
             trapList = savedTraps
-            subEnd = subshellEnd(subEnd, myTraps, optSave)
+            subEnd = subshellEnd(subEnd, myTraps, optSave, false)
             subEnd = fnTouchEnd(ft, subEnd)
             eeDone = false
             asgKept = false
@@ -6818,19 +6893,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // An error an expansion raised, checked before the command runs. set -u and ${v:?} end
     // the (sub)shell (exited 1); an arithmetic or substring error abandons the command line
     // (exited 2, which a subshell treats as any exit and a top-level line catches - see
-    // runProgram). Both leave status 1. Twin of takeAbort in bash-interpreter.abnf.
+    // runProgram). Both leave status 1, a refused ${NAME=WORD} store (arith_err 3) status 2.
+    // Twin of takeAbort in bash-interpreter.abnf.
     // ug: a global binding a nameref store put in effect goes back first (rt_nref_unglob).
     function emitAbortCheck(b, ug) {
         var ab = b.NewLoad(i32, gAbort)
         var isAb = b.NewICmp(llvm.enum.IPredNE, ab, zero)
-        var isAr = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gArithErr), zero)
+        var ae = b.NewLoad(i32, gArithErr)
+        var isAr = b.NewICmp(llvm.enum.IPredNE, ae, zero)
         var kill = curF.NewBlock(""), cont = curF.NewBlock("")
         b.NewCondBr(b.NewOr(isAb, isAr), kill, cont)
         if (ug == true) { kill.NewCall(rtNrefUnglob) }
         kill.NewStore(zero, gAbort)
         kill.NewStore(zero, gArithErr)
         kill.NewStore(emptyPtr(kill), gArPfx)   // no command prefix outlives the line
-        kill.NewStore(one, gExitCode)
+        // arith_err 3 is a refused ${NAME=WORD} store, which leaves status 2.
+        var three = llvm.constant.NewInt(i32, 3)
+        kill.NewStore(kill.NewSelect(kill.NewICmp(llvm.enum.IPredEQ, ae, three), llvm.constant.NewInt(i32, 2), one), gExitCode)
         kill.NewStore(kill.NewSelect(isAb, one, llvm.constant.NewInt(i32, 2)), gExited)
         kill.NewBr(viaUnwind(curExit, curExitRd))
         return cont
@@ -7978,7 +8057,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var top = lineExit.NewICmp(llvm.enum.IPredEQ, lineExit.NewLoad(i32, gSsDepth), zero)
                 lineExit.NewCondBr(lineExit.NewAnd(soft, top), softB, viaUnwind(savedExit, savedExitRd))
                 softB.NewStore(zero, gExited)
-                storeStatusI(softB, 1)
+                storeStatus(softB, softB.NewLoad(i32, gExitCode))
                 softB.NewBr(next)
                 b = next
             }
@@ -8285,6 +8364,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return u
     }
 
+    // AsgPList: the word of "(W1 W2 ...)". Twin of mkPrefixList in bash-interpreter.abnf.
+    function mkPrefixList(ws) {
+        return {fn: function(b) {
+            var out = gepStr(b, "(")
+            var i
+            for (i = 0; i < ws.length; i++) {
+                var r = evalWord(b, ws[i])
+                b = r.b
+                out = b.NewCall(rtStrcat, [out, (i > 0) ? b.NewCall(rtStrcat, [gepStr(b, " "), r.v]) : r.v])
+            }
+            return {b: b, v: b.NewCall(rtStrcat, [out, gepStr(b, ")")])}
+        }, c: undefined}
+    }
     function mkPrefixAsg(items) {
         var r = {aname: items[0].aname, op: "=", val: null, bad: null}
         var i
@@ -8732,7 +8824,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var softB = main.NewBlock("")
             lineExit.NewCondBr(soft, softB, mainExit)
             softB.NewStore(zero, gExited)
-            storeStatusI(softB, 1)
+            storeStatus(softB, softB.NewLoad(i32, gExitCode))
             softB.NewBr(next)
             b = heapRelease(next, mk)
         }
