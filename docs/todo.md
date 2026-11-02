@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1109** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1111** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -140,23 +140,16 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1101 php: callable-typed parameters validated by shape only; static compound callables to non-static methods · P3 · PHP · IN PROGRESS (PHP worker, round 48) [V]
+### T-1109 php: user-function argument TypeError location/trace; callable in unions, return types, variadics · P3 · PHP · OPEN [V]
 
-Spec: zend_is_callable_ex, which zend_verify_arg_type calls for a `callable` parameter, and Zend/tests/callable_self_parent_static_deprecation.phpt, section "Test callable type hint".
-- A `callable` parameter must run the full validity check, not a shape test, and must raise the self/parent/static and compound-form deprecations, as the call_user_func sites already do. An invalid callable must raise the TypeError "must be of type callable, array given".
-- `['K', 'parent::m']` naming a non-static method from a static context must be rejected with "non-static method K::m() cannot be called statically".
+Spec: zend_verify_arg_error (Zend/zend_execute.c) and zend_verify_callable / zend_verify_return_type.
+- An argument TypeError on a user function: getLine()/getFile() must give the function's declaration line, not the caller's. The uncaught message must add ", called in F on line N" as now, plus the declaration site. The trace must show the real argument (`h(Array)`, not `h(NULL)`). Repros: scratchpad/PHP48/ti.php and ti2.php.
+- `callable` inside a union (`callable|string`), a `callable` return type, and variadic `callable ...$cs` parameters still get only the shape test. They need the zend_is_callable check, and the deprecations, that plain `callable` parameters now get.
 
-### T-1102 php: uncaught "Undefined constant" Error reports the caller's line · P3 · PHP · IN PROGRESS (PHP worker, round 48) [V]
+### T-1110 php: microtime() missing; native uncaught "Call to undefined function" prints "in :0" · P3 · PHP · OPEN [V]
 
-In both engines, an uncaught Error 'Undefined constant "X"' reports the line of the enclosing call rather than the line where the constant is used. The r47 worker's repro is scratchpad/PHP47/ln2.php: PHP reports :4, ours :6. Check the getLine() of a caught Error too.
-
-### T-1103 php: htmlspecialchars double_encode / ENT_SUBSTITUTE / HTML5 names; array_key_exists float key via callable or named args · P3 · PHP · IN PROGRESS (PHP worker, round 48) [V]
-
-Spec: ext/standard/html.c.
-- `double_encode=false` must leave existing entities (`&amp;`, `&#39;`, `&eacute;`) alone. It is currently ignored.
-- With ENT_SUBSTITUTE, invalid UTF-8 becomes U+FFFD; with ENT_IGNORE it is dropped. Without either flag the result is "".
-- html_entity_decode with ENT_HTML5 must decode the HTML5 names beyond the 4.01 set, for example `&apos;` and `&NewLine;`.
-- array_key_exists called through a callable or with named arguments still raises no fractional-float-key deprecation.
+- microtime() is not implemented. Add microtime(bool $as_float = false): the string form is "0.12345600 1700000000" (msec part with 8 decimals, then a space and the seconds); with true it returns a float. Tests may only check the shape, because the value changes from run to run.
+- Native only: an uncaught "Call to undefined function f()" prints "in :0" / "Unknown on line 0", while the interpreter shows the file and line. Give the native call site the same location the interpreter uses.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1186,6 +1179,9 @@ T-1100 kotlin: buildSet { } (and buildSet(capacity)) — DONE r30 (3c71c232): bu
 T-1096 bash: array element through a nameref in the compiler (`declare -n r=t; r[z]=3`) — DONE r34 (52cb090f): arrays through a nameref in both engines (rt_nref_arr), nameref-named diagnostics; master-probed vs bash 5.3
 T-1097 bash: export -p / readonly -p NAME set the attribute; bad substitution aborts the command line — DONE r34 (68f75ed1): export/readonly -p NAME set the attribute, first expansion error ends the command (later $() not run), $'-1' operator forms, unclosed NAME[ syntax error; master-probed
 T-1098 bash: subscript quote rule for run-time arithmetic text (variable values, let) + token cosmetics — DONE r34 (555340e0): run-time arithmetic subscripts expand as in double quotes once, expansion results not re-expanded, token residuals; master-probed. Whole-word bad-substitution message filed
+T-1101 php: callable-typed parameters validated by shape only; static compound callables to non-static methods — DONE r48 (8b81d94b): callable/?callable params checked via zend_is_callable in callee frame with deprecations + TypeError, static compound non-static rejected; master-probed
+T-1102 php: uncaught "Undefined constant" Error reports the caller's line — DONE r48 (8b81d94b): Undefined constant raised at the constant's own line (getLine + uncaught); master-probed
+T-1103 php: htmlspecialchars double_encode / ENT_SUBSTITUTE / HTML5 names; array_key_exists float key via callable or named args — DONE r48 (8b81d94b): htmlspecialchars double_encode/ENT_SUBSTITUTE/IGNORE/DISALLOWED/invalid UTF-8, all 2125 HTML5 names, array_key_exists float-key deprecation via callable/named args; master-probed vs html.c
 
 # Settled — do not re-open
 
