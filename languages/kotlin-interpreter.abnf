@@ -4051,9 +4051,17 @@ NotMemberKw = :script(~~ "pure";
             }
             if (dest == "" || typeof v == "function") { return v }
             if (kIsType(v, judged)) { return v }
-            kThrowExc("ClassCastException", jvmCceMsg(jxkClass(v), dest))
+            kThrowExc("ClassCastException", kMutCastMsg(v, base, jvmCceMsg(jxkClass(v), dest)))
             return v
         }
+    }
+    // A read-only kotlin.collections class (EmptyList, ...) cast to a Mutable type
+    // fails in TypeIntrinsics.asMutableList and friends, which name the Kotlin type;
+    // any other failure is the checkcast's message msg. Twin of ktMutCastMsg in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kMutCastMsg(v, base, msg) {
+        if (base.indexOf("Mutable") != 0 || kCollIsType(v, base.substring(7)) !== true) { return msg }
+        return jxkClass(v) + " cannot be cast to kotlin.collections." + base
     }
     var kCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
                      "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
@@ -4353,13 +4361,15 @@ NotMemberKw = :script(~~ "pure";
     function kJvmTagged(o, jc) { if (jc != "") { o.__jc = jc } return o }
     // The JVM class of a map's keys / entries view (view "Key" / "Entry"): a nested
     // class of the map's own (LinkedHashMap$LinkedKeySet, HashMap$EntrySet,
-    // TreeMap$KeySet), a SingletonSet or an EmptySet - never a HashSet. Twin of
-    // ktMapView in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // TreeMap$KeySet), a MapBuilderKeys / MapBuilderEntries, a SingletonSet or an
+    // EmptySet - never a HashSet. Twin of ktMapView in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kMapViewClass(m, view) {
         var jc = m.__jc !== undefined ? m.__jc : "java.util.LinkedHashMap"
         if (jc == "kotlin.collections.EmptyMap") { return "kotlin.collections.EmptySet" }
         if (jc == "java.util.Collections$SingletonMap") { return "java.util.Collections$SingletonSet" }
         if (jc == "java.util.LinkedHashMap") { return jc + "$Linked" + view + "Set" }
+        if (jc == "kotlin.collections.builders.MapBuilder") { return jc + (view == "Entry" ? "Entries" : "Keys") }
         return jc + "$" + view + "Set"
     }
     function kJvmSmall(n, kind) {
@@ -4487,24 +4497,28 @@ NotMemberKw = :script(~~ "pure";
     hostGlobals["emptyMap"] = function() { return kJvmTagged(kMakeMap(), "kotlin.collections.EmptyMap") }
     // buildMap { put(k, v) } - the builder lambda takes the fresh map as `this`. The
     // builders also take an optional capacity first, so the lambda is the LAST
-    // argument.
+    // argument. The result is the receiver itself, sealed read-only (__ro, kind -5
+    // for the list): a cast back to a Mutable type and a write raise, as the JVM
+    // builders' checkIsMutable does (kRoGuard).
     hostGlobals["buildMap"] = function() {
         var f = arguments[arguments.length - 1]
-        var m = kMakeMap()
+        var m = kJvmTagged(kMakeMap(), "kotlin.collections.builders.MapBuilder")
         if (typeof f == "function") { kSetRecv({v: m, noit: true}); f(m) }
+        m.__ro = true
         return m
     }
     hostGlobals["buildList"] = function() {
         var f = arguments[arguments.length - 1]
         var l = []
         if (typeof f == "function") { kSetRecv({v: l, noit: true}); f(l) }
-        return l
+        return arrKindSet(l, 0 - 5)
     }
-    // buildSet's receiver keeps insertion order; the result is a read-only Set.
+    // buildSet's receiver keeps insertion order.
     hostGlobals["buildSet"] = function() {
         var f = arguments[arguments.length - 1]
         var s = kJvmTagged(kMakeSet(), "kotlin.collections.builders.SetBuilder")
         if (typeof f == "function") { kSetRecv({v: s, noit: true}); f(s) }
+        s.__ro = true
         return s
     }
     hostGlobals["Pair"] = function(a, b) { return {first: a, second: b} }
@@ -6947,9 +6961,9 @@ NotMemberKw = :script(~~ "pure";
     }
     // The classes of the negative kinds: -1 java.util.ArrayDeque, -2
     // kotlin.collections.ArrayDeque, -3 java.util.LinkedList, -4 an Arrays.asList at
-    // every size (an Array's sorted copy).
+    // every size (an Array's sorted copy), -5 a finished buildList.
     var kListKindClasses = ["", "java.util.ArrayDeque", "kotlin.collections.ArrayDeque", "java.util.LinkedList",
-        "java.util.Arrays$ArrayList"]
+        "java.util.Arrays$ArrayList", "kotlin.collections.builders.ListBuilder"]
     var kOpNames = {plus: "+", minus: "-", times: "*", div: "/", rem: "%"}
     // toString(radix) is java's Integer/Long.toString(v, radix) - a sign and the
     // magnitude's digits, an unsigned type reading its bits unsigned; the bit counts
@@ -8046,6 +8060,37 @@ NotMemberKw = :script(~~ "pure";
         }
         return null
     }
+    // A mutating call on a read-only collection (ktRoRule in lib/kotlin-math.js):
+    // {v} when it is answered here - an UnsupportedOperationException, or the answer
+    // of running it on a copy that kept its size - else null, and the call goes on.
+    // Twin of ktRoGuard in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kRoGuard(o, name, args) {
+        var isArr = Array.isArray(o)
+        var ro = isArr ? ktRoList(arrKind(o), o.length) : ktRoTagged(o.__jc, o.__ro === true, kIsMap(o))
+        if (ro == "") { return null }
+        var n = isArr ? o.length : o.keys.length
+        var pred = typeof args[0] == "function"
+        var rule = ktRoRule(ro, name, n, args.length, pred)
+        if (rule == 0 || (rule == 3 && kElems(args[0]).length == 0)) { return null }
+        if (rule != 2) { kThrowExc("UnsupportedOperationException", null) }
+        var cp = anytype
+        var r = anytype
+        if (isArr) {
+            cp = o.slice(0)
+            r = kSeqMethod(cp, name, args)
+        } else if (kIsSet(o)) {
+            cp = kSetFill(kMakeSet(), null, o.keys)
+            r = kSetMethod(cp, name, args)
+        } else {
+            cp = kMakeMap()
+            for (var i = 0; i < n; i++) { kMapPut(cp, o.keys[i], o.vals[i]) }
+            r = kMapMethod(cp, name, args)
+        }
+        if ((isArr ? cp.length : cp.keys.length) != n) {
+            kThrowExc("UnsupportedOperationException", ktRoSaysRemove(ro, name, pred) ? "remove" : null)
+        }
+        return r
+    }
     function kMapMethod(m, name, rawArgs) {
         var args = kNormArgs(rawArgs)
         var f = anytype
@@ -8633,12 +8678,20 @@ NotMemberKw = :script(~~ "pure";
         // (map/filter/sumOf/forEach/count/any/...) on its element sequence.
         // A MAP: the shared {__dict, keys, vals} handle mapOf/groupBy/associate build.
         if (kIsMap(target)) {
+            if (target.__jc !== undefined) {
+                var rom = kRoGuard(target, name, args)
+                if (rom != null) { return rom.v }
+            }
             var kmm = kMapMethod(target, name, args)
             if (kmm != null) { return kmm.v }
             fail("unknown Map method: " + name)
         }
         // A SET: its own {__set, keys} handle (see kMakeSet).
         if (kIsSet(target)) {
+            if (target.__jc !== undefined) {
+                var ros = kRoGuard(target, name, args)
+                if (ros != null) { return ros.v }
+            }
             var ksm2 = kSetMethod(target, name, args)
             if (ksm2 != null) { return ksm2.v }
             fail("unknown Set method: " + name)
@@ -8791,6 +8844,11 @@ NotMemberKw = :script(~~ "pure";
             tgtKind = "Collection"
         }
         if (Array.isArray(tgt)) {
+            var tak = arrKind(tgt)
+            if (tak == 4 || tak < 0 - 3) {
+                var rol = kRoGuard(tgt, name, args)
+                if (rol != null) { return rol.v }
+            }
             // add(element); add(index, element) is the INSERTING overload and belongs
             // to kSeqMethod below, so the fast path takes the one-argument form only.
             if (name == "add" && args.length == 1) { tgt.push(args[0]); arrModBump(tgt); return true }
@@ -12526,6 +12584,7 @@ NotMemberKw = :script(~~ "pure";
         if (jc === "java.util.HashMap") { return "java.util.HashMap$Node" }
         if (jc === "java.util.TreeMap") { return "java.util.TreeMap$Entry" }
         if (jc === "java.util.Collections$SingletonMap") { return "java.util.AbstractMap$SimpleImmutableEntry" }
+        if (jc === "kotlin.collections.builders.MapBuilder") { return jc + "$EntryRef" }
         return "java.util.LinkedHashMap$Entry"
     }
     // The simple name of a value's class. The twin is ktSimpleName in abnf/jsrtkotlin.go.
@@ -12748,6 +12807,7 @@ NotMemberKw = :script(~~ "pure";
         }
         if (kIsSet(o)) {
             if (name == "size") { return o.keys.length }
+            if (name == "indices") { return kRange(0, o.keys.length - 1, false) }
             return extPropGet(o, name)
         }
         // A StringBuilder IS a CharSequence, so kotlin.text's `indices` and `lastIndex`
@@ -13134,7 +13194,10 @@ NotMemberKw = :script(~~ "pure";
     function kCollIsType(v, t) {
         var isArr = Array.isArray(v)
         if (!isArr && !kIsSet(v) && !kIsMap(v)) { return undefined }
-        if (t.indexOf("Mutable") == 0) { t = t.substring(7) }
+        if (t.indexOf("Mutable") == 0) {
+            if (kCollJvmClass(v).indexOf("kotlin.collections.Empty") == 0) { return false }
+            t = t.substring(7)
+        }
         if (kIsMap(v)) {
             var mc = kJvmIsA(v.__jc !== undefined ? v.__jc : "java.util.LinkedHashMap", t)
             return mc !== undefined ? mc : t == "Map"
@@ -13638,12 +13701,18 @@ NotMemberKw = :script(~~ "pure";
         // Twins: js_ktset in abnf/jsrtkotlin.go and in languages/lib/kotlin-rt.metajs.
         if (kIsMultiIdx(i)) { kMultiIdx(o, "set", concat2impl(i.a, [v])); return }
         if (Array.isArray(o)) {
+            var sk = arrKind(o)
+            if (sk == 4 || sk < 0 - 3) { kRoGuard(o, "set", [i, v]) }
             var wix = kNum(i)
             if (wix < 0 || wix >= o.length) { kIndexOob("IndexOutOfBoundsException", wix, o.length) }
             o[wix] = v
             return
         }
-        if (kIsMap(o)) { kMapPut(o, i, v); return }
+        if (kIsMap(o)) {
+            if (o.__jc !== undefined) { kRoGuard(o, "set", [i, v]) }
+            kMapPut(o, i, v)
+            return
+        }
         if (typeof o == "object" && o != null && o.__class != undefined && o.__class != null) {
             var st = clsFind(o.__class, "set")
             if (typeof st == "function") { st(o, i, v); return }
@@ -14030,7 +14099,7 @@ NotMemberKw = :script(~~ "pure";
         if (Array.isArray(recv)) {
             var ak = arrKind(recv)
             if (ak == 0 || ak == 3) { return "L" }
-            if (ak == 4 || ak == -4) { return "R" }
+            if (ak == 4 || ak == -4 || ak == -5) { return "R" }
             if (ak < 0) { return "D" }
             return ak == 2 ? "Q" : "A"
         }

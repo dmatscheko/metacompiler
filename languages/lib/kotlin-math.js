@@ -385,3 +385,88 @@ function ktaRefClass(classes) {
     if (c == "") { return "[Ljava.lang.Object;" }
     return "[L" + c + ";"
 }
+
+// The read-only collection classes a cast to a Mutable type exposes, as the codes
+// ktRoRule takes: LB ListBuilder, L1 Collections$SingletonList, LA Arrays$ArrayList,
+// SB SetBuilder, S1 Collections$SingletonSet, MB MapBuilder, M1
+// Collections$SingletonMap; "" for a mutable collection, and for an EmptyList /
+// EmptySet / EmptyMap, which the cast itself refuses. A List's code comes from its
+// kind k (-5 a built buildList) and size n; a Set's or a Map's from its JVM class jc
+// and whether its builder has finished (sealed).
+function ktRoList(k, n) {
+    if (k == 0 - 5) { return "LB" }
+    if (k == 0 - 4 || (k == 4 && n > 1)) { return "LA" }
+    if (k == 4 && n == 1) { return "L1" }
+    return ""
+}
+function ktRoTagged(jc, sealed, isMap) {
+    var c = "S"
+    var single = "java.util.Collections$SingletonSet"
+    if (isMap) {
+        c = "M"
+        single = "java.util.Collections$SingletonMap"
+    }
+    if (sealed) { return c + "B" }
+    if (jc == single) { return c + "1" }
+    return ""
+}
+
+// What mutating member `name`, called with na arguments (pred: the first is a
+// function), does to the read-only collection of code ro holding n elements: 0 runs
+// it, 1 raises UnsupportedOperationException first, 2 runs it on a copy and raises
+// when the copy changed size, 3 raises when its argument has elements. A builder's
+// mutators call checkIsMutable first (a removeIf / removeFirst, and kotlin's
+// removeAll / retainAll of a predicate, only reach one on a hit); the
+// java.util classes inherit AbstractList / AbstractCollection / AbstractMap, whose
+// add, add(index), removeAt and put always throw and whose removals throw from the
+// iterator, on a hit only; Arrays$ArrayList writes in place (set, sort, fill), and
+// the Singleton classes override removeIf, replaceAll and Map's default methods to
+// throw. A sort or reverse of fewer than two elements writes nothing. Go twin:
+// ktRoRule in abnf/jsrtkotlin.go.
+var ktRoWriters = " set fill replaceAll sort sortDescending sortBy sortByDescending sortWith reverse shuffle "
+var ktRoListAdds = " add addFirst addLast removeAt "
+var ktRoBulk = " addAll remove removeAll retainAll clear "
+var ktRoRemovals = " removeIf removeFirst removeLast removeFirstOrNull removeLastOrNull "
+var ktRoMapPuts = " put set compute computeIfPresent merge replace replaceAll "
+var ktRoMapAdds = " getOrPut putIfAbsent computeIfAbsent "
+function ktRoRule(ro, name, n, na, pred) {
+    var w = " " + name + " "
+    if (pred && (name == "removeAll" || name == "retainAll")) { return 2 }
+    var builder = ro.charAt(1) == "B"
+    var kind = ro.charAt(0)
+    if (kind == "L") {
+        if (ktRoListAdds.indexOf(w) >= 0) { return 1 }
+        if (ktRoWriters.indexOf(w) >= 0) {
+            if (ro == "LA") { return 0 }
+            if (name == "set") { return 1 }
+            if (name == "fill" || name == "replaceAll") { return n > 0 ? 1 : 0 }
+            return builder && n > 1 ? 1 : 0
+        }
+        if (ro == "L1" && name == "removeIf") { return 1 }
+        if (ktRoBulk.indexOf(w) >= 0) { return builder ? 1 : 2 }
+        return ktRoRemovals.indexOf(w) >= 0 ? 2 : 0
+    }
+    if (kind == "S") {
+        if (name == "add" || (name == "removeIf" && !builder)) { return 1 }
+        if (name == "addAll") { return builder ? 1 : 3 }
+        if (ktRoBulk.indexOf(w) >= 0) { return builder ? 1 : 2 }
+        return name == "removeIf" ? 2 : 0
+    }
+    if (ktRoMapPuts.indexOf(w) >= 0) { return 1 }
+    if (name == "putAll") { return builder ? 1 : 3 }
+    // remove(key, value) is Map's default method, which only a SingletonMap overrides.
+    if (name == "remove" && na > 1) { return builder ? 2 : 1 }
+    if (name == "remove" || name == "clear") { return builder ? 1 : 2 }
+    if (ktRoMapAdds.indexOf(w) >= 0) { return builder || name == "getOrPut" ? 2 : 1 }
+    return 0
+}
+
+// Whether the UnsupportedOperationException a removal hit raises says "remove": an
+// Arrays$ArrayList's own iterator refuses so, and remove(element), retainAll,
+// removeIf and removeAll(elements) remove through it, where removeAll(predicate) is
+// kotlin's in-place filter, which ends in removeAt, and clear in removeRange.
+function ktRoSaysRemove(ro, name, pred) {
+    if (ro != "LA") { return false }
+    if (name == "removeAll") { return !pred }
+    return name == "remove" || name == "retainAll" || name == "removeIf"
+}

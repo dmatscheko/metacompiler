@@ -7372,6 +7372,53 @@ fun s169() {
         buildSet { add(1) }.javaClass.name == "kotlin.collections.builders.SetBuilder")
 }
 
+// ===== SECTION 170: read-only collections behind a Mutable cast =====
+// Set.indices, and what a cast to a Mutable type exposes: a builder's result
+// refuses every write, a Collections.singleton* or Arrays.asList refuses what
+// AbstractList / AbstractCollection / AbstractMap refuse, and an EmptyList /
+// EmptySet / EmptyMap refuses the cast itself.
+fun uoe170(f: () -> Any?): String = try { "" + f() } catch (e: UnsupportedOperationException) {
+    "U" + e.message
+} catch (e: ClassCastException) { "C:" + e.message }
+
+fun s170() {
+    check("idx170a", setOf(4, 5, 6).indices == 0..2 && emptySet<Int>().indices.isEmpty() &&
+        buildSet { add(1) }.indices.last == 0)
+    val bl = buildList { add(1); add(2); this[0] = 5 }
+    val bm = buildMap { put("a", 1); this["a"] = 2 }
+    val bs = buildSet { add(1); remove(1); add(2) }
+    check("ro170b", uoe170 { (bl as MutableList<Int>).add(9) } == "Unull" &&
+        uoe170 { (bl as MutableList<Int>)[0] = 7 } == "Unull" &&
+        uoe170 { (bm as MutableMap<String, Int>)["b"] = 1 } == "Unull" &&
+        uoe170 { (bs as MutableSet<Int>).add(9) } == "Unull" &&
+        bl == listOf(5, 2) && bm == mapOf("a" to 2) && bs == setOf(2))
+    check("ro170c", uoe170 { (bl as MutableList<Int>).removeIf { it > 50 } } == "false" &&
+        uoe170 { (bm as MutableMap<String, Int>).getOrPut("a") { 0 } } == "2" &&
+        uoe170 { (bs as MutableSet<Int>).remove(7) } == "Unull")
+    check("ro170d", uoe170 { (setOf(1) as MutableSet<Int>).add(2) } == "Unull" &&
+        uoe170 { (setOf(1) as MutableSet<Int>).remove(7) } == "false" &&
+        uoe170 { (mapOf(1 to 2) as MutableMap<Int, Int>).put(1, 2) } == "Unull" &&
+        uoe170 { (mapOf(1 to 2) as MutableMap<Int, Int>).remove(1) } == "Unull")
+    val l3 = listOf(1, 2, 3) as MutableList<Int>
+    l3[0] = 9
+    check("ro170e", uoe170 { (listOf(1) as MutableList<Int>).set(0, 2) } == "Unull" &&
+        uoe170 { l3.add(4) } == "Unull" && uoe170 { l3.remove(2) } == "Uremove" &&
+        uoe170 { l3.remove(7) } == "false" && uoe170 { l3.removeAt(0) } == "Unull" &&
+        l3 == listOf(9, 2, 3) && uoe170 { (setOf(1, 2) as MutableSet<Int>).add(3) } == "true")
+    check("ro170f", uoe170 { emptyList<Int>() as MutableList<Int> } ==
+        "C:kotlin.collections.EmptyList cannot be cast to kotlin.collections.MutableList" &&
+        uoe170 { emptyMap<Int, Int>() as MutableMap<Int, Int> } ==
+        "C:kotlin.collections.EmptyMap cannot be cast to kotlin.collections.MutableMap" &&
+        emptySet<Int>() !is MutableSet<*> && listOf(1) is MutableList<*>)
+    check("jc170g", buildList { add(1) }.javaClass.name == "kotlin.collections.builders.ListBuilder" &&
+        buildMap<Int, Int> {}.javaClass.name == "kotlin.collections.builders.MapBuilder" &&
+        buildList { add(1) }.toMutableList().apply { add(2) } == listOf(1, 2))
+    check("jc170h", bm.keys.javaClass.name == "kotlin.collections.builders.MapBuilderKeys" &&
+        bm.entries.javaClass.name == "kotlin.collections.builders.MapBuilderEntries" &&
+        bm.entries.first().javaClass.name == "kotlin.collections.builders.MapBuilder\$EntryRef")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7538,6 +7585,7 @@ fun main() {
     s167() // SECTION-CALL 167
     s168() // SECTION-CALL 168
     s169() // SECTION-CALL 169
+    s170() // SECTION-CALL 170
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

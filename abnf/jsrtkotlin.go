@@ -1551,7 +1551,7 @@ func init() {
 				return a[0]
 			}
 			src, _ := ktJvmClass(v).(string)
-			rt.ktRaise("ClassCastException", jvCceMsg(src, rt.toString(u(a[2]))))
+			rt.ktRaise("ClassCastException", ktMutCastMsg(v, t, src, jvCceMsg(src, rt.toString(u(a[2])))))
 			return a[0]
 		}
 		// js_ktextok(v, type, name, builtin) is whether the extension chain takes the
@@ -2028,6 +2028,11 @@ func init() {
 				}
 			}
 			if lst, isArr := recv.(*jsArray); isArr {
+				if lst.kind == ktArrFixed || lst.kind < ktArrLinked {
+					if v, handled := rt.ktRoGuard(lst, mname, arr.elems); handled {
+						return rt.wrap(v)
+					}
+				}
 				if v, handled := rt.ktSeqMethodK(lst, mname, arr.elems, recvKind); handled {
 					if out, isOut := v.(*jsArray); isOut && out != lst {
 						// A range (recvKind Collection) is an Iterable but no
@@ -2077,6 +2082,11 @@ func init() {
 				}
 				if gb, _ := mo.props["__grouping"].(bool); gb {
 					if v, handled := rt.ktGroupingMethod(mo, mname, arr.elems); handled {
+						return rt.wrap(v)
+					}
+				}
+				if _, tagged := mo.props["__jc"]; tagged {
+					if v, handled := rt.ktRoGuard(mo, mname, arr.elems); handled {
 						return rt.wrap(v)
 					}
 				}
@@ -3346,6 +3356,9 @@ func init() {
 					return w(float64(n - 1))
 				}
 			}
+			if keys, isSet := ktSetParts(o); isSet && name == "indices" && isUndefOrNull(u(r)) {
+				return w(ktMakeRange(ktRange{from: 0, to: float64(len(keys.elems) - 1), st: 1}))
+			}
 			// A StringBuilder IS a CharSequence, so the same two properties apply to
 			// it.
 			if sb, isObj := o.(*jsObject); isObj && ktIsSb(sb) && isUndefOrNull(u(r)) {
@@ -3447,6 +3460,9 @@ func init() {
 			// array with undefined for a non-negative index and aborts outright for
 			// a negative one.
 			if ao, isArr := u(a[0]).(*jsArray); isArr {
+				if ao.kind == ktArrFixed || ao.kind < ktArrLinked {
+					rt.ktRoGuard(ao, "set", []interface{}{u(a[1]), u(a[2])})
+				}
 				if k, isNum := u(a[1]).(float64); isNum {
 					ix := jsToInt(k)
 					if ix < 0 || ix >= len(ao.elems) {
@@ -3456,6 +3472,9 @@ func init() {
 			}
 			if mo, isObj := u(a[0]).(*jsObject); isObj {
 				if _, _, isDict := dictParts(mo); isDict {
+					if _, tagged := mo.props["__jc"]; tagged {
+						rt.ktRoGuard(mo, "set", []interface{}{u(a[1]), u(a[2])})
+					}
 					rt.ktMapPut(mo, u(a[1]), u(a[2]))
 					return 0
 				}
@@ -8746,7 +8765,12 @@ func ktRangeIsType(rg ktRange, t string) bool {
 // though it is held in the set handle (ktNewPq). Twin of kCollIsType in
 // kotlin-interpreter.abnf and ktCollIsType in languages/lib/kotlin-rt.metajs.
 func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
-	t = strings.TrimPrefix(t, "Mutable")
+	if strings.HasPrefix(t, "Mutable") {
+		if strings.HasPrefix(ktCollJvmClass(v), "kotlin.collections.Empty") {
+			return false, true
+		}
+		t = t[len("Mutable"):]
+	}
 	if _, _, isDict := dictParts(v); isDict {
 		if is, ok := ktJvmIsA(ktJvmTag(v, "java.util.LinkedHashMap"), t); ok {
 			return is, true
@@ -8786,6 +8810,21 @@ func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 	}
 }
 
+// ktMutCastMsg is the ClassCastException message of casting v, of JVM class src, to
+// t: a read-only kotlin.collections class (EmptyList, ...) cast to a Mutable type
+// fails in TypeIntrinsics.asMutableList and friends, which name the Kotlin type; any
+// other failure is the checkcast's message msg. Twin of kMutCastMsg in
+// kotlin-interpreter.abnf and ktMutCastMsg in languages/lib/kotlin-rt.metajs.
+func ktMutCastMsg(v interface{}, t, src, msg string) string {
+	if !strings.HasPrefix(t, "Mutable") {
+		return msg
+	}
+	if is, ok := ktCollIsType(v, t[len("Mutable"):]); !ok || !is {
+		return msg
+	}
+	return src + " cannot be cast to kotlin.collections." + t
+}
+
 // ktJvmTag is the JVM class a set or map records (ktJvmTagged), else def.
 func ktJvmTag(v interface{}, def string) string {
 	if o, isObj := v.(*jsObject); isObj {
@@ -8798,9 +8837,9 @@ func ktJvmTag(v interface{}, def string) string {
 
 // ktMapView tags a map's keys / entries view (view "Key" / "Entry") with its JVM
 // class: a nested class of the map's own (LinkedHashMap$LinkedKeySet,
-// HashMap$EntrySet, TreeMap$KeySet), a SingletonSet or an EmptySet - never a
-// HashSet. Twin of kMapViewClass in kotlin-interpreter.abnf and ktMapView in
-// languages/lib/kotlin-rt.metajs.
+// HashMap$EntrySet, TreeMap$KeySet), a MapBuilderKeys / MapBuilderEntries, a
+// SingletonSet or an EmptySet - never a HashSet. Twin of kMapViewClass in
+// kotlin-interpreter.abnf and ktMapView in languages/lib/kotlin-rt.metajs.
 func ktMapView(set interface{}, m interface{}, view string) interface{} {
 	jc := ktJvmTag(m, "java.util.LinkedHashMap")
 	switch jc {
@@ -8810,6 +8849,11 @@ func ktMapView(set interface{}, m interface{}, view string) interface{} {
 		jc = "java.util.Collections$SingletonSet"
 	case "java.util.LinkedHashMap":
 		jc += "$Linked" + view + "Set"
+	case ktMapBuilderClass:
+		jc += "Keys"
+		if view == "Entry" {
+			jc = ktMapBuilderClass + "Entries"
+		}
 	default:
 		jc += "$" + view + "Set"
 	}
@@ -9368,7 +9412,7 @@ func ktBuiltinKind(recv interface{}) byte {
 		switch {
 		case t.kind == 0 || t.kind == ktArrVals:
 			return 'L'
-		case t.kind == ktArrFixed || t.kind == ktArrAsList:
+		case t.kind == ktArrFixed || t.kind == ktArrAsList || t.kind == ktArrBuilt:
 			return 'R'
 		case t.kind < 0:
 			return 'D'
@@ -9971,12 +10015,17 @@ func ktJvmTagged(o *jsObject, builder string, n int) *jsObject {
 		jc = "java.util.TreeMap"
 	case "buildSet":
 		jc = "kotlin.collections.builders.SetBuilder"
+	case "buildMap":
+		jc = ktMapBuilderClass
 	}
 	if jc != "" {
 		o.set("__jc", jc)
 	}
 	return o
 }
+
+// The JVM class of buildMap's map.
+const ktMapBuilderClass = "kotlin.collections.builders.MapBuilder"
 
 // ktGlobalFn is the VALUE of one global builder name.
 func ktGlobalFn(rt *jsrt, name string) interface{} {
@@ -10014,24 +10063,29 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		})
 	// The builders take an optional capacity first, so the lambda is the LAST
 	// argument.
+	// The result is the receiver itself, sealed read-only (__ro, ktArrBuilt for the
+	// list): a cast back to a Mutable type and a write raise, as the JVM builders'
+	// checkIsMutable does (ktRoGuard).
 	case "buildMap":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			mp := ktMakeMap()
+			mp := ktJvmTagged(ktMakeMap(), name, 0)
 			rt.ktWithRecv(mp, argAt(args, len(args)-1), mp)
+			mp.set("__ro", true)
 			return mp
 		})
 	case "buildList":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			l := &jsArray{}
 			rt.ktWithRecv(l, argAt(args, len(args)-1), l)
+			l.kind = ktArrBuilt
 			return l
 		})
 	case "buildSet":
-		// The receiver is a MutableSet that keeps insertion order, and the result is
-		// that set as a read-only Set (a SetBuilder on the JVM).
+		// The receiver is a MutableSet that keeps insertion order.
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			s := ktJvmTagged(ktMakeSet(), name, 0)
 			rt.ktWithRecv(s, argAt(args, len(args)-1), s)
+			s.set("__ro", true)
 			return s
 		})
 	case "buildString":
@@ -10888,6 +10942,7 @@ const (
 	ktArrKDeque = -2 // kotlin.collections.ArrayDeque
 	ktArrLinked = -3 // java.util.LinkedList
 	ktArrAsList = -4 // java.util.Arrays$ArrayList at every size: an Array's sorted copy
+	ktArrBuilt  = -5 // kotlin.collections.builders.ListBuilder: a finished buildList
 )
 
 var ktArrWords = [...]string{ktKindList, ktKindArr, ktKindSeq, ktKindColl, ktKindList,
@@ -10974,6 +11029,8 @@ func ktJvmListClass(kind, n int) string {
 		return "java.util.LinkedList"
 	case kind == ktArrAsList:
 		return "java.util.Arrays$ArrayList"
+	case kind == ktArrBuilt:
+		return "kotlin.collections.builders.ListBuilder"
 	case kind == ktArrVals:
 		return "java.util.LinkedHashMap$LinkedValues"
 	}
@@ -11767,6 +11824,8 @@ func ktEntryJvmClass(v interface{}) string {
 		return "java.util.TreeMap$Entry"
 	case "java.util.Collections$SingletonMap":
 		return "java.util.AbstractMap$SimpleImmutableEntry"
+	case ktMapBuilderClass:
+		return ktMapBuilderClass + "$EntryRef"
 	}
 	return "java.util.LinkedHashMap$Entry"
 }
@@ -12060,4 +12119,181 @@ func (rt *jsrt) ktCursorMethod(c *jsObject, name string) (interface{}, bool) {
 		return jsUndef, true
 	}
 	return nil, false
+}
+
+// ktRoList and ktRoTagged name the read-only collection class a cast to a Mutable
+// type exposes, as ktRoRule's code. Twins of ktRoList / ktRoTagged in
+// languages/lib/kotlin-math.js, which has the codes.
+func ktRoList(k, n int) string {
+	switch {
+	case k == ktArrBuilt:
+		return "LB"
+	case k == ktArrAsList || (k == ktArrFixed && n > 1):
+		return "LA"
+	case k == ktArrFixed && n == 1:
+		return "L1"
+	}
+	return ""
+}
+
+func ktRoTagged(jc interface{}, sealed, isMap bool) string {
+	c, single := "S", "java.util.Collections$SingletonSet"
+	if isMap {
+		c, single = "M", "java.util.Collections$SingletonMap"
+	}
+	if sealed {
+		return c + "B"
+	}
+	if jc == single {
+		return c + "1"
+	}
+	return ""
+}
+
+const (
+	ktRoWriters  = " set fill replaceAll sort sortDescending sortBy sortByDescending sortWith reverse shuffle "
+	ktRoListAdds = " add addFirst addLast removeAt "
+	ktRoBulk     = " addAll remove removeAll retainAll clear "
+	ktRoRemovals = " removeIf removeFirst removeLast removeFirstOrNull removeLastOrNull "
+	ktRoMapPuts  = " put set compute computeIfPresent merge replace replaceAll "
+	ktRoMapAdds  = " getOrPut putIfAbsent computeIfAbsent "
+)
+
+// ktRoRule is what a mutating member does to a read-only collection: 0 runs it, 1
+// raises first, 2 runs it on a copy and raises when the copy changed size, 3 raises
+// when its argument has elements. Twin of ktRoRule in languages/lib/kotlin-math.js,
+// which has the rules.
+func ktRoRule(ro, name string, n, na int, pred bool) int {
+	w := " " + name + " "
+	has := func(set string) bool { return strings.Contains(set, w) }
+	builder := ro[1] == 'B'
+	pick := func(c bool, a, b int) int {
+		if c {
+			return a
+		}
+		return b
+	}
+	if pred && (name == "removeAll" || name == "retainAll") {
+		return 2
+	}
+	switch ro[0] {
+	case 'L':
+		switch {
+		case has(ktRoListAdds):
+			return 1
+		case has(ktRoWriters):
+			switch {
+			case ro == "LA":
+				return 0
+			case name == "set":
+				return 1
+			case name == "fill" || name == "replaceAll":
+				return pick(n > 0, 1, 0)
+			}
+			return pick(builder && n > 1, 1, 0)
+		case ro == "L1" && name == "removeIf":
+			return 1
+		case has(ktRoBulk):
+			return pick(builder, 1, 2)
+		}
+		return pick(has(ktRoRemovals), 2, 0)
+	case 'S':
+		switch {
+		case name == "add" || (name == "removeIf" && !builder):
+			return 1
+		case name == "addAll":
+			return pick(builder, 1, 3)
+		case has(ktRoBulk):
+			return pick(builder, 1, 2)
+		}
+		return pick(name == "removeIf", 2, 0)
+	}
+	switch {
+	case has(ktRoMapPuts):
+		return 1
+	case name == "putAll":
+		return pick(builder, 1, 3)
+	case name == "remove" && na > 1:
+		return pick(builder, 2, 1)
+	case name == "remove" || name == "clear":
+		return pick(builder, 1, 2)
+	case has(ktRoMapAdds):
+		return pick(builder || name == "getOrPut", 2, 1)
+	}
+	return 0
+}
+
+// ktRoSaysRemove is whether the exception a removal hit raises says "remove". Twin
+// of ktRoSaysRemove in languages/lib/kotlin-math.js.
+func ktRoSaysRemove(ro, name string, pred bool) bool {
+	if ro != "LA" {
+		return false
+	}
+	if name == "removeAll" {
+		return !pred
+	}
+	return name == "remove" || name == "retainAll" || name == "removeIf"
+}
+
+// ktRoGuard answers a mutating call on a read-only collection o (ktRoRule): an
+// UnsupportedOperationException, or the answer of running it on a copy that kept
+// its size, and true; false for any other call, which goes on. Twin of kRoGuard in
+// kotlin-interpreter.abnf and ktRoGuard in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktRoGuard(o interface{}, name string, args []interface{}) (interface{}, bool) {
+	var ro string
+	var n int
+	lst, isArr := o.(*jsArray)
+	mo, _ := o.(*jsObject)
+	keys, vals, isMap := dictParts(o)
+	switch {
+	case isArr:
+		ro, n = ktRoList(lst.kind, len(lst.elems)), len(lst.elems)
+	case isMap:
+		ro, n = ktRoTagged(mo.props["__jc"], mo.props["__ro"] == true, true), len(keys.elems)
+	default:
+		sk, isSet := ktSetParts(o)
+		if !isSet {
+			return nil, false
+		}
+		ro, n = ktRoTagged(mo.props["__jc"], mo.props["__ro"] == true, false), len(sk.elems)
+	}
+	if ro == "" {
+		return nil, false
+	}
+	pred := isCallable(argAt(args, 0))
+	rule := ktRoRule(ro, name, n, len(args), pred)
+	if rule == 0 || (rule == 3 && len(ktElems(rt, argAt(args, 0))) == 0) {
+		return nil, false
+	}
+	if rule != 2 {
+		rt.ktRaiseV("UnsupportedOperationException", jsNull)
+	}
+	var v interface{}
+	var size func() int
+	switch {
+	case isArr:
+		cp := &jsArray{elems: append([]interface{}{}, lst.elems...)}
+		v, _ = rt.ktSeqMethod(cp, name, args)
+		size = func() int { return len(cp.elems) }
+	case isMap:
+		cp := ktMakeMap()
+		for i, k := range keys.elems {
+			rt.ktMapPut(cp, k, vals.elems[i])
+		}
+		v, _ = rt.ktMapMethod(cp, name, args)
+		size = func() int { ck, _, _ := dictParts(cp); return len(ck.elems) }
+	default:
+		sk, _ := ktSetParts(o)
+		cp := rt.ktSetFill(ktMakeSet(), nil, sk.elems)
+		v, _ = rt.ktSetMethod(cp, name, args)
+		size = func() int { ck, _ := ktSetParts(cp); return len(ck.elems) }
+	}
+	if size() != n {
+		var msg interface{} = jsNull
+		if ktRoSaysRemove(ro, name, pred) {
+			msg = "remove"
+		}
+		rt.ktRaiseV("UnsupportedOperationException", msg)
+	}
+	return v, true
 }
