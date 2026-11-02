@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1169 kotlin (compiler): class property vs top-level object of the same name, `kotlin.io.println` · P3 · KT · OPEN [V]
+### T-1169 kotlin (compiler): class property vs top-level object of the same name, `kotlin.io.println` · P3 · KT · IN PROGRESS (KT worker, round 56) [V]
 Found while closing T-1168; oracle kotlinc 2.2.21. Compiler only (run and native); the interpreter matches kotlinc.
 - A class property loses to a top-level object of the same name inside a method:
   `class Box(val tag: String)` / `object foo { val tag = "obj" }` / `class Holder { val foo = Box("prop"); fun run() { println(foo.tag) } }` / `fun main() { println(foo.tag); Holder().run() }` — kotlinc "obj" then "prop"; run/native "obj" twice. Probable cause: ktGlobShadow considers only top-level funs and vals, not objects (check classes and enum classes too).
