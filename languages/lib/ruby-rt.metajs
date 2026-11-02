@@ -9135,6 +9135,7 @@ function rbMemberCall(target, name, args) {
             }
             if ((name == "to_enum" || name == "enum_for") && rbUserObj(target)) { return rbToEnum(target, args) }
             if (rbEnumAnswers(target, name)) { return rbEnumMixin(target, name, args) }
+            if (rbObjectExt(name) !== undefined) { return rbObjectExtCall(target, name, args) }
             // A call nothing answers goes to the class's method_missing, with the
             // name as a Symbol in front of the arguments. Twin of the method_missing
             // arm of mcall in ruby-interpreter.abnf.
@@ -9151,10 +9152,29 @@ function rbMemberCall(target, name, args) {
         }
         var own = target[name]
         if (own !== undefined && rbIsFn(own)) { return own.apply(undefined, args) }
+        if (rbObjectExt(name) !== undefined) { return rbObjectExtCall(target, name, args) }
         rbNoMethod(target, name)
     }
     rbNoMethod(target, name)
     return null
+}
+// The key a call on the implicit self reaches Object method n by. Twin of
+// rubyObjectExtKey in abnf/jsrtruby.go.
+function rbObjectExtKey(n) {
+    if (rbRestricted(rbBuiltinClass("Object"), n)) { return "$q$" + n }
+    return n
+}
+// respond_to?(n, all) of an Object method. Twin of rubyObjectResponds in
+// abnf/jsrtruby.go.
+function rbObjectResponds(n, all) {
+    return rbObjectExt(n) !== undefined && (all || !rbRestricted(rbBuiltinClass("Object"), n))
+}
+// Calls the Object method rbObjectExt found, with target as self.
+function rbObjectExtCall(target, name, args) {
+    var oxa = [target]
+    var oxi = 0
+    while (oxi < args.length) { oxa.push(args[oxi]); oxi = oxi + 1 }
+    return rbObjectExt(name).apply(undefined, oxa)
 }
 
 // rubyMethod is the direct method dispatch (js_rmcall in the Go twin; here it is
@@ -9181,7 +9201,7 @@ function js_rrespond(target, args) {
     var rcls = rbRespondClass(target)
     if (rcls != "") {
         if (rbBuiltinExtOn) {
-            if (rbBuiltinExtFind(target, n) !== undefined) { return true }
+            if (rbBuiltinExtFind(target, n) !== undefined || rbObjectResponds(n, all)) { return true }
         }
         return rbResponds(rcls, n) || (all && rbRespondsPriv(n))
     }
@@ -9195,7 +9215,7 @@ function js_rrespond(target, args) {
     if (rbResponds("", n)) { return true }
     if (rbSingFind(target, n) !== undefined) { return true }
     if (rbRestricted(target["__class"], n)) { return all }
-    if (rbSingRespond(target, n) || (all && rbRespondsPriv(n))) { return true }
+    if (rbSingRespond(target, n) || (all && rbRespondsPriv(n)) || rbObjectResponds(n, all)) { return true }
     if (rbEnumAnswers(target, n)) { return true }
     // respond_to_missing? - see respondTo in ruby-interpreter.abnf.
     if (rbUserObj(target) && rbFindMethod(target, "respond_to_missing?") !== undefined) {
@@ -9253,6 +9273,7 @@ function rbSuperBuiltin(self, name, args) {
         if (sing) { return js_rnosuper(self, sn) }
     }
     if (!rbUserObj(self) || self["__isclass"] === true) { return js_rnosuper(self, name) }
+    if (rbObjectExt(name) !== undefined) { return rbObjectExtCall(self, name, args) }
     var npos = rbNPos(args)
     if (name == "initialize") {
         if (npos > 0) { rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given " + npos + ", expected 0)") }
@@ -9459,6 +9480,7 @@ function rbMethod(target, name, args) {
     if (rbBuiltinExtOn) {
         var bxm = anytype
         bxm = rbBuiltinExtFind(target, name)
+        if (bxm === undefined && rbRespondClass(target) != "" && !rbResponds(rbRespondClass(target), name)) { bxm = rbObjectExt(name) }
         if (bxm !== undefined) {
             var bxa = [target]
             var bxi = 0
@@ -10539,6 +10561,15 @@ function rbBuiltinExtFind(v, name) {
         if (bm !== undefined && rbIsFn(bm)) { return bm }
         cn = rbExcParentOf(cn)
     }
+    return undefined
+}
+
+// A method a program gave Object, asked for only where a call would otherwise
+// fail. Twin of objectExt in ruby-interpreter.abnf, which states the rule.
+function rbObjectExt(name) {
+    if (!rbBuiltinExtOn) { return undefined }
+    var om = rbBuiltinClass("Object")[name]
+    if (om !== undefined && rbIsFn(om)) { return om }
     return undefined
 }
 
@@ -12574,6 +12605,7 @@ function js_rlvar(scope, name) {
     // In a method a class_eval block added to a builtin class, self is a builtin
     // value and the name may be one of its methods (`upcase' in String#shout).
     if (rbBuiltinExtOn && rbRespondClass(lself) != "" && js_rrespond(lself, [n]) === true) { return js_rxmcall(lself, n, []) }
+    if (rbObjectExt(n) !== undefined) { return rbMethod(lself, rbObjectExtKey(n), []) }
     rbNameErr("NameError", "undefined local variable or method `" + n + "' for " + rbNoMethodDesc(lself), n, lself)
     return null
 }
@@ -12594,6 +12626,9 @@ function js_rfn(scope, name) {
         var fm = rbFindMethod(fself, fk)
         if (fm !== undefined) { return rbBindMethod(fself, fk, fm) }
     }
+    var fom = anytype
+    fom = rbObjectExt(n)
+    if (fom !== undefined) { return rbBindMethod(fself, rbObjectExtKey(n), fom) }
     rbNoMethod(fself, n)
     return null
 }

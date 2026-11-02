@@ -250,6 +250,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		if rt.rubyBuiltinExt && rt.rubyRespondClass(self) != "" && rubyTruthy(rt.rubyRespond(self, []interface{}{name})) {
 			return m["js_rxmcall"]([]uint64{w(self), a[1], w(&jsArray{})})
 		}
+		if _, found := rt.rubyObjectExt(name); found {
+			return w(rt.rubyMethod(self, rt.rubyObjectExtKey(name), nil))
+		}
 		rt.rubyNameErr("NameError", "undefined local variable or method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
 		return 0
 	}
@@ -414,6 +417,12 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 					return rt.rubyMethod(o, key, args)
 				}})
 			}
+		}
+		if _, found := rt.rubyObjectExt(name); found {
+			key := rt.rubyObjectExtKey(name)
+			return w(&hostFunc{name: "method:" + name, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return rt.rubyMethod(self, key, args)
+			}})
 		}
 		rt.rubyNoMethod(self, name)
 		return 0
@@ -2567,6 +2576,9 @@ func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} 
 			if _, found := rt.rubyBuiltinExtFind(target, n); found {
 				return true
 			}
+			if rt.rubyObjectResponds(n, all) {
+				return true
+			}
 		}
 		return rubyResponds(cls, n) || (all && rt.rubyRespondsPrivate(n))
 	}
@@ -2594,6 +2606,9 @@ func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} 
 		return all
 	}
 	if rubySingRespond(o, n) || (all && rt.rubyRespondsPrivate(n)) {
+		return true
+	}
+	if rt.rubyObjectResponds(n, all) {
 		return true
 	}
 	if rt.rubyEnumAnswers(o, n) {
@@ -4125,6 +4140,12 @@ func (rt *jsrt) rubyWarnWrite(s string) {
 // reads "unhandled exception" for a RuntimeError and the bare class name
 // otherwise. Twins: excReport in ruby-interpreter.abnf and rbExcReport in
 // lib/ruby-rt.metajs.
+//
+// Limit: MRI follows the first line with "\tfrom FILE:N:in `meth'" for each outer
+// frame, and no engine writes those lines. A compiled frame keeps the site it was
+// entered at only in its own registers (curSiteSave in ruby-to-llvm-ir.abnf) and
+// a raise unwinds past them, so the outer frames would need a record on every
+// call.
 func (rt *jsrt) rubyExcReport(exc interface{}) {
 	o, isObj := exc.(*jsObject)
 	if !isObj {
@@ -4298,6 +4319,9 @@ func (rt *jsrt) rubySuperBuiltin(self interface{}, name string, args []interface
 	o, isObj := self.(*jsObject)
 	if !isObj || !rubyUserObj(o) || o.props["__isclass"] == true {
 		rt.rubyNoSuper(self, name)
+	}
+	if om, found := rt.rubyObjectExt(name); found {
+		return rt.call(om, jsUndef, append([]interface{}{o}, args...))
 	}
 	pos, _ := rubyBlockArgs(args)
 	switch name {
@@ -4695,6 +4719,35 @@ func (rt *jsrt) rubyBuiltinExtFind(v interface{}, name string) (interface{}, boo
 		}
 	}
 	return nil, false
+}
+
+// rubyObjectExt is a method a program gave Object, asked for only where a call
+// would otherwise fail. Twin of objectExt in ruby-interpreter.abnf, which states
+// the rule.
+func (rt *jsrt) rubyObjectExt(name string) (interface{}, bool) {
+	if !rt.rubyBuiltinExt {
+		return nil, false
+	}
+	if m, has := rt.rubyBuiltinClass("Object").props[name]; has && isCallable(m) {
+		return m, true
+	}
+	return nil, false
+}
+
+// rubyObjectExtKey is the key a call on the implicit self reaches Object method
+// name by: "$q$" + name for a private or protected one (rubySendKey).
+func (rt *jsrt) rubyObjectExtKey(name string) string {
+	if rubyRestricted(rt.rubyBuiltinClass("Object"), name) {
+		return "$q$" + name
+	}
+	return name
+}
+
+// rubyObjectResponds is respond_to?(n, all) of an Object method: a private or
+// protected one only with all.
+func (rt *jsrt) rubyObjectResponds(n string, all bool) bool {
+	_, found := rt.rubyObjectExt(n)
+	return found && (all || !rubyRestricted(rt.rubyBuiltinClass("Object"), n))
 }
 
 // jsRStr is a MUTABLE Ruby String: what a string literal, a method call, a String

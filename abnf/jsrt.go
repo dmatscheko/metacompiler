@@ -8433,6 +8433,9 @@ func (rt *jsrt) rubyMemberCall(target interface{}, name string, args []interface
 		if rt.rubyEnumAnswers(target, name) {
 			return rt.rubyEnumMixin(target, name, args)
 		}
+		if om, found := rt.rubyObjectExt(name); found {
+			return rt.call(om, jsUndef, append([]interface{}{target}, args...))
+		}
 		// A call nothing answers goes to the class's method_missing, with the name
 		// as a Symbol in front of the arguments. Twin of the method_missing arm of
 		// mcall in ruby-interpreter.abnf.
@@ -11349,7 +11352,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		return rt.rubyMethod(target, mn, args[1:])
 	}
 	if rt.rubyBuiltinExt {
-		if bm, found := rt.rubyBuiltinExtFind(target, name); found {
+		bm, found := rt.rubyBuiltinExtFind(target, name)
+		if cls := rt.rubyRespondClass(target); !found && cls != "" && !rubyResponds(cls, name) {
+			bm, found = rt.rubyObjectExt(name)
+		}
+		if found {
 			return rt.call(bm, jsUndef, append([]interface{}{target}, args...))
 		}
 	}

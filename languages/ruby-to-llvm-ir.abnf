@@ -5924,6 +5924,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if ((name == "to_enum" || name == "enum_for") && isSelfCall(name)) {
             return callExt(b, "js_rselfenum", [curScopeV, selfV, argsV])
         }
+        // A builtin value answers respond_to? only through js_rrespond, as an
+        // explicit receiver's does.
+        if (name == "respond_to?" && isSelfCall(name)) { return callExt(b, "js_rrespond", [selfV, argsV]) }
+        // At the top level, main's private define_method defines a public method of
+        // Object. Twin of moduleDirective in ruby-interpreter.abnf.
+        if (name == "define_method" && !curHasSelf && isSelfCall(name)) {
+            callExt(b, "js_rbreopen", [])
+            return callExt(b, "js_rxmcall", [emitOwnConst(b, "Object"), emitStr(b, name), argsV])
+        }
         if (name == "new" && curSelfIsCls && !isSRestricted(curClsName, "new")) { return emitClassNew(b, selfV, argsV) }
         return callExt(b, "js_rxmcall", [selfV, emitMKey(b, selfV, name, true), argsV])
     }
@@ -9462,7 +9471,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return false
     }
     function reopenableBuiltin(n) {
-        return nameIn(rubyBuiltinClasses, n) && n != "Object" && n != "BasicObject" && n != "Class" &&
+        return nameIn(rubyBuiltinClasses, n) && n != "BasicObject" && n != "Class" &&
             n != "Module" && n != "Kernel" && n != "Comparable" && n != "Enumerable" && n != "Math"
     }
     function buildMain(items) {

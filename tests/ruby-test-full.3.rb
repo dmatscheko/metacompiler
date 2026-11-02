@@ -1,4 +1,4 @@
-# Full-syntax test: Ruby - part 3, SECTIONs 97 to 125. tests/ruby-test-full.rb
+# Full-syntax test: Ruby - part 3, SECTIONs 97 to 126. tests/ruby-test-full.rb
 # leaves the -frozen interpreter leg too little of the IR interpreter's step
 # brake (-max-steps, 100M per call) for them; see that file for the
 # conventions.
@@ -1087,6 +1087,42 @@ def s125
   check("ct125d", [1, 2, 3].take(v[6]) == [1] && (1..).first(v[6]) == [1] && [1, 2, 3].drop(v[6]) == [2, 3])
   check("bt125e", v[3].times.size == 1180591620717411303424 && (-v[3]).times.size == 0 && v[3].times.first(2) == [0, 1])
 end
+# ===== SECTION 126: methods a program gives Object =====
+# `class Object; def m' defines a public method every receiver answers - main, a
+# builtin value, a user instance and a class - after its own class's methods and
+# before method_missing; a private one is reached only on the implicit self. A
+# top-level define_method defines one too and answers its name. /usr/bin/ruby
+# 2.6 settles each.
+class Object
+  def s126tw(x) x * 2; end
+  def s126who; self.class.name; end
+  def s126zz; 1; end
+  def s126up?; respond_to?(:upcase); end
+  private
+  def s126pv; :pv; end
+end
+class S126F
+  def s126zz; super + 1; end
+  def go; [s126tw(4), s126who, s126pv]; end
+  def method_missing(n, *a) "mm:#{n}"; end
+end
+S126DM = define_method(:s126dm) { |a| a * 3 }
+def s126
+  v = [3, "ab", [1], 1.5]
+  check("ob126a", s126tw(v[0]) == 6 && v[0].s126tw(1) == 2 && v[1].s126tw(2) == 4 && v[2].s126who == "Array" &&
+    v[3].s126who == "Float" && S126F.s126who == "Class" && Object.new.s126zz == 1)
+  check("ob126b", S126F.new.go == [8, "S126F", :pv] && S126F.new.s126zz == 2 && S126F.new.s126nope == "mm:s126nope")
+  check("ob126c", v[0].respond_to?(:s126tw) && S126F.new.respond_to?(:s126who) && !v[0].respond_to?(:s126pv) &&
+    v[0].respond_to?(:s126pv, true) && v[1].s126up? && !v[0].s126up?)
+  e = nil
+  begin
+    v[0].s126pv
+  rescue NoMethodError => x
+    e = x.message.lines.first.chomp
+  end
+  check("ob126d", e == "private method `s126pv' called for 3:Integer")
+  check("ob126e", S126DM == :s126dm && s126dm(2) == 6 && v[0].s126dm(5) == 15)
+end
 
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
@@ -1117,5 +1153,6 @@ s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
 s125() # SECTION-CALL 125
+s126() # SECTION-CALL 126
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
