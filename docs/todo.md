@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1171 kotlin: range type constructors (IntRange, LongRange, CharRange) · P3 · KT · OPEN [V]
+### T-1171 kotlin: range type constructors (IntRange, LongRange, CharRange) · P3 · KT · IN PROGRESS (KT worker, round 57) [V]
 Found while closing T-1169; oracle kotlinc 2.2.21. All engines.
 - `IntRange(1, 3)` as a constructor call fails: interpreter "call of a non function: IntRange"; run/native "call of a non function value: [object Object]". kotlinc prints `1..3`, and `kotlin.ranges.IntRange(1, 3).toList()` gives `[1, 2, 3]`. The type name is bound only as a value carrying the companion constants (`IntRange.EMPTY`), not as a callable. Check `LongRange(1L, 3L)`, `CharRange('a', 'c')`, `IntProgression.fromClosedRange(1, 9, 2)`, `.first/.last/.step`, `is IntRange`, and that `IntRange.EMPTY` still works.
 
