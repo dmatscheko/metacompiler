@@ -127,16 +127,16 @@ trap 'guard_reap; rm -rf "$OUT"' EXIT
 #            `full`, `full.2` and `full.3`, and a MODULE, tests/js-test-full.4.mjs,
 #            whose kind `full.4.mjs` carries its own extension. The
 #            THIRD FIELD IS COMMA-SEPARATED, because ROWS itself is split on whitespace.
-#   python   have several ratchet files (split so each leg stays well
-#   go, bash under the IR interpreter's step brake): tests/<lang>-test-full.<ext>,
-#            tests/<lang>-test-full.2.<ext> and tests/<lang>-test-full.3.<ext>, the
+#   python,  have several ratchet files (split so each leg stays well
+#   go, bash, under the IR interpreter's step brake): tests/<lang>-test-full.<ext>,
+#   ruby     tests/<lang>-test-full.2.<ext> and tests/<lang>-test-full.3.<ext>, the
 #            kinds `full`, `full.2` and `full.3`; go, bash and python also have
 #            full.4, bash and python full.5, python full.6 (CRLF line endings), full.7
 #            and full.8.
-#   lua, ruby, java, php  have tests/<lang>-test-full.2.<ext> beside the ratchet, for the same reason.
+#   lua, java, php  have tests/<lang>-test-full.2.<ext> beside the ratchet, for the same reason.
 ROWS="bash:sh:full,features,full.2,full.3,full.4,full.5 batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2,full.3,full.4 java:java:full,features,full.2 kotlin:kt
       js:js:full,features,full.2,full.3,full.4.mjs
-      lua:lua:full,features,full.2 metajs:js php:php:full,features,full.2 python:py:full,features,full.2,full.3,full.4,full.5,full.6,full.7,full.8 ruby:rb:full,features,full.2 swift:swift typescript:ts
+      lua:lua:full,features,full.2 metajs:js php:php:full,features,full.2 python:py:full,features,full.2,full.3,full.4,full.5,full.6,full.7,full.8 ruby:rb:full,features,full.2,full.3 swift:swift typescript:ts
       lisp:txt:features tinyc:txt:features"
 
 # <lang>:<label>:<source file>:<fixture path | exit-only>   - see the comment above

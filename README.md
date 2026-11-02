@@ -360,7 +360,7 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | JavaScript   | js-interpreter.abnf                                          | js-to-llvm-ir.abnf           | js-test-1.js, js-test-classes.js, js-test-features.js, js-test-full.js (.2.js, .3.js, .4.mjs) |
 | TypeScript   | typescript-interpreter.abnf                                  | typescript-to-llvm-ir.abnf   | typescript-test-1.ts, typescript-test-features.ts, typescript-test-full.ts |
 | Lua          | lua-interpreter.abnf                                         | lua-to-llvm-ir.abnf          | lua-test-1.lua, lua-test-features.lua, lua-test-full.lua |
-| Ruby         | ruby-interpreter.abnf                                        | ruby-to-llvm-ir.abnf         | ruby-test-1.rb, ruby-test-features.rb, ruby-test-full.rb |
+| Ruby         | ruby-interpreter.abnf                                        | ruby-to-llvm-ir.abnf         | ruby-test-1.rb, ruby-test-features.rb, ruby-test-full.rb (.2.rb, .3.rb) |
 | PHP          | php-interpreter.abnf                                         | php-to-llvm-ir.abnf          | php-test-1.php, php-test-features.php, php-test-full.php |
 | C#           | csharp-interpreter.abnf                                      | csharp-to-llvm-ir.abnf       | csharp-test-1.cs, csharp-test-features.cs, csharp-test-full.cs |
 | Dart         | dart-interpreter.abnf                                        | dart-to-llvm-ir.abnf         | dart-test-1.dart, dart-test-features.dart, dart-test-full.dart |
