@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer endless ranges · P3 · RB · OPEN [V]
+### T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer endless ranges · P3 · RB · IN PROGRESS (RB worker, round 61) [V]
 
 Found while working T-1137. The oracle is `/usr/bin/ruby` 2.6 with LC_ALL=en_US.UTF-8.
 
