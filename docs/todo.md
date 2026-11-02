@@ -107,7 +107,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.util classes; RandomAccess · P3 · KT · OPEN [V]
+### T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.util classes; RandomAccess · P3 · KT · IN PROGRESS (KT worker, round 35) [V]
 
 Oracle: kotlinc 2.2.21.
 - After a structural change to the parent, `s[0]` and `for (x in s)` on a stale subList must throw ConcurrentModificationException. Ours returns the old element / iterates the old window. Adding the check to layer 2's `js_ktindex` would put an `arrProps` host call on the hottest path, so first add a cheap "has props" test to the index-read fast path, then measure with tests/bench.sh kotlin --paired. All three engines must agree.
