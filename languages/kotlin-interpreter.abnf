@@ -3515,44 +3515,20 @@ NotMemberKw = :script(~~ "pure";
     }
     function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__range === true }
     // ----- kotlin.random -----
-    // THERE IS NO RANDOM SOURCE IN THIS PROJECT and there cannot be one the three
-    // engines agree on byte-for-byte - the same argument Kernel#rand is settled by in
-    // ruby-interpreter.abnf. So `random()` draws from a DETERMINISTIC generator with a
-    // fixed default seed: a program sees a varying sequence (two draws from 1..1000000
-    // differ, which is what distinguishes this from ruby's "always the front element"),
-    // every run of every engine sees the SAME sequence, and the matrix's byte-identity
-    // requirement is met by construction. The particular values are ours, not the
-    // JVM's - Kotlin's Random(seed) is XorWowRandom and reproducing its stream is not
-    // something a program can check without a JVM. Assert membership and bounds.
-    //
-    // xorshift32, in 32-bit arithmetic only: `|0` after every shift because the tag
-    // engine's integers do not wrap on their own.
+    // Random(seed) is kotlin's XorWowRandom (lib/kotlin-math.js's kxw*), its stream
+    // value for value. THERE IS NO RANDOM SOURCE IN THIS PROJECT, and there cannot be
+    // one the three engines agree on byte-for-byte - the same argument Kernel#rand is
+    // settled by in ruby-interpreter.abnf - so Random.Default, the generator behind
+    // `random()` and `shuffled()`, is the same generator with a fixed seed: a program
+    // sees a varying sequence and every run of every engine sees the SAME one. The
+    // JVM's Random.Default is unseeded; assert membership and bounds of its draws.
     function kRndBox(seed) {
-        var x = (kNum(seed) | 0) ^ 1640531527
-        x = x | 0
-        if (x == 0) { x = 1 }
-        var b = {__ktrnd: true, s: x}
-        kRndNext(b)
-        kRndNext(b)
-        return b
+        var p = szPair(seed)
+        return kxwNew(p.h, p.l)
     }
     function kIsRnd(v) { return v !== null && v !== undefined && typeof v == "object" && v.__ktrnd === true }
-    function kRndNext(box) {
-        var x = box.s | 0
-        x = (x ^ ((x << 13) | 0)) | 0
-        x = (x ^ (x >>> 17)) | 0
-        x = (x ^ ((x << 5) | 0)) | 0
-        if (x == 0) { x = 1 }
-        box.s = x
-        return x
-    }
-    // A non-negative draw below n. The 30-bit mask is what keeps this off `>>> 0`,
-    // whose answer for a negative operand is the one shift the three engines are
-    // least likely to spell the same way.
-    function kRndBelow(box, n) {
-        if (n <= 1) { return 0 }
-        return (kRndNext(box) & 1073741823) % n
-    }
+    // nextInt(n): a draw in 0 until n.
+    function kRndBelow(box, n) { return kxwInt(box, 0, n) }
     // The default generator, kotlin.random.Random.Default. One per program run.
     var kRndDefault = kRndBox(20260808)
     function kRndOf(args) {
@@ -3562,23 +3538,21 @@ NotMemberKw = :script(~~ "pure";
     // The kotlin.random.Random member surface. The twins are ktRndMethod in
     // abnf/jsrtkotlin.go and k4RndMethod in languages/lib/kotlin-rt.metajs.
     function kRndMethod(box, name, args) {
-        if (name == "nextInt" || name == "nextLong") {
-            if (args.length == 0) { return {v: kRndNext(box)} }
-            var rlo = 0
-            var rhi = kNum(args[0])
-            if (args.length > 1) { rlo = rhi; rhi = kNum(args[1]) }
-            if (rhi <= rlo) { kThrowExc("IllegalArgumentException", "Random range is empty: [" + rlo + ", " + rhi + ").") }
-            return {v: rlo + kRndBelow(box, rhi - rlo)}
-        }
-        if (name == "nextBoolean") { return {v: (kRndNext(box) & 1) == 1} }
-        if (name == "nextDouble") {
-            var rd = kRndBelow(box, 1073741824) / 1073741824
-            if (args.length == 1) { return {v: kFlo(rd * kNumD(args[0]))} }
-            if (args.length > 1) { return {v: kFlo(kNumD(args[0]) + rd * (kNumD(args[1]) - kNumD(args[0])))} }
-            return {v: kFlo(rd)}
-        }
         if (name == "toString") { return {v: "Random"} }
-        return null
+        var ns = []
+        for (var i = 0; i < args.length; i++) { ns.push(name == "nextDouble" ? kNumD(args[i]) : kNum(args[i])) }
+        return kRndAnswer(kxwCall(box, name, ns))
+    }
+    // A generator's {t, v} answer (kxwCall, jrndCall), boxed; null for a member it
+    // does not answer.
+    function kRndAnswer(r) {
+        if (r == null) { return null }
+        if (r.t == "err") { kThrowExc("IllegalArgumentException", r.v) }
+        if (r.t == "unsupported") { fail("Random." + r.v + " over a range of 2^31 or more is not supported") }
+        if (r.t == "long") { return {v: szMake(i64Make(r.v[0], r.v[1]), 64, false)} }
+        if (r.t == "double") { return {v: kFlo(r.v)} }
+        if (r.t == "float") { return {v: kFlo32(r.v)} }
+        return {v: r.v}
     }
     // java.util.Random(seed), the JVM's own generator (lib/kotlin-math.js's jrnd*):
     // its stream is java's, value for value. With no seed it takes a fixed one, as
@@ -3592,13 +3566,7 @@ NotMemberKw = :script(~~ "pure";
     function kJrndMethod(box, name, args) {
         var ns = []
         for (var i = 0; i < args.length; i++) { ns.push(kNum(args[i])) }
-        var r = jrndCall(box, name, ns)
-        if (r == null) { return null }
-        if (r.t == "err") { kThrowExc("IllegalArgumentException", r.v) }
-        if (r.t == "long") { return {v: szMake(i64Make(r.v[0], r.v[1]), 64, false)} }
-        if (r.t == "double") { return {v: kFlo(r.v)} }
-        if (r.t == "float") { return {v: kFlo32(r.v)} }
-        return {v: r.v}
+        return kRndAnswer(jrndCall(box, name, ns))
     }
     // The number of elements in a progression, arithmetically - a `random()` on
     // `1..1000000` must not materialize a million cells to pick one.
@@ -6946,10 +6914,9 @@ NotMemberKw = :script(~~ "pure";
     // The JVM class of a List: kotlin-stdlib's listOf answers EmptyList, a
     // Collections.singletonList or an Arrays.asList by its size; a deque, a LinkedList
     // or an Array's sorted copy its own class (the negative kinds); every other List
-    // here is a java.util.ArrayList. A values view is a LinkedHashMap's (the view
-    // keeps no record of its map's class); an Array or a Sequence keeps its simple
-    // name. Twin of ktJvmListClass in abnf/jsrtkotlin.go and
-    // languages/lib/kotlin-rt.metajs.
+    // here is a java.util.ArrayList. A values view is a LinkedHashMap's; an Array or
+    // a Sequence keeps its simple name. Twin of ktJvmListClass in abnf/jsrtkotlin.go
+    // and languages/lib/kotlin-rt.metajs.
     function kJvmListClass(kind, n) {
         if (kind == 4) {
             if (n == 0) { return "kotlin.collections.EmptyList" }
@@ -6958,6 +6925,22 @@ NotMemberKw = :script(~~ "pure";
         if (kind < 0) { return kListKindClasses[0 - kind] }
         if (kind == 3) { return "java.util.LinkedHashMap$LinkedValues" }
         return kind == 0 ? "java.util.ArrayList" : "ArrayList"
+    }
+    // The JVM class of a host array: the class a subList / asReversed copy was
+    // tagged with (kArrClassed), a values view's by its map's class, else its kind's.
+    // Twin of ktArrJvmClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kArrJvmClass(v) {
+        var p = arrProps(v)
+        if (p !== undefined && p.__jc !== undefined) { return p.__jc }
+        var ak = arrKind(v)
+        if (ak == 3 && kIsMap(kViewOwner(v))) { return ktValuesClass(kCollJvmClass(kViewOwner(v))) }
+        return kJvmListClass(ak, v.length)
+    }
+    // A fresh list answered as a JVM class of its own (a subList, an asReversed);
+    // jc "" leaves it an ArrayList.
+    function kArrClassed(a, jc) {
+        if (jc != "") { arrPropsSet(a, {__jc: jc}) }
+        return a
     }
     // The classes of the negative kinds: -1 java.util.ArrayDeque, -2
     // kotlin.collections.ArrayDeque, -3 java.util.LinkedList, -4 an Arrays.asList at
@@ -6989,7 +6972,7 @@ NotMemberKw = :script(~~ "pure";
         if (Array.isArray(v)) {
             var ak = arrKind(v)
             if (ak >= 5) { return ktaClasses[ak - 5] }
-            if (ak != 1) { return kJvmListClass(ak, v.length) }
+            if (ak != 1) { return kArrJvmClass(v) }
             var ecs = []
             for (var i = 0; i < v.length; i++) { if (v[i] !== null && v[i] !== undefined) { ecs.push(jxkClass(v[i])) } }
             return ktaRefClass(ecs)
@@ -7232,10 +7215,14 @@ NotMemberKw = :script(~~ "pure";
         if (name == "isEmpty") { return {v: es.length == 0} }
         if (name == "isNotEmpty") { return {v: es.length > 0} }
         // iterator(): the Iterator a for loop uses - the cursor a sequence hands out,
-        // over the live list (arr). Twin of ktSeqMethodK in abnf/jsrtkotlin.go.
+        // over the live list (arr), with the JVM class of the receiver's iterator (a
+        // map's elements come linked to it; kSetMethod names a set's). Twin of
+        // ktSeqMethodK in abnf/jsrtkotlin.go.
         if (name == "iterator" && args.length == 0) {
             var lc = kCursor({f: null})
             lc.arr = es
+            var itjc = ktIterClass(kCollJvmClass(kIsMap(kViewOwner(es)) && arrKind(es) != 3 ? kViewOwner(es) : es))
+            if (itjc != "") { lc.__jc = itjc }
             return {v: lc}
         }
         // The names the shared list branch already answers for an ARRAY are repeated
@@ -7502,6 +7489,12 @@ NotMemberKw = :script(~~ "pure";
             }
             return {v: es[kRndBelow(kRndOf(args), es.length)]}
         }
+        // shuffled(random) is toMutableList().apply { shuffle(random) }.
+        if (name == "shuffled") {
+            var shc = es.slice(0)
+            kxwShuffle(kRndOf(args), shc)
+            return {v: shc}
+        }
         // distinct answers a LIST and toSet/toMutableSet/toHashSet a SET - the
         // deduplication is the same, the SHAPE is not (kotlin.collections declares
         // distinct(): List and toSet(): Set).
@@ -7519,7 +7512,7 @@ NotMemberKw = :script(~~ "pure";
         if (name == "reversed" || name == "asReversed") {
             out = []
             for (i = es.length - 1; i >= 0; i--) { out.push(es[i]) }
-            return {v: out}
+            return {v: name == "asReversed" ? kArrClassed(out, ktReversedClass(kArrJvmClass(es))) : out}
         }
         if (name == "sorted") { return {v: kSortBy(es, null, false)} }
         if (name == "sortedDescending") { return {v: kSortBy(es, null, true)} }
@@ -7900,9 +7893,9 @@ NotMemberKw = :script(~~ "pure";
                 if (shi > es.length) { kThrowExc("IndexOutOfBoundsException", "toIndex = " + shi) }
                 if (slo > shi) { kThrowExc("IllegalArgumentException", "fromIndex(" + slo + ") > toIndex(" + shi + ")") }
                 for (i = slo; i < shi; i++) { out.push(es[i]) }
-            } else {
-                for (i = 0; i < idxs.length; i++) { out.push(es[kNum(idxs[i])]) }
+                return {v: kArrClassed(out, ktSubListClass(kArrJvmClass(es)))}
             }
+            for (i = 0; i < idxs.length; i++) { out.push(es[kNum(idxs[i])]) }
             return {v: out}
         }
         if (name == "zipWithNext") {
@@ -8032,6 +8025,11 @@ NotMemberKw = :script(~~ "pure";
             if (name != "reverse" && es.length > 1) { arrModBump(es) }
             return {v: undefined}
         }
+        // shuffle only sets, so it is no structural change.
+        if (name == "shuffle") {
+            kxwShuffle(kRndOf(args), es)
+            return {v: undefined}
+        }
         if (name == "clear") {
             kViewWrite(es, es.slice())
             while (es.length > 0) { es.pop() }
@@ -8067,6 +8065,9 @@ NotMemberKw = :script(~~ "pure";
     function kRoGuard(o, name, args) {
         var isArr = Array.isArray(o)
         var ro = isArr ? ktRoList(arrKind(o), o.length) : ktRoTagged(o.__jc, o.__ro === true, kIsMap(o))
+        var ow = anytype
+        ow = kViewOwner(o)
+        if (ro == "" && ow !== o && kIsMap(ow)) { ro = ktRoView(ktRoTagged(ow.__jc, ow.__ro === true, true), isArr) }
         if (ro == "") { return null }
         var n = isArr ? o.length : o.keys.length
         var pred = typeof args[0] == "function"
@@ -8122,6 +8123,31 @@ NotMemberKw = :script(~~ "pure";
             old = i >= 0 ? m.vals[i] : null
             kMapPut(m, f, args[1])
             return {v: old}
+        }
+        // java.util.Map's default methods: putIfAbsent and computeIfAbsent treat a key
+        // holding null as absent, and merge removes the key when the function answers
+        // null. Twin of the same cases of ktMapMethod in abnf/jsrtkotlin.go and
+        // languages/lib/kotlin-rt.metajs.
+        if (name == "putIfAbsent" || name == "computeIfAbsent" || name == "merge") {
+            i = kMapFind(m, f)
+            var cur = anytype
+            cur = i >= 0 ? m.vals[i] : null
+            if (cur !== null && name != "merge") { return {v: cur} }
+            var nv = anytype
+            if (name == "putIfAbsent") { nv = args[1] } else if (name == "computeIfAbsent") { nv = args[1](f) } else { nv = cur === null ? args[1] : args[2](cur, args[1]) }
+            if (nv !== null) {
+                kMapPut(m, f, nv)
+            } else if (name == "merge" && kMapFind(m, f) >= 0) {
+                kMapDropAt(m, kMapFind(m, f))
+            }
+            return {v: name == "putIfAbsent" ? cur : nv}
+        }
+        // remove(key, value) removes the entry only when it holds that value.
+        if (name == "remove" && args.length > 1) {
+            i = kMapFind(m, f)
+            if (i < 0 || !kEqVals(m.vals[i], args[1])) { return {v: false} }
+            kMapDropAt(m, i)
+            return {v: true}
         }
         if (name == "remove") {
             i = kMapFind(m, f)
@@ -8194,7 +8220,7 @@ NotMemberKw = :script(~~ "pure";
             } else if (Array.isArray(add)) {
                 for (i = 0; i < add.length; i++) { if (kIsPair(add[i])) { kMapPut(pm, add[i].first, add[i].second) } }
             } else if (kIsPair(add)) { kMapPut(pm, add.first, add.second) }
-            return {v: pm}
+            return {v: name == "plus" ? pm : undefined}
         }
         if (name == "minus") {
             var drop = []
@@ -8291,6 +8317,10 @@ NotMemberKw = :script(~~ "pure";
         sown = s.__wsrc !== undefined ? s.__wsrc : s
         if (kViewOwner(s.keys) !== sown) { kViewOf(s.keys, sown) }
         var sq = kSeqMethodK(s.keys, name, args, "Collection")
+        if (name == "iterator" && sq != null) {
+            var sij = ktIterClass(kCollJvmClass(s))
+            if (sij != "") { sq.v.__jc = sij }
+        }
         if (sq != null && Array.isArray(sq.v) && sq.v !== s.keys) {
             var sk = kResultKind(3, name)
             if (sk != 0) { arrKindSet(sq.v, sk) }
@@ -8845,7 +8875,7 @@ NotMemberKw = :script(~~ "pure";
         }
         if (Array.isArray(tgt)) {
             var tak = arrKind(tgt)
-            if (tak == 4 || tak < 0 - 3) {
+            if (tak == 4 || tak == 3 || tak < 0 - 3) {
                 var rol = kRoGuard(tgt, name, args)
                 if (rol != null) { return rol.v }
             }
@@ -12531,12 +12561,13 @@ NotMemberKw = :script(~~ "pure";
     function kCollJvmClass(v) {
         if (v !== null && v !== undefined && typeof v == "object") {
             if (v.__sb === true) { return "java.lang.StringBuilder" }
+            if (v.__ktcur === true && v.__jc !== undefined) { return v.__jc }
             if (v.__krx === true) { return "kotlin.text.Regex" }
         }
         if (isRange(v) || kIsCRange(v)) { return kRangeClass(v) }
         if (Array.isArray(v)) {
             var ak = arrKind(v)
-            return ak <= 0 || ak == 3 || ak == 4 ? kJvmListClass(ak, v.length) : ""
+            return ak <= 0 || ak == 3 || ak == 4 ? kArrJvmClass(v) : ""
         }
         if (kIsSet(v)) { return v.__jc !== undefined ? v.__jc : "java.util.LinkedHashSet" }
         if (kIsMap(v)) { return v.__jc !== undefined ? v.__jc : "java.util.LinkedHashMap" }
@@ -13211,7 +13242,7 @@ NotMemberKw = :script(~~ "pure";
         }
         var k = arrKind(v)
         if (k <= 0 || k == 4) {
-            var lc = kJvmIsA(kJvmListClass(k, v.length), t)
+            var lc = kJvmIsA(kArrJvmClass(v), t)
             if (lc !== undefined) { return lc }
             // A java.util.ArrayDeque (-1) is a Deque and not a List, a LinkedList (-3) both.
             var dq = (k == -1 || k == -3) && (t == "Deque" || t == "Queue")
@@ -14021,7 +14052,7 @@ NotMemberKw = :script(~~ "pure";
         "binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
         "clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
         "commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
-        "component2:LRAD component3:LRAD concatToString:A contains:LRAQGDSMBT " +
+        "component2:LRAD component3:LRAD computeIfAbsent:M concatToString:A contains:LRAQGDSMBT " +
         "containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
         "contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
         "copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +

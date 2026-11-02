@@ -2,6 +2,7 @@ package abnf
 
 import (
 	"math"
+	"math/bits"
 	"time"
 )
 
@@ -419,6 +420,101 @@ func jrndRange(o *jsObject, origin, bound int32) int32 {
 		r = jrndNext(o, 32)
 	}
 	return r
+}
+
+// kotlin.random.Random(seed): kotlin's XorWowRandom, its stream value for value. The
+// six Int words live on the box; seed1 is the seed's low word and seed2 its high
+// one, and the constructor discards 64 draws. Twin of kxw* in
+// languages/lib/kotlin-math.js.
+var kxwWords = [...]string{"x", "y", "z", "w", "v", "a"}
+
+func kxwMake(seed int64) *jsObject {
+	s1, s2 := int32(seed), int32(seed>>32)
+	o := newJSObject()
+	o.set("__ktrnd", true)
+	for i, w := range []int32{s1, s2, 0, 0, ^s1, s1<<10 ^ int32(uint32(s2)>>4)} {
+		o.set(kxwWords[i], float64(w))
+	}
+	for i := 0; i < 64; i++ {
+		kxwNext(o)
+	}
+	return o
+}
+
+func kxwNext(o *jsObject) int32 {
+	var s [6]int32
+	for i, w := range kxwWords {
+		f, _ := o.props[w].(float64)
+		s[i] = int32(f)
+	}
+	t := s[0]
+	t ^= int32(uint32(t) >> 2)
+	v0 := s[4]
+	t = t ^ t<<1 ^ v0 ^ v0<<4
+	s = [6]int32{s[1], s[2], s[3], v0, t, s[5] + 362437}
+	for i, w := range kxwWords {
+		o.set(w, float64(s[i]))
+	}
+	return t + s[5]
+}
+
+// nextBits(b) for b in 0..31.
+func kxwBits(o *jsObject, b uint) int32 {
+	r := kxwNext(o)
+	if b == 0 {
+		return 0
+	}
+	return int32(uint32(r) >> (32 - b))
+}
+
+// nextInt(from, until), until > from.
+func kxwInt(o *jsObject, from, until int32) int32 {
+	n := until - from
+	if n > 0 || n == math.MinInt32 {
+		if n&-n == n {
+			return from + kxwBits(o, uint(31-bits.LeadingZeros32(uint32(n))))
+		}
+		for {
+			b := int32(uint32(kxwNext(o)) >> 1)
+			v := b % n
+			if b-v+(n-1) >= 0 {
+				return from + v
+			}
+		}
+	}
+	for {
+		if r := kxwNext(o); r >= from && r < until {
+			return r
+		}
+	}
+}
+
+func kxwLong(o *jsObject) int64 {
+	hi := int64(kxwNext(o))
+	return hi<<32 + int64(kxwNext(o))
+}
+
+// nextLong(0, n) for 0 < n < 2^31: a power of two takes the top bits of one Int
+// draw, any other the remainder of nextLong() ushr 1, rejecting the biased draws.
+func kxwLongBelow(o *jsObject, n int64) int64 {
+	if n&-n == n {
+		return int64(kxwBits(o, uint(63-bits.LeadingZeros64(uint64(n)))))
+	}
+	for {
+		b := int64(uint64(kxwLong(o)) >> 1)
+		v := b % n
+		if b-v+(n-1) >= 0 {
+			return v
+		}
+	}
+}
+
+// kxwShuffle is MutableList.shuffle(random), in place.
+func kxwShuffle(o *jsObject, es []interface{}) {
+	for i := len(es) - 1; i > 0; i-- {
+		j := kxwInt(o, 0, int32(i+1))
+		es[i], es[j] = es[j], es[i]
+	}
 }
 
 // ktJrndMethod is the java.util.Random member surface. Twin of kJrndMethod in

@@ -4211,7 +4211,7 @@ func swMergeSort(xs []interface{}, less func(a, b interface{}) bool) []interface
 }
 
 // THERE IS NO RANDOM SOURCE IN THIS PROJECT and there cannot be one the three
-// engines agree on byte-for-byte (kotlin's ktRndMake is settled by the same
+// engines agree on byte-for-byte (kotlin's Random.Default is settled by the same
 // argument, and Math.random is deleted from the goja host for it). shuffled()
 // draws from a DETERMINISTIC xorshift32 with a fixed seed, so every run of every
 // engine sees the same permutation; a test asserts on the SORTED result or the

@@ -7419,6 +7419,73 @@ fun s170() {
 }
 
 
+// ===== SECTION 171: Map default methods, seeded shuffles, view and iterator classes =====
+// java.util.Map's putIfAbsent / computeIfAbsent / merge / remove(key, value), putAll's
+// Unit; kotlin.random.Random(seed) is XorWowRandom, so a seeded draw or shuffle is the
+// JVM's value for value; the JVM classes of asReversed / subList / iterator(); and a
+// sealed builder map's views refuse every write.
+fun s171() {
+    val k = listOf("a", "b", "c", "d", "e", "z")
+    val v = listOf(1, 2, 3, 4, 5, 9)
+    val m = mutableMapOf(k[0] to v[0], k[1] to v[1])
+    check("mm171a", m.putIfAbsent(k[0], v[5]) == 1 && m.putIfAbsent(k[2], v[2]) == null &&
+        m.computeIfAbsent(k[3]) { it.length + 6 } == 7 && m.computeIfAbsent(k[0]) { 100 } == 1 &&
+        m.merge(k[1], v[3]) { x, y -> x + y } == 6 && m.merge(k[4], v[4]) { x, y -> x + y } == 5 &&
+        m.toString() == "{a=1, b=6, c=3, d=7, e=5}")
+    val gone = m.merge(k[4], v[0]) { _, _ -> null }
+    check("mm171b", gone == null && !m.containsKey(k[4]) && m.putAll(mapOf()) == Unit &&
+        m.remove(k[0], v[1]) == false && m.remove(k[0], v[0]) == true && m.remove("q", v[0]) == false &&
+        m.toString() == "{b=6, c=3, d=7}")
+    val sl = mutableListOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    sl.shuffle(kotlin.random.Random(v[3] * 10 + 2))
+    val g = kotlin.random.Random(v[3] * 10 + 2)
+    check("rnd171c", sl == listOf(6, 1, 5, 10, 3, 9, 2, 8, 7, 4) &&
+        listOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10).shuffled(kotlin.random.Random(v[4] + 2)) == listOf(10, 8, 3, 4, 1, 9, 2, 5, 6, 7) &&
+        listOf(g.nextInt(100), g.nextInt(100), g.nextInt(), g.nextInt(5, 9)) == listOf(33, 40, -408207414, 8))
+    val g0 = kotlin.random.Random(v[0] - 1)
+    check("rnd171d", g0.nextInt() == -1934310868 && g0.nextInt(1) == 0 && g0.nextInt(2) == 1 &&
+        g0.nextInt(7) == 3 && g0.nextInt(1 shl 20) == 691119 && g0.nextInt(1000000007) == 400965107 &&
+        g0.nextInt(-5, 5) == -4 && g0.nextInt(Int.MIN_VALUE, Int.MAX_VALUE) == 811657455 &&
+        g0.nextInt(Int.MIN_VALUE, 0) == -1449617834 && g0.nextInt(-1000, Int.MAX_VALUE) == 43427776 &&
+        g0.nextLong() == 1158452016030805704L && g0.nextLong(100L) == 15L && g0.nextLong(-50L, 50L) == -48L &&
+        g0.nextLong(1L, 1025L) == 50L && g0.nextLong(1024L) == 1L && g0.nextDouble() == 0.6120722576430151 &&
+        g0.nextDouble(10.0) == 5.637887783588914 && g0.nextDouble(-1.0, 1.0) == -0.6624705647850315 &&
+        g0.nextFloat() == 0.52138245f && !g0.nextBoolean() && !g0.nextBoolean())
+    val ia = intArrayOf(1, 2, 3, 4, 5, 6)
+    ia.shuffle(kotlin.random.Random(v[2]))
+    val one = mutableListOf(1)
+    val g2 = kotlin.random.Random(v[1])
+    one.shuffle(g2)
+    check("rnd171e", ia.toList() == listOf(2, 3, 5, 4, 6, 1) && g2.nextInt() == -665788237 &&
+        kotlin.random.Random(5000000000L).nextInt() == 551290387 && (1..100).random(kotlin.random.Random(v[5])) == 43)
+    check("jc171f", listOf(1, 2, 3).asReversed().javaClass.name == "kotlin.collections.ReversedListReadOnly" &&
+        mutableListOf(1, 2, 3).asReversed().javaClass.name == "kotlin.collections.ReversedList" &&
+        buildList { add(1); add(2); add(3) }.subList(0, 2).javaClass.name ==
+            "kotlin.collections.builders.ListBuilder\$BuilderSubList" &&
+        mutableListOf(1, 2).subList(0, 1).javaClass.name == "java.util.ArrayList\$SubList" &&
+        listOf(1, 2).subList(0, 1).javaClass.name == "java.util.AbstractList\$RandomAccessSubList")
+    val bm = buildMap { put(1, "x"); put(2, "y") }
+    check("jc171g", buildSet { add(1) }.iterator().javaClass.name == "kotlin.collections.builders.MapBuilder\$KeysItr" &&
+        bm.values.iterator().javaClass.name == "kotlin.collections.builders.MapBuilder\$ValuesItr" &&
+        bm.iterator().javaClass.name == "kotlin.collections.builders.MapBuilder\$EntriesItr" &&
+        bm.values.javaClass.name == "kotlin.collections.builders.MapBuilderValues" &&
+        mutableListOf(1).iterator().javaClass.name == "java.util.ArrayList\$Itr" &&
+        hashSetOf(1).iterator().javaClass.name == "java.util.HashMap\$KeyIterator" &&
+        mutableMapOf(1 to 2).keys.iterator().javaClass.name == "java.util.LinkedHashMap\$LinkedKeyIterator" &&
+        hashMapOf(1 to 2).values.javaClass.name == "java.util.HashMap\$Values" &&
+        listOf<Int>().iterator().javaClass.name == "kotlin.collections.EmptyIterator")
+    check("ro171h", uoe170 { (bm.keys as MutableSet).remove(1) } == "Unull" &&
+        uoe170 { (bm.keys as MutableSet).remove(99) } == "Unull" &&
+        uoe170 { (bm.values as MutableCollection).remove("q") } == "Unull" &&
+        uoe170 { (bm.entries as MutableSet<Map.Entry<Int, String>>).clear() } == "Unull" &&
+        uoe170 { (bm.keys as MutableSet).removeIf { it > 50 } } == "false" &&
+        uoe170 { (bm.values as MutableCollection).removeIf { it == "x" } } == "Unull" &&
+        uoe170 { (mapOf(1 to "a").values as MutableCollection).remove("a") } == "Unull" &&
+        uoe170 { (mapOf(1 to "a").values as MutableCollection).remove("b") } == "false" &&
+        bm == mapOf(1 to "x", 2 to "y"))
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7586,6 +7653,7 @@ fun main() {
     s168() // SECTION-CALL 168
     s169() // SECTION-CALL 169
     s170() // SECTION-CALL 170
+    s171() // SECTION-CALL 171
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

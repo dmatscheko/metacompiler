@@ -2028,7 +2028,7 @@ func init() {
 				}
 			}
 			if lst, isArr := recv.(*jsArray); isArr {
-				if lst.kind == ktArrFixed || lst.kind < ktArrLinked {
+				if lst.kind == ktArrFixed || lst.kind == ktArrVals || lst.kind < ktArrLinked {
 					if v, handled := rt.ktRoGuard(lst, mname, arr.elems); handled {
 						return rt.wrap(v)
 					}
@@ -4193,7 +4193,7 @@ func ktJvmClass(v interface{}) interface{} {
 			return ktaClasses[t.kind-ktArrPrim]
 		}
 		if t.kind != ktArrArray {
-			return ktJvmListClass(t.kind, len(t.elems))
+			return ktArrJvmClass(t)
 		}
 		var ecs []string
 		for _, e := range t.elems {
@@ -5887,12 +5887,23 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "isNotEmpty":
 		return len(es) > 0, true
 	// iterator(): the Iterator a for loop uses - the cursor a sequence hands out
-	// (ktCursorMethod), over the live list (its arr). Twin of kSeqMethod in
-	// kotlin-interpreter.abnf and ktSeqMethod in languages/lib/kotlin-rt.metajs.
+	// (ktCursorMethod), over the live list (its arr), with the JVM class of the
+	// receiver's iterator (a map's elements come linked to it; ktSetMethod names a
+	// set's). Twin of kSeqMethod in kotlin-interpreter.abnf and ktSeqMethod in
+	// languages/lib/kotlin-rt.metajs.
 	case "iterator":
 		if len(args) == 0 {
 			c := ktCursorNew(newJSObject())
 			c.set("arr", o)
+			var recv interface{} = o
+			if ow, isView := ktViewOwner(o); isView && o.kind != ktArrVals {
+				if _, _, isMap := dictParts(ow); isMap {
+					recv = ow
+				}
+			}
+			if jc := ktIterClass(ktCollJvmClass(recv)); jc != "" {
+				c.set("__jc", jc)
+			}
 			return c, true
 		}
 	// The names the shared js_mcall already answers for an ARRAY are repeated here
@@ -6304,6 +6315,11 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			rt.ktRaise("NoSuchElementException", ktPredWord(kind)+" is empty.")
 		}
 		return es[ktRndBelow(rt.ktRndOf(args), len(es))], true
+	// shuffled(random) is toMutableList().apply { shuffle(random) }.
+	case "shuffled":
+		out := append([]interface{}{}, es...)
+		kxwShuffle(rt.ktRndOf(args), out)
+		return arr(out), true
 	case "distinct":
 		// distinct answers a LIST and toSet/toMutableSet/toHashSet a SET - the
 		// deduplication is the same, the SHAPE is not (kotlin.collections declares
@@ -6330,6 +6346,9 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		out := make([]interface{}, len(es))
 		for i, e := range es {
 			out[len(es)-1-i] = e
+		}
+		if name == "asReversed" {
+			return ktArrClassed(arr(out), ktReversedClass(ktArrJvmClass(o))), true
 		}
 		return arr(out), true
 	case "sorted", "sortedDescending":
@@ -6892,7 +6911,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		case lo > hi:
 			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("fromIndex(%d) > toIndex(%d)", lo, hi))
 		}
-		return arr(append([]interface{}{}, es[lo:hi]...)), true
+		return ktArrClassed(arr(append([]interface{}{}, es[lo:hi]...)), ktSubListClass(ktArrJvmClass(o))), true
 	case "zipWithNext":
 		out := []interface{}{}
 		for i := 1; rt.ktIterMore(ck, o, i); i++ {
@@ -7002,6 +7021,11 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if name != "reverse" && len(o.elems) > 1 {
 			o.mod++
 		}
+		return jsUndef, true
+	// shuffle only sets, so it is no structural change.
+	case "shuffle":
+		kxwShuffle(rt.ktRndOf(args), o.elems)
+		o.dropIdx()
 		return jsUndef, true
 	case "clear":
 		rt.ktViewWrite(o, o.elems)
@@ -7382,6 +7406,11 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 		ktViewOf(keys, own)
 	}
 	v, handled := rt.ktSeqMethodK(keys, name, args, ktKindColl)
+	if c, isCur := v.(*jsObject); isCur && name == "iterator" {
+		if jc := ktIterClass(ktCollJvmClass(s)); jc != "" {
+			c.set("__jc", jc)
+		}
+	}
 	// A set is a Collection: the same answer kinds as a values view's.
 	if out, isOut := v.(*jsArray); isOut && out != keys {
 		if k := ktResultKind(ktArrVals, name); k != 0 {
@@ -7687,8 +7716,47 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 		}
 		rt.ktMapPut(m, f, argAt(args, 1))
 		return old, true
+	// java.util.Map's default methods: putIfAbsent and computeIfAbsent treat a key
+	// holding null as absent, and merge removes the key when the function answers
+	// null. Twin of kMapMethod in kotlin-interpreter.abnf.
+	case "putIfAbsent", "computeIfAbsent", "merge":
+		var cur interface{} = jsNull
+		if i := rt.ktMapFind(keys, f); i >= 0 {
+			cur = vals.elems[i]
+		}
+		if cur != jsNull && name != "merge" {
+			return cur, true
+		}
+		var nv interface{}
+		switch {
+		case name == "putIfAbsent":
+			nv = argAt(args, 1)
+		case name == "computeIfAbsent":
+			nv = rt.ktCall(argAt(args, 1), f)
+		case cur == jsNull:
+			nv = argAt(args, 1)
+		default:
+			nv = rt.ktCall(argAt(args, 2), cur, argAt(args, 1))
+		}
+		if nv != jsNull {
+			rt.ktMapPut(m, f, nv)
+		} else if j := rt.ktMapFind(keys, f); name == "merge" && j >= 0 {
+			rt.ktMapDropAt(m, j)
+		}
+		if name == "putIfAbsent" {
+			return cur, true
+		}
+		return nv, true
 	case "remove":
 		i := rt.ktMapFind(keys, f)
+		if len(args) > 1 {
+			// remove(key, value) removes the entry only when it holds that value.
+			if i < 0 || !rt.ktEqVals(vals.elems[i], args[1]) {
+				return false, true
+			}
+			rt.ktMapDropAt(m, i)
+			return true, true
+		}
 		if i < 0 {
 			return jsNull, true
 		}
@@ -7797,6 +7865,9 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			} else if p, isPair := ktIsPair(add); isPair {
 				rt.ktMapPut(out, p.props["first"], p.props["second"])
 			}
+		}
+		if name == "putAll" {
+			return jsUndef, true
 		}
 		return out, true
 	case "minus":
@@ -8106,33 +8177,14 @@ func ktRangeAt(rg ktRange, i int) interface{} {
 // ----------------------------------------------------------------------------
 // kotlin.random
 //
-// THERE IS NO RANDOM SOURCE IN THIS PROJECT and there cannot be one the three
-// engines agree on byte-for-byte - the same argument Kernel#rand is settled by in
-// ruby-interpreter.abnf. So `random()` draws from a DETERMINISTIC generator with a
-// fixed default seed: a program sees a varying sequence (two draws from 1..1000000
-// differ, which is what distinguishes this from ruby's "always the front
-// element"), every run of every engine sees the SAME sequence, and the matrix's
-// byte-identity requirement holds by construction. The particular values are ours,
-// not the JVM's - Kotlin's Random(seed) is XorWowRandom - so assert membership and
-// bounds, never the value.
-//
-// xorshift32 in 32-bit arithmetic. The twins are kRndBox in
-// kotlin-interpreter.abnf and k4RndBox in languages/lib/kotlin-rt.metajs; all
-// three must produce the identical stream, which is why the shifts are spelled
-// with an explicit 32-bit reduction rather than the host's own word size.
-func ktRndMake(seed float64) *jsObject {
-	x := int32(jsToInt(seed)) ^ 1640531527
-	if x == 0 {
-		x = 1
-	}
-	o := newJSObject()
-	o.set("__ktrnd", true)
-	o.set("s", float64(x))
-	ktRndNext(o)
-	ktRndNext(o)
-	return o
-}
-
+// Random(seed) is kotlin's XorWowRandom (kxwMake in jsrtktmath.go), its stream value
+// for value. THERE IS NO RANDOM SOURCE IN THIS PROJECT, and there cannot be one the
+// three engines agree on byte-for-byte - the same argument Kernel#rand is settled by
+// in ruby-interpreter.abnf - so Random.Default, the generator behind `random()` and
+// `shuffled()`, is the same generator with a fixed seed: a program sees a varying
+// sequence and every run of every engine sees the SAME one. The JVM's Random.Default
+// is unseeded; assert membership and bounds of its draws. The twins are kRndBox in
+// kotlin-interpreter.abnf and k4RndBox in languages/lib/kotlin-rt.metajs.
 func ktIsRnd(v interface{}) bool {
 	o, isObj := v.(*jsObject)
 	if !isObj {
@@ -8142,27 +8194,9 @@ func ktIsRnd(v interface{}) bool {
 	return ok && b
 }
 
-func ktRndNext(o *jsObject) int32 {
-	f, _ := o.props["s"].(float64)
-	x := int32(f)
-	x = x ^ int32(uint32(x)<<13)
-	x = x ^ int32(uint32(x)>>17)
-	x = x ^ int32(uint32(x)<<5)
-	if x == 0 {
-		x = 1
-	}
-	o.set("s", float64(x))
-	return x
-}
-
-// A non-negative draw below n. The 30-bit mask is what keeps this off an unsigned
-// shift, whose answer for a negative operand is the one spelling the three engines
-// are least likely to agree on.
+// ktRndBelow is nextInt(n): a draw in 0 until n.
 func ktRndBelow(o *jsObject, n int) int {
-	if n <= 1 {
-		return 0
-	}
-	return int(ktRndNext(o)&1073741823) % n
+	return int(kxwInt(o, 0, int32(n)))
 }
 
 func (rt *jsrt) ktRndOf(args []interface{}) *jsObject {
@@ -8177,45 +8211,60 @@ func (rt *jsrt) ktRndOf(args []interface{}) *jsObject {
 // build.
 func (rt *jsrt) ktRndDefault() *jsObject {
 	if rt.ktRndDef == nil {
-		rt.ktRndDef = ktRndMake(20260808)
+		rt.ktRndDef = kxwMake(20260808)
 	}
 	return rt.ktRndDef
 }
 
 // ktRndMethod is the kotlin.random.Random member surface. The twins are the
 // kIsRnd branch of mcall in kotlin-interpreter.abnf and k4RndMethod in
-// languages/lib/kotlin-rt.metajs.
+// languages/lib/kotlin-rt.metajs, over kxwCall in languages/lib/kotlin-math.js.
 func (rt *jsrt) ktRndMethod(o *jsObject, name string, args []interface{}) (interface{}, bool) {
-	switch name {
-	case "nextInt", "nextLong":
-		if len(args) == 0 {
-			return float64(ktRndNext(o)), true
-		}
-		lo, hi := float64(0), rt.toNumber(argAt(args, 0))
-		if len(args) > 1 {
-			lo, hi = hi, rt.toNumber(argAt(args, 1))
-		}
-		if hi <= lo {
-			rt.ktRaise("IllegalArgumentException",
-				"Random range is empty: ["+rt.ktpRender(lo, 1)+", "+rt.ktpRender(hi, 1)+").")
-		}
-		return lo + float64(ktRndBelow(o, int(hi-lo))), true
-	case "nextBoolean":
-		return ktRndNext(o)&1 == 1, true
-	case "nextDouble":
-		d := float64(ktRndBelow(o, 1073741824)) / 1073741824
+	if name == "toString" {
+		return "Random", true
+	}
+	if name == "nextDouble" {
+		d := float64(int64(kxwBits(o, 26))<<27+int64(kxwBits(o, 27))) * 0x1.0p-53
 		if len(args) == 1 {
-			return jvmMkFlo(d * rt.toNumber(argAt(args, 0))), true
+			d *= rt.toNumber(argAt(args, 0))
 		}
 		if len(args) > 1 {
 			a, b := rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1))
-			return jvmMkFlo(a + d*(b-a)), true
+			d = a + d*(b-a)
 		}
 		return jvmMkFlo(d), true
-	case "toString":
-		return "Random", true
 	}
-	return nil, false
+	if len(args) == 0 {
+		switch name {
+		case "nextInt":
+			return float64(kxwNext(o)), true
+		case "nextLong":
+			return jsGInt{v: kxwLong(o), w: 64}, true
+		case "nextFloat":
+			return jsJFlo{f: float64(float32(kxwBits(o, 24)) / (1 << 24)), sty: floJavaF}, true
+		case "nextBoolean":
+			return kxwBits(o, 1) != 0, true
+		}
+		return nil, false
+	}
+	if name != "nextInt" && name != "nextLong" {
+		return nil, false
+	}
+	lo, hi := int64(0), giVal(rt, argAt(args, 0))
+	if len(args) > 1 {
+		lo, hi = hi, giVal(rt, argAt(args, 1))
+	}
+	if hi <= lo {
+		rt.ktRaise("IllegalArgumentException",
+			"Random range is empty: ["+strconv.FormatInt(lo, 10)+", "+strconv.FormatInt(hi, 10)+").")
+	}
+	if name == "nextInt" {
+		return float64(kxwInt(o, int32(lo), int32(hi))), true
+	}
+	if hi-lo >= 1<<31 {
+		rt.fail("Random.%s over a range of 2^31 or more is not supported", name)
+	}
+	return jsGInt{v: lo + kxwLongBelow(o, hi-lo), w: 64}, true
 }
 
 func ktRangeOf(v interface{}) (ktRange, bool) {
@@ -8793,7 +8842,7 @@ func ktCollIsType(v interface{}, t string) (is bool, ok bool) {
 	}
 	switch k := arr.kind; {
 	case k <= 0 || k == ktArrFixed:
-		if is, ok := ktJvmIsA(ktJvmListClass(k, len(arr.elems)), t); ok {
+		if is, ok := ktJvmIsA(ktArrJvmClass(arr), t); ok {
 			return is, true
 		}
 		// A java.util.ArrayDeque is a Deque and not a List, a LinkedList both.
@@ -9327,7 +9376,7 @@ var ktBuiltinMembers = func() map[string]string {
 		"binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
 		"clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
 		"commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
-		"component2:LRAD component3:LRAD concatToString:A contains:LRAQGDSMBT " +
+		"component2:LRAD component3:LRAD computeIfAbsent:M concatToString:A contains:LRAQGDSMBT " +
 		"containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
 		"contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
 		"copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
@@ -10171,7 +10220,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			if isUndefOrNull(seed) {
 				return rt.ktRndDefault()
 			}
-			return ktRndMake(rt.toNumber(seed))
+			return kxwMake(giVal(rt, seed))
 		})
 	// java.util.Random(seed), the JVM's own generator (jrndMake); with no seed it
 	// takes a fixed one, as ktRndDefault does. Reached by its qualified path only
@@ -11037,6 +11086,134 @@ func ktJvmListClass(kind, n int) string {
 	return "ArrayList"
 }
 
+// ktArrJvmClass is the JVM class of a host array: the class a subList / asReversed
+// copy was given (ktArrClassed), a values view's by its map's class, else its
+// kind's. Twin of kArrJvmClass in kotlin-interpreter.abnf and
+// languages/lib/kotlin-rt.metajs.
+func ktArrJvmClass(a *jsArray) string {
+	if p, isObj := a.props.(*jsObject); isObj {
+		if jc, has := p.props["__jc"].(string); has {
+			return jc
+		}
+	}
+	if a.kind == ktArrVals {
+		if ow, isView := ktViewOwner(a); isView {
+			if _, _, isMap := dictParts(ow); isMap {
+				return ktValuesClass(ktCollJvmClass(ow))
+			}
+		}
+	}
+	return ktJvmListClass(a.kind, len(a.elems))
+}
+
+// ktArrClassed answers a fresh list as a JVM class of its own (a subList, an
+// asReversed); jc "" leaves it an ArrayList.
+func ktArrClassed(a *jsArray, jc string) *jsArray {
+	if jc != "" {
+		p := newJSObject()
+		p.set("__jc", jc)
+		a.props = p
+	}
+	return a
+}
+
+// The JVM classes of the objects a collection of JVM class jc hands out, "" where
+// none is known. Twins of ktSubListClass, ktReversedClass, ktValuesClass and
+// ktIterClass in languages/lib/kotlin-math.js, which has the rules.
+const ktJuAbs = "java.util.AbstractList$"
+
+func ktSubListClass(jc string) string {
+	switch jc {
+	case "java.util.ArrayList", "java.util.ArrayList$SubList":
+		return "java.util.ArrayList$SubList"
+	case "kotlin.collections.builders.ListBuilder", "kotlin.collections.builders.ListBuilder$BuilderSubList":
+		return "kotlin.collections.builders.ListBuilder$BuilderSubList"
+	case "kotlin.collections.EmptyList":
+		return jc
+	case "kotlin.collections.ReversedListReadOnly":
+		return "kotlin.collections.AbstractList$SubList"
+	case "java.util.Arrays$ArrayList", "java.util.Collections$SingletonList", ktJuAbs + "RandomAccessSubList":
+		return ktJuAbs + "RandomAccessSubList"
+	case "kotlin.collections.ArrayDeque", "java.util.LinkedList", "kotlin.collections.ReversedList", ktJuAbs + "SubList":
+		return ktJuAbs + "SubList"
+	}
+	return ""
+}
+
+func ktReversedClass(jc string) string {
+	switch jc {
+	case "java.util.ArrayList", "java.util.ArrayList$SubList", "kotlin.collections.ArrayDeque",
+		"java.util.LinkedList", ktJuAbs + "SubList", "kotlin.collections.ReversedList":
+		return "kotlin.collections.ReversedList"
+	}
+	return "kotlin.collections.ReversedListReadOnly"
+}
+
+func ktValuesClass(mjc string) string {
+	switch mjc {
+	case "java.util.LinkedHashMap":
+		return mjc + "$LinkedValues"
+	case "kotlin.collections.builders.MapBuilder":
+		return mjc + "Values"
+	case "java.util.Collections$SingletonMap":
+		return "java.util.Collections$SingletonSet"
+	case "kotlin.collections.EmptyMap":
+		return "kotlin.collections.EmptyList"
+	}
+	return mjc + "$Values"
+}
+
+func ktIterClass(jc string) string {
+	const b = "kotlin.collections.builders."
+	switch {
+	case strings.HasPrefix(jc, "kotlin.collections.Empty"):
+		return "kotlin.collections.EmptyIterator"
+	case strings.HasPrefix(jc, "java.util.Collections$Singleton"):
+		return "java.util.Collections$1"
+	case jc == b+"ListBuilder" || jc == b+"ListBuilder$BuilderSubList":
+		return jc + "$Itr"
+	case jc == b+"SetBuilder" || jc == b+"MapBuilderKeys":
+		return b + "MapBuilder$KeysItr"
+	case jc == b+"MapBuilderValues":
+		return b + "MapBuilder$ValuesItr"
+	case jc == b+"MapBuilder" || jc == b+"MapBuilderEntries":
+		return b + "MapBuilder$EntriesItr"
+	case jc == "kotlin.collections.ReversedList" || jc == "kotlin.collections.ReversedListReadOnly":
+		return jc + "$listIterator$1"
+	case jc == "kotlin.collections.ArrayDeque":
+		return ktJuAbs + "Itr"
+	case jc == "java.util.ArrayList" || jc == "java.util.PriorityQueue":
+		return jc + "$Itr"
+	case jc == "java.util.ArrayList$SubList":
+		return jc + "$1"
+	case jc == ktJuAbs+"SubList" || jc == ktJuAbs+"RandomAccessSubList":
+		return ktJuAbs + "SubList$1"
+	case jc == "java.util.Arrays$ArrayList":
+		return "java.util.Arrays$ArrayItr"
+	case jc == "java.util.ArrayDeque":
+		return jc + "$DeqIterator"
+	case jc == "java.util.LinkedList":
+		return jc + "$ListItr"
+	case !strings.HasPrefix(jc, "java.util."):
+		return ""
+	}
+	m, k := jc, "Entry"
+	if d := strings.IndexByte(jc, '$'); d >= 0 {
+		m = jc[:d]
+		for _, w := range []string{"Key", "Value", "Entry"} {
+			if strings.LastIndex(jc, w) > d {
+				k = w
+			}
+		}
+	} else if strings.HasSuffix(jc, "Set") {
+		m, k = strings.TrimSuffix(jc, "Set")+"Map", "Key"
+	}
+	if m == "java.util.LinkedHashMap" {
+		k = "Linked" + k
+	}
+	return m + "$" + k + "Iterator"
+}
+
 // ktArrTagged marks a fresh array with a kind number.
 func ktArrTagged(a *jsArray, k int) *jsArray {
 	a.kind = k
@@ -11722,12 +11899,17 @@ func ktCollJvmClass(v interface{}) string {
 	if ktIsSb(v) {
 		return "java.lang.StringBuilder"
 	}
+	if c, isObj := v.(*jsObject); isObj && c.props["__ktcur"] == true {
+		if jc, has := c.props["__jc"].(string); has {
+			return jc
+		}
+	}
 	if ktRxIsRegex(v) {
 		return "kotlin.text.Regex"
 	}
 	if a, isArr := v.(*jsArray); isArr {
 		if a.kind <= 0 || a.kind == ktArrVals || a.kind == ktArrFixed {
-			return ktJvmListClass(a.kind, len(a.elems))
+			return ktArrJvmClass(a)
 		}
 		return ""
 	}
@@ -12150,6 +12332,18 @@ func ktRoTagged(jc interface{}, sealed, isMap bool) string {
 	return ""
 }
 
+// ktRoView is the code of a keys / entries view or (isValues) a values view of a map
+// of code mro. Twin of ktRoView in languages/lib/kotlin-math.js.
+func ktRoView(mro string, isValues bool) string {
+	switch {
+	case mro == "":
+		return ""
+	case isValues:
+		return "L" + mro[1:]
+	}
+	return "S" + mro[1:]
+}
+
 const (
 	ktRoWriters  = " set fill replaceAll sort sortDescending sortBy sortByDescending sortWith reverse shuffle "
 	ktRoListAdds = " add addFirst addLast removeAt "
@@ -12256,6 +12450,13 @@ func (rt *jsrt) ktRoGuard(o interface{}, name string, args []interface{}) (inter
 			return nil, false
 		}
 		ro, n = ktRoTagged(mo.props["__jc"], mo.props["__ro"] == true, false), len(sk.elems)
+	}
+	if ow, isView := ktViewOwner(o); ro == "" && isView {
+		if om, isObj := ow.(*jsObject); isObj && om != mo {
+			if _, _, owMap := dictParts(om); owMap {
+				ro = ktRoView(ktRoTagged(om.props["__jc"], om.props["__ro"] == true, true), isArr)
+			}
+		}
 	}
 	if ro == "" {
 		return nil, false

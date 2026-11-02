@@ -307,6 +307,252 @@ function jrndCall(box, name, args) {
     return null
 }
 
+// kotlin.random.Random(seed): kotlin's XorWowRandom (Marsaglia's xorwow), its stream
+// value for value. Every value is an Int held as a number, and every step that can
+// leave the Int range ends in `| 0`; an unsigned shift is kxwUshr, so no bit
+// operator ever sees an operand outside the Int range. The seed's two 32-bit words
+// (each 0..2^32-1) are the constructor's seed1 (low) and seed2 (high), as
+// Random(seed: Long) passes them; Random(seed: Int) sign-extends, which gives the
+// same words. The constructor discards 64 draws. Go twin: kxw* in
+// abnf/jsrtktmath.go.
+function kxwNew(hi32, lo32) {
+    var s1 = lo32 >= 2147483648 ? lo32 - 4294967296 : lo32
+    var s2 = hi32 >= 2147483648 ? hi32 - 4294967296 : hi32
+    var box = {__ktrnd: true, x: s1, y: s2, z: 0, w: 0, v: s1 ^ (0 - 1), a: ((s1 << 10) | 0) ^ kxwUshr(s2, 4)}
+    var i = 0
+    while (i < 64) {
+        kxwNext(box)
+        i = i + 1
+    }
+    return box
+}
+
+// x ushr k for an Int x and k in 1..31.
+function kxwUshr(x, k) {
+    if (x < 0) { return Math.floor((x + 4294967296) / Math.pow(2, k)) }
+    return Math.floor(x / Math.pow(2, k))
+}
+
+function kxwNext(box) {
+    var t = box["x"]
+    t = t ^ kxwUshr(t, 2)
+    box["x"] = box["y"]
+    box["y"] = box["z"]
+    box["z"] = box["w"]
+    var v0 = box["v"]
+    box["w"] = v0
+    t = t ^ ((t << 1) | 0) ^ v0 ^ ((v0 << 4) | 0)
+    box["v"] = t
+    box["a"] = (box["a"] + 362437) | 0
+    return (t + box["a"]) | 0
+}
+
+// nextBits(b): the top b bits of one draw (b in 0..31).
+function kxwBits(box, b) {
+    var r = kxwNext(box)
+    if (b == 0) { return 0 }
+    return kxwUshr(r, 32 - b)
+}
+
+// The exponent of n when n is a power of two in 1..2^31, else -1.
+function kxwLog2(n) {
+    var u = n
+    var b = 0
+    while (u > 1) {
+        u = u / 2
+        b = b + 1
+    }
+    if (u != 1) { return 0 - 1 }
+    return b
+}
+
+// nextInt(from, until), until > from: a power-of-two width takes the top bits,
+// any other rejects the draws whose remainder would be biased (`bits - v + (n - 1)`
+// overflows an Int); a width past 2^31 draws until one lands in range.
+function kxwInt(box, from, until) {
+    var n = until - from
+    if (n > 2147483648) {
+        var r = kxwNext(box)
+        while (r < from || r >= until) { r = kxwNext(box) }
+        return r
+    }
+    if (kxwLog2(n) >= 0) { return from + kxwBits(box, kxwLog2(n)) }
+    var bits = kxwUshr(kxwNext(box), 1)
+    var rnd = bits % n
+    while (bits - rnd + (n - 1) > 2147483647) {
+        bits = kxwUshr(kxwNext(box), 1)
+        rnd = bits % n
+    }
+    return from + rnd
+}
+
+// nextLong() as its two 32-bit words [hi, lo] (each 0..2^32-1): the first draw
+// shifted up 32, plus the second sign-extended.
+function kxwLong(box) {
+    var a = kxwNext(box)
+    var b = kxwNext(box)
+    var h = b < 0 ? a - 1 : a
+    return [h < 0 ? h + 4294967296 : h, b < 0 ? b + 4294967296 : b]
+}
+
+// nextLong(0, n) for n below 2^31: a power of two takes the top bits of one Int
+// draw, any other the remainder of nextLong() ushr 1 by n, rejecting the draw when
+// `bits - v + (n - 1)` overflows a Long. The 63-bit bits [bh, bl] are reduced 16
+// bits at a time so every product stays exact in a double.
+function kxwLongBelow(box, n) {
+    if (kxwLog2(n) >= 0) { return kxwBits(box, kxwLog2(n)) }
+    var v = 0 - 1
+    while (v < 0) {
+        var p = kxwLong(box)
+        var bh = Math.floor(p[0] / 2)
+        var bl = Math.floor(p[1] / 2) + (p[0] % 2) * 2147483648
+        v = bh % n
+        v = (v * 65536 + Math.floor(bl / 65536)) % n
+        v = (v * 65536 + bl % 65536) % n
+        var dl = bl - v
+        var dh = bh
+        if (dl < 0) {
+            dl = dl + 4294967296
+            dh = dh - 1
+        }
+        if (dh + Math.floor((dl + n - 1) / 4294967296) >= 2147483648) { v = 0 - 1 }
+    }
+    return v
+}
+
+// A Long's two's complement words [hi, lo] from a number of magnitude below 2^53.
+function kxwWords(x) {
+    var y = x < 0 ? 0 - x : x
+    var hi = Math.floor(y / 4294967296)
+    var lo = y % 4294967296
+    if (x >= 0) { return [hi, lo] }
+    if (lo == 0) { return [(4294967296 - hi) % 4294967296, 0] }
+    return [4294967295 - hi, 4294967296 - lo]
+}
+
+// MutableList.shuffle(random), in place: from the last index down to 1, each
+// element trades places with the one at nextInt(i + 1).
+function kxwShuffle(box, es) {
+    var i = es.length - 1
+    while (i > 0) {
+        var j = kxwInt(box, 0, i + 1)
+        var t = es[i]
+        es[i] = es[j]
+        es[j] = t
+        i = i - 1
+    }
+}
+
+// One member call, answered as {t, v} as jrndCall answers it, with t "unsupported"
+// for a nextLong range of 2^31 or more.
+function kxwCall(box, name, args) {
+    if (name == "nextInt" && args.length == 0) { return {t: "int", v: kxwNext(box)} }
+    if (name == "nextLong" && args.length == 0) { return {t: "long", v: kxwLong(box)} }
+    if (name == "nextInt" || name == "nextLong") {
+        var from = 0
+        var until = args[0]
+        if (args.length > 1) {
+            from = args[0]
+            until = args[1]
+        }
+        if (until <= from) { return {t: "err", v: "Random range is empty: [" + from + ", " + until + ")."} }
+        if (name == "nextInt") { return {t: "int", v: kxwInt(box, from, until)} }
+        if (until - from >= 2147483648) { return {t: "unsupported", v: name} }
+        return {t: "long", v: kxwWords(from + kxwLongBelow(box, until - from))}
+    }
+    if (name == "nextDouble") {
+        var d = (kxwBits(box, 26) * 134217728 + kxwBits(box, 27)) / 9007199254740992
+        if (args.length == 1) { d = d * args[0] }
+        if (args.length > 1) { d = args[0] + d * (args[1] - args[0]) }
+        return {t: "double", v: d}
+    }
+    if (name == "nextFloat" && args.length == 0) { return {t: "float", v: kxwBits(box, 24) / 16777216} }
+    if (name == "nextBoolean" && args.length == 0) { return {t: "bool", v: kxwBits(box, 1) != 0} }
+    return null
+}
+
+// The JVM classes of the objects a collection of JVM class jc hands out, "" where
+// none is known. Go twin: ktSubListClass, ktReversedClass, ktIterClass and
+// ktValuesClass in abnf/jsrtkotlin.go.
+var ktJuAbs = "java.util.AbstractList$"
+
+// l.subList(..): ArrayList's own SubList, java's AbstractList one (RandomAccess
+// for an array-backed list), a ListBuilder's BuilderSubList, kotlin's AbstractList
+// one for a ReversedListReadOnly; an EmptyList answers itself.
+function ktSubListClass(jc) {
+    if (jc == "java.util.ArrayList" || jc == "java.util.ArrayList$SubList") { return "java.util.ArrayList$SubList" }
+    if (jc == "kotlin.collections.builders.ListBuilder" || jc == "kotlin.collections.builders.ListBuilder$BuilderSubList") {
+        return "kotlin.collections.builders.ListBuilder$BuilderSubList"
+    }
+    if (jc == "kotlin.collections.EmptyList") { return jc }
+    if (jc == "kotlin.collections.ReversedListReadOnly") { return "kotlin.collections.AbstractList$SubList" }
+    if (jc == "java.util.Arrays$ArrayList" || jc == "java.util.Collections$SingletonList" || jc == ktJuAbs + "RandomAccessSubList") {
+        return ktJuAbs + "RandomAccessSubList"
+    }
+    if (jc == "kotlin.collections.ArrayDeque" || jc == "java.util.LinkedList" || jc == "kotlin.collections.ReversedList" || jc == ktJuAbs + "SubList") {
+        return ktJuAbs + "SubList"
+    }
+    return ""
+}
+
+// l.asReversed(): a ReversedList over a MutableList, else a ReversedListReadOnly.
+// kotlin picks the overload by the receiver's static type, which a value does not
+// carry, so the mutable classes stand for a MutableList receiver.
+function ktReversedClass(jc) {
+    if (jc == "java.util.ArrayList" || jc == "java.util.ArrayList$SubList" || jc == "kotlin.collections.ArrayDeque" ||
+        jc == "java.util.LinkedList" || jc == ktJuAbs + "SubList" || jc == "kotlin.collections.ReversedList") {
+        return "kotlin.collections.ReversedList"
+    }
+    return "kotlin.collections.ReversedListReadOnly"
+}
+
+// A map's values view: LinkedHashMap's LinkedValues, a MapBuilderValues, a
+// SingletonMap's SingletonSet, an EmptyMap's EmptyList, else the map's own Values.
+function ktValuesClass(mjc) {
+    if (mjc == "java.util.LinkedHashMap") { return mjc + "$LinkedValues" }
+    if (mjc == "kotlin.collections.builders.MapBuilder") { return mjc + "Values" }
+    if (mjc == "java.util.Collections$SingletonMap") { return "java.util.Collections$SingletonSet" }
+    if (mjc == "kotlin.collections.EmptyMap") { return "kotlin.collections.EmptyList" }
+    return mjc + "$Values"
+}
+
+// iterator(), and a Map's iterator() over its entries. A java.util set iterates its
+// backing map's keys (HashSet a HashMap, TreeSet a TreeMap), and a map view's
+// iterator is the map's nested Key / Value / Entry iterator.
+function ktIterClass(jc) {
+    var b = "kotlin.collections.builders."
+    var k = "Entry"
+    var m = jc
+    var d = jc.indexOf("$")
+    if (jc.indexOf("kotlin.collections.Empty") == 0) { return "kotlin.collections.EmptyIterator" }
+    if (jc.indexOf("java.util.Collections$Singleton") == 0) { return "java.util.Collections$1" }
+    if (jc == b + "ListBuilder" || jc == b + "ListBuilder$BuilderSubList") { return jc + "$Itr" }
+    if (jc == b + "SetBuilder" || jc == b + "MapBuilderKeys") { return b + "MapBuilder$KeysItr" }
+    if (jc == b + "MapBuilderValues") { return b + "MapBuilder$ValuesItr" }
+    if (jc == b + "MapBuilder" || jc == b + "MapBuilderEntries") { return b + "MapBuilder$EntriesItr" }
+    if (jc == "kotlin.collections.ReversedList" || jc == "kotlin.collections.ReversedListReadOnly") { return jc + "$listIterator$1" }
+    if (jc == "kotlin.collections.ArrayDeque") { return ktJuAbs + "Itr" }
+    if (jc == "java.util.ArrayList" || jc == "java.util.PriorityQueue") { return jc + "$Itr" }
+    if (jc == "java.util.ArrayList$SubList") { return jc + "$1" }
+    if (jc == ktJuAbs + "SubList" || jc == ktJuAbs + "RandomAccessSubList") { return ktJuAbs + "SubList$1" }
+    if (jc == "java.util.Arrays$ArrayList") { return "java.util.Arrays$ArrayItr" }
+    if (jc == "java.util.ArrayDeque") { return jc + "$DeqIterator" }
+    if (jc == "java.util.LinkedList") { return jc + "$ListItr" }
+    if (jc.indexOf("java.util.") != 0) { return "" }
+    if (d < 0 && jc.substring(jc.length - 3) == "Set") {
+        m = jc.substring(0, jc.length - 3) + "Map"
+        k = "Key"
+    }
+    if (d >= 0) {
+        m = jc.substring(0, d)
+        if (jc.indexOf("Key") > d) { k = "Key" }
+        if (jc.indexOf("Value") > d) { k = "Value" }
+        if (jc.indexOf("Entry") > d) { k = "Entry" }
+    }
+    if (m == "java.util.LinkedHashMap") { k = "Linked" + k }
+    return m + "$" + k + "Iterator"
+}
+
 // The JVM classes of Kotlin's arrays, which a Formatter mismatch names. A host
 // array carries a kind number (arrKind): 1 is an Array<T>, and the primitive
 // arrays are 5 + their element type's index here. Go twin: ktaElems in
@@ -409,6 +655,14 @@ function ktRoTagged(jc, sealed, isMap) {
     if (sealed) { return c + "B" }
     if (jc == single) { return c + "1" }
     return ""
+}
+
+// The code of a keys / entries view (a Set) or a values view (isValues, a
+// Collection) of a map of code mro: a MapBuilder's views check the builder as a
+// SetBuilder / ListBuilder does, a SingletonMap's are singleton collections.
+function ktRoView(mro, isValues) {
+    if (mro == "") { return "" }
+    return (isValues ? "L" : "S") + mro.charAt(1)
 }
 
 // What mutating member `name`, called with na arguments (pred: the first is a

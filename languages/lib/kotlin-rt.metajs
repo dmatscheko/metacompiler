@@ -4165,11 +4165,33 @@ function ktJvmListClass(kind, n) {
     if (kind == 3) { return "java.util.LinkedHashMap$LinkedValues" }
     return "ArrayList"
 }
+// The JVM class of a host array: the class a subList / asReversed copy was given
+// (ktArrClassed), a values view's by its map's class, else its kind's. Twin of
+// ktArrJvmClass in abnf/jsrtkotlin.go.
+function ktArrJvmClass(v) {
+    var p = arrProps(v)
+    if (p !== undefined) {
+        if (p["__jc"] !== undefined) { return p["__jc"] }
+    }
+    var ak = arrKind(v)
+    if (ak == 3) {
+        if (rtIsDictObj(k4ViewOwner(v))) { return ktValuesClass(ktCollJvmClass(k4ViewOwner(v))) }
+    }
+    return ktJvmListClass(ak, v.length)
+}
+// A fresh list answered as a JVM class of its own; jc "" leaves it an ArrayList.
+function ktArrClassed(a, jc) {
+    if (jc != "") { arrPropsSet(a, {__jc: jc}) }
+    return a
+}
 function jxkClass(v) {
+    if (k4IsCursor(v)) {
+        if (v["__jc"] !== undefined) { return v["__jc"] }
+    }
     if (Array.isArray(v)) {
         var ak = arrKind(v)
         if (ak >= 5) { return ktaClasses[ak - 5] }
-        if (ak != 1) { return ktJvmListClass(ak, v.length) }
+        if (ak != 1) { return ktArrJvmClass(v) }
         var ecs = []
         var i = 0
         while (i < v.length) {
@@ -4783,6 +4805,11 @@ function ktSeqMethodK(arr, name, args, kind) {
     if (name == "iterator" && args.length == 0) {
         var lc = k4CursorNew({})
         lc["arr"] = arr
+        var itr = anytype
+        itr = arr
+        if (arrKind(arr) != 3 && rtIsDictObj(k4ViewOwner(arr))) { itr = k4ViewOwner(arr) }
+        var itjc = ktIterClass(ktCollJvmClass(itr))
+        if (itjc != "") { lc["__jc"] = itjc }
         return lc
     }
     if (name == "map") {
@@ -5105,6 +5132,12 @@ function ktSeqMethodK(arr, name, args, kind) {
         }
         return es[k4RndBelow(k4RndOf(args), es.length)]
     }
+    // shuffled(random) is toMutableList().apply { shuffle(random) }.
+    if (name == "shuffled") {
+        out = k3Sub(es, 0, es.length)
+        kxwShuffle(k4RndOf(args), out)
+        return out
+    }
     if (name == "distinct") {
         // distinct answers a LIST and toSet/toMutableSet/toHashSet a SET - the
         // deduplication is the same, the SHAPE is not.
@@ -5127,7 +5160,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "asReversed") {
         for (i = es.length - 1; i >= 0; i = i - 1) { out.push(es[i]) }
-        return out
+        return ktArrClassed(out, ktReversedClass(ktArrJvmClass(es)))
     }
     if (name == "sorted") { return ktSortBy(es, null, false) }
     if (name == "sortedDescending") { return ktSortBy(es, null, true) }
@@ -5510,7 +5543,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (slo < 0) { ktRaise("IndexOutOfBoundsException", "fromIndex = " + slo) }
         if (shi > es.length) { ktRaise("IndexOutOfBoundsException", "toIndex = " + shi) }
         if (slo > shi) { ktRaise("IllegalArgumentException", "fromIndex(" + slo + ") > toIndex(" + shi + ")") }
-        return k3Sub(es, slo, shi)
+        return ktArrClassed(k3Sub(es, slo, shi), ktSubListClass(ktArrJvmClass(es)))
     }
     if (name == "zipWithNext") {
         b = ktIsFn(f)
@@ -5606,6 +5639,11 @@ function ktSeqMethodK(arr, name, args, kind) {
         // The sorts are ArrayList.sort, a structural change once there are two
         // elements; reverse() only sets.
         if (name != "reverse" && arr.length > 1) { arrModBump(arr) }
+        return undefined
+    }
+    // shuffle only sets, so it is no structural change.
+    if (name == "shuffle") {
+        kxwShuffle(k4RndOf(args), arr)
         return undefined
     }
     if (name == "clear") {
@@ -5985,6 +6023,10 @@ function ktSetMethod(s, name, args) {
     if (s["__wsrc"] !== undefined) { own = s["__wsrc"] }
     if (k4ViewOwner(keys) !== own) { k4ViewOf(keys, own) }
     var sq = ktSeqMethodK(keys, name, args, "Collection")
+    if (name == "iterator") {
+        var sij = ktIterClass(ktCollJvmClass(s))
+        if (sij != "") { sq["__jc"] = sij }
+    }
     if (ktIsArr(sq) && sq !== keys) {
         var sk = ktResultKind(3, name)
         if (sk != 0) { arrKindSet(sq, sk) }
@@ -6008,6 +6050,39 @@ function k3IsSetMinus(name) {
     if (name == "minus") { return true }
     if (name == "subtract") { return true }
     return name == "intersect"
+}
+
+function k3IsMapDefault(name) {
+    if (name == "putIfAbsent") { return true }
+    if (name == "computeIfAbsent") { return true }
+    return name == "merge"
+}
+
+// java.util.Map's default methods: putIfAbsent and computeIfAbsent treat a key
+// holding null as absent, and merge removes the key when the function answers null.
+// Twin of the same case of ktMapMethod in jsrtkotlin.go.
+function k3MapDefault(m, keys, vals, name, f, args) {
+    var cur = anytype
+    var nv = anytype
+    var i = ktMapFind(keys, f)
+    cur = null
+    if (i >= 0) { cur = vals[i] }
+    if (cur !== null && name != "merge") { return cur }
+    if (name == "putIfAbsent") { nv = ktArg(args, 1) }
+    else {
+        if (name == "computeIfAbsent") { nv = ktCall1(ktArg(args, 1), f) }
+        else {
+            nv = ktArg(args, 1)
+            if (cur !== null) { nv = ktCall2(ktArg(args, 2), cur, nv) }
+        }
+    }
+    if (nv !== null) { ktMapPut(m, f, nv) }
+    else {
+        i = ktMapFind(keys, f)
+        if (name == "merge" && i >= 0) { ktMapDropAt(m, i) }
+    }
+    if (name == "putIfAbsent") { return cur }
+    return nv
 }
 
 // ============================================================================
@@ -6067,8 +6142,16 @@ function ktMapMethod(m, name, args) {
         ktMapPut(m, f, ktArg(args, 1))
         return v
     }
+    if (k3IsMapDefault(name)) { return k3MapDefault(m, keys, vals, name, f, args) }
     if (name == "remove") {
         i = ktMapFind(keys, f)
+        if (args.length > 1) {
+            // remove(key, value) removes the entry only when it holds that value.
+            if (i < 0) { return false }
+            if (!ktEqVals(vals[i], args[1])) { return false }
+            ktMapDropAt(m, i)
+            return true
+        }
         if (i < 0) { return null }
         v = vals[i]
         ktMapDropAt(m, i)
@@ -6163,6 +6246,7 @@ function ktMapMethod(m, name, args) {
                 }
             }
         }
+        if (name == "putAll") { return undefined }
         return out
     }
     if (name == "minus") {
@@ -7061,6 +7145,8 @@ function ktRoGuard(o, name, args) {
         ro = ktRoTagged(o["__jc"], o["__ro"] === true, isMap)
         n = o["keys"].length
     }
+    var ow = k4ViewOwner(o)
+    if (ro == "" && ow !== o && rtIsDictObj(ow)) { ro = ktRoView(ktRoTagged(ow["__jc"], ow["__ro"] === true, true), isArr) }
     if (ro == "") { return KT_MISS }
     var pred = typeof args[0] == "function"
     var rule = ktRoRule(ro, name, n, args.length, pred)
@@ -7556,10 +7642,14 @@ function ktJvmPrimName(c) {
 // ktCollJvmClass in abnf/jsrtkotlin.go.
 function ktCollJvmClass(v) {
     if (ktIsSb(v)) { return "java.lang.StringBuilder" }
+    // A cursor carries a numeric length, so it is tested before any array.
+    if (k4IsCursor(v)) {
+        if (v["__jc"] !== undefined) { return v["__jc"] }
+    }
     if (ktRxIsRegex(v)) { return "kotlin.text.Regex" }
     if (ktIsArr(v)) {
         var ak = arrKind(v)
-        if (ak <= 0 || ak == 3 || ak == 4) { return ktJvmListClass(ak, v.length) }
+        if (ak <= 0 || ak == 3 || ak == 4) { return ktArrJvmClass(v) }
         return ""
     }
     if (ktIsSet(v)) { return ktJvmTag(v, "java.util.LinkedHashSet") }
@@ -8593,7 +8683,7 @@ function k4BuiltinLacks(recv, name) {
             "binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
             "clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
             "commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
-            "component2:LRAD component3:LRAD concatToString:A contains:LRAQGDSMBT " +
+            "component2:LRAD component3:LRAD computeIfAbsent:M concatToString:A contains:LRAQGDSMBT " +
             "containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
             "contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
             "copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
@@ -10257,7 +10347,7 @@ function ktSmcall(recv, name, args) {
 
     if (ktIsArr(rv)) {
         var rok = arrKind(rv)
-        if (rok == 4 || rok < 0 - 3) {
+        if (rok == 4 || rok == 3 || rok < 0 - 3) {
             var rol = ktRoGuard(rv, name, as)
             if (!ktMiss(rol)) { return rol }
         }
@@ -10904,61 +10994,32 @@ function k4RangeMake(from, to, name) {
 // ----------------------------------------------------------------------------
 // kotlin.random
 //
-// THERE IS NO RANDOM SOURCE IN THIS PROJECT and there cannot be one the three
-// engines agree on byte-for-byte - the same argument Kernel#rand is settled by in
-// ruby-interpreter.abnf. So `random()` draws from a DETERMINISTIC generator with a
-// fixed default seed: a program sees a varying sequence (two draws from 1..1000000
-// differ, which is what distinguishes this from ruby's "always the front
-// element"), every run of every engine sees the SAME sequence, and the matrix's
-// byte-identity requirement holds by construction. The values are ours, not the
-// JVM's - Kotlin's Random(seed) is XorWowRandom - so a test asserts membership and
-// bounds, never the value.
-//
-// xorshift32 in 32-bit arithmetic; the twins are kRndBox in
-// kotlin-interpreter.abnf and ktRndMake in abnf/jsrtkotlin.go, and all three have
-// to produce the identical stream.
+// Random(seed) is kotlin's XorWowRandom (lib/kotlin-math.js's kxw*), its stream
+// value for value. THERE IS NO RANDOM SOURCE IN THIS PROJECT, and there cannot be
+// one the three engines agree on byte-for-byte - the same argument Kernel#rand is
+// settled by in ruby-interpreter.abnf - so Random.Default, the generator behind
+// `random()` and `shuffled()`, is the same generator with a fixed seed: a program
+// sees a varying sequence and every run of every engine sees the SAME one. The
+// twins are kRndBox in kotlin-interpreter.abnf and kxwMake in abnf/jsrtktmath.go.
 // ----------------------------------------------------------------------------
-var K4_RND_DEFAULT = {__ktrnd: true, s: 1}
+var K4_RND_DEFAULT = {}
 var K4_RND_READY = false
 
-function k4RndBox(seed) {
-    var x = (k4Int(seed) | 0) ^ 1640531527
-    x = x | 0
-    if (x == 0) { x = 1 }
-    var bx = {__ktrnd: true, s: x}
-    k4RndNext(bx)
-    k4RndNext(bx)
-    return bx
-}
+function k4RndBox(seed) { return kxwNew(sintHi(seed), sintLo(seed)) }
 
 function k4IsRnd(v) {
     if (!ktIsObj(v)) { return false }
     return v["__ktrnd"] === true
 }
 
-function k4RndNext(box) {
-    var x = box["s"] | 0
-    x = (x ^ ((x << 13) | 0)) | 0
-    x = (x ^ (x >>> 17)) | 0
-    x = (x ^ ((x << 5) | 0)) | 0
-    if (x == 0) { x = 1 }
-    box["s"] = x
-    return x
-}
-
-// A non-negative draw below n. The 30-bit mask is what keeps this off an unsigned
-// shift of a negative operand, the one spelling the three engines are least likely
-// to agree on.
-function k4RndBelow(box, n) {
-    if (n <= 1) { return 0 }
-    return (k4RndNext(box) & 1073741823) % n
-}
+// nextInt(n): a draw in 0 until n.
+function k4RndBelow(box, n) { return kxwInt(box, 0, n) }
 
 // kotlin.random.Random.Default - one generator per program run.
 function k4RndDefault() {
     if (!K4_RND_READY) {
         K4_RND_READY = true
-        K4_RND_DEFAULT["s"] = k4RndBox(20260808)["s"]
+        K4_RND_DEFAULT = k4RndBox(20260808)
     }
     return K4_RND_DEFAULT
 }
@@ -11006,48 +11067,34 @@ function k4JrndMethod(box, name, args) {
         ns.push(ktNum(args[i]))
         i = i + 1
     }
-    var r = jrndCall(box, name, ns)
+    return k4RndAnswer(jrndCall(box, name, ns))
+}
+
+// A generator's {t, v} answer (kxwCall, jrndCall), boxed; KT_MISS for a member it
+// does not answer.
+function k4RndAnswer(r) {
     if (r === null) { return KT_MISS }
     if (r["t"] == "err") { ktRaise("IllegalArgumentException", r["v"]) }
+    if (r["t"] == "unsupported") { fail("Random." + r["v"] + " over a range of 2^31 or more is not supported") }
     if (r["t"] == "long") { return sint(r["v"][0], r["v"][1], 64, 0) }
     if (r["t"] == "double") { return flo(r["v"], 0) }
     if (r["t"] == "float") { return flo(rtF32Round(r["v"]), 3) }
     return r["v"]
 }
 
-// k4RndMethod is the kotlin.random.Random member surface. The twins are the
-// kIsRnd branch of mcall in kotlin-interpreter.abnf and ktRndMethod in
-// abnf/jsrtkotlin.go.
+// k4RndMethod is the kotlin.random.Random member surface over lib/kotlin-math.js's
+// kxwCall. The twins are the kIsRnd branch of mcall in kotlin-interpreter.abnf and
+// ktRndMethod in abnf/jsrtkotlin.go.
 function k4RndMethod(o, name, args) {
-    if (name == "nextInt" || name == "nextLong") {
-        if (args.length == 0) { return k4RndNext(o) }
-        var lo = 0
-        var hi = ktNum(k4At(args, 0))
-        if (args.length > 1) {
-            lo = hi
-            hi = ktNum(k4At(args, 1))
-        }
-        if (hi <= lo) {
-            ktRaise("IllegalArgumentException",
-                    "Random range is empty: [" + k2Render(lo, 1) + ", " + k2Render(hi, 1) + ").")
-        }
-        return lo + k4RndBelow(o, hi - lo)
-    }
-    if (name == "nextBoolean") { return (k4RndNext(o) & 1) == 1 }
-    if (name == "nextDouble") {
-        var rd = k4RndBelow(o, 1073741824) / 1073741824
-        if (args.length == 1) { return flo(rd * ktNum(k4At(args, 0)), 0) }
-        if (args.length > 1) {
-            var da = ktNum(k4At(args, 0))
-            var db = ktNum(k4At(args, 1))
-            return flo(da + rd * (db - da), 0)
-        }
-        return flo(rd, 0)
-    }
     if (name == "toString") { return "Random" }
-    return KT_MISS
+    var ns = []
+    var i = 0
+    while (i < args.length) {
+        ns.push(ktNum(args[i]))
+        i = i + 1
+    }
+    return k4RndAnswer(kxwCall(o, name, ns))
 }
-
 
 // `x in r`. A plain IntRange declares contains(value) and consults the bounds
 // only; a STEPPED progression is an Iterable and `in` is its linear membership,
@@ -11270,7 +11317,7 @@ function ktCollIsType(v, tname) {
     if (!ktIsArr(v)) { return undefined }
     var k = arrKind(v)
     if (k <= 0 || k == 4) {
-        var lc = ktJvmIsA(ktJvmListClass(k, v.length), t)
+        var lc = ktJvmIsA(ktArrJvmClass(v), t)
         if (lc !== undefined) { return lc }
         if ((k == -1 || k == -3) && (t == "Deque" || t == "Queue")) { return true }
         return coll || (t == "List" && k != -1)
