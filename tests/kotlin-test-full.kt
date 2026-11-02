@@ -4119,10 +4119,9 @@ fun sec82() {
     check("ix82o", S82Outer.S82Inner("in").toString() == "S82Outer\$S82Inner: in")
     // A TOP-LEVEL user throwable is unchanged: its simple name IS its binary name.
     check("ix82p", S82Top("t").toString() == "S82Top: t")
-    // The `Name@1` fallback still reads the SIMPLE name. That is deliberate: the @1
-    // is a fixed stand-in for the JVM's identity hash, so "S82Outer$S82Plain@1"
-    // would be no closer to the JVM's answer than "S82Plain@1" is.
-    check("ix82q", S82Outer.S82Plain(1).toString() == "S82Plain@1")
+    // Object#toString reads the binary name too, with hashCode() in hex.
+    val sp = S82Outer.S82Plain(1)
+    check("ix82q", sp.toString() == "S82Outer\$S82Plain@" + Integer.toHexString(sp.hashCode()))
 }
 
 
@@ -7742,6 +7741,71 @@ fun s175() {
 }
 
 
+// ===== SECTION 176: Object#toString and hashCode agree, synchronized, Integer / Long, function values, an Array copy's class =====
+// java.lang.Object#toString is the binary class name, "@" and hashCode() in hex, so
+// it follows an overridden hashCode, and Unit is an object with a hash of its own,
+// not null's 0. synchronized(lock) { } is the block's value. java.lang.Integer and
+// java.lang.Long are reachable from Kotlin. Without kotlin-reflect a reference
+// prints "function g (Kotlin reflection is not available)" and a lambda its hidden
+// class, AKt$$Lambda/0x...@hash. An Array's copy keeps the array's runtime class.
+class P176
+open class H176 { override fun hashCode() = 255 }
+class HS176 : H176()
+class O176 { class N176 }
+open class B176
+class X176 : B176() { override fun hashCode() = super.hashCode() + 1 }
+data class U176(val a: Int, val u: Unit)
+class C176(var n: Int) { fun inc(): Int = ++n }
+fun g176(x: Int): String = "s$x"
+fun agree176(x: Any): Boolean = x.toString() == x.javaClass.name + "@" + Integer.toHexString(x.hashCode())
+
+fun s176() {
+    val p = P176()
+    check("ts176a", p.toString() == "P176@" + p.hashCode().toString(16) && agree176(p) && agree176(HS176()) &&
+        agree176(O176.N176()) && agree176(Any()))
+    check("ts176b", H176().toString() == "H176@ff" && HS176().toString() == "HS176@ff" && "${HS176()}" == "HS176@ff" &&
+        O176.N176().toString().substringBefore("@") == "O176\$N176")
+    val x = X176()
+    check("sup176k", x.toString() == "X176@" + Integer.toHexString(x.hashCode()) && x.hashCode() == x.hashCode())
+    val lock = Any()
+    var side = 0
+    check("sync176c", synchronized(lock) { side++; 40 + 2 } == 42 && side == 1 && synchronized(p) { "in$side" } == "in1")
+    val xs = intArrayOf(255, -1, 10, 1)
+    check("int176d", Integer.toHexString(xs[0]) == "ff" && Integer.toHexString(xs[1]) == "ffffffff" &&
+        Integer.toBinaryString(xs[2]) == "1010" && Integer.toOctalString(xs[2] - 2) == "10" &&
+        Integer.parseInt("-77") == -77 && Integer.parseInt("zz", 36) == 1295 && Integer.valueOf("12") == 12 &&
+        Integer.MAX_VALUE == Int.MAX_VALUE && Integer.MIN_VALUE == Int.MIN_VALUE && Integer.SIZE == 32 &&
+        Integer.bitCount(xs[0]) == 8 && Integer.numberOfLeadingZeros(xs[3]) == 31 && Integer.compare(xs[2], xs[0]) == -1 &&
+        Integer.signum(xs[1]) == -1 && Integer.toString(xs[0], 16) == "ff" && Integer.max(xs[2], xs[0]) == 255 &&
+        Integer.sum(xs[2], xs[3]) == 11 && Integer.rotateLeft(xs[3], 33) == 2)
+    val ls = longArrayOf(-1L, 255L)
+    check("long176e", java.lang.Long.toHexString(ls[0]) == "ffffffffffffffff" && java.lang.Long.toBinaryString(ls[1]) == "11111111" &&
+        java.lang.Long.parseLong("-9000000000") == -9000000000L && java.lang.Long.parseLong("7f", 16) == 127L &&
+        java.lang.Long.MAX_VALUE == Long.MAX_VALUE && java.lang.Long.SIZE == 64 && java.lang.Long.bitCount(ls[0]) == 64 &&
+        java.lang.Long.compare(ls[0], ls[1]) == -1)
+    var nfe = ""
+    try { Integer.parseInt("abc") } catch (e: NumberFormatException) { nfe = e.message ?: "" }
+    check("int176f", nfe == "For input string: \"abc\"")
+    check("unit176g", Unit.hashCode() != 0 && U176(1, Unit).hashCode() == 31 + Unit.hashCode() &&
+        listOf(Unit).hashCode() == 31 + Unit.hashCode() && U176(1, Unit) == U176(1, Unit))
+    val c = C176(1)
+    val nr = " (Kotlin reflection is not available)"
+    check("fn176h", (::g176).toString() == "function g176" + nr && (c::inc).toString() == "function inc" + nr &&
+        (C176::inc).toString() == "function inc" + nr && (::C176).toString() == "constructor" + nr &&
+        (c::n).toString() == "property n" + nr && (C176::n).toString() == "property n" + nr &&
+        (String::length).toString() == "property length" + nr && "${listOf(::g176)}" == "[function g176$nr]")
+    val lam = { x: Int -> x + 1 }
+    check("fn176i", lam.toString().contains("\$\$Lambda") && lam.toString().contains("@") && !lam.toString().contains("\n"))
+    val a = arrayOfNulls<String>(2)
+    val e = emptyArray<String>()
+    val s = arrayOf("x", "y")
+    check("arr176j", a.copyOf().javaClass.name == "[Ljava.lang.String;" && e.copyOf(1).javaClass.name == "[Ljava.lang.String;" &&
+        a.copyOfRange(0, 1).javaClass.name == "[Ljava.lang.String;" && a.reversedArray().javaClass.name == "[Ljava.lang.String;" &&
+        (e + s[0]).javaClass.name == "[Ljava.lang.String;" && (s + "z").javaClass.name == "[Ljava.lang.String;" &&
+        (s + "z").size == 3 && (intArrayOf(xs[3]) + xs[2]).javaClass.name == "[I" && (s + listOf("q")).last() == "q")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7914,6 +7978,7 @@ fun main() {
     s173() // SECTION-CALL 173
     s174() // SECTION-CALL 174
     s175() // SECTION-CALL 175
+    s176() // SECTION-CALL 176
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -207,6 +207,19 @@ var ktmJava = ["sqrt", "sqrt", "cbrt", "cbrt", "exp", "exp", "expm1", "expm1", "
                "tanh", "tanh", "floor", "floor", "ceil", "ceil", "rint", "round",
                "signum", "sign", "atan2", "atan2", "hypot", "hypot", "pow", "pow"]
 
+// java.lang.Integer / java.lang.Long statics that are a Kotlin Int / Long member of
+// the same meaning applied to the first argument, as java name, kotlin name pairs.
+var ktmJavaInt = ["toString", "toString", "bitCount", "countOneBits",
+                  "numberOfLeadingZeros", "countLeadingZeroBits",
+                  "numberOfTrailingZeros", "countTrailingZeroBits",
+                  "highestOneBit", "takeHighestOneBit", "lowestOneBit", "takeLowestOneBit",
+                  "rotateLeft", "rotateLeft", "rotateRight", "rotateRight"]
+
+// The digit statics of Integer / Long and their radixes: the two's complement
+// digits at the class width (toHexString(-1) is ffffffff).
+var ktmJavaIntRadixNames = ["toHexString", "toOctalString", "toBinaryString"]
+var ktmJavaIntRadixes = [16, 8, 2]
+
 // Math.toRadians / toDegrees: one multiplication by java's own constant.
 function ktmJavaAngle(name, x) {
     if (name == "toRadians") { return x * 0.017453292519943295 }

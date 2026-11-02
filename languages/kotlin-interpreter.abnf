@@ -4251,6 +4251,35 @@ NotMemberKw = :script(~~ "pure";
                             MIN_VALUE: szMake(i64Make(0, 0), 8, true), SIZE_BITS: 8, SIZE_BYTES: 1}
     hostGlobals["UShort"] = {MAX_VALUE: szMake(i64Make(0, 65535), 16, true),
                              MIN_VALUE: szMake(i64Make(0, 0), 16, true), SIZE_BITS: 16, SIZE_BYTES: 2}
+    // java.lang.Integer and java.lang.Long, the JVM classes behind Int and Long: the
+    // companion constants, the digit statics (jxkRadix at the class width), the
+    // parsers (String.toInt / toLong, whose NumberFormatException they share),
+    // compare / signum, and the statics that are a Kotlin member of the same
+    // meaning (lib/kotlin-math.js's ktmJavaInt). Twin of ktJavaInt in
+    // abnf/jsrtkotlin.go and k4JavaInt in languages/lib/kotlin-rt.metajs.
+    function kJavaIntRadixFn(w, r) { return function(v) { return jxkRadix(kConv(v, w, false), r) } }
+    function kJavaIntMemberFn(w, kn) {
+        return function(v, a1) { return mcall(kConv(v, w, false), kn, a1 === undefined ? [] : [a1]) }
+    }
+    function kJavaInt(w) {
+        var kt = w == 64 ? hostGlobals["Long"] : hostGlobals["Int"]
+        var parse = w == 64 ? "toLong" : "toInt"
+        var parser = function(s, r) { return mcall(s, parse, r === undefined ? [] : [r]) }
+        var cmp = function(a, b) { return mcall(kConv(a, w, false), "compareTo", [kConv(b, w, false)]) }
+        var o = {MAX_VALUE: kt.MAX_VALUE, MIN_VALUE: kt.MIN_VALUE, SIZE: w, BYTES: w / 8, compare: cmp,
+                 signum: function(v) { return cmp(v, 0) },
+                 max: function(a, b) { return kPick(kConv(a, w, false), kConv(b, w, false), true) },
+                 min: function(a, b) { return kPick(kConv(a, w, false), kConv(b, w, false), false) },
+                 sum: function(a, b) { return mcall(kConv(a, w, false), "plus", [kConv(b, w, false)]) },
+                 valueOf: function(v, r) { return typeof v == "string" ? parser(v, r) : v }}
+        o[w == 64 ? "parseLong" : "parseInt"] = parser
+        for (var i = 0; i < ktmJavaIntRadixNames.length; i++) { o[ktmJavaIntRadixNames[i]] = kJavaIntRadixFn(w, ktmJavaIntRadixes[i]) }
+        for (var k = 0; k < ktmJavaInt.length; k += 2) { o[ktmJavaInt[k]] = kJavaIntMemberFn(w, ktmJavaInt[k + 1]) }
+        return o
+    }
+    hostGlobals["Integer"] = kJavaInt(32)
+    hostGlobals["java.lang.Integer"] = hostGlobals["Integer"]
+    hostGlobals["java.lang.Long"] = kJavaInt(64)
     // `Char(code)` is kotlin's Char FUNCTION (CharCode.kt), the bare name `Char` the
     // companion; the companion carries the function as its `invoke`. Twin of
     // ktTypeObj in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
@@ -4493,6 +4522,9 @@ NotMemberKw = :script(~~ "pure";
     // lambda's single parameter.
     hostGlobals["with"] = function(recv, f) { kSetRecv({v: recv, noit: true}); return f(recv) }
     hostGlobals["run"] = function(f) { return f() }
+    // kotlin.synchronized(lock) { }: one thread runs here, so holding the monitor is
+    // running the block, and its value is the block's.
+    hostGlobals["synchronized"] = function(lock, f) { return f() }
     hostGlobals["repeat"] = function(n, f) {
         for (var i = 0; i < kNum(n); i++) { f(i) }
     }
@@ -5659,11 +5691,8 @@ NotMemberKw = :script(~~ "pure";
         // bare name, `int`.
         if (typeof v == "object" && v.__kclass === true && v.jprim === true) { return v.jname }
         if (typeof v == "object" && v.__kclass === true) { return kKClassKw(v) + (v.jname !== undefined ? v.jname : v.kname) }
-        // A callable reference. Real kotlin-reflect renders "val Box.v: kotlin.Int";
-        // without the reflection library on the class path it prints "property v (Kotlin
-        // reflection is not available)". Neither is reproducible here, so both halves
-        // agree on the short form and the divergence is deliberate and recorded.
-        if (typeof v == "object" && v.__propref === true) { return "reference " + v.pname }
+        if (typeof v == "object" && v.__propref === true) { return kRefStr(v) }
+        if (typeof v == "function") { return kFnStr(v) }
         // A user object renders through its toString(): the data-class generated one
         // (Pt13(x=1, y=2)), an explicit override, or the Kotlin default Name@hash shape.
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {
@@ -8688,13 +8717,16 @@ NotMemberKw = :script(~~ "pure";
             }
             var kcmp = kCmpMethod(target, name, args)
             if (kcmp != null) { return kcmp.v }
+            if (name == "toString") { return kFnStr(target) }
+            if (name == "hashCode") { return kHash(target) }
             fail("unknown function method: " + name)
         }
         // kotlin.hashCode() and kotlin.toString() are extensions on Any?, so they are
         // the two members a NULL receiver answers rather than throwing: java's
-        // Objects.hashCode(null) is 0 and String.valueOf(null) is "null".
+        // Objects.hashCode(null) is 0 and String.valueOf(null) is "null". Unit
+        // (undefined) is an object with its own hash (kHash).
         if (target === undefined || target === null) {
-            if (name == "hashCode") return 0
+            if (name == "hashCode") { return kHash(target) }
             // Unit is a VALUE and Unit.toString() is "kotlin.Unit"; only a Kotlin null
             // renders "null" (ktpRender's jsUndefT arm and kstr's undefined arm agree).
             if (name == "toString") return target === undefined ? "kotlin.Unit" : "null"
@@ -8705,6 +8737,7 @@ NotMemberKw = :script(~~ "pure";
             var sm = clsFind(target.cls, name)
             if (typeof sm != "function") {
                 if (target.sext == true) { kSetNamed(sp.named); return undefined }
+                if (name == "hashCode" && args.length == 0) { return kAnyHash(target.self.__class) }
                 fail("no super method " + "'" + name + "'" + superOf(target))
             }
             kSetNamed(sp.named)
@@ -9110,7 +9143,9 @@ NotMemberKw = :script(~~ "pure";
         }
         return out + ")"
     }
-    // The Object default, Name@1 - EXCEPT for a Throwable, which inherits
+    // java.lang.Object#toString, the binary class name, "@" and hashCode() in
+    // unsigned hex - so a class that overrides only hashCode prints through it -
+    // EXCEPT for a Throwable, which inherits
     // java.lang.Throwable#toString: the BINARY class name and, only when the message
     // is non-null, ": " and the message (java: println(RuntimeException("x")) is
     // "java.lang.RuntimeException: x"). It goes HERE rather than in kstr because
@@ -9120,7 +9155,7 @@ NotMemberKw = :script(~~ "pure";
     // both still win, exactly as in Kotlin: neither reaches this function.
     function defaultToString(target) {
         if (kIsThrowable(target)) { return kThrowableStr(target) }
-        return (target.__class === kAnyClass ? "java.lang.Object" : target.__class.__name) + "@1"
+        return (target.__class === kAnyClass ? "java.lang.Object" : kClassBin(target.__class)) + "@" + jxkRadix(kHash(target), 16)
     }
     // The structural hash of a value, CONSISTENT with kEq: two values that compare
     // equal hash equally. Kotlin's own recipe - the 31 * h + component fold over the
@@ -9129,7 +9164,10 @@ NotMemberKw = :script(~~ "pure";
     // element-wise, and everything without structural equality from its identity, for
     // which the class name is the only stable thing this value model exposes.
     function kHash(v) {
-        if (v === null || v === undefined) { return 0 }
+        if (v === null) { return 0 }
+        // Unit is an object, not null: its identity hash stands in as the class
+        // name's, like every class without structural equality below.
+        if (v === undefined) { return strHash("kotlin.Unit") }
         if (kIsChar(v)) { return v.__char }
         if (kIsFlo(v)) { return kIsF32(v) ? kFltHash(v.__flo) : kDblHash(v.__flo) }
         // Long.hashCode is (value xor (value ushr 32)) read as an Int; every narrower
@@ -9141,6 +9179,9 @@ NotMemberKw = :script(~~ "pure";
         }
         var t = typeof v
         if (t == "boolean") { return v ? 1231 : 1237 }
+        // A function value or a reference: the identity stand-in its toString prints
+        // (kFnStr), as the compiled halves' ktElemHash answers.
+        if (t == "function" || kIsRef(v)) { return 1 }
         if (t == "number") { return v | 0 }
         if (t == "string") { return strHash(v) }
         if (Array.isArray(v)) {
@@ -9189,12 +9230,15 @@ NotMemberKw = :script(~~ "pure";
                 for (var k = 0; k < dp.length; k++) { h = (Math.imul(31, h) + kHash(kfield(v, dp[k]))) | 0 }
                 return h
             }
-            // Any()'s hash is the 1 its toString prints (ktElemHash's fallback).
-            if (cls === kAnyClass) { return 1 }
-            return strHash(cls.__name)
+            return kAnyHash(cls)
         }
         return 0
     }
+    // kotlin.Any.hashCode() of an instance of cls: the JVM's identity hash stands in as
+    // String.hashCode of the class name, and Any()'s is the 1 its toString prints.
+    // Twin of ktElemHash's tail in abnf/jsrtkotlin.go and emitAnyHashFunc in
+    // kotlin-to-llvm-ir.abnf.
+    function kAnyHash(cls) { return cls === kAnyClass ? 1 : strHash(cls.__name) }
     function strHash(sv) {
         var h = 0
         for (var i = 0; i < sv.length; i++) { h = (Math.imul(31, h) + sv.charCodeAt(i)) | 0 }
@@ -9306,7 +9350,12 @@ NotMemberKw = :script(~~ "pure";
         // `+` on a COLLECTION is kotlin.collections.plus: a list gains the elements of
         // another collection, or the single element (`listOf(1, 2) + listOf(3)`, and
         // `names + "x"`, where the String is an element, not a concatenation).
-        if (Array.isArray(l)) { return kSeqMethod(l, "plus", [r]).v }
+        // An Array's `+` is Array.plus, an array of its own kind and class.
+        if (Array.isArray(l)) {
+            var lk = arrKind(l)
+            var pl = kSeqMethod(l, "plus", [r]).v
+            return (lk == 1 || lk >= 5) ? kKindOut(l, "plus", pl, "Array") : pl
+        }
         if (kIsMap(l)) { return kMapMethod(l, "plus", [r]).v }
         // A SET gains elements as a Set, not as a List (kotlin.collections.plus is
         // declared on Set separately from Iterable and keeps the receiver's shape).
@@ -12296,7 +12345,11 @@ NotMemberKw = :script(~~ "pure";
             // String::length - the base names a builtin type this value model has no
             // descriptor for. It is still a perfectly good unbound reference: the
             // receiver arrives with the call, and the member is read off it.
-            if (!hv || isCls) { return kRefMake(null, name, false, baseName) }
+            if (!hv || isCls) {
+                var ur = kRefMake(null, name, false, baseName)
+                if (hv && base !== null && typeof base == "object" && base.__isclass === true) { ur.kcls = base }
+                return ur
+            }
             var r = kRefMake(base, name, true, null)
             r.kthis = (baseName == "this" || baseName.substring(0, 5) == "this@")
             return r
@@ -12311,6 +12364,30 @@ NotMemberKw = :script(~~ "pure";
     // this code. kbound false = the receiver is the first argument.
     function kRefMake(recv, name, bound, tname) {
         return {__propref: true, obj: recv, pname: name, kbound: bound, ktype: tname, kthis: false}
+    }
+    // A function value's toString, as Kotlin/JVM prints it without kotlin-reflect on
+    // the class path (the stdlib alone): "function g (Kotlin reflection is not
+    // available)", "property v (...)" or "constructor (...)" for a reference. A lambda
+    // is an instance of a hidden JVM class, AKt$$Lambda/0x...@hash, whose address and
+    // identity hash no engine here can know; it prints the stable part and the
+    // identity stand-in 1, which is its hashCode. Twin of ktFnStr in
+    // abnf/jsrtkotlin.go and k2FnStr in languages/lib/kotlin-rt.metajs.
+    var kNoReflect = " (Kotlin reflection is not available)"
+    function kFnStr(f) {
+        var n = fnRefName(f)
+        return n === undefined ? "$$Lambda@1" : "function " + n + kNoReflect
+    }
+    // A reference names a FUNCTION when the receiver's class chain (an unbound one's
+    // class) declares a method of the name, and for a builtin receiver when the name
+    // is not one of its properties (kRecvProps); anything else is a property.
+    function kRefStr(r) {
+        if (r.kctor === true) { return "constructor" + kNoReflect }
+        var cls = anytype
+        cls = r.kcls
+        if (r.kbound && r.obj !== null && typeof r.obj == "object") { cls = r.obj.__class }
+        var isFn = (cls !== undefined && cls !== null) ? typeof clsFind(cls, r.pname) == "function"
+                                                         : kRecvProps["$" + r.pname] !== true
+        return (isFn ? "function " : "property ") + r.pname + kNoReflect
     }
     // The names Kotlin declares as TYPES rather than values. A `::` in front of one of
     // them is an UNBOUND reference (String::length, Int::class) even where the runtime
@@ -13230,6 +13307,14 @@ NotMemberKw = :script(~~ "pure";
             if (ak >= 5 && name == "sortedDescending" && out.length == 0) { rk = 4 }
             if (rk == 0) { rk = ktSizedKind(ak, name, out.length, recv.length, ranged === true) }
             if (rk != 0) { arrKindSet(out, rk) }
+            // An Array's copy (copyOf, plus, sortedArray, ...) is an array of the
+            // receiver's own runtime class, as java.util.Arrays.copyOf makes it, so an
+            // explicit element type its builder fixed carries over. Twin of
+            // ktArrKeepClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+            if (ak == 1 && rk == 1 && name != "toTypedArray") {
+                var rp = arrProps(recv)
+                if (rp !== undefined && rp.__jc !== undefined) { kArrClassed(out, rp.__jc) }
+            }
         }
         return out
     }

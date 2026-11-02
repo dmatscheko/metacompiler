@@ -1154,10 +1154,9 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("nest-bname-obj", IxObj2.IxDeep("d").toString() == "IxObj2\$IxDeep: d")
     // A TOP-LEVEL user throwable is unchanged - the simple name IS its binary name.
     check("nest-bname-top", IxTop("t").toString() == "IxTop: t")
-    // And the `Name@1` fallback still reads the SIMPLE name: it is not the binary
-    // name in this project, because the `@1` is a fixed stand-in for the JVM's
-    // identity hash and "IxOuter$IxPlain@1" would be no closer to the JVM's answer.
-    check("nest-plain-render", IxOuter.IxPlain(1).toString() == "IxPlain@1")
+    // Object#toString reads the binary name too, with hashCode() in hex.
+    val ixp = IxOuter.IxPlain(1)
+    check("nest-plain-render", ixp.toString() == "IxOuter\$IxPlain@" + Integer.toHexString(ixp.hashCode()))
 
     // ----- half of a surrogate pair is a Char of its own -----
     // A String is UTF-16: s[i], a `for` over it and toString of one half answer the

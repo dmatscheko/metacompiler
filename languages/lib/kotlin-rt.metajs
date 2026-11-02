@@ -1611,7 +1611,10 @@ function ktElemHash(v) {
         if (v) { return 1231 }
         return 1237
     }
-    if (rtIsNil(v)) { return 0 }
+    if (v === null) { return 0 }
+    // Unit is an object, not null: its identity hash stands in as the class
+    // name's, like every class without structural equality (see the tail).
+    if (v === undefined) { return k0StrHash("kotlin.Unit") }
     if (floIs(v)) {
         // java.lang.Double.hashCode of a Double and java.lang.Float.hashCode of a
         // Float, not the truncated value - see ktFloHash.
@@ -1679,6 +1682,18 @@ function ktElemHash(v) {
     // A user class that declares hashCode (a data class does) answers for itself.
     var own = k0FindMember(v, "hashCode")
     if (own !== undefined) { return k0Wrap32(ktNum(ktCall1(own, v))) }
+    // Any other class instance stands in for the JVM's identity hash with
+    // String.hashCode of its class name; Any() itself answers 1. Twin of
+    // ktElemHash's tail in jsrtkotlin.go.
+    if (ktIsObj(v)) {
+        var cls = v["__class"]
+        if (ktIsObj(cls)) {
+            if (cls !== ktAnyDesc()) {
+                var cn = cls["__name"]
+                if (typeof cn == "string") { return k0StrHash(cn) }
+            }
+        }
+    }
     return 1
 }
 // ===========================================================================
@@ -2345,7 +2360,17 @@ function js_ktadd(l, r) {
     }
     if (ktIsArr(l)) {
         var av = ktSeqMethod(l, "plus", [r])
-        if (!ktMiss(av)) { return av }
+        if (!ktMiss(av)) {
+            // An Array's `+` is Array.plus, an array of its own kind and class.
+            var lk = arrKind(l)
+            if (ktIsArr(av)) {
+                if (lk == 1 || lk >= 5) {
+                    arrKindSet(av, lk)
+                    ktArrKeepClass(l, av, "plus")
+                }
+            }
+            return av
+        }
     } else if (ktIsObj(l)) {
         if (ktIsSet(l)) {
             var sv = ktSetMethod(l, "plus", [r])
@@ -2688,18 +2713,8 @@ function k2Render(v, depth) {
         }
         return out + "]"
     }
-    // A callable reference. Real kotlin-reflect renders "val Box.v: kotlin.Int";
-    // without the reflection library on the class path it prints "property v
-    // (Kotlin reflection is not available)". Neither is reproducible here, so
-    // both halves agree on the short form - a deliberate, recorded divergence
-    // (ktRefOf / the *hostFunc arm of ktpRender). The Go twin keeps the
-    // reference table beside the hostFunc; layer 2 has no such table, so the
-    // shape whoever ports js_ktref builds is probed for its marker instead.
+    if (ktIsFn(v)) { return k2FnStr(v) }
     if (typeof v == "object") {
-        if (v["__ktref"] === true) {
-            var rn = v["name"]
-            if (typeof rn == "string") { return "reference " + rn }
-        }
         var so = k2Obj(v, depth)
         if (so !== undefined) { return so }
         // ktpRender's fallthrough is rt.toString, which is JavaScript's
@@ -2707,6 +2722,31 @@ function k2Render(v, depth) {
         return "[object Object]"
     }
     return "" + v
+}
+
+// k2FnStr is ktFnStr (jsrtkotlin.go): a function value's toString without
+// kotlin-reflect - "function g (Kotlin reflection is not available)", "property
+// v (...)" or "constructor (...)" for a reference, and for a lambda the stable
+// part of AKt$$Lambda/0x...@hash with the identity stand-in 1, its hashCode.
+function k2FnStr(v) {
+    var nr = " (Kotlin reflection is not available)"
+    var info = ktRefOf(v)
+    if (info === undefined) {
+        var n = rtPairGet(k4NameFns, k4NameStrs, v)
+        if (typeof n == "string") { return "function " + n + nr }
+        return "$$Lambda@1"
+    }
+    if (info["ctor"] === true) { return "constructor" + nr }
+    var nm = info["name"]
+    var cls = info["cls"]
+    var rv = info["recv"]
+    if (info["bound"] === true) {
+        if (ktIsObj(rv)) { cls = rv["__class"] }
+    }
+    var isFn = !k4RecvProp(nm)
+    if (ktIsObj(cls)) { isFn = ktClsFind(cls, nm) !== undefined }
+    if (isFn) { return "function " + nm + nr }
+    return "property " + nm + nr
 }
 
 // k2Obj is ktpObj (jsrtkotlin.go:2657): the object shapes the Kotlin compiler
@@ -2798,11 +2838,15 @@ function k2Obj(o, depth) {
     // `override fun toString()` and a data class' generated one still win, exactly
     // as in Kotlin.
     if (k4bIsThrowLike(o)) { return ktThrowableStr(o) }
+    // java.lang.Object#toString: the binary class name, "@" and hashCode() in
+    // unsigned hex, so a class that overrides only hashCode prints through it.
+    // Twin of ktpObj's tail in jsrtkotlin.go.
     var name = cls["__name"]
     if (typeof name != "string") { return undefined }
     if (name.length == 0) { return undefined }
-    if (cls === ktAnyDesc()) { return "java.lang.Object@1" }
-    return name + "@1"
+    var hx = jxkRadix(ktElemHash(o), 16)
+    if (cls === ktAnyDesc()) { return "java.lang.Object@" + hx }
+    return ktClassBin(cls) + "@" + hx
 }
 
 // ktClassBin (jsrtkotlin.go's ktClassBin) is a descriptor's binary name: the
@@ -4227,6 +4271,16 @@ function ktArrJvmClass(v) {
     return ktJvmListClass(ak, v.length)
 }
 // A fresh list answered as a JVM class of its own; jc "" leaves it an ArrayList.
+// ktArrKeepClass (jsrtkotlin.go): an Array's copy (copyOf, plus, sortedArray,
+// ...) has the receiver's own runtime class, so an explicit element type its
+// builder fixed carries over.
+function ktArrKeepClass(src, out, name) {
+    if (arrKind(src) != 1 || arrKind(out) != 1 || name == "toTypedArray") { return }
+    var p = arrProps(src)
+    if (p === undefined) { return }
+    var jc = p["__jc"]
+    if (typeof jc == "string") { ktArrClassed(out, jc) }
+}
 function ktArrClassed(a, jc) {
     if (jc != "") { arrPropsSet(a, {__jc: jc}) }
     return a
@@ -7909,7 +7963,9 @@ function js_ktref(base, name, ext) {
             return ktMakeRef(k4bRefInfo(null, name, false, false, base["__kttype"], ext))
         }
         if (base["__isclass"] === true) {
-            return ktMakeRef(k4bRefInfo(null, name, false, false, base["__name"], ext))
+            var ci = k4bRefInfo(null, name, false, false, base["__name"], ext)
+            ci["cls"] = base
+            return ktMakeRef(ci)
         }
     }
     return ktMakeRef(k4bRefInfo(base, name, true, false, "", ext))
@@ -9489,6 +9545,61 @@ function k4JavaMath() {
     return o
 }
 
+// java.lang.Integer (w 32) or java.lang.Long (w 64), the JVM classes behind Int and
+// Long: the companion constants, the digit statics (jxkRadix at the class width),
+// the parsers (String.toInt / toLong, whose NumberFormatException they share),
+// compare / signum / max / min / sum, and the statics that are a Kotlin member of
+// the same meaning (lib/kotlin-math.js's ktmJavaInt). Twin of ktJavaInt in
+// abnf/jsrtktmath.go and kJavaInt in kotlin-interpreter.abnf.
+function k4JavaIntCmp(w, a, b) { return ktSmcall(k1Conv(a, w, 0), "compareTo", [k1Conv(b, w, 0)]) }
+function k4JavaIntRadixFn(w, r) { return function (v) { return jxkRadix(k1Conv(v, w, 0), r) } }
+function k4JavaIntMemberFn(w, kn) {
+    return function (v, a1) {
+        if (a1 === undefined) { return ktSmcall(k1Conv(v, w, 0), kn, []) }
+        return ktSmcall(k1Conv(v, w, 0), kn, [a1])
+    }
+}
+function k4JavaIntParser(parse) {
+    return function (s, r) {
+        if (r === undefined) { return ktSmcall(s, parse, []) }
+        return ktSmcall(s, parse, [r])
+    }
+}
+function k4JavaInt(w) {
+    var o = js_kttype("Int")
+    var parse = "toInt"
+    if (w == 64) {
+        o = js_kttype("Long")
+        parse = "toLong"
+    }
+    o["SIZE"] = w
+    o["BYTES"] = w / 8
+    var parser = k4JavaIntParser(parse)
+    if (w == 64) { o["parseLong"] = parser } else { o["parseInt"] = parser }
+    o["valueOf"] = function (v, r) {
+        if (typeof v == "string") { return parser(v, r) }
+        return v
+    }
+    o["compare"] = function (a, b) { return k4JavaIntCmp(w, a, b) }
+    o["signum"] = function (v) { return k4JavaIntCmp(w, v, 0) }
+    var gmax = ktGlobalFn("max")
+    var gmin = ktGlobalFn("min")
+    o["max"] = function (a, b) { return gmax(k1Conv(a, w, 0), k1Conv(b, w, 0)) }
+    o["min"] = function (a, b) { return gmin(k1Conv(a, w, 0), k1Conv(b, w, 0)) }
+    o["sum"] = function (a, b) { return ktSmcall(k1Conv(a, w, 0), "plus", [k1Conv(b, w, 0)]) }
+    var i = 0
+    while (i < ktmJavaIntRadixNames.length) {
+        o[ktmJavaIntRadixNames[i]] = k4JavaIntRadixFn(w, ktmJavaIntRadixes[i])
+        i = i + 1
+    }
+    var k = 0
+    while (k < ktmJavaInt.length) {
+        o[ktmJavaInt[k]] = k4JavaIntMemberFn(w, ktmJavaInt[k + 1])
+        k = k + 2
+    }
+    return o
+}
+
 // Double.pow, roundToInt and roundToLong. The rounding is Math.round's (half up),
 // saturated at the target range; a NaN receiver throws.
 function k4MathMethod(recv, name, args) {
@@ -9795,6 +9906,8 @@ function ktJvmTagged(o, builder, n) {
 function ktGlobalFn(name) {
     if (name == "Any") { return function () { return {__class: ktAnyDesc()} } }
     if (name == "Math") { return k4JavaMath() }
+    if (name == "Integer" || name == "java.lang.Integer") { return k4JavaInt(32) }
+    if (name == "java.lang.Long") { return k4JavaInt(64) }
     if (name == "PriorityQueue") { return function (a0, a1) { return ktNewPq(a0, a1) } }
     if (name == "ArrayList" || name == "HashSet" || name == "LinkedHashSet" || name == "HashMap" || name == "LinkedHashMap"
         || name == "TreeSet" || name == "TreeMap" || name == "LinkedList" || name == "ArrayDeque"
@@ -9889,6 +10002,9 @@ function ktGlobalFn(name) {
             return ktCall(f, [])
         }
     }
+    // kotlin.synchronized(lock) { }: one thread runs here, so holding the monitor
+    // is running the block, and its value is the block's.
+    if (name == "synchronized") { return function (lock, f) { return ktCall(f, []) } }
     if (name == "repeat") {
         return function (n, f) {
             var cnt = k4Int(n)
@@ -10463,9 +10579,10 @@ function ktSmcall(recv, name, args) {
     }
 
     // kotlin.hashCode() and kotlin.toString() are extensions on Any?, so a NULL
-    // receiver answers them rather than throwing.
+    // receiver answers them rather than throwing. Unit (undefined) is an object
+    // with its own hash (ktElemHash).
     if (rtIsNil(rv)) {
-        if (name == "hashCode") { return 0 }
+        if (name == "hashCode") { return ktElemHash(rv) }
         if (name == "toString") { return "null" }
     }
 
@@ -10534,6 +10651,7 @@ function ktSmcall(recv, name, args) {
                 if (rk >= 5 && name == "sortedDescending" && lv.length == 0) { lk = 4 }
                 if (lk == 0) { lk = ktSizedKind(rk, name, lv.length, rv.length, name == "slice" && ktIsRange(ktArg(as, 0))) }
                 if (lk != 0) { arrKindSet(lv, lk) }
+                ktArrKeepClass(rv, lv, name)
             }
             return lv
         }

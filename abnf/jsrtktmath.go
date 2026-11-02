@@ -257,6 +257,81 @@ func ktJavaMath(rt *jsrt) *jsObject {
 	return o
 }
 
+// ktJavaIntMembers are the java.lang.Integer / Long statics that are a Kotlin Int /
+// Long member of the same meaning applied to the first argument (lib/kotlin-math.js's
+// ktmJavaInt), and ktJavaIntRadix the digit statics with their radix.
+var ktJavaIntMembers = map[string]string{
+	"toString": "toString", "bitCount": "countOneBits",
+	"numberOfLeadingZeros": "countLeadingZeroBits", "numberOfTrailingZeros": "countTrailingZeroBits",
+	"highestOneBit": "takeHighestOneBit", "lowestOneBit": "takeLowestOneBit",
+	"rotateLeft": "rotateLeft", "rotateRight": "rotateRight",
+}
+var ktJavaIntRadix = map[string]int{"toHexString": 16, "toOctalString": 8, "toBinaryString": 2}
+
+// ktJavaInt is java.lang.Integer (w 32) or java.lang.Long (w 64), the JVM classes
+// behind Int and Long: the companion constants, the digit statics (two's complement
+// at the class width), the parsers (String.toInt / toLong, whose
+// NumberFormatException they share), compare / signum / max / min / sum, and the
+// member statics above. Twin of kJavaInt in kotlin-interpreter.abnf and k4JavaInt
+// in languages/lib/kotlin-rt.metajs.
+func ktJavaInt(rt *jsrt, w uint8) *jsObject {
+	kt := ktTypeObj("Int")
+	parse := "toInt"
+	if w == 64 {
+		kt = ktTypeObj("Long")
+		parse = "toLong"
+	}
+	conv := func(v interface{}) interface{} { return rt.ktConv(v, w, false) }
+	fn := func(name string, f func(args []interface{}) interface{}) {
+		kt.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} { return f(args) }))
+	}
+	kt.set("SIZE", float64(w))
+	kt.set("BYTES", float64(w/8))
+	tail := func(args []interface{}) []interface{} {
+		if len(args) > 1 {
+			return args[1:]
+		}
+		return nil
+	}
+	parser := func(args []interface{}) interface{} {
+		return ktMemberCall(argAt(args, 0), parse, tail(args))
+	}
+	if w == 64 {
+		fn("parseLong", parser)
+	} else {
+		fn("parseInt", parser)
+	}
+	fn("valueOf", func(args []interface{}) interface{} {
+		if _, isStr := argAt(args, 0).(string); isStr {
+			return parser(args)
+		}
+		return argAt(args, 0)
+	})
+	cmp := func(a, b interface{}) interface{} {
+		return ktMemberCall(conv(a), "compareTo", []interface{}{conv(b)})
+	}
+	fn("compare", func(args []interface{}) interface{} { return cmp(argAt(args, 0), argAt(args, 1)) })
+	fn("signum", func(args []interface{}) interface{} { return cmp(argAt(args, 0), float64(0)) })
+	for _, mm := range []string{"max", "min"} {
+		g := ktGlobalFn(rt, mm)
+		fn(mm, func(args []interface{}) interface{} {
+			return rt.call(g, jsUndef, []interface{}{conv(argAt(args, 0)), conv(argAt(args, 1))})
+		})
+	}
+	fn("sum", func(args []interface{}) interface{} {
+		return ktMemberCall(conv(argAt(args, 0)), "plus", []interface{}{conv(argAt(args, 1))})
+	})
+	for jn, r := range ktJavaIntRadix {
+		r := r
+		fn(jn, func(args []interface{}) interface{} { return jxRadix(rt, conv(argAt(args, 0)), r) })
+	}
+	for jn, kn := range ktJavaIntMembers {
+		kn := kn
+		fn(jn, func(args []interface{}) interface{} { return ktMemberCall(conv(argAt(args, 0)), kn, tail(args)) })
+	}
+	return kt
+}
+
 // ktMathMethod is the Double / Float extension members: pow, roundToInt and
 // roundToLong. roundToInt rounds half up (Math.round) and saturates at the Int
 // range; a NaN receiver throws, as MathJVM.kt does.

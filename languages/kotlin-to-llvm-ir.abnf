@@ -7675,31 +7675,24 @@ KwContract  = "contract" KwEnd ;
             return deadBlock()
         }, true)
     }
-    // java.lang.String.hashCode over the class NAME, computed at compile time. It is what
-    // the interpreter half's kHash answers for an instance of a class WITHOUT structural
-    // equality (`return strHash(cls.__name)`), so the two halves agree by construction.
-    function ktNameHash(sv) {
-        var h = 0
-        for (var i = 0; i < sv.length; i++) { h = (Math.imul(31, h) + sv.charCodeAt(i)) | 0 }
-        return h
-    }
-    // hashCode() for a class with no structural equality: the constant above. Kotlin's
-    // own default is an identity hash, which this value model cannot expose; the class
-    // name is the only stable thing it has, and the interpreter half made the same
-    // choice. Emitting it on EVERY class descriptor is also what makes hashCode() work
-    // for a NESTED instance: the structural fold below reaches it through js_ktsmcall.
-    function emitNameHashFunc(name) {
-        var hv = ktNameHash(name)
+    // kotlin.Any.hashCode(): the JVM's identity hash, which this value model cannot
+    // expose, stands in as String.hashCode of the instance's own class name - read at
+    // run time, so a subclass answers its own name. The same number ktElemHash's tail
+    // (jsrtkotlin.go) and the interpreter's kHash answer for a class instance.
+    function emitAnyHashFunc() {
         return emitFunc([], function(bb) {
-            bb.NewRet(emitNum(bb, hv))
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+            var nameV = callExt(bb, "js_get", [callExt(bb, "js_get", [thisV, emitStr(bb, "__class")]), emitStr(bb, "__name")])
+            bb.NewRet(callExt(bb, "js_ktsmcall", [nameV, emitStr(bb, "hashCode"), callExt(bb, "js_arr_new", [])]))
             return deadBlock()
         }, true)
     }
     // hashCode() for a data / value class: Kotlin's structural fold, 31 * acc + the
     // property's own hash, truncated to a 32 bit signed Int at every step - the same
-    // recurrence the interpreter's kHash runs over __dataProps. A null (or absent)
-    // property contributes 0, which is why each element needs its own branch rather
-    // than a select: js_ktsmcall would abort on null.
+    // recurrence the interpreter's kHash runs over __dataProps. A null property
+    // contributes 0, which is why each element needs its own branch rather than a
+    // select: js_ktsmcall would abort on null. The test is strict because Unit
+    // (undefined) is an object with its own hash.
     function emitHashCodeFunc(name, props) {
         return emitFunc([], function(bb) {
             var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
@@ -7712,7 +7705,7 @@ KwContract  = "contract" KwEnd ;
                 var nullB = curF.NewBlock("")
                 var valB = curF.NewBlock("")
                 var mrgB = curF.NewBlock("")
-                b2.NewCondBr(truthy(b2, callExt(b2, "js_eq", [pv, hNull])), nullB, valB)
+                b2.NewCondBr(truthy(b2, callExt(b2, "js_seq", [pv, hNull])), nullB, valB)
                 var zeroV = emitNum(nullB, 0)
                 nullB.NewBr(mrgB)
                 var hv = callExt(valB, "js_ktsmcall", [pv, emitStr(valB, "hashCode"),
@@ -8579,12 +8572,12 @@ KwContract  = "contract" KwEnd ;
             emitSuperName = savedSuper
             emitSuperRaw = savedSuperRaw
             if (dmod != null) { b = emitDataMembers(b, clsV, name, hdr.cparams, dmod == "data", own) }
-            // Every class answers hashCode(). A data / value class already got the
-            // structural one above; anything else (and a data class with no properties)
-            // gets the class-name constant, which is what the interpreter half answers.
-            if (own["$hashCode"] != true && (dmod == null || dataProps(hdr.cparams).length == 0)) {
+            // kotlin.Any's hashCode, on the ROOT of a class chain only, so an override
+            // further down still wins and `super.hashCode()` reaches it.
+            if (own["$hashCode"] != true && pickSuperRaw(hdr.supers) == null &&
+                (dmod == null || dataProps(hdr.cparams).length == 0)) {
                 callExt(b, "js_set", [clsV, emitStr(b, "hashCode"),
-                                      callExt(b, "js_closure", [handle(emitNameHashFunc(name)), curScopeV])])
+                                      callExt(b, "js_closure", [handle(emitAnyHashFunc()), curScopeV])])
             }
             if (comp != null) { b = emitCompanion(b, clsV, comp, parts.compName, name) }
             if (parts.nested.length > 0) {
@@ -9112,7 +9105,7 @@ KwContract  = "contract" KwEnd ;
         // the declaration is the entire port.
         var ktBuilders = ["Any", "mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf",
                           "emptyMap", "buildMap", "buildList", "buildSet", "buildString", "Pair", "Triple",
-                          "with", "run", "repeat", "StringBuilder", "String", "generateSequence",
+                          "with", "run", "synchronized", "repeat", "StringBuilder", "String", "generateSequence",
                           // stdlib top-level functions; their twins are the hostGlobals
                           // block in kotlin-interpreter.abnf. listOfNotNull is here rather
                           // than on the mutableListOf closure because it must DROP the nulls.
@@ -9170,11 +9163,11 @@ KwContract  = "contract" KwEnd ;
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
-        // java.lang.Math, declared only for a program that names Math and does not
+        // java.lang.Math and Integer, declared only for a program that names one and does not
         // declare it (js_ktglobal's ktJavaMath in abnf/jsrtktmath.go); without it the
         // name would reach the host's own Math.
         // The java.util collection constructors (ktJavaCollection) the same way.
-        var ktOnDemand = ["Math", "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap", "TreeSet", "TreeMap"]
+        var ktOnDemand = ["Math", "Integer", "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap", "TreeSet", "TreeMap"]
         for (var kd = 0; kd < ktOnDemand.length; kd++) {
             var odn = ktOnDemand[kd]
             if (ktVarSeen["$" + odn] == true && classNames["$" + odn] == undefined) {

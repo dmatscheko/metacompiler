@@ -1134,6 +1134,11 @@ func init() {
 			}
 			if la, isArr := l.(*jsArray); isArr {
 				if v, ok := rt.ktSeqMethod(la, "plus", []interface{}{r}); ok {
+					// An Array's `+` is Array.plus, an array of its own kind and class.
+					if out, isOut := v.(*jsArray); isOut && (la.kind == ktArrArray || la.kind >= ktArrPrim) {
+						out.kind = la.kind
+						ktArrKeepClass(la, out, "plus")
+					}
 					return w(v)
 				}
 			}
@@ -2009,11 +2014,12 @@ func init() {
 			// Objects.hashCode(null) is 0, String.valueOf(null) is "null"), and a
 			// BOOLEAN receiver owns hashCode/toString/not - none of which any branch
 			// below claims (`true.hashCode()` is 1231). The twin is the null and
-			// boolean tail of mcall in kotlin-interpreter.abnf.
+			// boolean tail of mcall in kotlin-interpreter.abnf. Unit (undefined) is
+			// an object with its own hash (ktElemHash).
 			if isUndefOrNull(recv) {
 				switch mname {
 				case "hashCode":
-					return rt.wrap(float64(0))
+					return rt.wrap(float64(int32(ktElemHash(rt, recv))))
 				case "toString":
 					return rt.wrap("null")
 				}
@@ -2101,6 +2107,7 @@ func init() {
 						if k != 0 {
 							out.kind = k
 						}
+						ktArrKeepClass(lst, out, mname)
 					}
 					return rt.wrap(v)
 				}
@@ -2316,7 +2323,7 @@ func init() {
 			if o, isObj := base.(*jsObject); isObj {
 				if b, isCls := o.props["__isclass"].(bool); isCls && b {
 					nm, _ := o.props["__name"].(string)
-					return w(rt.ktMakeRef(&ktRefInfo{name: name, tname: nm, ext: ext}))
+					return w(rt.ktMakeRef(&ktRefInfo{name: name, tname: nm, cls: o, ext: ext}))
 				}
 			}
 			return w(rt.ktMakeRef(&ktRefInfo{recv: base, name: name, bound: true, ext: ext}))
@@ -4436,20 +4443,55 @@ func (rt *jsrt) ktpRender(v interface{}, depth int) string {
 			parts[i] = rt.ktpRender(e, depth+1)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
-	case *hostFunc:
-		// A callable reference. Real kotlin-reflect renders "val Box.v: kotlin.Int";
-		// without the reflection library on the class path it prints "property v
-		// (Kotlin reflection is not available)". Neither is reproducible here, so
-		// both halves agree on the short form - a deliberate, recorded divergence.
-		if info, isRef := ktRefOf(t); isRef {
-			return "reference " + info.name
-		}
+	case *jsClosure, *hostFunc, *boundMethod:
+		return ktFnStr(t)
 	case *jsObject:
 		if s, ok := rt.ktpObj(t, depth); ok {
 			return s
 		}
 	}
 	return rt.toString(v)
+}
+
+// ktNoReflect is what Kotlin/JVM appends to a reference's toString without
+// kotlin-reflect on the class path (the stdlib alone).
+const ktNoReflect = " (Kotlin reflection is not available)"
+
+// ktFnStr is a function value's toString: "function g (Kotlin reflection is not
+// available)", "property v (...)" or "constructor (...)" for a reference. A lambda
+// is an instance of a hidden JVM class, AKt$$Lambda/0x...@hash, whose address and
+// identity hash no engine here can know; it prints the stable part and the
+// identity stand-in 1, which is its hashCode (ktElemHash). A reference names a
+// FUNCTION when the receiver's class chain (an unbound one's class) declares a
+// method of the name, and for a builtin receiver when the name is not one of its
+// properties (ktRecvProp). Twin of kFnStr / kRefStr in kotlin-interpreter.abnf and
+// k2FnStr in languages/lib/kotlin-rt.metajs.
+func ktFnStr(v interface{}) string {
+	info, isRef := ktRefOf(v)
+	if !isRef {
+		if n, has := ktFuncNames[v]; has {
+			return "function " + n + ktNoReflect
+		}
+		return "$$Lambda@1"
+	}
+	if info.ctor {
+		return "constructor" + ktNoReflect
+	}
+	var cls interface{}
+	if info.cls != nil {
+		cls = info.cls
+	}
+	if o, isObj := info.recv.(*jsObject); isObj && info.bound {
+		cls = o.props["__class"]
+	}
+	isFn := !ktRecvProp(info.name)
+	if cls != nil {
+		isFn = ktClsFind(cls, info.name) != nil
+	}
+	if isFn {
+		return "function " + info.name + ktNoReflect
+	}
+	return "property " + info.name + ktNoReflect
 }
 
 // ktpObj renders the object shapes the Kotlin compiler grammar builds. It reports
@@ -4548,14 +4590,18 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 	if ktIsThrowLike(o) {
 		return rt.ktThrowableStr(o), true
 	}
-	name, _ := cls.props["__name"].(string)
-	if name == "" {
+	// java.lang.Object#toString: the binary class name, "@" and hashCode() in
+	// unsigned hex, so a class that overrides only hashCode prints through it.
+	// Twin of defaultToString in kotlin-interpreter.abnf and ktRender's tail in
+	// languages/lib/kotlin-rt.metajs.
+	if n, _ := cls.props["__name"].(string); n == "" {
 		return "", false
 	}
+	name := ktClassBin(cls)
 	if cls == ktAnyDesc() {
 		name = "java.lang.Object"
 	}
-	return name + "@1", true
+	return name + "@" + jxRadix(rt, float64(int32(ktElemHash(rt, o))), 16), true
 }
 
 // ktpName is the __name of a class descriptor.
@@ -7308,6 +7354,10 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 		return 1237
 	case jsNullT:
 		return 0
+	case jsUndefT:
+		// Unit is an object, not null: its identity hash stands in as the class
+		// name's, like every class without structural equality (see the tail).
+		return int64(ktStrHash(rt, "kotlin.Unit"))
 	case jsJFlo:
 		// java.lang.Double.hashCode of a Double and java.lang.Float.hashCode of a
 		// Float, not the truncated value - see ktFloHash.
@@ -7387,6 +7437,14 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 		// A user class that declares hashCode (a data class does) answers for itself.
 		if mth, found := ktpFindMember(t, "hashCode"); found {
 			return int64(int32(rt.toNumber(rt.call(mth, jsUndef, []interface{}{t}))))
+		}
+		// Any other class instance stands in for the JVM's identity hash with
+		// String.hashCode of its class name; Any() itself answers 1. Twin of kAnyHash
+		// in kotlin-interpreter.abnf and emitAnyHashFunc in kotlin-to-llvm-ir.abnf.
+		if cls, _ := t.props["__class"].(*jsObject); cls != nil && cls != ktAnyDesc() {
+			if n, ok := cls.props["__name"].(string); ok {
+				return int64(ktStrHash(rt, n))
+			}
 		}
 	}
 	return 1
@@ -10352,6 +10410,10 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		})
 	case "Math":
 		return ktJavaMath(rt)
+	case "Integer", "java.lang.Integer":
+		return ktJavaInt(rt, 32)
+	case "java.lang.Long":
+		return ktJavaInt(rt, 64)
 	case "Delegates":
 		// kotlin.properties.Delegates: the three standard property delegates. Each
 		// answers a box js_ktdget / js_ktdset drive (see ktDelegKind).
@@ -10445,6 +10507,12 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 				return jsUndef
 			}
 			return rt.ktCall(f)
+		})
+	case "synchronized":
+		// kotlin.synchronized(lock) { }: one thread runs here, so holding the monitor
+		// is running the block, and its value is the block's.
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktCall(argAt(args, 1))
 		})
 	case "repeat":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -11383,6 +11451,21 @@ func ktArrJvmClass(a *jsArray) string {
 	return ktJvmListClass(a.kind, len(a.elems))
 }
 
+// ktArrKeepClass gives an Array's copy (copyOf, plus, sortedArray, ...) the
+// receiver's own runtime class, as java.util.Arrays.copyOf makes it, so an explicit
+// element type its builder fixed carries over. Twin of kKindOut in
+// kotlin-interpreter.abnf and ktArrKeepClass in languages/lib/kotlin-rt.metajs.
+func ktArrKeepClass(src, out *jsArray, name string) {
+	if src.kind != ktArrArray || out.kind != ktArrArray || name == "toTypedArray" {
+		return
+	}
+	if p, ok := src.props.(*jsObject); ok {
+		if jc, isStr := p.props["__jc"].(string); isStr {
+			ktArrClassed(out, jc)
+		}
+	}
+}
+
 // ktArrClassed answers a fresh list as a JVM class of its own (a subList, an
 // asReversed); jc "" leaves it an ArrayList.
 func ktArrClassed(a *jsArray, jc string) *jsArray {
@@ -11938,6 +12021,7 @@ type ktRefInfo struct {
 	bound bool
 	ctor  bool        // ::Box - a constructor reference
 	tname string      // the TYPE the base named, for an unbound reference
+	cls   *jsObject   // that type's descriptor, when the program declares it
 	ext   interface{} // the EXTENSIONS of that name as [type, closure, ...] (emitRefValue)
 }
 
