@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1114** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1116** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -102,15 +102,13 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1111 kotlin: MutableMap putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll value; shuffle(Random); view and iterator classes · P3 · KT · IN PROGRESS (KT worker, round 32) [V]
+### T-1115 kotlin: MutableMap compute/computeIfPresent/replace; asList class; asReversed live view; buildList subList writes · P3 · KT · OPEN [V]
 
-Oracle: kotlinc 2.2.21. All three engines are wrong, and all of these predate r31:
-- `mutableMapOf(..).putIfAbsent`, `computeIfAbsent` and `merge` abort with "unknown Map method" ("unknown dict method" in llvm.Run). kotlinc gives 1 / null / 7 / 6 for the r31 worker's probe; re-derive it.
-- `m.putAll(mapOf())` returns the map instead of kotlin.Unit.
-- Two-argument `m.remove(k, v)` must return a Boolean (false when there is no match). Ours returns null; the interpreter returns 1 for `remove("a", 2)`.
-- `MutableList.shuffle(Random(seed))` and `List.shuffled(Random(seed))` fail with "unknown list method". Use the same Random algorithm as the existing Random(seed) support, so seeded output matches kotlinc.
-- Class names: `asReversed()` is kotlin.collections.ReversedListReadOnly (ReversedList for a mutable list); `buildList{..}.subList` is ListBuilder$BuilderSubList; `buildSet{}.iterator().javaClass.name` is MapBuilder$KeysItr (ours crashes with "property .name of null").
-- Writing through a view of a sealed builder map, such as `(bm.keys as MutableSet).remove(1)`, must throw UnsupportedOperationException (message null). Ours mutates the map.
+Oracle: kotlinc 2.2.21.
+- `mutableMapOf("a" to 1).compute("a") { _, v -> (v ?: 0) + 1 }` aborts in every engine with "unknown Map method: compute"; kotlinc gives 2. computeIfPresent and replace (both forms, incl. replace(k, old, new) → Boolean) are missing too. Follow java.util.Map's defaults; a null result removes the key.
+- `arrayOf(1, 2).asList().javaClass.name` must be java.util.Arrays$ArrayList, and the list must write through to the array (`set` changes the array).
+- `asReversed()` must be a live view: `val rv = ml.asReversed(); ml.add(4); println(rv)` prints [4, 3, 2, 1]. Ours makes a copy, [3, 2, 1].
+- A sealed buildList's subList is a mutable copy, so writes through it do not throw as BuilderSubList's do. Probe this first; it comes from reading the code.
 
 # GO — Go  (oracle: `go run`)
 
@@ -131,16 +129,12 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1109 php: user-function argument TypeError location/trace; callable in unions, return types, variadics · P3 · PHP · IN PROGRESS (PHP worker, round 49) [V]
+### T-1114 php: return-type TypeError location; type-string order for callable/iterable/static; arrow-fn return deprecations · P3 · PHP · OPEN [V]
 
-Spec: zend_verify_arg_error (Zend/zend_execute.c) and zend_verify_callable / zend_verify_return_type.
-- An argument TypeError on a user function: getLine()/getFile() must give the function's declaration line, not the caller's. The uncaught message must add ", called in F on line N" as now, plus the declaration site. The trace must show the real argument (`h(Array)`, not `h(NULL)`). Repros: scratchpad/PHP48/ti.php and ti2.php.
-- `callable` inside a union (`callable|string`), a `callable` return type, and variadic `callable ...$cs` parameters still get only the shape test. They need the zend_is_callable check, and the deprecations, that plain `callable` parameters now get.
-
-### T-1110 php: microtime() missing; native uncaught "Call to undefined function" prints "in :0" · P3 · PHP · IN PROGRESS (PHP worker, round 49) [V]
-
-- microtime() is not implemented. Add microtime(bool $as_float = false): the string form is "0.12345600 1700000000" (msec part with 8 decimals, then a space and the seconds); with true it returns a float. Tests may only check the shape, because the value changes from run to run.
-- Native only: an uncaught "Call to undefined function f()" prints "in :0" / "Unknown on line 0", while the interpreter shows the file and line. Give the native call site the same location the interpreter uses.
+Spec: php-src PHP-8.4, Zend/zend_execute.c (zend_verify_return_error) and zend_compile.c (zend_type_to_string).
+- "Return value must be of type …" must report the line of the return statement. All engines report the caller's line, so each return needs its own site store.
+- phsTypeText/phpTypeText treat callable, iterable and static as class names, which puts type strings in the wrong order and case. php-src prints "Foo|callable" where we print "callable|Foo". Follow zend_type_to_string's order: class names first, then the builtin types in its fixed order.
+- The callable deprecations on a return statement are not raised for arrow functions or by-reference returns.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1171,6 +1165,9 @@ T-1107 bash: attribute change on a readonly variable; circular-nameref store; de
 T-1108 bash: bad-substitution message names the whole word; `]` from an expansion inside a subscript; stray `]]` order — DONE r35 (e615484e): bad-substitution names the whole word/dq string, ] from expansions in subscripts, stray ]] order, compiler $() local leak; master-probed
 T-1105 ruby: split tests/ruby-test-full.rb, which is ~0.4% below the -frozen 100M step brake — DONE r51 (1cbfc396): sections 97-121 moved into ruby-test-full.3.rb (wired into --full, native-full, README); main file now passes at 90M steps; counts unchanged
 T-1104 ruby: interpreter `break` from a block is caught by the nearest call with a block literal (untagged) — DONE r51 (2f9bacc6): break ends its block's home call in all engines (tagged home records/tokens), dead home -> LocalJumpError, lambda/->/define_method breaks; master-probed vs ruby 2.6; paired bench -0.04%
+T-1109 php: user-function argument TypeError location/trace; callable in unions, return types, variadics — DONE r49 (2a328aac): argument TypeError/ArgumentCountError at the declaration line (incl. generators) with 'and defined', trace shows passed args, callable in unions/return types/variadics via zend_is_callable; master-probed
+T-1110 php: microtime() missing; native uncaught "Call to undefined function" prints "in :0" — DONE r49 (66c9347e): microtime() per microtime.c, undefined-function Error at its call in run and native; plus e8b64ac3 warnings test exits 0/1 (raw fail count collided with timeout's 124 in --cross)
+T-1111 kotlin: MutableMap putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll value; shuffle(Random); view and iterator classes — DONE r32 (a87b38bb): Map putIfAbsent/computeIfAbsent/merge/remove(k,v)/putAll per java.util.Map, kotlin's real XorWowRandom (seeded output now matches kotlinc; old xorshift never did), shuffle/shuffled, view/iterator class names, sealed-view writes throw; master-probed
 
 # Settled — do not re-open
 
