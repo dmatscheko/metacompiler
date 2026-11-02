@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1125 kotlin: program-class toString/hashCode agreement; synchronized; Integer.toHexString; data-class hashCode with Unit; printing a function value · P3 · KT · OPEN [V]
+### T-1125 kotlin: program-class toString/hashCode agreement; synchronized; Integer.toHexString; data-class hashCode with Unit; printing a function value · P3 · KT · IN PROGRESS (KT worker, round 37) [V]
 
 Oracle: kotlinc 2.2.21.
 - In every program class, toString and hashCode must agree: for `class Foo`, `f.toString() == "Foo@" + f.hashCode().toString(16)` is true. Ours prints `Foo@1` but hashes the class name to 70822, in all engines. Pick one per-object identity number and use it in both.
