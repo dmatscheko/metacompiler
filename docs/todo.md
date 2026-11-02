@@ -132,7 +132,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1172 bash: -a declarations through namerefs to unset globals, second operand after a circular nameref became an array · P3 · SH · OPEN [V]
+### T-1172 bash: -a declarations through namerefs to unset globals, second operand after a circular nameref became an array · P3 · SH · IN PROGRESS (SH worker, round 54) [V]
 Found while closing T-1170; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Compiler only (pre-existing): `f() { local -n w=$1; declare -a w=x; echo "s $?"; declare -p w; }; f g; declare -p g` — oracle and interpreter "s 0", `declare -n w="g"`, stderr "declare: g: not found"; run/native "s 1", `declare -an w=([0]="g")`.
 - Both engines: `f() { local -n w=w; declare -a w=x w=3; echo "s $?"; declare -p w; }; f` — oracle status 1, `declare -an w=()`, plus "declare: `3': invalid variable name for name reference" after the freed-memory line; ours status 0, `declare -a w=([0]="3")`. Rule: a value given to an array nameref is checked as a nameref name.
