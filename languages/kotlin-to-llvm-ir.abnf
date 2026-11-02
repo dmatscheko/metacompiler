@@ -3007,8 +3007,10 @@ KwContract  = "contract" KwEnd ;
     // The scope the top-level declarations are bound in carries __kttop when any of
     // them is shadowed (ktGlobShadow): js_ktrecvof stops its search for a local there.
     function emitTopMark(b) {
-        for (var i = 0; i < topDeclList.length; i++) {
-            if (ktGlobShadow(topDeclList[i])) {
+        var names = topDeclList.slice()
+        for (var i = 0; i < topClassItems.length; i++) { names.push(topClassItems[i].name) }
+        for (var i = 0; i < names.length; i++) {
+            if (ktGlobShadow(names[i])) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "__kttop"), hTrue])
                 return
             }
@@ -3088,13 +3090,13 @@ KwContract  = "contract" KwEnd ;
     }
     // KOTLIN'S SCOPE TOWER PUTS THE IMPLICIT RECEIVERS BETWEEN THE LOCALS AND THE
     // TOP LEVEL: an unqualified `f()` or `p` that a receiver's class declares is that
-    // member even when a top-level `fun f` / `val p` exists. Only a name that is both
+    // member even when a top-level `fun f` / `val p` / type exists. Only a name that is both
     // declared at top level and declared as a member somewhere pays for the run-time
     // test (js_ktrecvof, which names the receiver or answers undefined); every other
     // site is emitted as before. Twin of core.globalHit in kotlin-interpreter.abnf.
     function ktGlobShadow(name) {
-        return (topFunNames["$" + name] == true || topValNames["$" + name] == true)
-            && (classMethodNames["$" + name] == true || classPropNames["$" + name] == true)
+        return (classMethodNames["$" + name] == true || classPropNames["$" + name] == true)
+            && ktTopName(name)
     }
     // A bare read / write / call of such a name: the receiver arm (rv is the receiver
     // js_ktrecvof found) or the ordinary one, merged. fitV (an i1, or null) must
@@ -8277,6 +8279,7 @@ KwContract  = "contract" KwEnd ;
         if (top == null) { return null }
         return curBinPrefix == "" ? top : curBinPrefix + "$" + top
     }
+    var topTypeNames = {}   // The names of topClassItems, for ktTopType.
     function markTopType(t) {
         if (declTick > prevTick) { topClassPending = declMark }
         return t
@@ -8286,6 +8289,7 @@ KwContract  = "contract" KwEnd ;
         if (topClassPending != null) {
             topClassItems.push({idx: topItemIndex, name: topClassPending.name,
                                 supers: topClassPending.supers})
+            topTypeNames["$" + topClassPending.name] = true
             topClassPending = null
         }
         topItemIndex++
@@ -8366,10 +8370,7 @@ KwContract  = "contract" KwEnd ;
     function ktTopName(n) {
         return topFunNames["$" + n] == true || topValNames["$" + n] == true || ktTopType(n)
     }
-    function ktTopType(n) {
-        for (var i = 0; i < topClassItems.length; i++) { if (topClassItems[i].name == n) { return true } }
-        return false
-    }
+    function ktTopType(n) { return topTypeNames["$" + n] == true }
     // The factory the enclosing descriptor exposes under the nested class's name. It is
     // an ordinary callable property, so `Outer.Nested(a)` (memberCall on a descriptor
     // calls the property directly) and `outer.Inner(a)` (memberCall on an INSTANCE

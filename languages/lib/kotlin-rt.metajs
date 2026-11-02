@@ -10823,6 +10823,12 @@ function ktGlobalFn(name) {
         }
     }
     if (ktmIsName(name)) { return k4MathFn(name) }
+    // kotlin.io.println / print and the kotlin.text.Regex constructor, reached
+    // through a package handle (ktPkgMember). Twin of the same cases in
+    // abnf/jsrtkotlin.go.
+    if (name == "kotlin.io.println") { return js_ktprint() }
+    if (name == "kotlin.io.print") { return js_ktwrite() }
+    if (name == "kotlin.text.Regex") { return function (pat, opts) { return ktRxNew(pat, opts) } }
     return undefined
 }
 
@@ -11001,6 +11007,9 @@ function ktSmcall(recv, name, args) {
     if (ktIsPkg(rv)) {
         var pf = ktPkgMember(rv["__pkg"], name)
         if (!k4Fn(pf)) { fail("not a function: " + rv["__pkg"] + "." + name) }
+        // A no-argument printer call passes "", as the emitter does for a bare
+        // `println()`: the printer itself cannot count its arguments.
+        if (as.length == 0 && (name == "println" || name == "print")) { return pf("") }
         return pf.apply(undefined, as)
     }
 

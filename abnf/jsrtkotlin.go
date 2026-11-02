@@ -1855,16 +1855,7 @@ func init() {
 		// on standard error. The writer is read at each call, as -pipe swaps
 		// outWriter.
 		ktPrinter := func(name, end string, toErr bool) func(a []uint64) uint64 {
-			return func(a []uint64) uint64 {
-				return rt.wrap(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-					w := outWriter
-					if toErr {
-						w = warnWriter
-					}
-					fmt.Fprint(w, wtf8Clean(ktpLine(rt, args)+end))
-					return jsUndef
-				}))
-			}
+			return func(a []uint64) uint64 { return rt.wrap(ktPrintFn(name, end, toErr)) }
 		}
 		m["js_ktprint"] = ktPrinter("println", "\n", false)
 		m["js_ktwrite"] = ktPrinter("print", "", false)
@@ -10866,8 +10857,31 @@ func ktEmptyOne(kind string) interface{} {
 const ktMapBuilderClass = "kotlin.collections.builders.MapBuilder"
 
 // ktGlobalFn is the VALUE of one global builder name.
+// ktPrintFn is Kotlin's println / print host function (js_ktprint and its kin).
+func ktPrintFn(name, end string, toErr bool) *hostFunc {
+	return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		w := outWriter
+		if toErr {
+			w = warnWriter
+		}
+		fmt.Fprint(w, wtf8Clean(ktpLine(rt, args)+end))
+		return jsUndef
+	})
+}
+
 func ktGlobalFn(rt *jsrt, name string) interface{} {
 	switch name {
+	// kotlin.io.println / print and the kotlin.text.Regex constructor, reached
+	// through a package handle (ktPkgMember): the bare names are program-scope
+	// bindings and an emitter form, which a package handle cannot reach.
+	case "kotlin.io.println":
+		return ktPrintFn("println", "\n", false)
+	case "kotlin.io.print":
+		return ktPrintFn("print", "", false)
+	case "kotlin.text.Regex":
+		return jsHostFunc("Regex", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktRxNew(argAt(args, 0), argAt(args, 1))
+		})
 	case "Any":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			o := newJSObject()

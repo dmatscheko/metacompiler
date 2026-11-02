@@ -8586,6 +8586,33 @@ fun s193() {
         H193().run() == "h1,h2193" && p193(J193("q")) == "qp")
 }
 
+// ===== SECTION 194: a member property hides a top-level type of its name; kotlin.io =====
+// The implicit receiver ranks above the top level, so inside a method a property named
+// like a top-level object, enum class or class is that property. The qualified
+// kotlin.io.println / print and kotlin.text.Regex are the stdlib's.
+class Box194(val tag: String)
+object obj194 { val tag = "obj" }
+enum class Mode194 { A; val tag get() = "enum" + name }
+class Kls194 { companion object { val tag = "comp" } }
+class Holder194 {
+    val obj194 = Box194("prop")
+    var Mode194 = Box194("mprop")
+    val Kls194 = Box194("kprop")
+    fun run(): String {
+        val a = obj194.tag + Mode194.tag + Kls194.tag
+        Mode194 = Box194("reset")
+        return a + Mode194.tag
+    }
+}
+fun s194() {
+    check("topobj194a", obj194.tag == "obj" && Mode194.A.tag == "enumA" && Kls194.tag == "comp" &&
+        Holder194().run() == "propmpropkpropreset" && obj194.tag == "obj")
+    kotlin.io.print("io194:")
+    kotlin.io.println()
+    check("kio194b", kotlin.io.println("x194") == Unit && kotlin.text.Regex("a+").matches("aa") &&
+        kotlin.text.Regex("B", RegexOption.IGNORE_CASE).matches("b"))
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -8776,6 +8803,7 @@ fun main() {
     s191() // SECTION-CALL 191
     s192() // SECTION-CALL 192
     s193() // SECTION-CALL 193
+    s194() // SECTION-CALL 194
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
