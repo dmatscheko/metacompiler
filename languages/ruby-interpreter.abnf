@@ -16690,7 +16690,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binOps["*"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return mkRStr(strRepeat(rsText(l), toF(r))) } return rbin("*", l, r) }
     binOps["/"]  = function(l, r) { return rbin("/", l, r) }
     // String#% formats and Range#% is Range#step. Twins: js_rmod in
-    // abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    // abnf/jsrtruby.go, rbNonNumBin in lib/ruby-rt.metajs.
     binOps["%"]  = function(l, r) {
         if (typeof l == "string" || isRStr(l)) { return mkRStr(rformat(rsText(l), r, "%")) }
         if (isRange(l)) { return rangeStep(l, "%", [r], null) }

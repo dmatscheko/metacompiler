@@ -9935,11 +9935,7 @@ function js_radd(l, r) { return rbBin("+", l, r) }
 function js_rsub(l, r) { return rbBin("-", l, r) }
 function js_rmul(l, r) { return rbBin("*", l, r) }
 function js_rdiv(l, r) { return rbBin("/", l, r) }
-// Range#% is Range#step.
-function js_rmod(l, r) {
-    if (rbIsRange(l)) { return rbRangeStep(l, "%", [r]) }
-    return rbBin("%", l, r)
-}
+function js_rmod(l, r) { return rbBin("%", l, r) }
 function js_rpow(l, r) { return rbBin("**", l, r) }
 
 // & | ^ are the NON-short-circuit boolean operators when the left side is true,
@@ -11088,6 +11084,8 @@ function rbNonNumBin(op, l, r) {
     }
     if (typeof r == "object" && rtTag(r, "__rstr")) { return rbBin(op, l, r["__s"]) }
     if ((op == ">>" || op == "<<") && rbIsFn(l)) { return rbProcCompose(l, r, op == ">>") }
+    // Range#% is Range#step.
+    if (op == "%" && rbIsRange(l)) { return rbRangeStep(l, "%", [r]) }
     rbNumOperandErr(op, l, r)
     return null
 }
