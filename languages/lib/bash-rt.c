@@ -1373,6 +1373,41 @@ char *rt_arr_keyar(char *nm, char *sub) {
     return rt_arr_ikey(nm, ar_subeval(sub));
 }
 
+/* A subscript's text with rt_arsubq's quoting of [ and ] taken off (all: of
+ * every character, an associative array's key). Twin of bashArUnEsc in
+ * lib/bash-deparse.js. */
+char *ar_unesc(char *s, int all)
+{
+    int len = rt_strlen(s);
+    char *dst = rt_bump(len + 1);
+    int i = 0, o = 0;
+    while (i < len) {
+        if (s[i] == 92 && i + 1 < len && (all != 0 || s[i + 1] == 91 || s[i + 1] == 93)) i = i + 1;
+        else if (s[i] == 92 && i + 1 < len) {
+            dst[o] = s[i];
+            o = o + 1;
+            i = i + 1;
+        }
+        dst[o] = s[i];
+        o = o + 1;
+        i = i + 1;
+    }
+    dst[o] = 0;
+    return dst;
+}
+
+/* bash reads the token after an operand before it evaluates the operand: one
+ * that can start no token is the error then, 1. Twin of arNextBad. */
+int ar_nextbad(void)
+{
+    int q = ar_p;
+    while (q < ar_len && (ar_s[q] == 32 || ar_s[q] == 9 || ar_s[q] == 10)) q = q + 1;
+    if (q >= ar_len || ar_tokstart((int)(unsigned char)ar_s[q]) != 0) return 0;
+    ar_p = q;
+    ar_err("arithmetic syntax error: invalid arithmetic operator");
+    return 1;
+}
+
 /* [ EXPR ] after a name, or 0 when the name has no subscript. An associative
  * array's subscript is the literal text up to the "]". An empty one, `b[]`, is
  * ar_nosub, which names no element: reading it and storing to it are bash's
@@ -1394,10 +1429,10 @@ char *ar_subscript(char *nm)
     }
     if (rt_isassoc(nm) != 0) {
         int s0 = ar_p;
-        while (ar_p < ar_len && ar_at(0) != 93) ar_p = ar_p + 1;
+        while (ar_p < ar_len && ar_at(0) != 93) ar_p = ar_p + (ar_at(0) == 92 ? 2 : 1);
         if (ar_at(0) != 93) { ar_err("missing `]'"); return 0; }
         ar_p = ar_p + 1;
-        return rt_substr(ar_s, s0, ar_p - s0 - 1);
+        return ar_unesc(rt_substr(ar_s, s0, ar_p - s0 - 1), 1);
     }
     /* An indexed array's subscript runs to the matching "]" and is an expression of
      * its own, whose errors name it alone; without its "]" it is "bad array
@@ -1405,8 +1440,9 @@ char *ar_subscript(char *nm)
     n0 = ar_p - 1 - rt_strlen(nm);
     s1 = ar_p;
     while (ar_p < ar_len && !(ar_at(0) == 93 && depth == 0)) {
-        if (ar_at(0) == 91) depth = depth + 1;
-        if (ar_at(0) == 93) depth = depth - 1;
+        if (ar_at(0) == 92) ar_p = ar_p + 1;
+        else if (ar_at(0) == 91) depth = depth + 1;
+        else if (ar_at(0) == 93) depth = depth - 1;
         ar_p = ar_p + 1;
     }
     if (ar_p >= ar_len) { ar_p = n0; ar_err("bad array subscript"); return 0; }
@@ -1414,6 +1450,8 @@ char *ar_subscript(char *nm)
     ar_p = ar_p + 1;
     /* A skipped operand's subscript is not evaluated at all. */
     if (ar_noeval > 0) return "0";
+    if (ar_nextbad() != 0) return 0;
+    sub = ar_unesc(sub, 0);
     /* The subscript text is expanded again, as in double quotes: z='a[$x]' makes
      * $(( z )) read a[1] when x=1, and a quote character stays in the text. Twin of
      * arSubscript. */
@@ -1500,6 +1538,7 @@ long ar_primary(void)
         if (ar_bad != 0) return 0;
         ar_ws();
         if (ar_at(0) == 61 && ar_at(1) != 61) return 0;
+        if (ar_nextbad() != 0) return 0;
         v = ar_value(nm, key);
         ar_ws();
         if ((ar_at(0) == 43 && ar_at(1) == 43) || (ar_at(0) == 45 && ar_at(1) == 45)) {
@@ -1716,8 +1755,9 @@ long ar_assign(void)
         while (q < ar_len && ar_idch((int)(unsigned char)ar_s[q], 0) != 0) q = q + 1;
         if (q < ar_len && ar_s[q] == 91) {
             while (q < ar_len) {
-                if (ar_s[q] == 91) depth = depth + 1;
-                if (ar_s[q] == 93) { depth = depth - 1; if (depth == 0) break; }
+                if (ar_s[q] == 92) q = q + 1;
+                else if (ar_s[q] == 91) depth = depth + 1;
+                else if (ar_s[q] == 93) { depth = depth - 1; if (depth == 0) break; }
                 q = q + 1;
             }
             q = q + 1;
@@ -7108,16 +7148,16 @@ char *rt_globescape(char *s) {
 }
 
 /* i8* rt_arsubq(i8* s): an expansion's value in a subscript of an arithmetic text
- * that holds an expansion, with a backslash before each \ $ ` " and ', so the
- * subscript's own expansion does not expand it again. Twin of arSubEsc in
- * bash-interpreter.abnf. */
+ * that holds an expansion, with a backslash before each \ $ ` " ' [ and ], so the
+ * subscript's own expansion does not expand it again and its brackets neither
+ * nest nor end the subscript. Twin of bashArSubEsc in lib/bash-deparse.js. */
 char *rt_arsubq(char *s) {
     int len = rt_strlen(s);
     char *dst = rt_bump(len * 2 + 1);
     int i = 0, o = 0;
     while (i < len) {
         int ch = (int)(unsigned char)s[i];
-        if (ch == 92 || ch == 36 || ch == 96 || ch == 34 || ch == 39) {
+        if (ch == 92 || ch == 36 || ch == 96 || ch == 34 || ch == 39 || ch == 91 || ch == 93) {
             dst[o] = 92;
             o = o + 1;
         }
@@ -7667,6 +7707,12 @@ int rt_ss_restore(int u)
     frame_n = ss_afn[d];
     argv_floor = ss_afl[d];
     if (a_floor > ss_floor[d]) a_floor = ss_floor[d];
+    /* The subshell's own `local`s go with it: the snapshot already holds what
+     * they saved, and a function return must not restore them over later stores. */
+    while (ls_top > ss_lstop[d]) {
+        ls_top = ls_top - 1;
+        las_top = las_top - ls_acnt[ls_top];
+    }
     p = ss_nv[d];
     arr_rows = 0;
     r = 0;

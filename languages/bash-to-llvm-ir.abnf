@@ -358,7 +358,7 @@ HereDoc     <~~ push(mkHereDoc(up.in, up.pos)) ~~> = HdScan :whitespace(Whitespa
 // The body of an unquoted here-document, entered through c.parseFrom from mkHereDoc (so
 // -verify reports it unreachable; the "\x01" is prepended there).
 // Twin of HereBodyW in bash-interpreter.abnf; see there.
-HereBodyW   <~~ push(mkWord(takeAll())) ~~> = "\x01" :whitespace() HereSegs ;
+HereBodyW   <~~ badClaim(up.start + 1, up.pos, true); push(mkWord(takeAll())) ~~> = "\x01" :whitespace() HereSegs ;
 HereSegs    = { HereSeg } ;
 HereSeg     = DqExpSeg | DqEsc | HereLit ;
 HereLit     <~~ push(makeConst(up.in)) ~~> = !@+"$\\`" ;
@@ -428,7 +428,7 @@ SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
 DqSeg       <~~ badClaim(up.start, up.pos, false); push(mkDqWord(takeAll())) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 // $"..." : the double-quoted string in the C locale. Twin of LocSeg in bash-interpreter.abnf.
-LocSeg      <~~ push(mkDqWord(takeAll())) ~~>
+LocSeg      <~~ badClaim(up.start, up.pos, false); push(mkDqWord(takeAll())) ~~>
             = '$"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
             = !@+"\"$\\`" ;
@@ -547,12 +547,12 @@ PeBody      = PeLen | PeIndForm | PeCore | PeLenBad | PeBad ;
 PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
 // `${#x-default}` and `${#a[0]/1/xxx}` PARSE in bash and then fail at run time with
 // "bad substitution"; this is the alternative that reaches that documented behaviour.
-PeLenBad    <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = "#" PeCore ;
+PeLenBad    <~~ push(badRec(up.start, arSrc(up.start, up.pos), false)) ~~> = "#" PeCore ;
 // Any other text between the braces parses as well and is the same run-time error
 // (`${(m)foo}`, a zsh idiom): the message, and the command line is abandoned with status 1.
 // Not after a blank or "|", which open a function substitution (FunSub) in bash, so one
 // without its closing "}" is the syntax error it is there.
-PeBad       <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = PeBadFirst { PeBadCh } ;
+PeBad       <~~ push(badRec(up.start, arSrc(up.start, up.pos), false)) ~~> = PeBadFirst { PeBadCh } ;
 PeBadFirst  = !@+"} \t\n|" ;
 PeBadCh     = !@+"}" ;
 PeIndForm   <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | PeCore ) ;
@@ -683,9 +683,9 @@ DqDollarBrace <~~ push(mkParamExp(dqIdxItems(takeAll()))) ~~>
             = "${" :whitespace() DqPeBody "}" ;
 DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
 // In double quotes, a bad ${NAME[...} whose "[" is never closed is reported with the whole
-// word it is in (dqBad, badClaim): bash 5.3, echo x"${m[[]-v}"y is "bad substitution: no
+// word it is in (badRec, badClaim): bash 5.3, echo x"${m[[]-v}"y is "bad substitution: no
 // closing `}' in x"${m[[]-v}"y".
-DqPeBad     <~~ push(dqBad(up.start, arSrc(up.start, up.pos))) ~~> = PeBadFirst { PeBadCh } ;
+DqPeBad     <~~ push(badRec(up.start, arSrc(up.start, up.pos), true)) ~~> = PeBadFirst { PeBadCh } ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
 DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqAnsiOpForm | DqSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
@@ -2223,6 +2223,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             retInSub = true
             var undoBase = attrUndo.length
             subDepth = subDepth + 1
+            subEnter()
             var svq = uqStarEmit
             uqStarEmit = false
             var ft = fnTouchBegin(b)
@@ -2231,6 +2232,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             lnCtx = svLn
             emitLine = svLine
             subDepth = subDepth - 1
+            subIds.pop()
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
             loopStack = savedLoops
@@ -2398,7 +2400,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
         var badsub = null
-        var badNc = null
+        var badRc = null
         var words = []     // word objects {fn, c}
         var ariths = []    // bare arithmetic thunks (the ${v:off:len} offsets)
         var wordT = null
@@ -2415,7 +2417,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.rtNm != undefined) { rtNm = true }
             else if (it.fn != undefined) { words.push(it); wordT = it }
             else if (it.lenp != undefined) { lenp = true }
-            else if (it.badsub != undefined) { badsub = it.badsub; badNc = it.nc }
+            else if (it.badsub != undefined) { badsub = it.badsub; badRc = it.rec }
             else if (it.indp != undefined) { indp = true }
             else if (it.xf != undefined) { xf = it.xf }
             else if (it.pfx != undefined) { pfx = it.pfx }
@@ -2437,7 +2439,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // Only the first error of a command is reported.
                 var first = curF.NewBlock(""), done = curF.NewBlock("")
                 b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewOr(b.NewLoad(i32, gAbort), b.NewLoad(i32, gArithErr)), zero), first, done)
-                emitDiag(first, gepStr(first, (badNc != null) ? badNcMsg(badNc()) : badMsg))
+                emitDiag(first, gepStr(first, badSubMsg(badRc(), badsub)))
                 first.NewBr(done)
                 done.NewStore(one, gArithErr)
                 return {b: done, v: emptyPtr(done)}
@@ -3537,14 +3539,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arSqPart(at, q, raw) {
         var r = {at: at, strip: false}
         arSqRecs.push(r)
-        return {c: undefined, fn: function(b) { return ansiWord(r.strip ? arSubEsc(raw) : q).fn(b) }}
+        return {c: undefined, fn: function(b) { return ansiWord(r.strip ? bashArSubEsc(raw) : q).fn(b) }}
     }
     function arSqAnsi(at, v) { return arSqPart(at, bashSq(v), v) }
     // An expansion's or a quoted part's value in such a subscript is not expanded
     // again: bash backslash-quotes its \ $ ` " and ', and the subscript's own expansion,
     // as in double quotes, removes each of those backslashes but the one before a '.
     // bash 5.3, x=1 and d='$x': $(( a[$d] )) is an error at "$x", $(( a["'1'"] + $x ))
-    // one at "\'1\'". Twin of arSubProt in bash-interpreter.abnf; rt_arsubq is arSubEsc.
+    // one at "\'1\'". Twin of arSubProt in bash-interpreter.abnf; rt_arsubq is bashArSubEsc.
     function arSubProt(at, sg0) {
         var r = {at: at, strip: false}
         arSqRecs.push(r)
@@ -3552,20 +3554,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (sg.sp != undefined) { sg = sg.sp }
         return {c: undefined, fn: function(b) {
             if (!r.strip) { return evalWord(b, sg) }
-            if (sg.c != undefined) { return makeConst(arSubEsc(sg.c)).fn(b) }
+            if (sg.c != undefined) { return makeConst(bashArSubEsc(sg.c)).fn(b) }
             var x = evalWord(b, sg)
             return {b: x.b, v: x.b.NewCall(rtArSubQ, x.v)}
         }}
-    }
-    function arSubEsc(s) {
-        var out = ""
-        var i
-        for (i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
-            if (ch == "\\" || ch == "$" || ch == "`" || ch == "\"" || ch == "'") { out = out + "\\" }
-            out = out + ch
-        }
-        return out
     }
     function arSqClaim(from, to) {
         var t = arSrc(from, to)
@@ -3582,14 +3574,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         arSqRecs = keep
     }
-    // Twin of badRecs / dqBad / badClaim in bash-interpreter.abnf.
+    // Twin of badRecs / badRec / badClaim in bash-interpreter.abnf.
     var badRecs = []
-    function dqBad(at, t) {
-        if (!bashSubUnclosed(t)) { return {badsub: t} }
-        var r = {at: at, dq: "", word: ""}
+    function badRec(at, t, dq) {
+        var r = {at: at, dq: "", word: "", nc: dq && bashSubUnclosed(t)}
         badRecs.push(r)
         // A function, as the item itself may be copied before the word claims it.
-        return {badsub: t, nc: function() { return r }}
+        return {badsub: t, rec: function() { return r }}
     }
     function badClaim(from, to, word) {
         var i
@@ -3597,11 +3588,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = badRecs[i]
             if (r.at >= from && r.at < to) {
                 if (word && r.word == "") { r.word = arSrc(from, to) }
-                if (!word && r.dq == "") { r.dq = arSrc(from, to) }
+                if (!word && r.dq == "" && r.word == "") { r.dq = arSrc(from, to) }
             }
         }
     }
-    function badNcMsg(r) { return "bad substitution: no closing `}' in " + badShow((r.word != "") ? r.word : r.dq) + "\n" }
+    // A bad ${...} t names the double-quoted string it is in, else its word, as bash prints
+    // them (bashBadSubWord); in double quotes one whose "[" is never closed names the word.
+    function badSubMsg(r, t) {
+        if (r.nc) { return "bad substitution: no closing `}' in " + badShow((r.word != "") ? r.word : r.dq) + "\n" }
+        var w = bashBadSubWord(r.dq, r.word)
+        if (w == "") { return "${" + t + "}: bad substitution\n" }
+        return ((r.dq != "") ? bashDqBody(badShow(w)) : badShow(w)) + ": bad substitution\n"
+    }
     // The word as bash shows it there: a $'...' that is a quote, outside double quotes or
     // inside a ${...}, is decoded, and single-quoted again outside double quotes (bash 5.3
     // shows x"${m[$'x'[]-v}"y as x"${m[x[]-v}"y). Twin of badShow in bash-interpreter.abnf.
@@ -4374,7 +4372,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (attrUndo[u].name == nm) { ge = attrUndo[u] }
             }
             var sv = {name: nm, i: attrOn(intVars, nm), u: attrOn(upVars, nm), l: attrOn(loVars, nm), r: attrOn(roVars, nm), n: attrOn(refVars, nm)}
-            if (ge != null && hasOwn(curFrame.locs, "$" + nm)) {
+            if (ge != null && locOwn("$" + nm)) {
                 attrUndo.push(ge)
                 attrUnwind(attrUndo.length - 1)
             } else { ge = null }
@@ -4406,7 +4404,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (msg != "") { emitDiag(b, gepStr(b, msg)); roFail = true; return b }
                 refChk = false
             }
-            var fresh = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset") && !hasOwn(curFrame.locs, "$" + names[j])
+            var fresh = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset") && !locOwn("$" + names[j])
             // Without -n a declaration of a nameref acts on its target, unless it is a
             // function's first local of the name. One whose target is not known here (none
             // yet, or a computed one) stays on the nameref, right for the first. Twin of
@@ -4496,7 +4494,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // function declare a function-local name (value AND attributes restored on
             // return) unless -g is given; `export` and `readonly` always act on the global.
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
-            var fresh = localize && curFrame != null && !hasOwn(curFrame.locs, "$" + names[j])
+            var fresh = localize && curFrame != null && !locOwn("$" + names[j])
             // A nameref to itself is refused outside a function, and nothing is declared
             // (bash 5.3; inside one bash only warns, which is not modelled): a literal value
             // here, a computed one when it is stored (selfRef). Twin of the same check in
@@ -4528,8 +4526,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // the global's attributes or its array: `declare -i g; f(){ local g;
                 // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
                 // one-element array. rt_push_local saves all of it for the return.
-                var lexAgain = hasOwn(curFrame.locs, key)
-                curFrame.locs[key] = true
+                var lexAgain = locOwn(key)
+                if (!lexAgain) { curFrame.locs[key] = subIds[subIds.length - 1] }
                 attrPushUndo(names[j])
                 if (!lexAgain) {
                     intVars[key] = false
@@ -5002,6 +5000,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function attrPushUndo(name) {
         attrUndo.push({name: name, i: attrOn(intVars, name), u: attrOn(upVars, name), l: attrOn(loVars, name), r: attrOn(roVars, name),
                        n: attrOn(refVars, name)})
+    }
+    // The locals a function's code declares, lexically (curFrame.locs): each with the
+    // subshell or command substitution it was declared in (0: none), which counts only
+    // while that one is being compiled, so a local of an earlier $( ) is no local after it.
+    var subSeq = 0
+    var subIds = [0]
+    function subEnter() { subSeq = subSeq + 1; subIds.push(subSeq) }
+    function locOwn(key) {
+        if (curFrame == null || !hasOwn(curFrame.locs, key)) { return false }
+        var i
+        for (i = 0; i < subIds.length; i++) { if (subIds[i] == curFrame.locs[key]) { return true } }
+        return false
     }
     function attrUnwind(base) {
         while (attrUndo.length > base) {
@@ -5530,9 +5540,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             retInSub = true
             var undoBase = attrUndo.length
             subDepth = subDepth + 1
+            subEnter()
             var ft = fnTouchBegin(b)
             var eb = bodyT(ft.body)
             subDepth = subDepth - 1
+            subIds.pop()
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
             loopStack = savedLoops
@@ -7007,7 +7019,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else if (sp0.key == null) {
                         storeVarRaw(b, sp0.name, unsetPtr(b))
                         b.NewCall(rtArrClear, gepStr(b, sp0.name))
-                        var ownLoc = curFrame != null && hasOwn(curFrame.locs, "$" + sp0.name)
+                        var ownLoc = curFrame != null && locOwn("$" + sp0.name)
                         if (ownLoc) { b.NewCall(rtUnsetX, [llvm.constant.NewInt(i32, getVarId(sp0.name)), b.NewLoad(i32, curFrame.depth)]) }
                         else { b.NewCall(rtXmark, [gepStr(b, sp0.name), zero]) }
                         // `unset` drops the attributes with the value, in bash and here.

@@ -886,9 +886,8 @@ $(s120m "$e")"
 # lands on the nameref itself, now a plain array; through a nameref to NAME[SUB] it is not
 # a valid identifier, and a subscripted read finds no variable. Every expected value is
 # bash 5.3's.
-s121m() { local l e; while IFS= read -r l; do e=${l#*line }; e=${e#*: }; printf '%s\n' "$e"; done <<< "$1"; }
 s121() {
-  local r e
+  local r e l nl=$'\n'
   r=$( (readonly s121z=1
     declare -gi s121z; echo "i=$?"; declare -gu s121z; echo "u=$?"; declare -ga s121z; echo "a=$?"
     declare -gA s121z; echo "A=$?"; declare -g +i s121z; echo "pi=$?"; declare -gix s121z; echo "ix=$?"
@@ -901,10 +900,10 @@ pi=1
 ix=1
 x=0
 declare -rx s121z="1"'
-  e=$( (readonly s121y=1 s121u=abc; declare -gl s121y; declare -gn s121y; declare -gn s121u) 2>&1); r=$(s121m "$e")
-  check sro2 "$r" "declare: s121y: readonly variable
-declare: \`1': invalid variable name for name reference
-declare: s121u: readonly variable"
+  e=$( (readonly s121y=1 s121u=abc; declare -gl s121y; declare -gn s121y; declare -gn s121u) 2>&1); l=$LINENO
+  check sro2 "$e" "$0: line $l: declare: s121y: readonly variable
+$0: line $l: declare: \`1': invalid variable name for name reference
+$0: line $l: declare: s121u: readonly variable"
   r=$( (declare -gan s121a; echo "1=$?"; declare -p s121a
     s121b=v; declare -gan s121b; echo "2=$?"; declare -p s121b
     s121c=(1); declare -gn s121c; echo "3=$?"; declare -p s121c
@@ -926,9 +925,9 @@ declare -a s121e
 declare -- s121f="1"
 7=0
 declare -a s121g'
-  e=$( (s121c=(1); declare -gn s121c; local -An s121h) 2>&1); r=$(s121m "$e")
-  check snr2 "$r" 'declare: s121c: reference variable cannot be an array
-local: s121h: reference variable cannot be an array'
+  e=$( (s121c=(1); declare -gn s121c; local -An s121h) 2>&1); l=$LINENO
+  check snr2 "$e" "$0: line $l: declare: s121c: reference variable cannot be an array
+$0: line $l: local: s121h: reference variable cannot be an array"
   r=$( (declare -gn s121p=s121q s121q=s121p; s121p[1]=4; echo "rc=$?"; declare -p s121p; s121p=5; declare -p s121p
     declare -gn s121r=s121s s121s=s121r; s121r=(x y); echo "l=$?"; declare -p s121r s121s) 2>/dev/null)
   check scr1 "$r" 'rc=0
@@ -937,20 +936,62 @@ declare -a s121p=([0]="5" [1]="4")
 l=0
 declare -a s121r=([0]="x" [1]="y")
 declare -n s121s="s121r"'
-  e=$( (declare -gn s121p=s121q s121q=s121p; s121p[1]=4) 2>&1); r=$(s121m "$e")
-  check scr2 "$r" 'warning: s121p: circular name reference
-warning: s121p: circular name reference'
+  e=$( (declare -gn s121p=s121q s121q=s121p; s121p[1]=4) 2>&1); l=$LINENO
+  check scr2 "$e" "$0: line $l: warning: s121p: circular name reference
+$0: line $l: warning: s121p: circular name reference"
   r=$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; echo "${s121w[0]}|$s121w|${s121w[@]}|${#s121w[@]}|${s121w[1]:-d}") 2>/dev/null)
   check sne1 "$r" '|2||0|d'
-  e=$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w[0]=9; echo no) 2>&1)
-  e="$e
-$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w=(7 8); echo no) 2>&1)"
-  e="$e
-$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w+=(z); echo no) 2>&1)"
-  r=$(s121m "$e")
-  check sne2 "$r" "\`s121v[1]': not a valid identifier
-\`s121v[1]': not a valid identifier
-\`s121v[1]': not a valid identifier"
+  e=$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w[0]=9; echo no) 2>&1); l=$LINENO
+  r="$0: line $l: \`s121v[1]': not a valid identifier"
+  e="$e$nl$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w=(7 8); echo no) 2>&1)"; l=$LINENO
+  r="$r$nl$0: line $l: \`s121v[1]': not a valid identifier"
+  e="$e$nl$( (s121v=(1 2 3); declare -gn s121w=s121v[1]; s121w+=(z); echo no) 2>&1)"; l=$LINENO
+  r="$r$nl$0: line $l: \`s121v[1]': not a valid identifier"
+  check sne2 "$e" "$r"
+}
+# ===== SECTION 122: the word a bad substitution names; brackets in arithmetic subscripts =====
+# "bad substitution" names the double-quoted string the ${...} is in, else its whole word,
+# with a $( ) in it printed again and an unquoted $'...' single-quoted. A [ or ] an
+# expansion puts into an arithmetic subscript neither nests nor ends it, and an associative
+# key keeps it. bash reads the token after an operand before it evaluates the operand, so
+# a stray "]]" is reported first. A local of an earlier $( ) is none in the function after
+# it. Every expected value is bash 5.3's.
+s122() {
+  local r e f w nl=$'\n' x=abc t='arithmetic syntax error: invalid arithmetic operator (error token is'
+  local -A m
+  e=$( (echo "pre ${#x-a} post") 2>&1); w="$0: line $LINENO: pre \${#x-a} post: bad substitution"
+  f=$( (echo x${#x-a}y) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: x\${#x-a}y: bad substitution"
+  f=$( (echo x${m[$'x'[]-v}y) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: x\${m['x'[]-v}y: bad substitution"
+  f=$( (echo "a $(echo  hi   there) ${#x-a} b") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: a \$(echo hi there) \${#x-a} b: bad substitution"
+  f=$( (echo pre"in ${#x-a}"post) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: in \${#x-a}: bad substitution"
+  f=$( (echo "a\"b ${#x-a}") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: a\"b \${#x-a}: bad substitution"
+  f=$( (y=p${#x-a}q) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: p\${#x-a}q: bad substitution"
+  f=$( (echo "<$(echo x${#x-a}y)>") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: x\${#x-a}y: bad substitution$nl<>"
+  check sbw1 "$e" "$w"
+  local iv=(10 20 30) g='1]' h='[' p='1+'
+  local -A m2=([1]=5 ['1]']=7)
+  e=$( (echo $(( iv[$g+1] ))) 2>&1); w="$0: line $LINENO: 1]+1: $t \"]+1\")"
+  f=$( (echo $(( iv[1 $h] ))) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 1 [: $t \"[\")"
+  f=$( (echo $(( iv[ '1' ] ]] ))) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: iv[ '1' ] ]] : $t \"]] \")"
+  f=$( (echo $(( p ]] ))) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: p ]] : $t \"]] \")"
+  f=$( (echo $(( iv[ $g ] ]] ))) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: iv[ 1\\] ] ]] : $t \"]] \")"
+  check sab1 "$e" "$w"
+  check sab2 "$(( m2[$g] + 0 ))" 7
+  r=$(declare -gi s122g; declare -gu s122u
+    s122f() {
+      : $(local s122g)
+      local s122g
+      s122g=1+1
+      : $(local s122u)
+      local s122u=abc
+      : $(local s122q=1)
+      s122q=2
+      echo "$s122g $s122u"
+    }
+    s122f
+    echo "$s122q")
+  check slc1 "$r" '1+1 abc
+2'
 }
 # ===== END SECTIONS =====
 
@@ -986,5 +1027,6 @@ s118  # SECTION-CALL 118
 s119  # SECTION-CALL 119
 s120  # SECTION-CALL 120
 s121  # SECTION-CALL 121
+s122  # SECTION-CALL 122
 echo "full: $checks checks, $fails failures"
 exit $fails

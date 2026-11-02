@@ -48,6 +48,68 @@ function bashSubUnclosed(t) {
     return true
 }
 
+// The text a "bad substitution" error names (bash 5.3): dq, the double-quoted string the
+// ${...} is in with its quotes, else word, its whole word; each with a $( ) in it printed
+// again (dpComsub). "" when neither was claimed. A word this printer cannot read (a
+// here-document body) is kept as written.
+function bashBadSubWord(dq, word) {
+    var w = (dq != "") ? dq : word
+    if (w == "") { return "" }
+    var st = {s: w, i: 0, err: "", peeked: null}
+    var d = dpWordText(st)
+    return (st.err == "" && st.i == w.length) ? d : w
+}
+
+// The inside of a double-quoted string s ("..." or $"..."), with \" shown as ", which is
+// how bash's parser leaves it for an error message.
+function bashDqBody(s) {
+    var i = (s.charAt(0) == "$") ? 2 : 1
+    var out = ""
+    for (; i < s.length - 1; i++) {
+        var ch = s.charAt(i)
+        if (ch == "\\") {
+            out = out + ((s.charAt(i + 1) == "\"") ? "\"" : s.slice(i, i + 2))
+            i = i + 1
+            continue
+        }
+        out = out + ch
+    }
+    return out
+}
+
+// An expansion's value in a subscript of an arithmetic text that holds an expansion,
+// backslash-quoted so it is not expanded again: \ $ ` " ' as bash quotes them, and [ ]
+// so a bracket it holds neither nests nor ends the subscript (bash 5.3: with g='1]',
+// $(( a[$g+1] )) is an error at "]+1"). Twin of rt_arsubq.
+function bashArSubEsc(s) {
+    var out = ""
+    var i
+    for (i = 0; i < s.length; i++) {
+        var ch = s.charAt(i)
+        if (ch == "\\" || ch == "$" || ch == "`" || ch == "\"" || ch == "'" || ch == "[" || ch == "]") { out = out + "\\" }
+        out = out + ch
+    }
+    return out
+}
+
+// A subscript's text with bashArSubEsc's quoting of [ and ] taken off (all: of every
+// character, an associative array's key, which is not expanded again). Twin of ar_unesc.
+function bashArUnEsc(s, all) {
+    var out = ""
+    var i
+    for (i = 0; i < s.length; i++) {
+        var ch = s.charAt(i)
+        if (ch == "\\" && i + 1 < s.length) {
+            var nx = s.charAt(i + 1)
+            out = out + ((all || nx == "[" || nx == "]") ? nx : ch + nx)
+            i = i + 1
+            continue
+        }
+        out = out + ch
+    }
+    return out
+}
+
 // names sorted by their characters' codes, as `declare -f` lists functions.
 function bashSortNames(names) {
     var out = names.slice(0)

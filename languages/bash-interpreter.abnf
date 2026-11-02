@@ -377,7 +377,7 @@ HereDoc     <~~ push(mkHereDoc(up.in, up.pos)) ~~> = HdScan :whitespace(Whitespa
 // and $ expansions, exactly like the inside of a double-quoted string. The leading "\x01" is
 // prepended by mkHereDoc so the production can start with a token and then turn whitespace
 // skipping off (a production may not START with a Command - that is read as a repetition).
-HereBodyW   <~~ push(mkWord(takeAll())) ~~> = "\x01" :whitespace() HereSegs ;
+HereBodyW   <~~ badClaim(up.start + 1, up.pos, true); push(mkWord(takeAll())) ~~> = "\x01" :whitespace() HereSegs ;
 HereSegs    = { HereSeg } ;
 HereSeg     = DqExpSeg | DqEsc | HereLit ;
 HereLit     <~~ push(makeConst(up.in)) ~~> = !@+"$\\`" ;
@@ -448,7 +448,7 @@ DqSeg       <~~ badClaim(up.start, up.pos, false); push(mkDqWord(takeAll())) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 // $"..." : a string translated by the locale's message catalog, which in the C locale has
 // none, so it is the double-quoted string (bash 5.3: echo $"a b"c prints a bc).
-LocSeg      <~~ push(mkDqWord(takeAll())) ~~>
+LocSeg      <~~ badClaim(up.start, up.pos, false); push(mkDqWord(takeAll())) ~~>
             = '$"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
             = !@+"\"$\\`" ;
@@ -582,12 +582,12 @@ PeBody      = PeLen | PeIndForm | PeCore | PeLenBad | PeBad ;
 PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
 // `${#x-default}` and `${#a[0]/1/xxx}` PARSE in bash and then fail at run time with
 // "bad substitution"; this is the alternative that reaches that documented behaviour.
-PeLenBad    <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = "#" PeCore ;
+PeLenBad    <~~ push(badRec(up.start, arSrc(up.start, up.pos), false)) ~~> = "#" PeCore ;
 // Any other text between the braces parses as well and is the same run-time error
 // (`${(m)foo}`, a zsh idiom): the message, and the command line is abandoned with status 1.
 // Not after a blank or "|", which open a function substitution (FunSub) in bash, so one
 // without its closing "}" is the syntax error it is there.
-PeBad       <~~ push({badsub: arSrc(up.start, up.pos)}) ~~> = PeBadFirst { PeBadCh } ;
+PeBad       <~~ push(badRec(up.start, arSrc(up.start, up.pos), false)) ~~> = PeBadFirst { PeBadCh } ;
 PeBadFirst  = !@+"} \t\n|" ;
 PeBadCh     = !@+"}" ;
 PeIndForm   <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | PeCore ) ;
@@ -742,9 +742,9 @@ DqDollarBrace <~~ push(mkParamExp(dqIdxItems(takeAll()))) ~~>
             = "${" :whitespace() DqPeBody "}" ;
 DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
 // In double quotes, a bad ${NAME[...} whose "[" is never closed is reported with the whole
-// word it is in (dqBad, badClaim): bash 5.3, echo x"${m[[]-v}"y is "bad substitution: no
+// word it is in (badRec, badClaim): bash 5.3, echo x"${m[[]-v}"y is "bad substitution: no
 // closing `}' in x"${m[[]-v}"y".
-DqPeBad     <~~ push(dqBad(up.start, arSrc(up.start, up.pos))) ~~> = PeBadFirst { PeBadCh } ;
+DqPeBad     <~~ push(badRec(up.start, arSrc(up.start, up.pos), true)) ~~> = PeBadFirst { PeBadCh } ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
 DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqAnsiOpForm | DqSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
@@ -2773,7 +2773,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
         var badsub = null
-        var badNc = null
+        var badRc = null
         var args = []
         var wordT = null
         var hasIdx = false
@@ -2788,7 +2788,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.qname != undefined) { errName = it.qname }
             else if (it.hasIdx != undefined) { hasIdx = true; idxAll = idxAllItem(it); idxAq = idxAqItem(it) }
             else if (it.lenp != undefined) { lenp = true }
-            else if (it.badsub != undefined) { badsub = it.badsub; badNc = it.nc }
+            else if (it.badsub != undefined) { badsub = it.badsub; badRc = it.rec }
             else if (it.indp != undefined) { indp = true }
             else if (it.xf != undefined) { xf = it.xf }
             else if (it.pfx != undefined) { pfx = it.pfx }
@@ -2807,7 +2807,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (badsub != null) {
             var badMsg = "${" + badsub + "}: bad substitution\n"
             return function() {
-                if (!arithErr && abortSignal == null) { diagErr((badNc != null) ? badNcMsg(badNc()) : badMsg) }
+                if (!arithErr && abortSignal == null) { diagErr(badSubMsg(badRc(), badsub)) }
                 arithErr = true
                 return ""
             }
@@ -5332,24 +5332,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arSqPart(at, q, raw) {
         var r = {at: at, strip: false}
         arSqRecs.push(r)
-        return function() { return r.strip ? arSubEsc(raw) : q }
+        return function() { return r.strip ? bashArSubEsc(raw) : q }
     }
     function arSqAnsi(at, v) { return arSqPart(at, bashSq(v), v) }
     // An expansion's or a quoted part's value in such a subscript is not expanded
     // again: bash backslash-quotes its \ $ ` " and ', and the subscript's own expansion,
     // as in double quotes, removes each of those backslashes but the one before a '.
     // bash 5.3, x=1 and d='$x': $(( a[$d] )) is an error at "$x", $(( a["'1'"] + $x ))
-    // one at "\'1\'". Twin of arSubProt in bash-to-llvm-ir.abnf.
-    function arSubEsc(s) {
-        var out = ""
-        var i
-        for (i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
-            if (ch == "\\" || ch == "$" || ch == "`" || ch == "\"" || ch == "'") { out = out + "\\" }
-            out = out + ch
-        }
-        return out
-    }
+    // one at "\'1\'". It quotes [ and ] too (bashArSubEsc). Twin of arSubProt in
+    // bash-to-llvm-ir.abnf.
     function arSubProt(at, sg) {
         var r = {at: at, strip: false}
         arSqRecs.push(r)
@@ -5358,11 +5349,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var v = f()
             if (!r.strip) { return v }
-            if (!isFields(v)) { return arSubEsc(v) }
+            if (!isFields(v)) { return bashArSubEsc(v) }
             var l = decFields(v)
             var o = []
             var i
-            for (i = 0; i < l.length; i++) { o.push(arSubEsc(l[i])) }
+            for (i = 0; i < l.length; i++) { o.push(bashArSubEsc(l[i])) }
             return encFields(o)
         }
     }
@@ -5383,16 +5374,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         arSqRecs = keep
     }
-    // The bad ${...} of dqBad and the word around each, which the enclosing double-quoted
-    // string and word fill in (the innermost of each kind). Twin of badRecs in
-    // bash-to-llvm-ir.abnf.
+    // The bad ${...} of badRec and the word around each, which the enclosing double-quoted
+    // string and word fill in (the innermost of each kind; a string around the word, as
+    // with a $( ) in it, claims nothing). Twin of badRecs in bash-to-llvm-ir.abnf.
     var badRecs = []
-    function dqBad(at, t) {
-        if (!bashSubUnclosed(t)) { return {badsub: t} }
-        var r = {at: at, dq: "", word: ""}
+    function badRec(at, t, dq) {
+        var r = {at: at, dq: "", word: "", nc: dq && bashSubUnclosed(t)}
         badRecs.push(r)
         // A function, as the item itself may be copied before the word claims it.
-        return {badsub: t, nc: function() { return r }}
+        return {badsub: t, rec: function() { return r }}
     }
     function badClaim(from, to, word) {
         var i
@@ -5400,11 +5390,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = badRecs[i]
             if (r.at >= from && r.at < to) {
                 if (word && r.word == "") { r.word = arSrc(from, to) }
-                if (!word && r.dq == "") { r.dq = arSrc(from, to) }
+                if (!word && r.dq == "" && r.word == "") { r.dq = arSrc(from, to) }
             }
         }
     }
-    function badNcMsg(r) { return "bad substitution: no closing `}' in " + badShow((r.word != "") ? r.word : r.dq) + "\n" }
+    // A bad ${...} t names the double-quoted string it is in, else its word, as bash prints
+    // them (bashBadSubWord); in double quotes one whose "[" is never closed names the word.
+    function badSubMsg(r, t) {
+        if (r.nc) { return "bad substitution: no closing `}' in " + badShow((r.word != "") ? r.word : r.dq) + "\n" }
+        var w = bashBadSubWord(r.dq, r.word)
+        if (w == "") { return "${" + t + "}: bad substitution\n" }
+        return ((r.dq != "") ? bashDqBody(badShow(w)) : badShow(w)) + ": bad substitution\n"
+    }
     // The word as bash shows it there: a $'...' that is a quote, outside double quotes or
     // inside a ${...}, is decoded, and single-quoted again outside double quotes (bash 5.3
     // shows x"${m[$'x'[]-v}"y as x"${m[x[]-v}"y). Twin of badShow in bash-to-llvm-ir.abnf.
@@ -5591,13 +5588,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (arAt(0) != 91) { return null }
         arP = arP + 1
         if (arAt(0) == 93) { arP = arP + 1; return AR_NOSUB }
-        // An associative array's subscript is the literal text up to the "]".
+        // An associative array's subscript is the literal text up to the "]". A character
+        // a backslash quotes (bashArSubEsc) ends nothing, here and in an indexed one.
         if (assocFact(nm, false)) {
             var s0 = arP
-            while (arP < arLen && arAt(0) != 93) { arP = arP + 1 }
+            while (arP < arLen && arAt(0) != 93) { arP = arP + ((arAt(0) == 92) ? 2 : 1) }
             if (arAt(0) != 93) { arErr("missing `]'"); return null }
             arP = arP + 1
-            return arS.slice(s0, arP - 1)
+            return bashArUnEsc(arS.slice(s0, arP - 1), true)
         }
         // An indexed array's subscript runs to the matching "]" and is an expression of its
         // own, whose errors name it alone: bash 5.3, let "y=a[1+]" is `1+: arithmetic syntax
@@ -5607,8 +5605,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var s1 = arP
         var depth = 0
         while (arP < arLen && !(arAt(0) == 93 && depth == 0)) {
-            if (arAt(0) == 91) { depth = depth + 1 }
-            if (arAt(0) == 93) { depth = depth - 1 }
+            if (arAt(0) == 92) { arP = arP + 1 }
+            else if (arAt(0) == 91) { depth = depth + 1 }
+            else if (arAt(0) == 93) { depth = depth - 1 }
             arP = arP + 1
         }
         if (arP >= arLen) { arP = n0; arErr("bad array subscript"); return null }
@@ -5616,9 +5615,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         arP = arP + 1
         // A skipped operand's subscript is not evaluated at all: (( 0 && a[1+] )) is 1.
         if (arNoeval > 0) { return "0" }
-        var k = arSubEval(subExpandDq(sub))
+        if (arNextBad()) { return null }
+        var k = arSubEval(subExpandDq(bashArUnEsc(sub, false)))
         if (arBad) { return null }
         return arrIdxKey(nm, k, nm)
+    }
+    // bash reads the token after an operand before it evaluates the operand (its subscript
+    // or its value): one that can start no token is the error then (bash 5.3: x='1+';
+    // $(( x ]] )) is an error at "]]"). Twin of ar_nextbad.
+    function arNextBad() {
+        var q = arP
+        while (q < arLen && (arS.charCodeAt(q) == 32 || arS.charCodeAt(q) == 9 || arS.charCodeAt(q) == 10)) { q = q + 1 }
+        if (q >= arLen || arTokStart(arS.charCodeAt(q))) { return false }
+        arP = q
+        arErr("arithmetic syntax error: invalid arithmetic operator")
+        return true
     }
     // A variable's value as an operand: empty is 0, anything else is itself an expression.
     function arValue(nm, key) {
@@ -5666,6 +5677,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // caller reports (`1 && x=4`). Twin of ar_primary.
             arWs()
             if (arAt(0) == 61 && arAt(1) != 61) { return 0 }
+            if (arNextBad()) { return 0 }
             var v2 = arValue(nm, key)
             arWs()
             if ((arAt(0) == 43 && arAt(1) == 43) || (arAt(0) == 45 && arAt(1) == 45)) {
@@ -5844,8 +5856,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var depth = 0
                 while (q < arLen) {
                     var bc = arS.charCodeAt(q)
-                    if (bc == 91) { depth = depth + 1 }
-                    if (bc == 93) { depth = depth - 1; if (depth == 0) { break } }
+                    if (bc == 92) { q = q + 1 }
+                    else if (bc == 91) { depth = depth + 1 }
+                    else if (bc == 93) { depth = depth - 1; if (depth == 0) { break } }
                     q = q + 1
                 }
                 q = q + 1
