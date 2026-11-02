@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1112** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1113** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -160,21 +160,14 @@ Spec: zend_verify_arg_error (Zend/zend_execute.c) and zend_verify_callable / zen
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1107 bash: attribute change on a readonly variable; circular-nameref store; declare -n e=a[1] · P3 · SH · IN PROGRESS (SH worker, round 35) [V]
+### T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-word bad substitution; circular-nameref ${#r[@]} warnings · P3 · SH · OPEN [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
-- `readonly z=1; declare -i z` must fail with "declare: z: readonly variable" and rc=1. The same goes for -u, -l, -a, -A and +i. Both engines accept the change.
-- A store through a circular nameref, `c1[1]=4`: bash warns twice, stores the value and returns rc=0. Ours returns rc=1.
-- `declare -n e=a[1]; echo ${e[0]}`: bash prints an empty line; the interpreter prints 2.
-- `declare -n` with -a/-A: bash sometimes drops it silently and sometimes says "reference variable cannot be an array". Find which case is which in variables.c / builtins/declare.def, then match it. Currently the interpreter prints `declare -an` and the compiler refuses the program.
-
-### T-1108 bash: bad-substitution message names the whole word; `]` from an expansion inside a subscript; stray `]]` order · P3 · SH · IN PROGRESS (SH worker, round 35) [V]
-
-Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
-- The "bad substitution" message must name the whole word: the full double-quoted content (`"pre ${#x-a} post"`) or the full unquoted word (`x${#x-a}y`, `x${m[$'x'[]-v}y`). In it, a command substitution appears in deparsed form and an unquoted `$'x'` appears as `'x'`.
-- With `g='1]'`, bash reports `$(( iv[$g+1] ))` as an error at "]+1"; ours ends the subscript at the `]` that came from the expansion.
-- In `$(( iv[ '1' ] ]] ))`, bash first reports the stray "]]" against the whole text; ours evaluates the subscript first and reports `'1'`.
-- Compiler: the lexical curFrame.locs lets a local from an earlier `$()` in the same function show through. Check whether this changes visible output in a probe before fixing it.
+- `declare -c` (capcase, new in bash 5.3: first letter upper, rest lower) is rejected as an invalid option; bash accepts it. Check `declare -p` output and how it interacts with -u/-l.
+- `declare -t` (trace attribute) is unsupported. It has no visible effect without DEBUG/RETURN traps, but it must be accepted and shown by `declare -p` as `-t`.
+- Compiled runtime: prefix/suffix removal with a leading `*` (`${l#*pat}`, `${l%%*pat}`) takes about 1M IR steps on a ~150-character line, probably quadratic. Because of this, the step cost of bash-test-full.5 depends on the script path (57M from tests/, 84M from a temp dir). Make the matcher linear (or near it) in bash-rt.c, then re-measure. This is an algorithmic fix to our runtime, not an optimizer pass.
+- `( case a${#x-a}b in x) ;; esac ); echo "3=$?"`: bash prints `3=1`; both our engines skip the rest of the line.
+- `${#ref[@]}` through a circular nameref: bash warns twice, we warn once.
 
 # C — C subset
 
@@ -1186,6 +1179,8 @@ T-1101 php: callable-typed parameters validated by shape only; static compound c
 T-1102 php: uncaught "Undefined constant" Error reports the caller's line — DONE r48 (8b81d94b): Undefined constant raised at the constant's own line (getLine + uncaught); master-probed
 T-1103 php: htmlspecialchars double_encode / ENT_SUBSTITUTE / HTML5 names; array_key_exists float key via callable or named args — DONE r48 (8b81d94b): htmlspecialchars double_encode/ENT_SUBSTITUTE/IGNORE/DISALLOWED/invalid UTF-8, all 2125 HTML5 names, array_key_exists float-key deprecation via callable/named args; master-probed vs html.c
 T-1106 kotlin: Set.indices; read-only builder results not frozen against cast mutation; ListBuilder/MapBuilder javaClass — DONE r31 (ed41c693): Set.indices; read-only builder/singleton/Arrays$ArrayList/Empty* collections refuse writes through a cast per JVM class rules; ListBuilder/MapBuilder javaClass; master-probed vs kotlinc 2.2.21
+T-1107 bash: attribute change on a readonly variable; circular-nameref store; declare -n e=a[1] — DONE r35 (8a3f38c8): readonly attribute changes refused, nameref/array interactions per bash, circular nameref store, declare -n w=v[1]; master-probed vs bash 5.3 (stdout+stderr)
+T-1108 bash: bad-substitution message names the whole word; `]` from an expansion inside a subscript; stray `]]` order — DONE r35 (e615484e): bad-substitution names the whole word/dq string, ] from expansions in subscripts, stray ]] order, compiler $() local leak; master-probed
 
 # Settled — do not re-open
 
