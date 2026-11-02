@@ -160,7 +160,7 @@ Spec: zend_verify_arg_error (Zend/zend_execute.c) and zend_verify_callable / zen
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-word bad substitution; circular-nameref ${#r[@]} warnings · P3 · SH · OPEN [V]
+### T-1112 bash: declare -c / -t; ${l#*pat} quadratic in the compiled runtime; case-word bad substitution; circular-nameref ${#r[@]} warnings · P3 · SH · IN PROGRESS (SH worker, round 36) [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
 - `declare -c` (capcase, new in bash 5.3: first letter upper, rest lower) is rejected as an invalid option; bash accepts it. Check `declare -p` output and how it interacts with -u/-l.
