@@ -20,15 +20,11 @@ package abnf
 //
 // Known simplifications, all DELIBERATE and all shared by the engines:
 //
-//   - An ARRAY renders exactly like a List, `[1, 2]`. Real Kotlin prints
-//     `[Ljava.lang.Integer;@1b6d3586` for an Array, because an Array is a JVM array
-//     and inherits Object.toString. In this value model arrayOf and listOf both
-//     build a plain host array and are indistinguishable at runtime, so no renderer
-//     can tell them apart; the List answer is the one that is right more often.
-//   - A class without a toString renders as `Name@1`: a FIXED synthetic hash. Real
-//     Kotlin prints the identity hash, which differs between two runs of the real
-//     toolchain and therefore cannot be asserted anyway; a constant is the only
-//     value the engines can agree on without an object-identity counter.
+//   - A class without a toString renders as `Name@1`, and an Array as `[I@1`: a
+//     FIXED synthetic hash. Real Kotlin prints the identity hash, which differs
+//     between two runs of the real toolchain and therefore cannot be asserted
+//     anyway; a constant is the only value the engines can agree on without an
+//     object-identity counter.
 
 import (
 	"errors"
@@ -1217,6 +1213,34 @@ func init() {
 		m["js_ktequals"] = func(a []uint64) uint64 {
 			return boolH(ktEquals([]uint64{a[0], a[1], boolH(true)}, false))
 		}
+		// js_ktsame(l, r) is `===`: an object or a function compares by identity, and
+		// everything else (a number, a Char, a String, a Boolean, null) keeps no
+		// identity in this value model and compares by value, as a JVM primitive
+		// does. Twins: kSame in kotlin-interpreter.abnf, js_ktsame in
+		// languages/lib/kotlin-rt.metajs.
+		// js_ktcompstr(v) / js_ktcomphash(v) render and hash a data or value class
+		// property: an Array by its contents (java.util.Arrays.toString / hashCode),
+		// though the generated equals still compares it by identity. Twins: kCompStr /
+		// kCompHash in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+		m["js_ktcompstr"] = func(a []uint64) uint64 {
+			if t, ok := u(a[0]).(*jsArray); ok && ktIsJvmArr(t) && !ktaIsUnsigned(t.kind) {
+				return rt.wrapStr(rt.ktArrContentStr(t.elems, false))
+			}
+			return m["js_ktstr"](a)
+		}
+		m["js_ktcomphash"] = func(a []uint64) uint64 {
+			if t, ok := u(a[0]).(*jsArray); ok && ktIsJvmArr(t) {
+				return w(float64(ktArrContentHash(rt, t.elems, false)))
+			}
+			return m["js_ktsmcall"]([]uint64{a[0], rt.wrapStr("hashCode"), w(&jsArray{})})
+		}
+		m["js_ktsame"] = func(a []uint64) uint64 {
+			switch u(a[0]).(type) {
+			case *jsObject, *jsArray, *jsGenerator, *jsClosure, *hostFunc, *boundMethod:
+				return boolH(rt.strictEq(u(a[0]), u(a[1])))
+			}
+			return boolH(ktEquals([]uint64{a[0], a[1], boolH(false)}, true))
+		}
 		// js_ktadoptfn(f, ty): a function value whose declared type fixes its
 		// result's width - `val f: () -> Long = { 1 }` - answers through a wrapper
 		// that retypes each result. Twin of kAdoptFn in kotlin-interpreter.abnf.
@@ -2030,6 +2054,11 @@ func init() {
 				case "toString":
 					return rt.wrap("null")
 				}
+				if recv == jsNull {
+					if v, ok := ktNullArrMember(mname, arr.elems); ok {
+						return rt.wrap(v)
+					}
+				}
 			}
 			// An ENUM descriptor: values() / valueOf(name) / entries. The compiler
 			// emits __entries (the entry list in declaration order) on the
@@ -2520,11 +2549,16 @@ func init() {
 		}
 		// js_ktvararr(xs, ty) makes the list a `vararg xs: ty` parameter collects
 		// the array Kotlin binds: an IntArray for Int, ... (ktaKindOf), an Array for
-		// any other element type. Twin of bindParams in kotlin-interpreter.abnf and
+		// any other element type, a primitive array's elements retyped to its element
+		// type (an Int literal given to a Short vararg). Twin of bindParams in kotlin-interpreter.abnf and
 		// js_ktvararr in languages/lib/kotlin-rt.metajs.
 		m["js_ktvararr"] = func(a []uint64) uint64 {
 			if arr, isArr := u(a[0]).(*jsArray); isArr {
-				arr.kind = ktVarargKind(rt.toString(u(a[1])))
+				ty := rt.toString(u(a[1]))
+				arr.kind = ktVarargKind(ty)
+				if arr.kind >= ktArrPrim {
+					rt.ktAdoptEl(arr, ty, "")
+				}
 			}
 			return a[0]
 		}
@@ -4611,6 +4645,9 @@ func (rt *jsrt) ktpRender(v interface{}, depth int) string {
 		// `println(listOf("x", "y"))` is `[x, y]`.
 		return t
 	case *jsArray:
+		if ktIsJvmArr(t) {
+			return rt.ktArrStr(t)
+		}
 		if t.props != nil {
 			rt.ktLinkCheck(t)
 		}
@@ -6741,12 +6778,14 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			out[len(es)-1-i] = e
 		}
 		return arr(out), true
-	// contentToString / contentEquals: an Array gets NO structural toString or equals in
-	// Kotlin (it prints as its identity and compares by reference), so these two are how
-	// an array is printed and compared element by element. ktpRender already produces
-	// Kotlin's `[1, 2]` for the list shape an array is here.
+	// contentToString / contentEquals / contentHashCode: an Array gets NO structural
+	// toString, equals or hashCode in Kotlin (it prints as its identity and compares by
+	// reference), so these are how an array is printed, compared and hashed element by
+	// element.
 	case "contentToString", "contentDeepToString":
-		return rt.ktpRender(arr(es), 0), true
+		return rt.ktArrContentStr(es, name == "contentDeepToString"), true
+	case "contentHashCode", "contentDeepHashCode":
+		return float64(ktArrContentHash(rt, es, name == "contentDeepHashCode")), true
 	case "contentEquals", "contentDeepEquals":
 		other, ok := argAt(args, 0).(*jsArray)
 		return ok && rt.ktContentEq(es, other.elems, name == "contentDeepEquals"), true
@@ -7607,8 +7646,12 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 	switch t := v.(type) {
 	case *jsArray:
 		// An Array hashes by identity, like its equals (ktStructEq): the identity
-		// stand-in 1.
+		// stand-in 1. An unsigned array is a value class, which hashes its
+		// storage's contents.
 		if ktIsJvmArr(t) {
+			if ktaIsUnsigned(t.kind) {
+				return int64(ktArrContentHash(rt, t.elems, false))
+			}
 			return 1
 		}
 		var h int32 = 1
@@ -9920,7 +9963,7 @@ var ktBuiltinMembers = func() map[string]string {
 		"commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
 		"component2:LRAD component3:LRAD compute:M computeIfAbsent:M computeIfPresent:M concatToString:A contains:LRAQGDSMBT " +
 		"containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
-		"contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
+		"contentDeepEquals:A contentDeepHashCode:A contentDeepToString:A contentEquals:ABT contentHashCode:A contentToString:A " +
 		"copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
 		"deleteCharAt:B deleteRange:B destructured:H digitToInt:C digitToIntOrNull:C " +
 		"distinct:LRAQGDS distinctBy:LRAQGDS downTo:C drop:LRAQGDSBT dropLast:LRADBT " +
@@ -12233,6 +12276,69 @@ func ktIterClass(jc string) string {
 // Sequence or a view sharing the host array. Twin of kIsJvmArr in
 // kotlin-interpreter.abnf and ktIsJvmArr in languages/lib/kotlin-rt.metajs.
 func ktIsJvmArr(a *jsArray) bool { return a.kind == ktArrArray || a.kind >= ktArrPrim }
+
+// ktaIsUnsigned reports an unsigned array kind (UIntArray ...): a value class over
+// a primitive array rather than a JVM array itself. Twin of ktaIsUnsigned in
+// languages/lib/kotlin-math.js.
+func ktaIsUnsigned(kind int) bool { return kind >= ktArrPrim+8 }
+
+// ktArrStr is an Array's toString, Object's: its class, "@" and its identity hash
+// ([I@1). An unsigned array's generated toString renders its storage's contents
+// (UIntArray(storage=[1, 2])). Twin of kArrStr in kotlin-interpreter.abnf and
+// ktArrStr in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktArrStr(a *jsArray) string {
+	if ktaIsUnsigned(a.kind) {
+		return ktaElems[a.kind-ktArrPrim] + "Array(storage=" + rt.ktArrContentStr(a.elems, false) + ")"
+	}
+	return rt.toString(ktJvmClass(a)) + "@" + jxRadix(rt, float64(int32(ktElemHash(rt, a))), 16)
+}
+
+// ktArrContentStr is contentToString, the elements as a List renders them; deep
+// (contentDeepToString) renders a nested array by its contents in turn. Twin of
+// kArrContentStr in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktArrContentStr(es []interface{}, deep bool) string {
+	parts := make([]string, len(es))
+	for i, e := range es {
+		if ea, ok := e.(*jsArray); ok && deep && ktIsJvmArr(ea) {
+			parts[i] = rt.ktArrContentStr(ea.elems, true)
+		} else {
+			parts[i] = rt.ktpRender(e, 1)
+		}
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+// ktArrContentHash is contentHashCode, java.util.Arrays.hashCode: the List fold
+// from 1; deep (contentDeepHashCode) hashes a nested array by its contents in
+// turn. Twin of kArrContentHash in kotlin-interpreter.abnf and
+// languages/lib/kotlin-rt.metajs.
+func ktArrContentHash(rt *jsrt, es []interface{}, deep bool) int32 {
+	var h int32 = 1
+	for _, e := range es {
+		if ea, ok := e.(*jsArray); ok && deep && ktIsJvmArr(ea) {
+			h = 31*h + ktArrContentHash(rt, ea.elems, true)
+		} else {
+			h = 31*h + int32(ktElemHash(rt, e))
+		}
+	}
+	return h
+}
+
+// ktNullArrMember answers the array content extensions declared on a nullable
+// receiver (IntArray?.contentHashCode()) for null: it hashes 0, prints "null" and
+// equals only null. Twin of the null tail of mcall in kotlin-interpreter.abnf and
+// k4NullArrMember in languages/lib/kotlin-rt.metajs.
+func ktNullArrMember(name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "contentHashCode", "contentDeepHashCode":
+		return float64(0), true
+	case "contentToString", "contentDeepToString":
+		return "null", true
+	case "contentEquals", "contentDeepEquals":
+		return argAt(args, 0) == jsNull, true
+	}
+	return nil, false
+}
 
 // ktContentEq is contentEquals over two arrays' elements: element-wise equals, so a
 // nested array compares by identity, unless deep (contentDeepEquals), which

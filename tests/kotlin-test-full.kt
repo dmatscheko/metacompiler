@@ -1615,7 +1615,7 @@ fun sec38() {
     check("chr1", s[0] == 'a' && s.get(1) == 'B' && s.charAt(2) == 'c')
     check("chr2", s.first() == 'a' && s.last() == 'c')
     check("chr3", "z".single() == 'z')
-    check("chr4", s.toCharArray().toString() == "[a, B, c]")
+    check("chr4", s.toCharArray().toString().startsWith("[C@") && s.toCharArray().contentToString() == "[a, B, c]")
     var n38 = 0
     for (c in s) { if (c == 'a' || c == 'c') n38++ }
     check("chr5", n38 == 2)
@@ -2063,7 +2063,7 @@ fun sec49() {
     // The top-level functions.
     check("st42", maxOf(1, 2) == 2 && minOf(1, 2, 0) == 0)
     check("st43", "" + listOfNotNull(1, null, 2) == "[1, 2]")
-    check("st44", "" + List(3) { it } == "[0, 1, 2]" && "" + arrayOfNulls<Int>(2) == "[null, null]")
+    check("st44", "" + List(3) { it } == "[0, 1, 2]" && ("" + arrayOfNulls<Int>(2)).startsWith("[Ljava.lang.Integer;@"))
     check("st45", lazy { 5 }.value == 5)
     check("st46", 7.coerceIn(0, 5) == 5 && 1.coerceIn(0, 5) == 1)
     // kotlin.math keeps the operand's TYPE: abs(-1.5) is 1.5 and max(1.5, 2.0) is 2.0,
@@ -8305,6 +8305,56 @@ fun s186() {
         D186.N186().m().javaClass.name == "double" && C186().m().size == 1)
 }
 
+// ===== SECTION 187: referential equality, array rendering and content hashes, named spread, vararg types =====
+// `===` is identity for every object - a data class, a List, a Pair, a map, an
+// enum entry - while `==` stays equals(); a map's keys view is one object. An Array
+// inherits Object.toString ([I@hash, so only its prefix is asserted), and a data
+// or value class renders and hashes an Array property by its contents but compares
+// it by identity; an unsigned array renders its storage. contentHashCode is
+// java.util.Arrays.hashCode, and the content extensions accept a null receiver. A
+// named vararg argument may be a spread, which passes a copy. A vararg parameter's
+// static type is its array, and a primitive one retypes its literal arguments
+// (kotlinc 2.2.21).
+data class P187(val x: Int)
+enum class E187 { A, B }
+data class D187(val a: IntArray, val s: Array<String>, val n: Int)
+fun fl187(vararg xs: Long) = xs
+fun fs187(vararg xs: Short) = xs
+fun g187(a: Int, vararg xs: Int) = a + xs.sum()
+fun h187(vararg xs: String, sep: String = "-") = xs.joinToString(sep)
+fun w187(vararg xs: Int): IntArray { xs[0] = 9; return xs }
+
+@OptIn(ExperimentalUnsignedTypes::class)
+fun s187() {
+    val p = P187(1); val p2 = p; val l = listOf(1, 2); val l2 = l
+    val m = mutableMapOf(1 to 2)
+    check("same187a", P187(1) !== P187(1) && p === p2 && P187(1) == P187(1) && listOf(1) !== listOf(1) && l === l2 &&
+        Pair(1, 2) !== Pair(1, 2) && mutableListOf(1) !== mutableListOf(1) && m.keys === m.keys &&
+        m !== mutableMapOf(1 to 2) && E187.A === E187.A && E187.A !== E187.B && p !== null && "ab" === "ab")
+    val x = intArrayOf(1, 2)
+    val n: IntArray? = null
+    check("astr187b", x.toString().startsWith("[I@") && "$x" == x.toString() && arrayOf("x").toString().startsWith("[Ljava.lang.String;@") &&
+        longArrayOf(1).toString().startsWith("[J@") && listOf(intArrayOf(1)).toString().startsWith("[[I@") &&
+        arrayOf(intArrayOf(1), arrayOf("a")).contentDeepToString() == "[[1], [a]]" &&
+        arrayOf(intArrayOf(1)).contentToString().startsWith("[[I@") && uintArrayOf(1u, 2u).toString() == "UIntArray(storage=[1, 2])" &&
+        n.contentToString() == "null" && n.contentEquals(null) && !n.contentEquals(intArrayOf()))
+    check("ahash187c", x.contentHashCode() == 994 && intArrayOf().contentHashCode() == 1 && arrayOf("a", "b").contentHashCode() == 4066 &&
+        longArrayOf(1L, 5000000000L).contentHashCode() == 705033697 && doubleArrayOf(1.5).contentHashCode() == 1073217567 &&
+        booleanArrayOf(true, false).contentHashCode() == 40359 && charArrayOf('a').contentHashCode() == 128 &&
+        arrayOf(intArrayOf(1)).contentDeepHashCode() == 63 && n.contentHashCode() == 0 && uintArrayOf(1u, 2u).hashCode() == 994)
+    val d = D187(intArrayOf(1, 2), arrayOf("x"), 3)
+    check("adata187d", d.toString() == "D187(a=[1, 2], s=[x], n=3)" && d != D187(intArrayOf(1, 2), arrayOf("x"), 3) &&
+        d.hashCode() == D187(intArrayOf(1, 2), arrayOf("x"), 3).hashCode())
+    val b = intArrayOf(3, 4)
+    val c = intArrayOf(1)
+    val r = w187(xs = *c)
+    check("nspread187e", g187(1, xs = *b) == 8 && g187(a = 2, xs = *b) == 9 && h187(xs = *arrayOf("p", "q"), sep = "+") == "p+q" &&
+        g187(1, xs = *intArrayOf()) == 1 && c[0] == 1 && r[0] == 9 && r !== c)
+    val a: Any = fs187(7)[0]
+    check("vty187f", fl187(5L)[0].javaClass.name == "long" && fl187(5L).javaClass.name == "[J" && fs187(1)[0].javaClass.name == "short" &&
+        a is Short)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -8489,6 +8539,7 @@ fun main() {
     s184() // SECTION-CALL 184
     s185() // SECTION-CALL 185
     s186() // SECTION-CALL 186
+    s187() // SECTION-CALL 187
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

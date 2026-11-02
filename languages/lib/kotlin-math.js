@@ -791,6 +791,11 @@ function ktaCopyRangeFault(from, to, size, ak) {
     return ["IndexOutOfBoundsException", "arraycopy: source index " + from + " out of bounds for " + jt + "[" + size + "]"]
 }
 
+// Whether array kind ak is an unsigned array (UIntArray ...), a value class over a
+// primitive array rather than a JVM array itself. Go twin: ktaIsUnsigned in
+// abnf/jsrtkotlin.go.
+function ktaIsUnsigned(ak) { return ak >= 13 }
+
 // The kind of the primitive array of element type `elem` ("Int"), 0 for none.
 function ktaKindOf(elem) {
     var i = 0

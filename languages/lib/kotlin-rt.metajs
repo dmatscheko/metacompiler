@@ -132,6 +132,55 @@ function ktIsJvmArr(a) {
     return k == 1 || k >= 5
 }
 
+// jsrtkotlin.go ktArrStr: an Array's toString is Object's ([I@1); an unsigned
+// array's renders its storage's contents.
+function ktArrStr(v) {
+    var ak = arrKind(v)
+    if (ktaIsUnsigned(ak)) { return ktaElems[ak - 5] + "Array(storage=" + ktArrContentStr(v, false) + ")" }
+    return jxkClass(v) + "@" + jxkRadix(ktElemHash(v), 16)
+}
+
+// jsrtkotlin.go ktArrContentStr: contentToString, deep for contentDeepToString.
+function ktArrContentStr(es, deep) {
+    var out = "["
+    var i = 0
+    while (i < es.length) {
+        if (i > 0) { out = out + ", " }
+        var e = es[i]
+        if (deep && Array.isArray(e) && ktIsJvmArr(e)) { out = out + ktArrContentStr(e, true) }
+        else { out = out + k2Render(e, 1) }
+        i = i + 1
+    }
+    return out + "]"
+}
+
+// jsrtkotlin.go ktArrContentHash: contentHashCode, deep for contentDeepHashCode.
+function ktArrContentHash(es, deep) {
+    var h = 1
+    var i = 0
+    while (i < es.length) {
+        var e = es[i]
+        var eh = 0
+        if (deep && Array.isArray(e) && ktIsJvmArr(e)) { eh = ktArrContentHash(e, true) }
+        else { eh = ktElemHash(e) }
+        h = (Math.imul(31, h) + eh) | 0
+        i = i + 1
+    }
+    return h
+}
+
+// jsrtkotlin.go ktNullArrMember: the array content extensions on a null receiver.
+// KT_MISS for any other name.
+function k4NullArrMember(name, as) {
+    if (name == "contentHashCode") { return 0 }
+    if (name == "contentDeepHashCode") { return 0 }
+    if (name == "contentToString") { return "null" }
+    if (name == "contentDeepToString") { return "null" }
+    if (name == "contentEquals") { return k4At(as, 0) === null }
+    if (name == "contentDeepEquals") { return k4At(as, 0) === null }
+    return KT_MISS
+}
+
 // k0IsRec is Go's `v.(*jsObject)`: an object that is NOT an array. Every Go arm
 // spelled `o, ok := v.(*jsObject)` is this test, because a *jsArray is its own
 // Go type there and is a plain object here.
@@ -1645,8 +1694,12 @@ function ktElemHash(v) {
     // half.
     if (ktIsArr(v)) {
         // An Array hashes by identity, like its equals (ktStructEq): the identity
-        // stand-in 1.
-        if (ktIsJvmArr(v)) { return 1 }
+        // stand-in 1. An unsigned array is a value class, which hashes its
+        // storage's contents.
+        if (ktIsJvmArr(v)) {
+            if (ktaIsUnsigned(arrKind(v))) { return ktArrContentHash(v, false) }
+            return 1
+        }
         var lh = 1
         var li = 0
         while (li < v.length) {
@@ -2452,6 +2505,32 @@ function js_kteq(l, r, strict) {
     return ktIdent(l, r)
 }
 
+// jsrtkotlin.go js_ktcompstr / js_ktcomphash: a data or value class property
+// rendered and hashed, an Array by its contents.
+function js_ktcompstr(v) {
+    if (Array.isArray(v)) {
+        if (ktIsJvmArr(v)) { if (!ktaIsUnsigned(arrKind(v))) { return ktArrContentStr(v, false) } }
+    }
+    return js_ktstr(v)
+}
+function js_ktcomphash(v) {
+    if (Array.isArray(v)) {
+        if (ktIsJvmArr(v)) { return ktArrContentHash(v, false) }
+    }
+    return ktSmcall(v, "hashCode", [])
+}
+
+// jsrtkotlin.go js_ktsame: `===`. An object or a function compares by identity,
+// everything else by value.
+function js_ktsame(l, r) {
+    if (!ktIsChar(l)) {
+        var t = typeof l
+        if (t == "function") { return l === r }
+        if (t == "object") { if (l !== null) { return l === r } }
+    }
+    return js_kteq(l, r, false)
+}
+
 // jsrtkotlin.go js_ktne.
 function js_ktne(l, r, strict) {
     var fe = anytype
@@ -2716,6 +2795,7 @@ function k2Render(v, depth) {
     if (floIs(v)) { return k1FloText(v) }
     if (typeof v == "number") { return "" + v }
     if (Array.isArray(v)) {
+        if (ktIsJvmArr(v)) { return ktArrStr(v) }
         k4LinkCheck(v)
         var out = "["
         var i = 0
@@ -5420,10 +5500,13 @@ function ktSeqMethodK(arr, name, args, kind) {
         for (i = es.length - 1; i >= 0; i = i - 1) { out.push(es[i]) }
         return out
     }
-    // contentToString / contentEquals: an Array gets NO structural toString or
-    // equals in Kotlin, so these two are how an array is printed and compared.
-    if (name == "contentToString") { return ktRender(es) }
-    if (name == "contentDeepToString") { return ktRender(es) }
+    // contentToString / contentEquals / contentHashCode: an Array gets NO
+    // structural toString, equals or hashCode in Kotlin, so these are how an array
+    // is printed, compared and hashed.
+    if (name == "contentToString") { return ktArrContentStr(es, false) }
+    if (name == "contentDeepToString") { return ktArrContentStr(es, true) }
+    if (name == "contentHashCode") { return ktArrContentHash(es, false) }
+    if (name == "contentDeepHashCode") { return ktArrContentHash(es, true) }
     if (name == "contentEquals") { return k3ContentEq(es, f, false) }
     if (name == "contentDeepEquals") { return k3ContentEq(es, f, true) }
     if (name == "sortedBy") { return ktSortBy(es, f, false) }
@@ -8791,6 +8874,7 @@ function js_ktadoptfn(f, ty) {
 function js_ktvararr(xs, ty) {
     if (Array.isArray(xs)) {
         var k = ktaKindOf(ty)
+        if (k != 0) { k4bAdoptAll(xs, ty) }
         if (k == 0) { k = 1 }
         arrKindSet(xs, k)
     }
@@ -9227,7 +9311,7 @@ function k4BuiltinLacks(recv, name) {
             "commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
             "component2:LRAD component3:LRAD compute:M computeIfAbsent:M computeIfPresent:M concatToString:A contains:LRAQGDSMBT " +
             "containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
-            "contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
+            "contentDeepEquals:A contentDeepHashCode:A contentDeepToString:A contentEquals:ABT contentHashCode:A contentToString:A " +
             "copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
             "deleteCharAt:B deleteRange:B destructured:H digitToInt:C digitToIntOrNull:C " +
             "distinct:LRAQGDS distinctBy:LRAQGDS downTo:C drop:LRAQGDSBT dropLast:LRADBT " +
@@ -10905,6 +10989,10 @@ function ktSmcall(recv, name, args) {
     if (rtIsNil(rv)) {
         if (name == "hashCode") { return ktElemHash(rv) }
         if (name == "toString") { return "null" }
+        if (rv === null) {
+            var nam = k4NullArrMember(name, as)
+            if (!ktMiss(nam)) { return nam }
+        }
     }
 
     // An ENUM descriptor: values() / valueOf(name) / entries.

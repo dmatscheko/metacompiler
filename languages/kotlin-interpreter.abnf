@@ -1197,11 +1197,10 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = EqExpr { "&&" EqExpr } ;
 
-// Referential equality === / !== is evaluated like structural == / != (untyped values
-// compare by identity for objects), so the operands still run and fold.
+// Referential equality === / !== is its own operator (kSame).
 EqExpr      <~~ push(foldBinary(ktEqOps(takeAll(), up.start, up.pos))) ~~>
             = RelExpr { EqOp RelExpr } ;
-EqOp        = "===" <~~ push("==") ~~> | "!==" <~~ push("!=") ~~>
+EqOp        = "===" <~~ push("===") ~~> | "!==" <~~ push("!==") ~~>
             | "==" <~~ push("==") ~~> | "!=" <~~ push("!=") ~~> ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
@@ -1610,12 +1609,15 @@ AnnLambda   <~~ push({ktrail: pop()}) ~~>
 // the callee's parameter names by kfit) or a plain positional expression. The named
 // form has to be tried before the plain one, because `d = 7` would otherwise parse as
 // the assignment expression `d = 7`; NotEqSign keeps `a == b` out of it (the `=` of a
-// named argument is never followed by another `=`).
+// named argument is never followed by another `=`). A named vararg argument may be
+// spread (`xs = *arr`), which passes a copy of the array, as a positional spread does.
 Arg         = SpreadArg | NamedArg | Expression ;
 SpreadArg   <~~ push({spread: pop()}) ~~>
             = "*" Expression ;
 NamedArg    <~~ var v = pop(); push({argname: pop(), av: v}) ~~>
-            = KId <~~ push(up.in) ~~> "=" NotEqSign Expression ;
+            = KId <~~ push(up.in) ~~> "=" NotEqSign ( NamedSpread | Expression ) ;
+NamedSpread <~~ push(kSpreadCopy(pop())) ~~>
+            = "*" Expression ;
 
 // RawStr before Template (both open with "), KHexLit/KBinLit before FloatLit/KIntLit
 // (0x/0b prefixes), FloatLit before KIntLit (a plain integer falls through),
@@ -3327,6 +3329,18 @@ NotMemberKw = :script(~~ "pure";
     // "==:" is the equality ktEqOps gives an operand declared with a non-floating type.
     binOps["==:"] = function(l, r) { return kEq(l, r, false) }
     binOps["!=:"] = function(l, r) { return !kEq(l, r, false) }
+    binOps["==="] = function(l, r) { return kSame(l, r) }
+    binOps["!=="] = function(l, r) { return !kSame(l, r) }
+    // `===`: referential equality. An object or a function (an instance, a collection,
+    // an array, a lambda, a reference) compares by identity; a number, a Char, a String,
+    // a Boolean and null keep no identity in this value model and compare by value, as
+    // a JVM primitive does. Twin of js_ktsame in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kSame(l, r) {
+        var t = typeof l
+        if (t == "function" || (t == "object" && l !== null && !kIsChar(l) && !kIsFlo(l) && !szIs(l))) { return l === r }
+        return kEqOp(l, r, true)
+    }
     // The `==` operator: on two Doubles (or two Floats) IEEE 754, so NaN == NaN is
     // false and -0.0 == 0.0 true - Kotlin's rule for operands statically typed as
     // floating point, which this value model assumes for two float boxes - and
@@ -5670,11 +5684,12 @@ NotMemberKw = :script(~~ "pure";
         // IntRange.toString / IntProgression.toString.
         if (isRange(v)) { return rangeStr(v) }
         if (kIsCRange(v)) { return kCRangeStr(v) }
-        // A list (and an array, which this value model cannot tell apart from a list)
-        // renders as java.util.AbstractCollection.toString does: "[1, 2]", elements
-        // separated by a comma and a space, a String element unquoted (not
-        // JavaScript's Array.prototype.toString "1,2").
+        // A list renders as java.util.AbstractCollection.toString does: "[1, 2]",
+        // elements separated by a comma and a space, a String element unquoted (not
+        // JavaScript's Array.prototype.toString "1,2"). An Array is a JVM array and
+        // inherits Object.toString (kArrStr).
         if (Array.isArray(v)) {
+            if (kIsJvmArr(v)) { return kArrStr(v) }
             kLinkCheck(v)
             var out = "["
             for (var ai = 0; ai < v.length; ai++) {
@@ -7675,12 +7690,12 @@ NotMemberKw = :script(~~ "pure";
             for (i = es.length - 1; i >= 0; i--) { out.push(es[i]) }
             return {v: out}
         }
-        // contentToString / contentEquals: Array does NOT get a structural toString or
-        // equals in Kotlin (an array prints as its identity and compares by reference),
-        // so these two are how an array is printed and compared element by element.
-        // `[1, 2]` is Kotlin's rendering, which is what kstr already produces for the
-        // list shape an array is here.
-        if (name == "contentToString" || name == "contentDeepToString") { return {v: kstr(es)} }
+        // contentToString / contentEquals / contentHashCode: Array does NOT get a
+        // structural toString, equals or hashCode in Kotlin (an array prints as its
+        // identity and compares by reference), so these are how an array is printed,
+        // compared and hashed element by element.
+        if (name == "contentToString" || name == "contentDeepToString") { return {v: kArrContentStr(es, name == "contentDeepToString")} }
+        if (name == "contentHashCode" || name == "contentDeepHashCode") { return {v: kArrContentHash(es, name == "contentDeepHashCode")} }
         if (name == "contentEquals" || name == "contentDeepEquals") {
             var oth = args.length > 0 ? args[0] : null
             return {v: Array.isArray(oth) && kContentEq(es, oth, name == "contentDeepEquals")}
@@ -8831,6 +8846,15 @@ NotMemberKw = :script(~~ "pure";
             // Unit is a VALUE and Unit.toString() is "kotlin.Unit"; only a Kotlin null
             // renders "null" (ktpRender's jsUndefT arm and kstr's undefined arm agree).
             if (name == "toString") return target === undefined ? "kotlin.Unit" : "null"
+            // The array content extensions are declared on a nullable receiver too
+            // (IntArray?.contentHashCode()): null hashes 0, prints "null" and equals
+            // only null. Twin of ktNullArrMember in abnf/jsrtkotlin.go and
+            // languages/lib/kotlin-rt.metajs.
+            if (target === null) {
+                if (name == "contentHashCode" || name == "contentDeepHashCode") { return 0 }
+                if (name == "contentToString" || name == "contentDeepToString") { return "null" }
+                if (name == "contentEquals" || name == "contentDeepEquals") { return args[0] === null }
+            }
             fail("method call ." + name + "() on null")
         }
         // super.m(): start the lookup at the recorded parent, keep `this`.
@@ -9244,7 +9268,7 @@ NotMemberKw = :script(~~ "pure";
         var out = cls.__name + "("
         for (var i = 0; i < dp.length; i++) {
             if (i > 0) { out += ", " }
-            out += dp[i] + "=" + kstr2(kfield(target, dp[i]))
+            out += dp[i] + "=" + kCompStr(kfield(target, dp[i]))
         }
         return out + ")"
     }
@@ -9298,8 +9322,9 @@ NotMemberKw = :script(~~ "pure";
         if (t == "string") { return strHash(v) }
         if (Array.isArray(v)) {
             // An Array hashes by identity, like its equals (kStructEq): the identity
-            // stand-in 1.
-            if (kIsJvmArr(v)) { return 1 }
+            // stand-in 1. An unsigned array is a value class, which hashes its
+            // storage's contents.
+            if (kIsJvmArr(v)) { return ktaIsUnsigned(arrKind(v)) ? kArrContentHash(v, false) : 1 }
             var lh = 1
             for (var i = 0; i < v.length; i++) { lh = (Math.imul(31, lh) + kHash(v[i])) | 0 }
             return lh
@@ -9342,7 +9367,7 @@ NotMemberKw = :script(~~ "pure";
             var dp = cls.__dataProps
             if (dp != null) {
                 var h = 0
-                for (var k = 0; k < dp.length; k++) { h = (Math.imul(31, h) + kHash(kfield(v, dp[k]))) | 0 }
+                for (var k = 0; k < dp.length; k++) { h = (Math.imul(31, h) + kCompHash(kfield(v, dp[k]))) | 0 }
                 return h
             }
             return kAnyHash(cls)
@@ -9587,6 +9612,52 @@ NotMemberKw = :script(~~ "pure";
             } else if (!kEq(es[i], oth[i], false)) { return false }
         }
         return true
+    }
+    // An Array's toString is Object's: its class, "@" and its identity hash ([I@1).
+    // An unsigned array is a value class over a primitive array, and its generated
+    // toString renders that storage's contents (kotlinc 2.2.21:
+    // UIntArray(storage=[1, 2])). Twin of ktArrStr in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kArrStr(v) {
+        var ak = arrKind(v)
+        if (ktaIsUnsigned(ak)) { return ktaElems[ak - 5] + "Array(storage=" + kArrContentStr(v, false) + ")" }
+        return jxkClass(v) + "@" + jxkRadix(kHash(v), 16)
+    }
+    // A data or value class renders and hashes an Array property by its contents
+    // (java.util.Arrays.toString / hashCode), though it still compares it by identity.
+    // Twin of js_ktcompstr / js_ktcomphash in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kCompStr(v) {
+        if (Array.isArray(v) && kIsJvmArr(v) && !ktaIsUnsigned(arrKind(v))) { return kArrContentStr(v, false) }
+        return kstr2(v)
+    }
+    function kCompHash(v) {
+        if (Array.isArray(v) && kIsJvmArr(v)) { return kArrContentHash(v, false) }
+        return kHash(v)
+    }
+    // contentToString: the elements as a List renders them, "[1, 2]"; deep
+    // (contentDeepToString) renders a nested array by its contents in turn rather than
+    // by its identity. Twin of ktArrContentStr in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kArrContentStr(es, deep) {
+        var out = "["
+        for (var i = 0; i < es.length; i++) {
+            if (i > 0) { out += ", " }
+            out += deep && Array.isArray(es[i]) && kIsJvmArr(es[i]) ? kArrContentStr(es[i], true) : kstr(es[i])
+        }
+        return out + "]"
+    }
+    // contentHashCode: java.util.Arrays.hashCode, the List fold 31 * h + element hash
+    // from 1 (intArrayOf(1, 2) is 994); deep (contentDeepHashCode) hashes a nested
+    // array by its contents in turn. Twin of ktArrContentHash in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kArrContentHash(es, deep) {
+        var h = 1
+        for (var i = 0; i < es.length; i++) {
+            var eh = deep && Array.isArray(es[i]) && kIsJvmArr(es[i]) ? kArrContentHash(es[i], true) : kHash(es[i])
+            h = (Math.imul(31, h) + eh) | 0
+        }
+        return h
     }
     // An Array or a primitive array, as opposed to a List, a Sequence or a view
     // sharing the host array. Twin of ktIsJvmArr in abnf/jsrtkotlin.go.
@@ -10556,7 +10627,7 @@ NotMemberKw = :script(~~ "pure";
             else if (it != undefined && it.pdef != undefined) { p.def = it.pdef }
             else if (it != undefined && it.pty != undefined) { p.ty = it.pty }
         }
-        ktNoteDecl(p.pname, p.ty)
+        ktNoteDecl(p.pname, ktParamTy(p.ty, p.vararg))
         return p
     }
     function pName(p) { return (typeof p == "string") ? p : p.pname }
@@ -10596,8 +10667,11 @@ NotMemberKw = :script(~~ "pure";
                     va = Array.isArray(nv) ? nv : kIterable(nv)
                 }
                 // The array Kotlin binds: an IntArray for Int, ..., else an Array.
+                // A primitive array's elements take its element type, as an
+                // integer literal argument does (`vararg xs: Short` given 1).
                 // Twin of js_ktvararr in abnf/jsrtkotlin.go.
                 var vk = ktaKindOf(p.ty)
+                if (vk != 0) { kAdoptAll(va, p.ty) }
                 declVar(p.pname, arrKindSet(va, vk == 0 ? 1 : vk))
                 // The parameters after a vararg take only named arguments (and the
                 // trailing lambda, which kTrailArg passed by name).
@@ -10663,6 +10737,8 @@ NotMemberKw = :script(~~ "pure";
     // Evaluate a call's argument items into {pos, named, nvals}: a plain thunk is
     // positional, a {spread} splices its array in, and a {argname} lands in the named
     // map, its value also in nvals in source order.
+    // A named vararg argument's spread, *arr: a thunk answering a copy of the array.
+    function kSpreadCopy(t) { return function() { return kIterable(t()).slice() } }
     function kevalArgs(items) {
         var pos = []
         var named = null
@@ -10841,7 +10917,7 @@ NotMemberKw = :script(~~ "pure";
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].vv != undefined) { p.prop = true }
         }
-        if (p.prop) { ktNoteMember(p.pname, p.ty) }
+        if (p.prop) { ktNoteMember(p.pname, ktParamTy(p.ty, p.vararg)) }
         return p
     }
 
@@ -14766,7 +14842,7 @@ NotMemberKw = :script(~~ "pure";
         "commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
         "component2:LRAD component3:LRAD compute:M computeIfAbsent:M computeIfPresent:M concatToString:A contains:LRAQGDSMBT " +
         "containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
-        "contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
+        "contentDeepEquals:A contentDeepHashCode:A contentDeepToString:A contentEquals:ABT contentHashCode:A contentToString:A " +
         "copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
         "deleteCharAt:B deleteRange:B destructured:H digitToInt:C digitToIntOrNull:C " +
         "distinct:LRAQGDS distinctBy:LRAQGDS downTo:C drop:LRAQGDSBT dropLast:LRADBT " +

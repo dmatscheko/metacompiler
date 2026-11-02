@@ -1152,11 +1152,10 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = EqExpr { "&&" EqExpr } ;
 
-// Referential equality === / !== is lowered like structural == / != (in the untyped
-// handle world both are identity for objects), so the operands still run and fold.
+// Referential equality === / !== is its own operator (js_ktsame).
 EqExpr      <~~ push(foldBinary(ktEqOps(takeAll(), up.start, up.pos))) ~~>
             = RelExpr { EqOp RelExpr } ;
-EqOp        = "===" <~~ push("==") ~~> | "!==" <~~ push("!=") ~~>
+EqOp        = "===" <~~ push("===") ~~> | "!==" <~~ push("!==") ~~>
             | "==" <~~ push("==") ~~> | "!=" <~~ push("!=") ~~> ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
@@ -1593,8 +1592,10 @@ TrailLambda <~~ push({at: pop(), trail: true}) ~~>
 // otherwise parse as the assignment expression it looks like.
 CallArgs    = CallArg { "," CallArg } [ "," ] ;
 CallArg     = NamedArg | SpreadArg | PlainArg ;
+// A named vararg argument binds the array spliced like a spread (orderArgs), so its
+// optional `*` (`xs = *arr`) changes nothing.
 NamedArg    <~~ push({at: pop(), aname: pop().argn}) ~~>
-            = KId <~~ push({argn: up.in}) ~~> "=" Expression ;
+            = KId <~~ push({argn: up.in}) ~~> "=" [ "*" ] Expression ;
 SpreadArg   <~~ push({at: pop(), spread: true}) ~~>
             = "*" Expression ;
 PlainArg    <~~ push({at: pop()}) ~~>
@@ -3611,6 +3612,8 @@ KwContract  = "contract" KwEnd ;
         // "==:" - an operand declared with a non-floating type - is Any.equals.
         if (op == "==:") { return callExt(b, "js_ktequals", [l, r]) }
         if (op == "!=:") { return callExt(b, "js_not", [callExt(b, "js_ktequals", [l, r])]) }
+        if (op == "===") { return callExt(b, "js_ktsame", [l, r]) }
+        if (op == "!==") { return callExt(b, "js_not", [callExt(b, "js_ktsame", [l, r])]) }
         return coreEmitBinK(b, op, l, r)
     }
     // Kotlin folds a unary minus into an integer LITERAL when typing it: `2147483648`
@@ -3691,7 +3694,7 @@ KwContract  = "contract" KwEnd ;
             else if (items[i].isvararg != undefined) { rec.vararg = true }
             else if (items[i].pty != undefined) { rec.ty = items[i].pty }
         }
-        ktNoteDecl(rec.name, rec.ty)
+        ktNoteDecl(rec.name, ktParamTy(rec.ty, rec.vararg))
         // A PARAMETER whose declared type is a receiver function type - the DSL builder
         // shape, `fun doc(body: Node.() -> Unit)` - binds its receiver as `this`
         // exactly as a local `val f: T.() -> R` does, so `t.body()` inside the callee
@@ -7124,8 +7127,8 @@ KwContract  = "contract" KwEnd ;
             else if (items[i].isvararg != undefined) { rec.vararg = true }
             else if (items[i].pty != undefined) { rec.ty = items[i].pty }
         }
-        ktNoteDecl(rec.name, rec.ty)
-        if (rec.prop) { ktNoteMember(rec.name, rec.ty) }
+        ktNoteDecl(rec.name, ktParamTy(rec.ty, rec.vararg))
+        if (rec.prop) { ktNoteMember(rec.name, ktParamTy(rec.ty, rec.vararg)) }
         return rec
     }
     // The signature of a primary constructor, in the shape emitParamSig consumes.
@@ -7913,10 +7916,9 @@ KwContract  = "contract" KwEnd ;
             for (var k = 0; k < props.length; k++) {
                 var lead = (k == 0) ? (props[k] + "=") : (", " + props[k] + "=")
                 v = callExt(bb, "js_jadd", [v, emitStr(bb, lead)])
-                // js_ktstr, not the concat's own ToString: a property holding a list
-                // renders "[1, 2]" here, exactly as the interpreter's dataToString
-                // (which folds with kstr2) renders it.
-                v = callExt(bb, "js_jadd", [v, callExt(bb, "js_ktstr",
+                // js_ktcompstr, not the concat's own ToString: a property holding a
+                // list renders "[1, 2]", and an Array its contents (kCompStr).
+                v = callExt(bb, "js_jadd", [v, callExt(bb, "js_ktcompstr",
                                                        [callExt(bb, "js_get", [thisV, emitStr(bb, props[k])])])])
             }
             bb.NewRet(callExt(bb, "js_jadd", [v, emitStr(bb, ")")]))
@@ -7979,8 +7981,7 @@ KwContract  = "contract" KwEnd ;
                 b2.NewCondBr(truthy(b2, callExt(b2, "js_seq", [pv, hNull])), nullB, valB)
                 var zeroV = emitNum(nullB, 0)
                 nullB.NewBr(mrgB)
-                var hv = callExt(valB, "js_ktsmcall", [pv, emitStr(valB, "hashCode"),
-                                                      callExt(valB, "js_arr_new", [])])
+                var hv = callExt(valB, "js_ktcomphash", [pv])
                 valB.NewBr(mrgB)
                 var ph = mrgB.NewPhi([llvm.ir.NewIncoming(zeroV, nullB), llvm.ir.NewIncoming(hv, valB)])
                 var sum = callExt(mrgB, "js_jadd", [callExt(mrgB, "js_mul", [acc, emitNum(mrgB, 31)]), ph])

@@ -42,7 +42,7 @@ fun main() {
     if (unwrapped + 1 != 42) { fails = fails + 1 }
     if (boxed!! != 41) { fails = fails + 1 }
 
-    // referential equality === / !== (lowered like structural == / !=)
+    // referential equality === / !== (a String compares by value)
     val s = "kotlin"
     if (!(s === s)) { fails = fails + 1 }
     if (s !== "other") { } else { fails = fails + 1 }

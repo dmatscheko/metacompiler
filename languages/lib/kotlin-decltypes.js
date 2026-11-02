@@ -47,6 +47,14 @@ var ktPrimArrElem = {"$IntArray": "Int", "$LongArray": "Long", "$ShortArray": "S
                      "$ByteArray": "Byte", "$FloatArray": "Float", "$DoubleArray": "Double",
                      "$UIntArray": "UInt", "$ULongArray": "ULong", "$UShortArray": "UShort",
                      "$UByteArray": "UByte"}
+// A parameter's static type: a vararg parameter of element type T is an IntArray
+// for Int (each primitive and unsigned type has its own array) and an Array<T>
+// otherwise.
+function ktParamTy(ty, vararg) {
+    if (!vararg || ty == "") { return ty }
+    if (ktPrimArrElem["$" + ty + "Array"] == ty || ty == "Char" || ty == "Boolean") { return ty + "Array" }
+    return "Array<" + ty + ">"
+}
 var ktOneArgColl = {"$List": 1, "$MutableList": 1, "$ArrayList": 1, "$Set": 1, "$MutableSet": 1,
                     "$HashSet": 1, "$LinkedHashSet": 1, "$Collection": 1, "$MutableCollection": 1,
                     "$Iterable": 1, "$Array": 1, "$Sequence": 1}
