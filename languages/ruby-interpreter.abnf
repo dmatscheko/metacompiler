@@ -4110,7 +4110,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "unpack" || name == "unpack1") { return strUnpack(b, name, args) }
         if (name == "encode" || (name == "scrub" && blk == null)) { return strEncode(b, enc, name, args) }
         if (name == "scrub") { return scrubBlock(b, enc, blk) }
-        if (name == "scrub!" || name == "encode!") {
+        if (name == "unicode_normalize" || name == "unicode_normalized?") { return strNormalize(t, name, args) }
+        if (name == "scrub!" || name == "encode!" || name == "unicode_normalize!") {
             var nv = anytype
             nv = binMethod(t, name.substring(0, name.length - 1), args, blk)
             return binRetag(t, strBytes(nv), strEnc(nv))
@@ -4184,6 +4185,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var n = rbsEncCanon(rstr(e))
         if (n == "") { raiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rstr(e)) }
         return n
+    }
+    // String#unicode_normalize / #unicode_normalized? of t, a text or a box
+    // (rbsNormalize in lib/ruby-str.js): the form is :nfc (the default), :nfd,
+    // :nfkc or :nfkd. A binary String is MRI's Encoding::CompatibilityError, a
+    // US-ASCII one is normalized already, and a box in UTF-8 is invalid, the
+    // ArgumentError of the gsub MRI normalizes with. Twins: rubyStrNormalize in
+    // abnf/jsrtrubystr.go, rbStrNormalize in lib/ruby-rt.metajs.
+    function strNormalize(t, name, args) {
+        var enc = isBin(t) ? binEnc(t) : "UTF-8"
+        if (enc == "ASCII-8BIT") {
+            raiseErr(name, "Encoding::CompatibilityError", "Unicode Normalization not appropriate for ASCII-8BIT")
+        }
+        if (enc == "US-ASCII") { return name == "unicode_normalize" ? t : true }
+        var form = args.length > 0 && isSym(args[0]) ? args[0].s : (args.length > 0 ? "" : "nfc")
+        if (form != "nfc" && form != "nfd" && form != "nfkc" && form != "nfkd") {
+            raiseErr(name, "ArgumentError", "Invalid normalization form " + rstr(args[0]) + ".")
+        }
+        if (isBin(t)) { raiseErr(name, "ArgumentError", "invalid byte sequence in UTF-8") }
+        var n = rbsNormalize(t, form)
+        return name == "unicode_normalize" ? n : n == t
     }
     // String#scrub with a block, of the bytes b in encoding enc: each invalid
     // sequence becomes what the block answers for it. Twins: rubyScrubBlock in
@@ -4393,7 +4414,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // The re-encoding bang methods always answer the String, which takes the
         // bytes and the encoding the plain method answers.
-        if (name == "scrub!" || name == "encode!") {
+        if (name == "scrub!" || name == "encode!" || name == "unicode_normalize!") {
             var ev = anytype
             ev = mcall(b.__rs, name.substring(0, name.length - 1), args, blk)
             if (isBin(ev)) { becomeBin(b, ev) } else { b.__rs = rsText(ev) }
@@ -4906,11 +4927,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "oct") { return {ok: true, v: strToInum(s, 0 - 8, false).v} }
         if (name == "clear") { return {ok: true, v: ""} }
         // The bang forms answer the receiver: strMutate stores this text back.
-        if (name == "scrub" || name == "unicode_normalize" || name == "encode"
-            || name == "scrub!" || name == "unicode_normalize!" || name == "encode!") {
+        if (name == "scrub" || name == "encode" || name == "scrub!" || name == "encode!") {
             return {ok: true, v: s}
         }
-        if (name == "unicode_normalized?" || name == "valid_encoding?") { return {ok: true, v: true} }
+        if (name == "valid_encoding?") { return {ok: true, v: true} }
         if (name == "ascii_only?") {
             var ai = 0
             while (ai < s.length) {
@@ -10631,6 +10651,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_f") { return mkFlo(rbnStrToDbl(target, false)) }
             if (name == "to_r") { return ratOfScan(name, rbnStrToRat(target, false)) }
             if (name == "to_c") { return cpxOfScan(name, rbnStrToCpx(target, false)) }
+            if (name == "unicode_normalize" || name == "unicode_normalized?") { return strNormalize(target, name, args) }
             if (name == "upcase") { return target.toUpperCase() }
             // MRI maps case fully but has no Final_Sigma: unicodeCase mode 2 (abnf/casemap.go).
             if (name == "downcase") { return unicodeCase(target, 2) }

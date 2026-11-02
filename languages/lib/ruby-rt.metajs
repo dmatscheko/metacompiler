@@ -440,7 +440,8 @@ function rbBinMethod(t, name, args) {
     if (name == "unpack" || name == "unpack1") { return rbStrUnpack(b, name, args) }
     if (name == "encode" || (name == "scrub" && blk === null)) { return rbStrEncode(b, enc, name, args) }
     if (name == "scrub") { return rbScrubBlock(b, enc, blk) }
-    if (name == "scrub!" || name == "encode!") {
+    if (name == "unicode_normalize" || name == "unicode_normalized?") { return rbStrNormalize(t, name, args) }
+    if (name == "scrub!" || name == "encode!" || name == "unicode_normalize!") {
         var nv = rbBinMethod(t, name.substring(0, name.length - 1), args)
         return rbBinRetag(t, rbStrBytes(nv), rbStrEnc(nv))
     }
@@ -507,6 +508,31 @@ function rbEncArg(e) {
     var n = rbsEncCanon(rbStr(e))
     if (n == "") { rbRaiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rbStr(e)) }
     return n
+}
+// Twin of strNormalize in ruby-interpreter.abnf.
+function rbStrNormalize(t, name, args) {
+    var pos = rbPosArgs(args)
+    var enc = rbStrEnc(t)
+    if (enc == "ASCII-8BIT") {
+        rbRaiseErr(name, "Encoding::CompatibilityError", "Unicode Normalization not appropriate for ASCII-8BIT")
+    }
+    if (enc == "US-ASCII") {
+        if (name == "unicode_normalize") { return t }
+        return true
+    }
+    var form = "nfc"
+    if (pos.length > 0) {
+        form = ""
+        if (rbIsSym(pos[0])) { form = pos[0]["s"] }
+    }
+    if (form != "nfc" && form != "nfd" && form != "nfkc" && form != "nfkd") {
+        rbRaiseErr(name, "ArgumentError", "Invalid normalization form " + rbStr(pos[0]) + ".")
+    }
+    if (rbIsBox(t)) { rbRaiseErr(name, "ArgumentError", "invalid byte sequence in UTF-8") }
+    var s = rbSV(t)
+    var n = rbsNormalize(s, form)
+    if (name == "unicode_normalize") { return n }
+    return n == s
 }
 // Twin of scrubBlock in ruby-interpreter.abnf.
 function rbScrubBlock(b, enc, blk) {
@@ -680,7 +706,7 @@ function rbStrMutate(b, name, args) {
         return rbArgAt(args, 1)
     }
     // Twin of the re-encoding bang arm of strMutate in ruby-interpreter.abnf.
-    if (name == "scrub!" || name == "encode!") {
+    if (name == "scrub!" || name == "encode!" || name == "unicode_normalize!") {
         var ev = js_rxmcall(b["__s"], name.substring(0, name.length - 1), args)
         if (rbIsBox(ev)) { rbBecomeBin(b, ev) } else { b["__s"] = rbSV(ev) }
         return b
@@ -10096,6 +10122,7 @@ function rbMethod(target, name, args) {
         if (name == "to_f") { return rbMkFlo(rbnStrToDbl(target, false)) }
         if (name == "to_r") { return rbRatOfScan(name, rbnStrToRat(target, false)) }
         if (name == "to_c") { return rbCpxOfScan(name, rbnStrToCpx(target, false)) }
+        if (name == "unicode_normalize" || name == "unicode_normalized?") { return rbStrNormalize(target, name, args) }
         if (name == "upcase") { return rbUpper(target) }
         if (name == "downcase") { return rbLower(target) }
         if (name == "include?") { return target.indexOf(rbStr(rbArgAt(args, 0))) >= 0 }
@@ -12990,11 +13017,10 @@ function smMethod(s, name, sargs, nargs) {
     if (name == "oct") { return {ok: true, v: rbStrToInum(s, 0 - 8, false)["v"]} }
     if (name == "clear") { return {ok: true, v: ""} }
     // The bang forms answer the receiver: the box mutator stores this text back.
-    if (name == "scrub" || name == "unicode_normalize" || name == "encode"
-        || name == "scrub!" || name == "unicode_normalize!" || name == "encode!") {
+    if (name == "scrub" || name == "encode" || name == "scrub!" || name == "encode!") {
         return {ok: true, v: s}
     }
-    if (name == "unicode_normalized?" || name == "valid_encoding?") { return {ok: true, v: true} }
+    if (name == "valid_encoding?") { return {ok: true, v: true} }
     if (name == "ascii_only?") {
         var ai = 0
         while (ai < s.length) {

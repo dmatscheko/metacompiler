@@ -5,7 +5,7 @@ import "unicode/utf8"
 // A Ruby String's extended grapheme clusters (UAX #29 as MRI 2.6, Unicode
 // 12.1, segments them): the Go twin of the grapheme section of
 // languages/lib/ruby-str.js, over the same table (that file describes the
-// encoding and the classes; abnf/ruby_gcb_test.go keeps the two equal).
+// encoding and the classes; abnf/ruby_unicode_test.go keeps the two equal).
 
 const rubyGcbTable = "" +
 	"00003000:2000;3000=1000>3000P0001p3002P0002Y>002Z0002^3002_>002`000<0400=a000B3400B:000FA400Fo000Fp4" +

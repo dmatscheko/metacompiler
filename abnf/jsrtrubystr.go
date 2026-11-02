@@ -3049,6 +3049,46 @@ func rubyBinEq(b *jsRBin, o interface{}) bool {
 	return ob == b.b && (oe == b.encName() || rubyAsciiOnly(ob))
 }
 
+// rubyStrNormalize is String#unicode_normalize / #unicode_normalized? of t, a
+// plain string or a box (rubyNormalize). Twin of strNormalize in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyStrNormalize(t interface{}, name string, args []interface{}) interface{} {
+	pos, _ := rubyBlockArgs(args)
+	bin, isBin := t.(*jsRBin)
+	enc := "UTF-8"
+	if isBin {
+		enc = bin.encName()
+	}
+	if enc == "ASCII-8BIT" {
+		rt.rubyRaiseErr(name, "Encoding::CompatibilityError", "Unicode Normalization not appropriate for ASCII-8BIT")
+	}
+	if enc == "US-ASCII" {
+		if name == "unicode_normalize" {
+			return t
+		}
+		return true
+	}
+	form := "nfc"
+	if len(pos) > 0 {
+		form = ""
+		if sy, isSym := pos[0].(jsSym); isSym {
+			form = sy.s
+		}
+	}
+	if form != "nfc" && form != "nfd" && form != "nfkc" && form != "nfkd" {
+		rt.rubyRaiseErr(name, "ArgumentError", "Invalid normalization form "+rt.rubyStr(pos[0])+".")
+	}
+	if isBin {
+		rt.rubyRaiseErr(name, "ArgumentError", "invalid byte sequence in UTF-8")
+	}
+	s := rt.rubyStr(t)
+	n := rubyNormalize(s, form)
+	if name == "unicode_normalize" {
+		return n
+	}
+	return n == s
+}
+
 // rubyScrubSplit is the bytes b of a String in encoding enc cut at its invalid
 // sequences: the even entries are the valid runs, the odd ones the sequences
 // #scrub hands its block. Twin of rbsScrubSplit in lib/ruby-str.js.
@@ -3427,7 +3467,9 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 			return rt.rubyStrEncode(t.b, enc, name, pos)
 		}
 		return rt.rubyScrubBlock(t.b, enc, blk)
-	case "scrub!", "encode!":
+	case "unicode_normalize", "unicode_normalized?":
+		return rt.rubyStrNormalize(t, name, args)
+	case "scrub!", "encode!", "unicode_normalize!":
 		nb, ne := rt.rubyStrBE(rt.rubyBinMethod(t, strings.TrimSuffix(name, "!"), args))
 		t.retag(nb, ne)
 		return t

@@ -2713,7 +2713,7 @@ var rubyRespondNames = map[string][]string{
 		"rindex", "rjust", "rpartition", "rstrip", "rstrip!", "scan", "scrub", "scrub!", "send", "setbyte", "size",
 		"slice", "slice!", "split", "squeeze", "squeeze!", "start_with?", "strip", "strip!", "sub", "sub!",
 		"succ", "succ!", "sum", "swapcase", "swapcase!", "to_c", "to_f", "to_i", "to_r", "to_str", "to_sym",
-		"tr", "tr!", "tr_s", "tr_s!", "undump", "unicode_normalize", "unicode_normalized?", "unpack",
+		"tr", "tr!", "tr_s", "tr_s!", "undump", "unicode_normalize", "unicode_normalize!", "unicode_normalized?", "unpack",
 		"unpack1", "upcase", "upcase!",
 		"upto", "valid_encoding?"},
 	"Symbol": {"<", "<=", "<=>", ">", ">=", "[]", "between?", "capitalize", "clamp", "downcase",
@@ -2846,7 +2846,7 @@ var rubyArityNames = map[string][]string{
 	"String -1": {"byteslice", "capitalize", "center", "chomp", "chomp!", "concat", "delete", "delete!",
 		"downcase", "each_line", "encode", "encode!", "end_with?", "index", "lines", "ljust", "prepend",
 		"rindex", "rjust", "scrub", "scrub!", "slice", "slice!", "split", "squeeze", "squeeze!", "start_with?", "swapcase",
-		"swapcase!", "to_i", "unicode_normalize", "unicode_normalized?", "upcase", "upto"},
+		"swapcase!", "to_i", "unicode_normalize", "unicode_normalize!", "unicode_normalized?", "upcase", "upto"},
 	"String 1": {"casecmp", "casecmp?", "delete_prefix", "delete_prefix!", "delete_suffix",
 		"delete_suffix!", "force_encoding", "getbyte", "partition", "replace", "rpartition"},
 	"String 2":  {"insert", "setbyte", "tr", "tr!", "tr_s", "tr_s!"},
@@ -2931,7 +2931,7 @@ var rubyOwnNames = map[string][]string{
 		"rjust", "rpartition", "rstrip", "rstrip!", "scrub", "scrub!", "setbyte", "size", "slice", "slice!",
 		"split", "squeeze", "squeeze!", "start_with?", "strip", "strip!", "succ", "sum", "swapcase",
 		"swapcase!", "to_c", "to_f", "to_i", "to_r", "to_s", "to_str", "to_sym", "tr", "tr!", "tr_s",
-		"tr_s!", "undump", "unicode_normalize", "unicode_normalized?", "upcase", "upto",
+		"tr_s!", "undump", "unicode_normalize", "unicode_normalize!", "unicode_normalized?", "upcase", "upto",
 		"valid_encoding?"},
 	"Symbol": {"<=>", "==", "===", "[]", "capitalize", "downcase", "empty?", "id2name",
 		"inspect", "length", "next", "size", "succ", "swapcase", "to_proc", "to_s", "to_sym",
@@ -5486,7 +5486,7 @@ func (rt *jsrt) rubyStrMutate(b *jsRStr, name string, args []interface{}) interf
 			b.s = nv.s
 		}
 		return argAt(pos, 1)
-	case "scrub!", "encode!":
+	case "scrub!", "encode!", "unicode_normalize!":
 		// Twin of the re-encoding bang arm of strMutate in ruby-interpreter.abnf.
 		switch nv := rt.rubyMethod(b.s, strings.TrimSuffix(name, "!"), args).(type) {
 		case *jsRBin:

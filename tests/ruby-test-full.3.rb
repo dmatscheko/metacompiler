@@ -1665,6 +1665,43 @@ def s196
   check("gc196c", e.class == Enumerator && e.size == 2 && e.to_a.map(&:size) == [2, 1] && r == [2, 1] &&
         "".respond_to?(:grapheme_clusters) && "".respond_to?(:each_grapheme_cluster))
 end
+# ===== SECTION 197: String#unicode_normalize / #unicode_normalize! / #unicode_normalized? =====
+# UAX #15 over MRI 2.6's Unicode 12.1 tables: full canonical (or compatibility)
+# decomposition, Hangul by arithmetic, canonical ordering of the marks, and for
+# :nfc / :nfkc canonical composition, which a mark of the same class blocks.
+# Strings are built from code points. /usr/bin/ruby 2.6 settles each.
+def s197
+  f = [:nfc, :nfd, :nfkc, :nfkd]
+  rows = [[0x65, 0x301], [0x212B], [0xFB01, 0x2460], [0xAC00, 0x11A8], [0xAC01], [0x61, 0x301, 0x323],
+          [0x61, 0x301, 0x301], [0x1E9B, 0x323], [0x1100, 0x1161, 0x41], [0x3300]].map { |c| c.pack("U*") }
+  got = rows.map { |s| f.map { |x| s.unicode_normalize(x).codepoints } }
+  check("nm197a", got == [[[0xE9], [0x65, 0x301], [0xE9], [0x65, 0x301]], [[0xC5], [0x41, 0x30A], [0xC5], [0x41, 0x30A]],
+        [[0xFB01, 0x2460], [0xFB01, 0x2460], [0x66, 0x69, 0x31], [0x66, 0x69, 0x31]],
+        [[0xAC01], [0x1100, 0x1161, 0x11A8], [0xAC01], [0x1100, 0x1161, 0x11A8]],
+        [[0xAC01], [0x1100, 0x1161, 0x11A8], [0xAC01], [0x1100, 0x1161, 0x11A8]],
+        [[0x1EA1, 0x301], [0x61, 0x323, 0x301], [0x1EA1, 0x301], [0x61, 0x323, 0x301]],
+        [[0xE1, 0x301], [0x61, 0x301, 0x301], [0xE1, 0x301], [0x61, 0x301, 0x301]],
+        [[0x1E9B, 0x323], [0x17F, 0x323, 0x307], [0x1E69], [0x73, 0x323, 0x307]],
+        [[0xAC00, 0x41], [0x1100, 0x1161, 0x41], [0xAC00, 0x41], [0x1100, 0x1161, 0x41]],
+        [[0x3300], [0x3300], [0x30A2, 0x30D1, 0x30FC, 0x30C8], [0x30A2, 0x30CF, 0x309A, 0x30FC, 0x30C8]]] &&
+        rows[0].unicode_normalize.codepoints == [0xE9])
+  check("nm197b", rows.map { |s| f.map { |x| s.unicode_normalized?(x) } } == [[false, true, false, true],
+        [false, false, false, false], [true, true, false, false], [false, false, false, false], [true, false, true, false],
+        [false, false, false, false], [false, true, false, true], [true, false, false, false], [false, true, false, true],
+        [true, true, false, false]])
+  err = [[rows[0], :xyz], [rows[0], "nfc"], ["\xff", :nfc], ["\xff", :bad], ["\xff".b, :nfc]].map do |s, x|
+    begin; s.unicode_normalize(x); rescue ArgumentError, Encoding::CompatibilityError => e; [e.class, e.message]; end
+  end
+  a = "ok".force_encoding("US-ASCII")
+  check("nm197c", err == [[ArgumentError, "Invalid normalization form xyz."], [ArgumentError, "Invalid normalization form nfc."],
+        [ArgumentError, "invalid byte sequence in UTF-8"], [ArgumentError, "Invalid normalization form bad."],
+        [Encoding::CompatibilityError, "Unicode Normalization not appropriate for ASCII-8BIT"]] &&
+        a.unicode_normalize.equal?(a) && a.unicode_normalized?(:nfkd))
+  g = [0xFB01, 0x2460].pack("U*")
+  h = [g]
+  check("nm197d", g.unicode_normalize!(:nfkc).equal?(g) && h == ["fi1"] && g.unicode_normalized?(:nfkc) &&
+        "".method(:unicode_normalize!).arity == -1)
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1708,5 +1745,6 @@ s193() # SECTION-CALL 193
 s194() # SECTION-CALL 194
 s195() # SECTION-CALL 195
 s196() # SECTION-CALL 196
+s197() # SECTION-CALL 197
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

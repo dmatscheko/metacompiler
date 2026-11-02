@@ -9608,9 +9608,9 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 	case "clear":
 		return "", true
 	// The bang forms answer the receiver: the box mutator stores this text back.
-	case "scrub", "unicode_normalize", "encode", "scrub!", "unicode_normalize!", "encode!":
+	case "scrub", "encode", "scrub!", "encode!":
 		return o, true
-	case "unicode_normalized?", "valid_encoding?":
+	case "valid_encoding?":
 		return true, true
 	case "ascii_only?":
 		for i := 0; i < len(o); i++ {
@@ -11977,6 +11977,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return rt.rubyRatOfScan(name, rubyStrToRat(o, false))
 		case "to_c":
 			return rt.rubyCpxOfScan(name, rubyStrToCpx(o, false))
+		case "unicode_normalize", "unicode_normalized?":
+			return rt.rubyStrNormalize(o, name, args)
 		case "upcase":
 			return caseMapMode(o, caseUpper|caseFull)
 		case "downcase":
