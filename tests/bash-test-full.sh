@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Full-syntax test: Bash (the practical POSIX-plus-bash shell language) - part 1
-# of 6, sections 01 to 32.
+# of 7, sections 01 to 32.
 #
-# THE BASH RATCHET IS SIX FILES, so that no compiler leg comes near the IR
+# THE BASH RATCHET IS SEVEN FILES, so that no compiler leg comes near the IR
 # interpreter's step brake (-max-steps, 100M per call); SECTION 45's long
 # subjects alone cost ~30M, and SECTION 61's long lists ~65M.
 #
@@ -10,11 +10,12 @@
 #   tests/bash-test-full.2.sh   sections 33 to 46
 #   tests/bash-test-full.3.sh   sections 47 to 60 and 62 to 89
 #   tests/bash-test-full.4.sh   section 61
-#   tests/bash-test-full.5.sh   sections 90 to 128
-#   tests/bash-test-full.6.sh   sections 129 on, and every newer section
+#   tests/bash-test-full.5.sh   sections 90 to 123
+#   tests/bash-test-full.6.sh   sections 124 to 134
+#   tests/bash-test-full.7.sh   sections 135 on, and every newer section
 #
 # The section NUMBERS are global, and ./test.sh --full reports the files as the
-# units bash, bash2, bash3, bash4, bash5 and bash6.
+# units bash, bash2, bash3, bash4, bash5, bash6 and bash7.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 # of the default matrix. The goal of the metacompiler is to support the full

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Full-syntax test: Bash (the practical POSIX-plus-bash shell language) - part 6
-# of 6, sections 129 on; a new section goes here. The split is explained in
-# tests/bash-test-full.sh.
+# of 7, sections 124 to 134. The split is explained in tests/bash-test-full.sh.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 # of the default matrix. The goal of the metacompiler is to support the full
@@ -49,6 +48,164 @@ check() {
   fi
 }
 
+# ===== SECTION 124: prefix and suffix removal with a star =====
+# ${v#p} ${v##p} ${v%p} ${v%%p} for patterns holding a "*": the shortest and the longest
+# match, with "?", bracket expressions, escapes and several stars, on a subject longer
+# than the pattern many times over. Every expected value is bash 5.3's.
+s124() {
+  local r p s='/usr/lib/a.b: line 12: x.tar.gz: y' l=''
+  local -a ps=('*: line *: ' '*/' '*.' '*.*' '*[ab]' '*[!.]' '*\:' '*?' '*??' '**' '*' '*x*' '*b*' '*z' '*/*/' '?*:' '*[[:digit:]] ')
+  for p in "${ps[@]}"; do r="$r|${s#$p}|${s##$p}|${s%$p}|${s%%$p}"; done
+  check sst1 "$r" '|x.tar.gz: y|y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|usr/lib/a.b: line 12: x.tar.gz: y|a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|b: line 12: x.tar.gz: y|gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar||/a.b: line 12: x.tar.gz: y|r.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: || line 12: x.tar.gz: y| y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: ||sr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz:||/usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: y||/usr/lib/a.b: line 12: x.tar.gz: y||.tar.gz: y||/usr/lib/a.b: line 12: ||/a.b: line 12: x.tar.gz: y||/usr/lib/a.||: y|: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|lib/a.b: line 12: x.tar.gz: y|a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y| line 12: x.tar.gz: y| y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y|/usr/lib/a.b: line 12: x.tar.gz: y'
+  for p in a b c d e f g h; do l="$l$p$p$p$p$p$p$p$p$p$p:"; done
+  check sst2 "${l#*h:}|${l##*:}|${l%:*}|${l%%:*}|${l#*d?d}|${l%d*}|${l%%d*}" '||aaaaaaaaaa:bbbbbbbbbb:cccccccccc:dddddddddd:eeeeeeeeee:ffffffffff:gggggggggg:hhhhhhhhhh|aaaaaaaaaa|ddddddd:eeeeeeeeee:ffffffffff:gggggggggg:hhhhhhhhhh:|aaaaaaaaaa:bbbbbbbbbb:cccccccccc:ddddddddd|aaaaaaaaaa:bbbbbbbbbb:cccccccccc:'
+}
+# ===== SECTION 125: expansion errors in a case word, a case pattern and [[ ]] =====
+# An expansion error in the word or a pattern of a case abandons the command, so a
+# subshell holding it ends with status 1; a bad substitution names the whole word. The
+# patterns are expanded only up to the first that matches, and ;& runs the next body
+# without expanding its patterns. In [[ ]] an operand's expansion error abandons the
+# command too, while its own arithmetic only fails it; && and || expand only what they
+# need. Every expected value is bash 5.3's.
+s125() {
+  local e f w nl=$'\n' x=abc
+  e=$( (case a${#x-a}b in x) ;; esac; echo no) 2>&1; echo "st=$?"); w="$0: line $LINENO: a\${#x-a}b: bad substitution${nl}st=1"
+  f=$( (case x in a${#x-a}b) echo m ;; x) echo x ;; esac) 2>&1; echo "st=$?"); e="$e$nl$f"; w="$w$nl$0: line $LINENO: a\${#x-a}b: bad substitution${nl}st=1"
+  f=$( (case x in x|a${#x-a}b) echo hit ;; esac) 2>&1; echo "st=$?"); e="$e$nl$f"; w="$w${nl}hit${nl}st=0"
+  f=$( (case a${s125u?unset}b in x) ;; esac) 2>&1; echo "st=$?"); e="$e$nl$f"; w="$w$nl$0: line $LINENO: s125u: unset${nl}st=1"
+  f=$( (case x in x) echo one ;& y$(echo side >&2)) echo two ;; esac; case x in y|x|$(echo lazy >&2)) echo three ;; esac) 2>&1); e="$e$nl$f"; w="$w${nl}one${nl}two${nl}three"
+  check scw1 "$e" "$w"
+  e=$( ([[ x == a${#x-a}b ]]; echo no) 2>&1; echo "st=$?"); w="$0: line $LINENO: a\${#x-a}b: bad substitution${nl}st=1"
+  f=$( ([[ -n $((1/0)) ]]; echo no) 2>&1; echo "st=$?"); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 1/0: division by 0 (error token is \"0\")${nl}st=1"
+  f=$( ([[ 1/0 -eq 1 ]]; echo "in=$?") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: [[: 1/0: division by 0 (error token is \"0\")${nl}in=1"
+  f=$( ([[ x == x || a${#x-a}b == y ]]; echo "a=$?"; [[ x == y && $(echo no >&2) == y ]]; echo "b=$?") 2>&1); e="$e$nl$f"; w="$w${nl}a=0${nl}b=1"
+  check scw2 "$e" "$w"
+}
+# ===== SECTION 126: circular namerefs: how often bash warns =====
+# Through a circular chain of namerefs the count and the keys (${#REF[@]}, ${!REF[@]})
+# warn once and an element or the elements twice; an @-transform reads an empty value
+# after one warning. Inside a function a nameref to itself is declared with two warnings.
+# Every expected value is bash 5.3's.
+s126() {
+  local e f l w nl=$'\n' c=': warning: p: circular name reference'
+  e=$( (declare -n p=q q=p; echo "${#p[@]}|${#p[*]}|${!p[@]}|${#p[1]}") 2>&1); l=$LINENO
+  w="$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c${nl}0|0||0"
+  f=$( (declare -n p=q q=p; echo "${p[@]}|${p@Q}|${p@U}") 2>&1); e="$e$nl$f"; l=$LINENO
+  w="$w$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl||"
+  check snc1 "$e" "$w"
+  s126f() { local -n l=l; echo "${#l[@]}"; declare -p l; }; l=$LINENO
+  e=$( (s126f) 2>&1)
+  check snc2 "$e" "$0: line $l: local: warning: l: circular name reference
+$0: line $l: warning: l: circular name reference
+$0: line $l: warning: l: circular name reference
+0
+declare -n l=\"l\""
+}
+# ===== SECTION 127: errors of an arithmetic text's expansions; function attributes =====
+# An error raised while an arithmetic text's expansions are expanded is the word's: it
+# carries no "((: " prefix and abandons the line, where an error of the evaluation only
+# fails (( )). A bad substitution there names the arithmetic text: what (( )) or $(( ))
+# enclose, a for (( )) part from its first token, an offset from the ":" on. Through a
+# circular nameref @a and @A warn three times, four with a subscript, and a chain that
+# closes on a local reads, stores and unsets the global variable of that name. A byte that
+# starts no well-formed UTF-8 sequence is a character of its own to a pattern and to case mapping.
+# declare -ft gives a function the trace attribute, which declare -F and -pf show. Every
+# expected value is bash 5.3's.
+s127() {
+  local e f l w nl=$'\n' x=abc s=hello b='bad substitution'
+  e=$( ( (( $((1/0)) )); echo no) 2>&1); w="$0: line $LINENO: 1/0: division by 0 (error token is \"0\")"
+  f=$( (if (( 1 + $((2/0)) )); then echo t; else echo e; fi; echo no) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 2/0: division by 0 (error token is \"0\")"
+  f=$( (for (( i=$((3/0)); i<1; i++ )); do :; done; echo no) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 3/0: division by 0 (error token is \"0\")"
+  f=$( (echo ${s:1+$((4/0))}; echo no) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: 4/0: division by 0 (error token is \"0\")"
+  f=$( ( (( 1/0 + $x )); echo "st=$?") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: ((: 1/0 + abc : division by 0 (error token is \"0 + abc \")${nl}st=1"
+  check sxe1 "$e" "$w"
+  e=$( ( (( 1+${#x-a}  )); echo no) 2>&1); w="$0: line $LINENO:  1+\${#x-a}  : $b"
+  f=$( (echo "a $((${#x-a}+1)) b") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: \${#x-a}+1: $b"
+  f=$( (echo $[ ${#x-a} ]) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO:  \${#x-a} : $b"
+  f=$( (for ((  i=${#x-a} ; i<1; i++ )); do :; done) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: i=\${#x-a} : $b"
+  f=$( (echo ${s:  ${#x-a}  }) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO:   \${#x-a}  : $b"
+  f=$( (echo "${s:1: 1+${#x-a}}") 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO:  1+\${#x-a}: $b"
+  f=$( ( (( $'\t'${#x-a} )) ) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO:  '"$'\t'"'\${#x-a} : $b"
+  f=$( ([[ 1 -eq "${#x-a}" ]]) 2>&1); e="$e$nl$f"; w="$w$nl$0: line $LINENO: \${#x-a}: $b"
+  check sxe2 "$e" "$w"
+  local c=': warning: q: circular name reference'
+  e=$( (declare -n q=r r=q; echo "[${q@a}]") 2>&1); l=$LINENO
+  w="$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl[]"
+  f=$( (declare -n q=r r=q; echo "[${q[@]@A}]") 2>&1); e="$e$nl$f"; l=$LINENO
+  w="$w$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl$0: line $l$c$nl[]"
+  f=$( (s127n() { local -n n; n=n; echo "[$?]"; }; s127n) 2>&1); e="$e$nl$f"; w="$w$nl[0]"
+  check sxe3 "$e" "$w"
+  s127r() { local -n s127v=s127v; echo "${#s127v[@]} $s127v"; s127v=X; s127v+=Z; printf -v s127v %s "$s127v"P; echo "$s127v"
+    for s127v in F1 F2; do :; done; unset s127v; echo "[${s127v-u}]"; }
+  s127v=G; e=$(s127r 2>/dev/null; echo "$s127v"); f=$(s127r 2>&1 >/dev/null); w=${f//[!$nl]/}; f=${f//maximum nameref depth/@}; f=${f//[!@]/}
+  check snl1 "$e ${#w} ${#f}" $'1 G\nXZP\n[u]\nF2 12 5'
+  local v=$'a\x80b' v2=$'ab\x80' v3=$'\xc3b' v4=$'\xc0\xafa'
+  check sxb1 "${v#?}|${v##??}|${v%?}|${v//?/-}|${v2%??}|${v2#??}|${v3^^}|${v4^^}|${v2^^}" $'\x80b|b|a\x80|---|a|\x80|\xc3B|\xc0\xafA|AB\x80'
+  e=$(s127f() { :; }; s127g() { :; }
+    declare -ft s127f s127g nosuch; echo "st=$?"; declare -f +t s127g; declare -pF s127f s127g
+    f=$(declare -f s127f); echo "${f##*$nl}"; f=$(declare -pf s127f); echo "${f##*$nl}"
+    typeset -tF s127g; echo "st=$?"
+    unset -f s127f; s127f() { :; }; declare -pF s127f s127g; declare -pF nosuch 2>/dev/null; echo "st=$?"
+    (declare +t -f s127g); declare -F s127g; declare -pF s127g)
+  check sft1 "$e" 'st=1
+declare -ft s127f
+declare -f s127g
+}
+declare -ft s127f
+st=0
+declare -f s127f
+declare -ft s127g
+st=1
+s127g
+declare -ft s127g'
+}
+# ===== SECTION 128: circular namerefs in stores and arithmetic; case toggling =====
+# Through a nameref chain that closes on a local, an element store, an array literal and an
+# arithmetic store land on the global variable of that name and leave the nameref; an
+# arithmetic store looks the name up once more than an assignment (one more warning), `let`
+# once more again for each NAME[SUB], and outside a function an arithmetic scalar store
+# through a circular chain stores nothing. An arithmetic element store makes a set scalar
+# element 0. ${v~} and ${v~~} toggle the case of the first / every ASCII letter, a pattern
+# picking the characters. -n takes -i and the case attributes away, and fails with -i.
+# declare -ft with no name prints only the traced functions, whatever the others hold.
+# Every expected value is bash 5.3's.
+s128() {
+  local e f c='circular name reference' m='maximum nameref depth'
+  # s128c TEXT WORD: how many lines TEXT has, and how many of them hold WORD.
+  s128c() { local IFS=$'\n' l n=0 wd=$2; set -- $1; for l; do [[ $l == *"$wd"* ]] && n=$(( n + 1 )); done; echo "$# $n"; }
+  s128a=(G0 G1)
+  s128f() { local -n s128a=s128a; s128a[1]=Q; s128a[3]+=R; echo "${s128a[3]} ${#s128a[@]}"; s128a=(n "${s128a[1]}"); s128a+=(o); declare -p s128a; }
+  e=$(s128f 2>/dev/null; declare -p s128a); f=$(s128f 2>&1 >/dev/null)
+  check sgc1 "$e $(s128c "$f" "$c")" 'R 3
+declare -n s128a="s128a"
+declare -a s128a=([0]="n" [1]="Q" [2]="o") 13 13'
+  s128g() { local -n s128s=s128s; (( s128s = 5 )); let s128s+=1; (( s128s[2] = 4 )); let 's128s[3]=s128s[2]+1'; local x='s128s[0]++'; let x; echo $(( s128s[3] )) $(( s128s )); }
+  s128s=1; e=$(s128g 2>/dev/null; declare -p s128s); f=$(s128g 2>&1 >/dev/null)
+  check sgc2 "$e $(s128c "$f" "$m")" '5 7
+declare -a s128s=([0]="7" [2]="4" [3]="5") 26 2'
+  s128k() { local -n s128d=s128d; echo "${s128d:=DEF} ${s128d=X} ${s128d:-Y}"; }
+  unset s128d; e=$(s128k 2>/dev/null; echo "$s128d"); f=$(s128k 2>&1 >/dev/null)
+  check sgc3 "$e $(s128c "$f" "$m")" 'DEF DEF DEF
+DEF 6 1'
+  e=$(declare -n s128q=s128r s128r=s128q; (( s128q = 5 )); echo "st=$?"; (( s128q[1] = 6 )); declare -p s128q; declare -n s128t=s128u s128u=s128t; let 's128t[2]=7'; declare -p s128t)
+  f=$( (declare -n s128q=s128r s128r=s128q; (( s128q = 5 )); (( s128q[1] = 6 )); declare -n s128t=s128u s128u=s128t; let 's128t[2]=7') 2>&1)
+  check sgc4 "$e $(s128c "$f" "$c")" 'st=0
+declare -n s128q="s128r"
+declare -n s128t="s128u" 9 8'
+  e=$(x=7; (( x[2]=4 )); y=8; let 'y[1]=5'; z=9; s='z[3]=1'; (( $s )); declare -p x y z)
+  check sae1 "$e" 'declare -a x=([0]="7" [2]="4")
+declare -a y=([0]="8" [1]="5")
+declare -a z=([0]="9" [3]="1")'
+  local v=hELLo a=(abC Def) u=$'\xc3\xa9Ab' t=aB-1
+  check stc1 "${v~} ${v~~} ${v~~[lLb]} ${v~[a-z]} ${a[*]~} ${a[1]~~} ${u~} ${u~~} ${t~~?}" $'HELLo HellO hEllo HELLo AbC def dEF \xc3\xa9Ab \xc3\xa9aB Ab-1'
+  e=$(s128m=3; s128n() { local -i n; local -n n=s128m; declare -p n; local -u o=q; local -n o=s128m; declare -p o; local -n -i p=s128m; echo "st=$?"; n=4+1; declare -p s128m; }; s128n)
+  check snd1 "$e" 'declare -n n="s128m"
+declare -n o="s128m"
+st=1
+declare -- s128m="4+1"'
+  e=$(s128p() { echo "$(case a in a) echo x;; esac)"; }; s128o() { :; }; declare -ft s128o; declare -ft; echo "st=$?")
+  check sdf1 "$e" $'s128o () \n{ \n    :\n}\ndeclare -ft s128o\nst=0'
+}
 # ===== SECTION 129: integer operands of test; circular namerefs keep attributes; type =====
 # test and [ take a plain decimal integer for -eq ... -ge (white space around it and one sign
 # allowed, no arithmetic, nothing beyond 64 bits): anything else is "integer expected", the
@@ -171,81 +328,18 @@ s134() {
   e="$e $([ /usr -ef /usr ]; echo -n $?; [[ /dev/null -ef /dev/null ]]; echo -n $?; test / -ef /dev; echo -n $?; o=-ef; [ "$p" $o "$p" ]; echo -n $?; [ /usr -nt /usr ]; echo -n $?; [[ / -ot / ]]; echo -n $?)"
   check rox8 "$e" '010101 001111'
 }
-# ===== SECTION 135: list values for array members, stores to circular array namerefs =====
-# NAME[SUB]=(list) is refused and abandons the line, after a declaration has made NAME an
-# array. export and readonly of a function's circular local nameref act on the global. A
-# store to a circular nameref that holds an array leaves the array as it was; its
-# declaration's own list still lands. Every expected value is bash 5.3's, less the byte
-# bash prints between the quotes.
-s135() {
-  local e
-  s135s() { local l; while IFS= read -r l; do l=${l#*: line }; l=${l//$'\001'/}; printf '%s;' "${l#*: }"; done <<< "$1"; }
-  e=$( { s135a[1]=(x y); echo no; } 2>&1; echo "s=$?"; declare -p s135a 2>&1)
-  check alm1 "$(s135s "$e")" 's135a[1]: cannot assign list to array member;'
-  e=$(s135f() { local s135b[2]=(p); echo no; }; s135f 2>&1; echo "s=$?")
-  check alm2 "$(s135s "$e")" 's135b[2]: cannot assign list to array member;'
-  e=$(declare -A s135c; { declare -A s135c[k]=(v w); echo no; } 2>&1; declare -p s135c)
-  check alm3 "$(s135s "$e")" 's135c[k]: cannot assign list to array member;'
-  e=$(s135f() { export s135d[1]=(p q); echo no; }; s135f 2>&1; declare -p s135d 2>&1)
-  check alm4 "$(s135s "$e")" 's135d[1]: cannot assign list to array member;'
-  e=$(s135g() { local -n s135w=s135w; export s135w=q; declare -p s135w; local -n s135v=s135v; readonly s135v; export -n s135v; }; s135g 2>&1; declare -p s135w)
-  check alm5 "$(s135s "$e")" 'local: warning: s135w: circular name reference;warning: s135w: circular name reference;warning: s135w: maximum nameref depth (8) exceeded;warning: s135w: circular name reference;declare -n s135w="s135w";local: warning: s135v: circular name reference;warning: s135v: circular name reference;warning: s135v: circular name reference;warning: s135v: maximum nameref depth (8) exceeded;warning: s135v: circular name reference;declare -x s135w="q";'
-  e=$(s135g() { local -n s135u=s135u; readonly s135u=(x); }; s135g 2>&1; declare -p s135u)
-  check alm6 "$(s135s "$e")" 'local: warning: s135u: circular name reference;warning: s135u: circular name reference;warning: s135u: circular name reference;warning: s135u: circular name reference;warning: s135u: circular name reference;declare -ar s135u=([0]="x");'
-  e=$(readonly s135z=1; export s135z=2 2>/dev/null; declare -p s135z)
-  check alm7 "$e" 'declare -rx s135z="1"'
-  e=$(s135g() { local -n s135t=s135t; declare s135t=(x y); s135t[1]=q; echo no; }; s135g 2>&1; echo "s=$?")
-  check alm8 "$(s135s "$e")" 'local: warning: s135t: circular name reference;warning: s135t: circular name reference;warning: s135t: circular name reference;warning: s135t: circular name reference;warning: s135t: circular name reference;warning: s135t: circular name reference;`'"'"': not a valid identifier;'
-  e=$(s135g() { local -n s135q=s135q; declare s135q=(x y); (( s135q[1]=7 )); echo "s=$?"; let 's135q[0]=4'; echo "s=$?"; declare s135q[1]=z; echo "s=$?"; unset 's135q[1]' s135q; echo "s=$?"; read -a s135q <<< 'a b'; echo "s=$?"; declare s135q+=(z); declare -p s135q; }; s135g 2>/dev/null)
-  check alm9 "$e" $'s=0\ns=0\ns=1\ns=0\ns=1\ndeclare -an s135q=([0]="x" [1]="y" [2]="z")'
-}
-# ===== SECTION 136: declaration operands with brackets in the subscript =====
-# The subscript of a declaration operand that is one word ends at the "]" that closes its
-# "[", brackets inside it counted. Every expected value is bash 5.3's.
-s136() {
-  local e v
-  s136s() { local l; while IFS= read -r l; do l=${l#*: line }; printf '%s;' "${l#*: }"; done <<< "$1"; }
-  e=$( { declare -n 's136a[c6[x y]]'; echo "s=$?"; declare 's136a[a[1]]=x'; echo "s=$?"; declare -p s136a; } 2>&1)
-  check dsb1 "$(s136s "$e")" 'declare: s136a[c6[x y]]: reference variable cannot be an array;s=1;s=0;declare -a s136a=([0]="x");'
-  e=$(s136f() { local -n 's136b[c6[x y]]'; echo "s=$?"; local 's136c[b[2]]=y'; declare -p s136c; }; s136f 2>&1)
-  check dsb2 "$(s136s "$e")" 'local: s136b[c6[x y]]: reference variable cannot be an array;s=1;declare -a s136c=([0]="y");'
-  e=$( { declare -a 's136d[a[1]]=(p q)'; declare 's136e[a[1]'; echo "s=$?"; declare 's136e[a]b]=x'; echo "s=$?"; declare -p s136d; } 2>&1)
-  check dsb3 "$(s136s "$e")" 'declare: `s136e[a[1]'"'"': not a valid identifier;s=1;declare: `s136e[a]b]=x'"'"': not a valid identifier;s=1;declare -a s136d=([0]="p" [1]="q");'
-  v='s136g[x[1]]'
-  e=$( { declare "$v"; declare -p s136g; v='s136h[a[1]]+=x'; declare "$v"; declare -p s136h; export "$v"; echo "s=$?"; } 2>&1)
-  check dsb4 "$(s136s "$e")" 'declare -a s136g;declare -a s136h=([0]="x");export: `s136h[a[1]]'"'"': not a valid identifier;s=1;'
-}
-# ===== SECTION 137: stores to a readonly nameref with no value =====
-# A nameref with no value takes a stored value as its own, which must name a variable:
-# "not a valid identifier" comes before the nameref's readonly, and arithmetic reports it
-# and goes on. An element of one names no variable. Every expected value is bash 5.3's.
-s137() {
-  local e
-  s137s() { local l; while IFS= read -r l; do l=${l#*: line }; printf '%s;' "${l#*: }"; done <<< "$1"; }
-  e=$( { declare -nr s137a; s137a=5; echo no; } 2>&1; echo "s=$?")
-  e="$e"$'\n'"$(declare -nr s137a; { s137a=abc; echo no; } 2>&1; echo "s=$?")"
-  e="$e"$'\n'"$(declare -nr s137a; { s137a+=5; echo no; } 2>&1; echo "s=$?"; declare -p s137a)"
-  check rnv1 "$(s137s "$e")" '`5'"'"': not a valid identifier;s137a: readonly variable;`5'"'"': not a valid identifier;'
-  e=$( { declare -nr s137b; (( s137b = 3 )); echo "s=$?"; (( s137b = 0 )); echo "s=$?"; let s137b=4; echo "s=$?"; echo "$(( s137b = 2 ))"; declare -p s137b; } 2>&1)
-  check rnv2 "$(s137s "$e")" '((: `3'"'"': not a valid identifier;s=0;((: `0'"'"': not a valid identifier;s=1;let: `4'"'"': not a valid identifier;s=0;`2'"'"': not a valid identifier;2;declare -nr s137b;'
-  e=$( { declare -nr s137c; read s137c <<< 7; echo "s=$?"; printf -v s137c %s 8; echo "s=$?"; read s137c <<< abc; echo "s=$?"; } 2>&1)
-  check rnv3 "$(s137s "$e")" 'read: `7'"'"': not a valid identifier;s=1;printf: `8'"'"': not a valid identifier;s=1;s137c: readonly variable;s=1;'
-  e=$(declare -nr s137d; { s137d[1]=3; echo no; } 2>&1; declare -p s137d)
-  e="$e"$'\n'"$(declare -n s137e; { (( s137e[1] = 4 )); echo "s=$?"; } 2>&1; { s137e[1]=3; echo no; } 2>&1; declare -p s137e)"
-  check rnv4 "$(s137s "$e")" '`'"'"': not a valid identifier;((: `'"'"': not a valid identifier;s=0;`'"'"': not a valid identifier;'
-  e=$(s137f() { local -nr s137g; s137g=5; echo no; }; s137f 2>&1; echo "s=$?")
-  check rnv5 "$(s137s "$e")" '`5'"'"': not a valid identifier;'
-}
 # ===== END SECTIONS =====
 
+s124  # SECTION-CALL 124
+s125  # SECTION-CALL 125
+s126  # SECTION-CALL 126
+s127  # SECTION-CALL 127
+s128  # SECTION-CALL 128
 s129  # SECTION-CALL 129
 s130  # SECTION-CALL 130
 s131  # SECTION-CALL 131
 s132  # SECTION-CALL 132
 s133  # SECTION-CALL 133
 s134  # SECTION-CALL 134
-s135  # SECTION-CALL 135
-s136  # SECTION-CALL 136
-s137  # SECTION-CALL 137
 echo "full: $checks checks, $fails failures"
 exit $fails
