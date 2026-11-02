@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1146** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1147** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -153,18 +153,21 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1143 bash: declaration error prefix rule, compiler run-time-circular and readonly nameref array decls, valueless local nameref subscript store, compiler step cost of comsub+extglob probes · P3 · SH · IN PROGRESS (SH worker, round 45) [V]
+### T-1146 bash: declaration message ordering and redirects, local -r/-a merges, readonly of circular nameref, warning counts, valueless -g nameref subscript, compiler lexical-readonly limits · P3 · SH · OPEN [V]
 
-Found while working T-1139. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+Found while working T-1143. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
-1. Error prefix rule. bash prefixes a declaration's first error with this_command_name, which is FUNCNAME only when the declaration is the first command the function runs; otherwise the message is bare. Both engines use FUNCNAME for any -g declaration in a function. Repro: `ib=(1); g() { true; declare -gA ib=(x); }; g` prints `ib: cannot convert indexed to associative array` in bash, and `g: ib: ...` in ours.
-2. Compiler: a readonly set after the function is defined (`f() { declare -gA c[1]=(x); }; readonly c=1; f`) is missed by the static roVars, so the compiler reports only "cannot assign list". It must also report the readonly error the interpreter gives.
-3. Compiler: when the circularity is only known at run time (`x=w; f() { local -n w=$x; local w=(q); }; f`), `local w=(q)` leaves `-n w="w"`. bash gives `declare -an w=([0]="q")`.
-4. `local -nr w=w; local w=(q)`: bash gives `-an w=([0]="q")`. Both engines keep `-nr w="w"`.
-5. `f() { local -n q7; declare q7[1]=5; declare -p q7; }; f`: bash prints ``declare: `5': invalid variable name for name reference`` and leaves `-an q7`. Both engines store `[1]="5"`.
-6. Compiler step cost. A long probe (19 command-substitution plus subshell cases, each filtering lines with the extglob `${l##*: line +([0-9]): }`) needs just over 100M steps in the compiled leg under -frozen, while each segment passes on its own. Find where the steps go (the extglob `+([0-9])` removal is not covered by the new literal-suffix fast path in stripPat), and fix the algorithm, not with an optimizer pass.
+1. When one declaration has several literal operands, bash prints all of the expansion-time messages first. Ours interleave them with the later messages, for example in `declare -gA ib=(x) ib=(y)`, or with a list-to-member operand mixed with a conversion literal.
+2. A redirect on the declaration does not suppress the expansion-time message in bash, because expansion runs before the redirect. Ours does suppress it (`declare -gA ib=(x) 2>/dev/null` still prints the expansion message in bash).
+3. `local -r y=1; local -a y` in the same function gives `declare -ar y=()` in bash, and `local -nr w=w; local -a w` gives `-anr w=()`.
+4. `readonly` of a circular local nameref acts on the global in bash. A later `local w=(q)` should then print `w: readonly variable` and abandon the line.
+5. `local w=w` on a circular nameref prints one warning fewer than bash, in both engines.
+6. `declare -g q7[1]=5` with a valueless local nameref: bash prints ``q7: `': not a valid identifier`` (check the exact text) with status 1; we print nothing and return 0.
+7. Compiler lexical limits: `readonly d=1` placed after `f2() { local d; declare -a d=(1); }` refuses the first `local d`, but the second declaration still succeeds, because d counts as a local of f2 lexically. Also, a plain `c=2` in a function, with the readonly placed later, is not refused.
+8. Compiler: a run-time-circular `local -i w=3` shows `-in` instead of `-n` in `declare -p`.
+9. Line numbers: an abandon inside a function defined within a command substitution reports a different line number than bash. Note that the tests strip line numbers, so add an assertion that keeps them.
 
-Not emulated by design: the \001 byte bash prints before `: invalid variable name for name reference` when reading through a circular array nameref.
+Not emulated: when a valueless nameref's subscript store has a valid-name VALUE, bash prints uninitialised memory.
 
 Verify with `tests/probe.sh bash` on all four legs, and diff the `.err` files. New sections go in tests/bash-test-full.7.sh.
 
@@ -1216,6 +1219,7 @@ T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) — me
 T-1139 bash: list-to-member edge cases, nameref array conversions, prefix list assignment parse, quoted compound values, reads through circular array nameref, path-length-dependent frozen step cost — merged a35d7084: list-to-member declaration failures, nameref array conversions (-g target, removing nameref attribute, read -a/mapfile), prefix list assignments, quoted compound values (+ compiler keeps -i/-u/-l on runtime (...)), reads through circular array namerefs, readonly :=  status 2, linear ${v#*L}/${v%L*} for literal L (part 6 frozen steps 70M -> 27M); 4-leg probe matches bash 5.3 (stdout + stderr; \001 byte by design); bash gates green; bench 0.00%
 T-1142 kotlin: per-class program-method arity, interpreter named args on builtins shadowed by a class method name — merged 013812e4: per-class reference arity for disputed method names (run-time from the receiver's class chain via recorded closure arity), stdlib named-argument order chosen by receiver (interp lookupMethod, compiler namesCover fallback); 4-leg probe matches kotlinc 2.2.21 except the pre-existing compiled named-arg evaluation order (filed P2); kotlin gates green; bench -0.02%
 T-1141 ruby: Kernel#warn, $stderr reassignment capturing warnings, big-Integer endless ranges — merged 081928f9 (partial by design: warn uplevel >= 2 inside a method raises NotImplementedError, carried to follow-up): Kernel#warn (IO#puts semantics, options errors, uplevel 0/1 with no per-call cost), warnings + warn through $stderr.write with TypeError on non-writable assignment, big-Integer endless ranges exact (each/for/first/step/lazy/next), endless #last RangeError; 4-leg probe matches ruby 2.6 stdout + stderr; matrix 605/605; bench -0.04%
+T-1143 bash: declaration error prefix rule, compiler run-time-circular and readonly nameref array decls, valueless local nameref subscript store, compiler step cost of comsub+extglob probes — merged 904aa2c2: this_command_name error prefix in both engines, compiler run-time readonly flags (readonly set after function definition), run-time-circular nameref array decls (rt_nref_loops), local -nr w=w; local w=(q) per oracle (ticket expectation was wrong), valueless local nameref subscript store, extglob strip literal-run filter (19-case probe >100M -> <10M steps); 4-leg probe (162 pattern removals + decl diagnostics) matches bash 5.3 stdout + stderr; bash gates green; bench +0.01%
 
 # Settled — do not re-open
 
