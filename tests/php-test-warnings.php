@@ -283,6 +283,16 @@ $fc[$fk[3]] ??= "n"; check("key-float-coalesce-assign", [$fc, lastErr()], [[0 =>
 $v = $fs[$fk[0]] ??= "x"; check("key-float-coalesce-assign-string", [$v, lastErr()], ["b", null]);
 $v = array_key_exists($fk[2], $fa); check("key-float-key-exists", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 4.5 to int loses precision', __LINE__)]);
 $v = array_key_exists($fk[1], $fa); check("key-float-key-exists-integral", [$v, lastErr()], [false, null]);
+// Not compiled to its opcode - called through a callable, with named arguments or
+// as key_exists - array_key_exists deprecates such a key too (PHP_FUNCTION).
+$ka = [1 => "x"];
+$kk = [1.5, 2.5];
+$kf = "array_key_exists";
+$v = $kf($kk[0], $ka); check("key-float-key-exists-callable", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$v = array_key_exists(array: $ka, key: $kk[1]); check("key-float-key-exists-named", [$v, lastErr()], [false, want(E_DEPRECATED, 'Implicit conversion from float 2.5 to int loses precision', __LINE__)]);
+$v = key_exists($kk[0], $ka); check("key-float-key-exists-alias", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$v = array_map("array_key_exists", [$kk[1]], [$ka]); check("key-float-key-exists-map", [$v, lastErr()], [[false], want(E_DEPRECATED, 'Implicit conversion from float 2.5 to int loses precision', __LINE__)]);
+$v = call_user_func($kf, $kk[0], $ka); check("key-float-key-exists-cuf", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
 unset($fa[$fk[2]][$fk[3]]); check("key-float-unset-nested", [$fa, lastErr()], [[1 => "one", 4 => []], want(E_DEPRECATED, 'Implicit conversion from float 0.5 to int loses precision', __LINE__)]);
 unset($fa[$fk[0]]); check("key-float-unset", [$fa, lastErr()], [[4 => []], want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
 
@@ -305,6 +315,17 @@ class WarnCbB extends WarnCbA {
     }
 }
 (new WarnCbB)->go();
+// A callable parameter's check raises the same deprecations, at the line of the
+// function (its RECV opcode).
+class WarnCbC extends WarnCbA {
+    const HINT = __LINE__; public function hint(callable $c) { return "h"; }
+    public function go() {
+        $v = $this->hint("parent::m"); check("cb-hint-parent", [$v, lastErr()], ["h", want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', self::HINT)]);
+        $v = $this->hint([$this, "WarnCbA::m"]); check("cb-hint-compound", [$v, lastErr()], ["h", want(E_DEPRECATED, 'Callables of the form ["WarnCbC", "WarnCbA::m"] are deprecated', self::HINT)]);
+        $v = $this->hint([$this, "m"]); check("cb-hint-plain", [$v, lastErr()], ["h", null]);
+    }
+}
+(new WarnCbC)->go();
 $v = is_callable([new WarnCbA, "parent::m"]); check("cb-compound-no-parent", [$v, lastErr()], [false, null]);
 try { call_user_func([new WarnCbA, "parent::m"]); $v = "none"; } catch (TypeError $e) { $v = $e->getMessage(); }
 check("cb-compound-no-parent-error", $v, 'call_user_func(): Argument #1 ($callback) must be a valid callback, cannot access "parent" when current class scope has no parent');

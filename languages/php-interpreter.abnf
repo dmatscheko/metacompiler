@@ -192,7 +192,7 @@ CloseAhead  = :script(~~ "pure";
 // parameter and return types are checked at the call and at each return.
 // 'function &name()' returns by REFERENCE (DefAmp, refFnEnter).
 Def         <~~ push(makeFun(takeAll())); refFnStack.pop() ~~>
-            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(up.in); refFnEnter(up.in, "$"); genPush(); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(up.in); refFnEnter(up.in, "$"); genPush(); fnEnter(); cloEnterFn(up.in, false, up.pos) ~~> ParamList [ ReturnType ] Block ;
 DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
@@ -231,7 +231,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // returns by reference as a function's does (refFnEnter); an abstract/interface
 // method has no body (';' instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}); refFnStack.pop() ~~>
-            = [ AttrGrp ] { PropMod } KwFunction [ DefAmp ] MethodName <~~ push(up.in); refFnEnter(up.in, "->"); genPush(); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+            = [ AttrGrp ] { PropMod } KwFunction [ DefAmp ] MethodName <~~ push(up.in); refFnEnter(up.in, "->"); genPush(); fnEnter(); cloEnterFn(up.in, true, up.pos) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: const A = 1, B = 2; with an optional TYPE before the first name
 // (the typed class constants of PHP 8.3). The typed form has to be its own
 // alternative and be tried FIRST - writing it as an optional [ TypeHint ] would let
@@ -2030,10 +2030,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function phpArgFit(p, n, v, argset, who, cls) {
         var r = anytype
         r = phpTypeFit(p.rel ? phpTypeResolve(p.typ, true) : p.typ, v, ctxSelf())
-        if (r !== phpTypeBad) { return r }
+        if (r !== phpTypeBad && (p.cb == undefined || p.cb == null || phpCallableArg(p.cb.d, r))) { return r }
         var where = argset.site == undefined || argset.site == "" ? "" : ", called" + argset.site
         phpRaise("TypeError", phpFnShown(who, cls) + "(): Argument #" + n + " (" + p.name + ") must be of type "
             + phsTypeText(p.rel ? phpTypeResolve(p.typ, false) : p.typ) + ", " + phpValueName(v) + " given" + where)
+    }
+    // Is v, which a callable parameter's shape test admitted, a valid callback in
+    // the callee's frame (zend_check_type_slow's zend_is_callable)? A string or an
+    // array is checked, its deprecations raised first at site d (null: none); the
+    // library calls the check makes leave phpSite as the call left it. Twin of
+    // emitArgFit in php-to-llvm-ir.abnf.
+    function phpCallableArg(d, v) {
+        if (typeof v != "string" && !isArr(v)) { return true }
+        var keep = phpSite
+        cbDepr(d, v)
+        var ok = phpIsCallable(v)
+        phpSite = keep
+        return ok
     }
     // The body of a function declaring return type rtype, checking what it returns
     // (zend_verify_return_type): a generator's and a void function's are not; a
@@ -4904,9 +4917,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var lc = phsCase(fnName(n), false)
         return hasOwn(phpBuiltins, lc) || varExists(fnKey(lc))
     }
+    // A callable naming array_key_exists is its declaration with display_errors=1,
+    // which checks the key (__mec_akeyexists in lib/php-stdlib.php), as every
+    // callable of a native is in the compiler.
     function callDyn(n, argset) {
         var lc = phsCase(fnName(n), false)
-        if (hasOwn(phpBuiltins, lc) && !nativeRefuses(lc, argset)) {
+        if (hasOwn(phpBuiltins, lc) && !nativeRefuses(lc, argset) && !(diagOn && lc == "array_key_exists" && varExists(fnKey(lc)))) {
             if (argset.pend != null) { argDiag(null, argset) }
             return phpBuiltins[lc].apply(undefined, argset.pos)
         }
@@ -5513,6 +5529,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var fileConst = magicFileConst(name, pos)
         if (fileConst != undefined) { return makeConst(fileConst) }
+        var at = callSite(pos)
         return function() {
             var lo = name.toLowerCase()
             if (lo == "true") { return true }
@@ -5544,8 +5561,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (name == "E_NOTICE") { return 8 }
             if (name == "E_DEPRECATED") { return 8192 }
             if (hasOwn(phpConsts, name)) { return phpConsts[name] }
-            // PHP 8: a catchable `Error: Undefined constant "X"`. The compiler half
-            // words it in makeConstRef.
+            // PHP 8: a catchable `Error: Undefined constant "X"`, raised at the
+            // constant's own line. The compiler half words it in makeConstRef.
+            if (at != "") { phpSite = at }
             phpRaise("Error", "Undefined constant " + String.fromCharCode(34) + name + String.fromCharCode(34))
         }
     }
@@ -5719,9 +5737,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     var cloStatic = false
     function cloNoteClass(n) { cloClass = stripWs(n); return n }
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
-    function cloEnterFn(n, method) {
+    function cloEnterFn(n, method, pos) {
         var meth = (method ? cloClass + "::" : "") + stripWs(n)
-        cloScopes.push({name: meth + "()", self: method, cls: method ? cloClass : "", fn: stripWs(n), meth: meth})
+        cloScopes.push({name: meth + "()", self: method, cls: method ? cloClass : "", fn: stripWs(n), meth: meth, pos: pos})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
@@ -5730,7 +5748,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // A static closure where a $this is in reach hides it (hide); st marks one
         // that no instance can be bound to (cloBind).
         cloScopes.push({name: name, cls: top == null ? "" : top.cls, self: top != null && top.self && !cloStatic, line: line,
-                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self})
+                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self, pos: pos})
         cloStatic = false
     }
     function cloLeave() { return cloScopes.pop() }
@@ -7266,7 +7284,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var ptyp = hooks.length > 0 ? "" : typ
         if (promote && ptyp != "") { typedNames[nm] = true }
         if (dnull) { typ = phpTypeOrNull(typ) }
-        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, pnull: dnull, rel: phpTypeRel(typ), hooks: hooks, zpp: zpp}
+        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, pnull: dnull, rel: phpTypeRel(typ), hooks: hooks, zpp: zpp,
+                cb: phpCbParam(typ, variadic)}
+    }
+    // A parameter declaring callable alone (phpCallableOnly) is checked in the
+    // callee's frame as zend_is_callable_ex checks it (phpCallableArg), its
+    // deprecations raised at the function's line: {d: that site, or null}; null
+    // for any other parameter. Twin of paramList's cbs in php-to-llvm-ir.abnf.
+    function phpCbParam(typ, variadic) {
+        if (phpLibDepth > 0 || variadic || !phpCallableOnly(typ)) { return null }
+        phpLibRef("__mec_cbcompound", true)
+        var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
+        return {d: diagSite("__mec_cbdepr", top == null ? undefined : top.pos)}
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
@@ -8243,6 +8272,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         },
         // Twin of js_phcountrecs in lib/php-rt.metajs and abnf/jsrtphp.go.
         "__mec_countrecs": function() { return countRecs },
+        // __mec_cbns($where, $class, $method): the TypeError $where begins for a
+        // non-static method of $class that a callback binds no object to. Twin of
+        // __mec_cbns in php-to-llvm-ir.abnf.
+        "__mec_cbns": function(where, cn, mn) {
+            cbNonStatic(phpStr(where), findClass(phpStr(cn)), phpStr(mn), phpStr(cn))
+            return null
+        },
+        // The file and line a diagnostic the library raises stands at (phpHere),
+        // the file null with lines=0; null with display_errors=0. Twin of
+        // __mec_here in php-to-llvm-ir.abnf.
+        "__mec_here": function() {
+            if (!diagOn) { return null }
+            var sp = siteFileLine(phpHere())
+            return arrOf(diagLines && sp.file != "" ? [sp.file, sp.line] : [null, 0])
+        },
         "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), true, false) },
         "is_callable": function(v) { return phpIsCallable(v) },
         "__mec_ifaces": function(v) { return phpIfaceNames(v) },
@@ -9630,7 +9674,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return n
     }
     // The site at pos calling check fname, compiled in here: a function of the
-    // check's leading arguments, or null where nothing is diagnosed.
+    // check's leading arguments, or null where nothing is diagnosed. The check's own
+    // calls are the library's and leave phpSite as the program's code had it.
     function diagSite(fname, pos) {
         if (!diagOn || phpLibDepth > 0 || pos == undefined) { return null }
         phpLibRef(fname, true)
@@ -9643,7 +9688,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var all = []
             for (var i = 0; i < vals.length; i++) { all.push(vals[i]) }
             for (var j = 0; j < at.length; j++) { all.push(at[j]) }
+            var keep = phpSite
             callNamed(fname, argsOf(all))
+            phpSite = keep
         }
     }
     // '@e': ZEND_BEGIN_SILENCE before e and ZEND_END_SILENCE after it, also when an

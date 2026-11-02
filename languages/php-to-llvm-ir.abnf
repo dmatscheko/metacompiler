@@ -188,7 +188,7 @@ CloseAhead  = :script(~~ "pure";
 // parameter and return types are checked at the call and at each return.
 // 'function &name()' returns by REFERENCE (DefAmp, refFnEnter).
 Def         <~~ push(makeFun(takeAll())); refFnStack.pop() ~~>
-            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(noteFnName(up.in)); refFnEnter(up.in, "$"); genPush(); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(noteFnName(up.in)); refFnEnter(up.in, "$"); genPush(); fnEnter(); cloEnterFn(up.in, false, up.pos) ~~> ParamList [ ReturnType ] Block ;
 DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
@@ -240,7 +240,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // '&' is accepted and ignored; an abstract/interface method has no body (';'
 // instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}); refFnStack.pop() ~~>
-            = [ AttrGrp ] { MethMod } KwFunction [ DefAmp ] MethodName <~~ push(noteFnName(up.in)); refFnEnter(up.in, "->"); genPush(); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+            = [ AttrGrp ] { MethMod } KwFunction [ DefAmp ] MethodName <~~ push(noteFnName(up.in)); refFnEnter(up.in, "->"); genPush(); fnEnter(); cloEnterFn(up.in, true, up.pos) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: 'const A = 1, B = 2;', with PHP 8.3's typed form ('const int
 // SIZE = 4') and any modifier (final/public/...). They are published on the class
 // descriptor under a 'k:' key and resolved by walking __super, so a subclass and an
@@ -2594,6 +2594,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 return {b: b, v: callExt(b, "js_get", [frameCls(b, "self"), emitStr(b, "__name")])}
             }
         }
+        var site = callSite(pos)
         return function(b) {
             var nameV = emitStr(b, name)
             var v = phClsLookup(b, nameV)
@@ -2608,6 +2609,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var badB = curF.NewBlock("")
             var okB = curF.NewBlock("")
             missB.NewCondBr(missB.NewICmp(llvm.enum.IPredEQ, probed, hUndef), badB, okB)
+            if (site != 0) { siteStore(badB, site) }
             callExt(badB, "js_phraise", [emitStr(badB, "Error"),
                                          emitStr(badB, "Undefined constant " + dq + name + dq)])
             badB.NewBr(mergeB) // never reached: js_phraise throws
@@ -5653,16 +5655,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var cloStatic = false
     function cloNoteClass(n) { cloClass = stripWs(n); return n }
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
-    function cloEnterFn(n, method) {
+    function cloEnterFn(n, method, pos) {
         var meth = (method ? cloClass + "::" : "") + stripWs(n)
-        cloScopes.push({name: meth + "()", self: method, cls: method ? cloClass : "", fn: stripWs(n), meth: meth, vm: varMark()})
+        cloScopes.push({name: meth + "()", self: method, cls: method ? cloClass : "", fn: stripWs(n), meth: meth, vm: varMark(), pos: pos})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
         var line = "" + c.lineOf(pos)
         var name = "{closure:" + (top == null ? c.curFileAbs() : top.name) + ":" + line + "}"
         cloScopes.push({name: name, cls: top == null ? "" : top.cls, self: top != null && top.self && !cloStatic, line: line,
-                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self, vm: varMark()})
+                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self, vm: varMark(), pos: pos})
         cloStatic = false
     }
     // live: the variables the function's text names, its parameters among them,
@@ -5781,7 +5783,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var isGen = genPop()
         fnLeave()
         var sc = cloLeave()
-        var pl = paramList(items)
+        var pl = paramList(items, sc.pos)
         pl.rty = retTypeOf(pl.rty, isGen)
         var body = null
         var byVal = []
@@ -5825,7 +5827,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // capture, its parameter binding and its try-aware return in one step.
     function makeArrowFn(items) {
         var isGen = genPop()
-        var pl = paramList(items)
+        var pl = paramList(items, cloScopes[cloScopes.length - 1].pos)
         pl.rty = retTypeOf(pl.rty, isGen)
         var bodyT = null
         var mark = 0
@@ -7436,6 +7438,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
             || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
             || name == "__mec_callable" || name == "__mec_ifaces" || name == "__mec_clsname" || name == "realpath"
+            || name == "__mec_here" || name == "__mec_cbns"
     }
     // The natives lib/php-stdlib.php is written on, each ONE extern taking its
     // arguments in order, an absent optional one as null (abnf/jsrtphpstr.go,
@@ -7640,6 +7643,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "__mec_clsname") {
             var cnN = callExt(b, "js_phstr", [vs[0]])
             return {b: b, v: b.NewCall(clsNameFn(), [curScopeV, cnN])}
+        }
+        // __mec_cbns($where, $class, $method): js_phcbns' TypeError for a
+        // non-static method of $class that a callback binds no object to. Twin of
+        // the native in php-interpreter.abnf.
+        if (name == "__mec_cbns") {
+            var nsCls = phClsArg(b, vs[1])
+            callExt(nsCls.b, "js_phcbns", [vs[0], nsCls.v, vs[1], vs[2], hUndef, hNull])
+            return {b: nsCls.b, v: hNull}
+        }
+        // __mec_here(): [file, line] of the site a diagnostic the library raises
+        // stands at (php_here), the file null with lines=0 or at site 0; null with
+        // display_errors=0. Twin of the native in php-interpreter.abnf.
+        if (name == "__mec_here") {
+            if (!diagOn) { return {b: b, v: hNull} }
+            var hereV = hereSite(b)
+            var noFile = b.NewICmp(llvm.enum.IPredEQ, hereV, handle(0))
+            var atV = callExt(b, "js_pharr", [])
+            callExt(b, "js_phpush", [atV, diagLines ? b.NewSelect(noFile, hNull, b.NewCall(siteFileFn(), [hereV])) : hNull])
+            callExt(b, "js_phpush", [atV, diagLines ? b.NewSelect(noFile, emitNum(b, 0), callExt(b, "js_num_i", [b.NewAnd(hereV, handle(16777215))])) : emitNum(b, 0)])
+            return {b: b, v: atV}
         }
         if (name == "__mec_ifaces") {
             var ia = phClsArg(b, vs[0])
@@ -8085,7 +8108,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             nsUsed = true
             libFixed = true
         }
-        if (name == "__mec_callable") { nsUsed = true }
+        if (name == "__mec_callable" || name == "__mec_cbns") { nsUsed = true }
         // A native given a count it refuses is called as its library declaration,
         // whose entry raises the ArgumentCountError (phpLibArityBad); so is one
         // given a named or spread argument, which the native, taking positions
@@ -8449,7 +8472,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (!lib && req == 0 && !typed) { return null }
         if (lib && req == 0 && max < 0 && !typed) { return null }
         return {req: req, max: max, rest: fn.rest, who: who, sig: sigText(fn.params, fn.rest), clo: false, lib: lib,
-                tys: tys, rty: rty, names: fn.params, zpps: fn.zpps}
+                tys: tys, rty: rty, names: fn.params, zpps: fn.zpps, cbs: fn.cbs}
     }
     function zppAny(zpps) {
         if (zpps == undefined) { return false }
@@ -8530,12 +8553,33 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var joinB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, argV, hUndef), joinB, fitB)
         var r = callExt(fitB, "js_phfit", [argV, emitStr(fitB, typ), selfV, hUndef, restV])
-        fitB.NewCondBr(fitB.NewICmp(llvm.enum.IPredEQ, r, hUndef), failB, joinB)
+        var cb = chk.cbs == undefined ? null : chk.cbs[i]
+        var fitEnd = null
+        if (cb == null) {
+            fitB.NewCondBr(fitB.NewICmp(llvm.enum.IPredEQ, r, hUndef), failB, joinB)
+        } else {
+            // A callable parameter's string or array is checked as is_callable
+            // checks it, in this (the callee's) frame, its deprecations first; the
+            // library calls the check makes leave php.site as the call stored it.
+            var cbB = curF.NewBlock("")
+            var isB = curF.NewBlock("")
+            fitB.NewCondBr(fitB.NewICmp(llvm.enum.IPredEQ, r, hUndef), failB, isB)
+            var strOrArr = isB.NewOr(isB.NewICmp(llvm.enum.IPredEQ, callExt(isB, "js_phis", [emitStr(isB, "string"), argV]), hTrue),
+                                     isB.NewICmp(llvm.enum.IPredEQ, callExt(isB, "js_phis", [emitStr(isB, "array"), argV]), hTrue))
+            isB.NewCondBr(strOrArr, cbB, joinB)
+            var keepV = cbB.NewLoad(i64, siteGlobal())
+            var okR = makeIsCallable({pos: function(ab) { return {b: ab, v: argV} }}, cb.d)(cbB)
+            okR.b.NewStore(keepV, siteGlobal())
+            okR.b.NewCondBr(truthy(okR.b, okR.v), joinB, failB)
+            fitB = isB
+            fitEnd = okR.b
+        }
         callExt(failB, "js_phargerr", [argV, emitStr(failB, typ), selfV, emitNum(failB, i + 1), emitStr(failB, chk.names[i]),
                                        emitStr(failB, chk.who), chkScopeV(failB, chk), siteText(failB), restV])
         failB.NewBr(joinB) // never taken: js_phargerr raises
-        var v = joinB.NewPhi([llvm.ir.NewIncoming(argV, b), llvm.ir.NewIncoming(r, fitB), llvm.ir.NewIncoming(argV, failB)])
-        return {b: joinB, v: v}
+        var ins = [llvm.ir.NewIncoming(argV, b), llvm.ir.NewIncoming(r, fitB), llvm.ir.NewIncoming(argV, failB)]
+        if (fitEnd != null) { ins.push(llvm.ir.NewIncoming(r, fitEnd)) }
+        return {b: joinB, v: joinB.NewPhi(ins)}
     }
     // v, what a function declaring return type rty returns (hUndef: it ended
     // without a return statement), as that type takes it, or js_phretfit's
@@ -8769,8 +8813,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // The parameter list of a function, closure or arrow function, reduced to the
     // names, the defaults, the BY-REFERENCE positions (a call site has to hand a cell
-    // over for those) and the variadic tail, if any.
-    function paramList(items) {
+    // over for those) and the variadic tail, if any. cbs holds, for a parameter
+    // declaring callable alone (phpCallableOnly), {d: the site raising its
+    // deprecations at the declaration at pos, or null}, else null (emitArgFit).
+    // Twin of phpCbParam in php-interpreter.abnf.
+    function paramList(items, pos) {
         var params = []
         var defs = []
         var byref = []
@@ -8779,6 +8826,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var pendingRest = false
         var tys = []
         var zpps = []
+        var cbs = []
         var pendingType = ""
         var rty = ""
         for (var i = 0; i < items.length; i++) {
@@ -8795,6 +8843,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 // (emitZppFit) if it declares a scalar type, else nothing checks it.
                 tys.push(phpLibDepth > 0 ? "" : pendingType)
                 zpps.push(phpLibDepth > 0 && !pendingRef && !pendingRest ? pendingType : "")
+                cbs.push(null)
                 pendingType = ""
                 pendingRef = false
                 pendingRest = false
@@ -8806,9 +8855,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
         }
         for (var z = 0; z < zpps.length; z++) { zpps[z] = zppType(zpps[z], false) }
+        for (var q = 0; q < tys.length; q++) {
+            if (q != rest && phpLibDepth == 0 && phpCallableOnly(tys[q])) {
+                phpLibRef("__mec_cbcompound", true)
+                nsUsed = true
+                cbs[q] = {d: diagSite("__mec_cbdepr", pos)}
+            }
+        }
         if (rest >= 0) { dynPlaceVariadic = true }
         if (defs.length < params.length - (rest >= 0 ? 1 : 0)) { phpLibArgErr() }
-        return {params: params, defs: defs, byref: byref, rest: rest, tys: tys, rty: phpLibDepth > 0 ? "" : rty, zpps: zpps}
+        return {params: params, defs: defs, byref: byref, rest: rest, tys: tys, rty: phpLibDepth > 0 ? "" : rty, zpps: zpps, cbs: cbs}
     }
     // 'function f(...$rest)': the variadic parameter arrives as one argument holding
     // the collected PHP array (emitPhArgs packs the tail), so no prologue is needed -
@@ -8830,7 +8886,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var items = raw.slice(st)
         var name = items[0]
         if (vis != "") { noteMVis(name) }
-        var pl = paramList(items.slice(1))
+        var pl = paramList(items.slice(1), sc.pos)
         var params = pl.params
         var defs = pl.defs
         var promoted = []
@@ -8886,7 +8942,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             inner = makeBody(stmts)
         }
         return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt, live: sc.live, gen: isGen,
-                tys: pl.tys, rty: retTypeOf(pl.rty, isGen), zpps: pl.zpps,
+                tys: pl.tys, rty: retTypeOf(pl.rty, isGen), zpps: pl.zpps, cbs: pl.cbs,
                 lib: phpLibDepth > 0 && name.substring(0, 5) != "__mec",
                 fname: phpLibDepth > 0 && name.substring(0, 5) == "__mec" ? undefined : name,
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}

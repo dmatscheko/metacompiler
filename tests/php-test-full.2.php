@@ -2127,6 +2127,72 @@ function s94() {
         && (int)$o[1] === 1 && (integer)$o[0] === 1 && (boolean)$o[0] === true);
 }
 
+// ===== SECTION 95: callable parameters; an undefined constant's line; htmlspecialchars =====
+// A parameter declaring callable takes a callback zend_is_callable_ex accepts,
+// judged in the callee's frame: a string or an array naming nothing, or a
+// non-static method with no object, is zend_verify_arg_error's TypeError. A
+// non-static K::m in [$class, "K::m"] with no object fails call_user_func's check
+// too. The Error of an undefined constant stands at the constant's own line.
+// htmlspecialchars (ext/standard/html.c) keeps an entity the doctype knows, or a
+// numeric one, without double_encode; invalid UTF-8 (get_next_char) becomes U+FFFD
+// under ENT_SUBSTITUTE, is dropped under ENT_IGNORE and empties the result
+// otherwise. html_entity_decode knows HTML5's own names under ENT_HTML5.
+class S95A { public function foo() { return "A"; } public static function sfoo() { return "As"; } }
+class S95B extends S95A {
+    public function hint(callable $c) { return "ok"; }
+    public static function shint(?callable $c) { return "ok"; }
+    public function inst($c) { return s95m(fn() => $this->hint($c)); }
+    public static function stat($c) { return s95m(fn() => self::shint($c)); }
+    public static function cuf($c) { return s95m(fn() => call_user_func($c)); }
+}
+function s95m($f) {
+    try { return $f(); } catch (Throwable $e) {
+        $m = $e->getMessage();
+        $at = strpos($m, ", called in");
+        return get_class($e) . ": " . ($at === false ? $m : substr($m, 0, $at));
+    }
+}
+function s95nope() {
+    $GLOBALS["s95l"] = __LINE__ + 1;
+    return NOPE95;
+}
+function s95nope2() {
+    $GLOBALS["s95l2"] = __LINE__ + 2;
+    return 1 +
+        NOPE95;
+}
+function s95() {
+    $b = new S95B;
+    $te = "TypeError: S95B::hint(): Argument #1 (\$c) must be of type callable, ";
+    $ts = "TypeError: S95B::shint(): Argument #1 (\$c) must be of type ?callable, ";
+    check("cbhint1", $b->inst("S95A::sfoo") === "ok" && $b->inst([$b, "foo"]) === "ok" && $b->inst("strlen") === "ok"
+        && $b->inst(fn() => 1) === "ok" && $b->inst(["S95B", "parent::foo"]) === "ok" && $b->inst("parent::foo") === "ok");
+    check("cbhint2", $b->inst("nofunc95") === $te . "string given" && $b->inst([1, 2]) === $te . "array given"
+        && $b->inst(["S95B", "nope"]) === $te . "array given" && $b->inst([$b, "S95A::nope"]) === $te . "array given");
+    check("cbhint3", S95B::stat(["S95B", "parent::foo"]) === $ts . "array given" && S95B::stat(["S95B", "parent::sfoo"]) === "ok"
+        && S95B::stat("S95B::foo") === $ts . "string given" && S95B::stat(["S95A", "foo"]) === $ts . "array given"
+        && S95B::stat(null) === "ok");
+    $cu = "TypeError: call_user_func(): Argument #1 (\$callback) must be a valid callback, non-static method S95A::foo() cannot be called statically";
+    check("cbstatic", S95B::cuf(["S95B", "parent::foo"]) === $cu && S95B::cuf(["S95B", "S95A::foo"]) === $cu
+        && S95B::cuf(["S95B", "parent::sfoo"]) === "As" && $b->inst(["S95B", "S95A::foo"]) === "ok");
+    $l = 0;
+    try { s95nope(); } catch (Error $e) { $l = $e->getLine(); }
+    $l2 = 0;
+    try { s95nope2(); } catch (Error $e) { $l2 = $e->getLine(); }
+    check("undefconst-line", $l === $GLOBALS["s95l"] && $l2 === $GLOBALS["s95l2"]);
+    $h = ["&amp; &#39; &eacute; &bogus; &#x41; &#; &apos; &NewLine; <x> &", "a\xC3(b", "x\xE2\x82\xF0y", "a\x01b\x0Cc", "&#1; &#13;"];
+    check("html-noencode", htmlspecialchars($h[0], ENT_QUOTES, "UTF-8", false) === "&amp; &#39; &eacute; &amp;bogus; &#x41; &amp;#; &amp;apos; &amp;NewLine; &lt;x&gt; &amp;"
+        && htmlspecialchars($h[0], ENT_QUOTES | ENT_HTML5, null, false) === "&amp; &#39; &eacute; &amp;bogus; &#x41; &amp;#; &apos; &NewLine; &lt;x&gt; &amp;"
+        && htmlspecialchars($h[0], ENT_QUOTES | ENT_XML1, null, false) === "&amp; &#39; &amp;eacute; &amp;bogus; &#x41; &amp;#; &apos; &amp;NewLine; &lt;x&gt; &amp;"
+        && htmlspecialchars($h[4], ENT_DISALLOWED | ENT_HTML5, null, false) === "&amp;#1; &amp;#13;");
+    check("html-utf8", htmlspecialchars($h[1]) === "a\u{FFFD}(b" && htmlspecialchars($h[1], ENT_QUOTES) === ""
+        && htmlspecialchars($h[2], ENT_QUOTES | ENT_IGNORE) === "xy" && htmlspecialchars($h[2]) === "x\u{FFFD}\u{FFFD}y"
+        && htmlspecialchars($h[3], ENT_DISALLOWED) === "a\u{FFFD}b\u{FFFD}c" && htmlspecialchars($h[3], ENT_DISALLOWED | ENT_HTML5) === "a\u{FFFD}b\x0Cc");
+    check("html5-decode", html_entity_decode("&apos;&NewLine;&lang;&nGt;&fjlig;&Afr;", ENT_QUOTES | ENT_HTML5) === "'\n\u{27E8}\u{226B}\u{20D2}fj\u{1D504}"
+        && html_entity_decode("&lang;&NewLine;&apos;") === "\u{2329}&NewLine;&apos;"
+        && htmlspecialchars_decode("&NewLine;&apos;", ENT_QUOTES | ENT_HTML5) === "&NewLine;'");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2166,6 +2232,7 @@ function main() {
     s92(); // SECTION-CALL 92
     s93(); // SECTION-CALL 93
     s94(); // SECTION-CALL 94
+    s95(); // SECTION-CALL 95
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

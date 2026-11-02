@@ -373,3 +373,17 @@ function phpLibArityBad(ix, name, n) {
 function phpLibZppNative(name) {
     return ",strlen,intdiv,substr,strpos,strrpos,strcmp,ord,chr,strtolower,strtoupper,".indexOf("," + name + ",") >= 0
 }
+
+// Is declared type typ callable alone, or nullable? A parameter of that type is
+// checked as zend_is_callable_ex checks a callback; in a union with other types
+// the callable alternative is judged by its shape only.
+function phpCallableOnly(typ) {
+    var alts = phsTypeAlts(typ)
+    var cb = false
+    for (var i = 0; i < alts.length; i++) {
+        var lc = phsCase(alts[i], false)
+        if (lc == "callable") { cb = true }
+        else if (lc != "null") { return false }
+    }
+    return cb
+}
