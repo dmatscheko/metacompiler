@@ -147,7 +147,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1130 bash: compiled test with run-time operators, test -o/-R, -n on subscripted names, circular nameref declarations with attributes · P3 · SH · OPEN [V]
+### T-1130 bash: compiled test with run-time operators, test -o/-R, -n on subscripted names, circular nameref declarations with attributes · P3 · SH · IN PROGRESS (SH worker, round 41) [V]
 
 Found while working T-1127. The oracle is `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 
