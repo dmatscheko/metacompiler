@@ -164,7 +164,7 @@ Spec: ext/standard/html.c.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1107 bash: attribute change on a readonly variable; circular-nameref store; declare -n e=a[1] · P3 · SH · OPEN [V]
+### T-1107 bash: attribute change on a readonly variable; circular-nameref store; declare -n e=a[1] · P3 · SH · IN PROGRESS (SH worker, round 35) [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
 - `readonly z=1; declare -i z` must fail with "declare: z: readonly variable" and rc=1. The same goes for -u, -l, -a, -A and +i. Both engines accept the change.
@@ -172,7 +172,7 @@ Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
 - `declare -n e=a[1]; echo ${e[0]}`: bash prints an empty line; the interpreter prints 2.
 - `declare -n` with -a/-A: bash sometimes drops it silently and sometimes says "reference variable cannot be an array". Find which case is which in variables.c / builtins/declare.def, then match it. Currently the interpreter prints `declare -an` and the compiler refuses the program.
 
-### T-1108 bash: bad-substitution message names the whole word; `]` from an expansion inside a subscript; stray `]]` order · P3 · SH · OPEN [V]
+### T-1108 bash: bad-substitution message names the whole word; `]` from an expansion inside a subscript; stray `]]` order · P3 · SH · IN PROGRESS (SH worker, round 35) [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
 - The "bad substitution" message must name the whole word: the full double-quoted content (`"pre ${#x-a} post"`) or the full unquoted word (`x${#x-a}y`, `x${m[$'x'[]-v}y`). In it, a command substitution appears in deparsed form and an unquoted `$'x'` appears as `'x'`.
