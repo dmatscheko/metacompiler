@@ -2138,6 +2138,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtPushLocal = rtDecl("rt_push_local", false, [0])
     var rtPopLocals = rtDecl("rt_pop_locals", false, [0])
     var rtLocalHere = rtDecl("rt_local_here", false, [0, 0])
+    var rtLocalAny = rtDecl("rt_local_any", false, [0])
     var rtRoBind = rtDecl("rt_ro_bind", false, [0])
     var rtRoNow = rtDecl("rt_ro_now", false, [0, 0])
     var rtDynAtn = rtDecl("rt_dyn_atn", false, [1])
@@ -2149,6 +2150,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtNrefAtmark = rtDecl("rt_nref_atmark", false, [1, 0, 0])
     var rtNrefRoex = rtDecl("rt_nref_roex", false, [1, 0])
     var rtNrefElemend = rtDecl("rt_nref_elemend", false, [1])
+    var rtNrefHidnew = rtDecl("rt_nref_hidnew", false, [1, 0, 0])
+    var rtNrefHid = rtDecl("rt_nref_hid", false, [1])
     var rtPushTmp = rtDecl("rt_push_tmp", false, [0])
     var rtFnEnter = rtDecl("rt_fn_enter", false, [0])
     var rtLocalNew = rtDecl("rt_local_new", false, [0, 0])
@@ -4770,6 +4773,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             global = sg
             return b
         }
+        // A declaration's value v stored through the nameref nm whose target is known only
+        // when it runs: a readonly target refuses it, which fails the builtin, status 1, and
+        // goes to endB, skipping the attributes that follow. The refusal names the builtin
+        // who, when given (a local's); else it is rt_setvar_byname's, bare.
+        var refDeclStore = function(b, nm, v, app, endB, who) {
+            var nv = gepStr(b, nm)
+            var rfB = curF.NewBlock(""), okB = curF.NewBlock("")
+            if (who != "") {
+                var stB = curF.NewBlock("")
+                var ro = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(refAttrs(b, nv, true), llvm.constant.NewInt(i32, 8)), zero)
+                b.NewCondBr(b.NewAnd(ro, b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtNrefVoid, nv), zero)), rfB, stB)
+                emitDiag(rfB, rfB.NewCall(rtStrcat, [rfB.NewCall(rtStrcat, [gepStr(rfB, who + ": "), rfB.NewCall(rtNrefBase, nv)]), gepStr(rfB, ": readonly variable\n")]))
+                b = stB
+            }
+            b.NewCall(rtSetByName, [nv, v, app ? one : zero, refAttrs(b, nv, true)])
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtTakeSubbad), zero), rfB, okB)
+            rfB.NewStore(one, refuseP)
+            rfB.NewBr(endB)
+            return emitAbortCheck(okB)
+        }
         // The value of assignment a, expanded now unless v already holds it.
         var declValue = function(b, a, v) {
             if (v != null) { return {b: b, v: v} }
@@ -4896,11 +4919,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var dgB = curF.NewBlock("")
                 b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, drc, zero), dfB, dgB)
                 dgB.NewCondBr(dgB.NewICmp(llvm.enum.IPredEQ, drc, llvm.constant.NewInt(i32, 3)), dEnd, dsB)
-                if (a != null) {
-                    var dsv = gepStr(dsB, names[j])
-                    dsB.NewCall(rtSetByName, [dsv, dv, (a.op == "+=") ? one : zero, refAttrs(dsB, dsv, true)])
-                    dsB = emitAbortCheck(dsB)
-                }
+                if (a != null) { dsB = refDeclStore(dsB, names[j], dv, a.op == "+=", dEnd, "") }
                 dsB.NewCondBr(dsB.NewICmp(llvm.enum.IPredEQ, drc, one), dpB, dEnd)
                 dpB.NewCall(rtNrefDpost, [gepStr(dpB, names[j]), llvm.constant.NewInt(i32, dat), dx])
                 dpB.NewBr(dEnd)
@@ -5031,33 +5050,35 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 lpB = roBack(atBack(lpB, names[j], preAt), names[j], preRo)
                 lpB.NewBr(lpEnd)
                 refVars[lk] = true
-                // Through a chain that ends at NAME[SUB] it does nothing (rt_nref_elemend), in
-                // both engines. bash 5.3 instead makes a local literally named NAME[SUB], which
-                // every later lookup through a nameref ending there finds in place of the
-                // element, with the declaration's attributes; that is not emulated.
-                var elB = curF.NewBlock("")
-                noB.NewCondBr(noB.NewICmp(llvm.enum.IPredNE, noB.NewCall(rtNrefElemend, gepStr(noB, names[j])), zero), lpEnd, elB)
-                noB = elB
                 // -i, -u, -l, -r and -x alone, of a plain value, go to the variable the chain ends
                 // at when that is a variable name, made a local of the call (rt_nref_atmark),
                 // and the value is stored through the nameref under them; any other target
                 // takes the path below.
                 var tAt = (flags.charAt(0) == "-" && flags.split("-").join("").split("i").join("").split("u").join("").split("l").join("").split("r").join("").split("x").join("") == "") ? caseAtFlags(flags) + (setRo ? 8 : 0) + ((xCode > 0) ? 16 : 0) : 0
-                if (tAt != 0 && (a == null || (a.lit == null && a.idxT == null))) {
+                var plainA = a == null || (a.lit == null && a.idxT == null)
+                var tv = null
+                if ((tAt != 0 || flags == "") && plainA && a != null) {
+                    var tr = declValue(noB, a, v)
+                    noB = tr.b
+                    tv = tr.v
+                    v = tv
+                }
+                // Through a chain that ends at NAME[SUB], the same makes the hidden local
+                // NAME[SUB] (rt_nref_hidnew); with any other option or value, nothing.
+                var elB = curF.NewBlock("")
+                if ((tAt != 0 || flags == "") && plainA) {
+                    var hdB = curF.NewBlock("")
+                    noB.NewCondBr(noB.NewICmp(llvm.enum.IPredNE, noB.NewCall(rtNrefHidnew, [gepStr(noB, names[j]), llvm.constant.NewInt(i32, tAt & 7), noB.NewLoad(i32, curFrame.depth)]), zero), hdB, elB)
+                    if (a != null) { hdB = refDeclStore(hdB, names[j], tv, a.op == "+=", lpEnd, kw) }
+                    if ((tAt & 24) != 0) { hdB.NewCall(rtNrefDpost, [gepStr(hdB, names[j]), llvm.constant.NewInt(i32, tAt & 8), ((tAt & 16) != 0) ? one : zero]) }
+                    hdB.NewBr(lpEnd)
+                } else { noB.NewCondBr(noB.NewICmp(llvm.enum.IPredNE, noB.NewCall(rtNrefElemend, gepStr(noB, names[j])), zero), lpEnd, elB) }
+                noB = elB
+                if (tAt != 0 && plainA) {
                     var nv0 = gepStr(noB, names[j])
-                    var tv = null
-                    if (a != null) {
-                        var tr = declValue(noB, a, v)
-                        noB = tr.b
-                        tv = tr.v
-                    }
                     var tgB = curF.NewBlock(""), otB = curF.NewBlock("")
                     noB.NewCondBr(noB.NewICmp(llvm.enum.IPredNE, noB.NewCall(rtNrefAtmark, [nv0, llvm.constant.NewInt(i32, tAt & 7), noB.NewLoad(i32, curFrame.depth)]), zero), tgB, otB)
-                    if (a != null) {
-                        var tnv = gepStr(tgB, names[j])
-                        tgB.NewCall(rtSetByName, [tnv, tv, (a.op == "+=") ? one : zero, refAttrs(tgB, tnv, true)])
-                        tgB = emitAbortCheck(tgB)
-                    }
+                    if (a != null) { tgB = refDeclStore(tgB, names[j], tv, a.op == "+=", lpEnd, kw) }
                     // Readonly and export come after the value.
                     if ((tAt & 24) != 0) { tgB.NewCall(rtNrefDpost, [gepStr(tgB, names[j]), llvm.constant.NewInt(i32, tAt & 8), ((tAt & 16) != 0) ? one : zero]) }
                     tgB.NewBr(lpEnd)
@@ -5657,7 +5678,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             roVars["$" + names[j]] = false
                             lt = b.NewSelect(roRtCond(b, names[j]), ltR, lt)
                         }
-                        var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), lt, b.NewCall(rtIsAssoc, gepStr(b, names[j])), gepStr(b, (kw == "typeset") ? kw : "declare")])
+                        var dwho = gepStr(b, (kw == "typeset") ? kw : "declare")
+                        var rp = null
+                        // NAME[SUB] is the hidden local of that name while there is one (rt_nref_hid).
+                        if (darrs[j] != null) {
+                            var hpB = curF.NewBlock(""), apB = curF.NewBlock(""), jpB = curF.NewBlock("")
+                            b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, b.NewCall(rtNrefHid, gepStr(b, darrs[j])), zero), hpB, apB)
+                            var hrp = hpB.NewCall(rtDeclp, [gepStr(hpB, darrs[j]), emptyPtr(hpB), zero, dwho])
+                            hpB.NewBr(jpB)
+                            var arp = apB.NewCall(rtDeclp, [gepStr(apB, names[j]), lt, apB.NewCall(rtIsAssoc, gepStr(apB, names[j])), dwho])
+                            apB.NewBr(jpB)
+                            b = jpB
+                            rp = b.NewPhi([llvm.ir.NewIncoming(hrp, hpB), llvm.ir.NewIncoming(arp, apB)])
+                        } else { rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), lt, b.NewCall(rtIsAssoc, gepStr(b, names[j])), dwho]) }
                         acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, acc, zero), acc, rp)
                     }
                     storeStatus(b, acc)
@@ -8623,6 +8656,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // Twin of applyPrefix and runPrefixed.
             var isFn = cmd0.c != undefined && !noFn && funcFor(cmd0.c) != null
             var vals = []
+            // Before eval, a name refused only when this runs sets its slot in roPs, and
+            // hidePrefix leaves its array and run-time marks.
+            var roPs = {}
+            for (k = 0; k < asgs.length; k++) {
+                var an = asgs[k].aname
+                if (!isFn && cmd0.c == "eval" && asgs[k].bad == null && !roStore(an) && roRtMay(an) && !attrOn(refVars, an) && !hasOwn(roPs, "$" + an)) {
+                    roPs["$" + an] = slotOf(i32)
+                    b.NewStore(zero, roPs["$" + an])
+                }
+            }
             for (k = 0; k < asgs.length; k++) {
                 if (prefixBad(b, asgs[k])) { vals.push(null); continue }
                 // A builtin's binding through a nameref is made when it runs (rt_prefix_ref).
@@ -8633,6 +8676,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var prr = pRef ? null : roRtTest(b, asgs[k].aname)
                 var pOld = null
                 if (prr != null) {
+                    if (hasOwn(roPs, "$" + asgs[k].aname)) { prr.ro.NewStore(one, roPs["$" + asgs[k].aname]) }
                     pOld = loadVar(prr.ro, asgs[k].aname)
                     b = prr.ok
                 }
@@ -8677,7 +8721,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             tmpDepth = isFn ? depth : null
             // eval runs its string with each binding hiding its name's array and attributes,
             // as a function body does. Twin of runPrefixed in bash-interpreter.abnf.
-            var hid = (!isFn && cmd0.c == "eval") ? hidePrefix({b: b}, asgs, null) : []
+            var hid = []
+            if (!isFn && cmd0.c == "eval") {
+                var hx = {b: b}
+                hid = hidePrefix(hx, asgs, roPs)
+                b = hx.b
+            }
             if (hid.length > 0) { evalScopes.push({hid: hid, depth: depth, fr: curFrame}) }
             b = run(b)
             if (hid.length > 0) { evalScopes.pop() }
@@ -9237,6 +9286,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var lnm = decl[i].dname
             if (lnm != undefined && prefixHas(asgs, lnm) && lp.indexOf(lnm) < 0) { lp.push(lnm) }
         }
+        // Their NAME=VALUE operands (la, positions in decl) take a letter after lp's, s for
+        // such a nameref (prefixRefStores).
+        var la = []
+        if ((kw == "export" || kw == "readonly") && unset == "" && bashDeclBadOpt(kw, flags) == "") {
+            for (i = 1; i < decl.length; i++) {
+                var la0 = decl[i].a
+                if (la0 != undefined && la0.idxT == null && la0.lit == null && prefixHas(asgs, la0.name)) { la.push(i) }
+            }
+        }
         var variants = {}
         var variantFor = function(st) {
             if (hasOwn(variants, "$" + st)) { return variants["$" + st] }
@@ -9245,7 +9303,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var q
             for (q = 1; q < decl.length; q++) {
                 var c = (decl[q].dname != undefined && lp.indexOf(decl[q].dname) >= 0) ? st.charAt(lp.indexOf(decl[q].dname)) : ""
-                if (c == "d") { drop = true; continue }
+                if (la.indexOf(q) >= 0) { c = st.charAt(lp.length + la.indexOf(q)) }
+                if (c == "d" || c == "s") { drop = true; continue }
                 vi.push((c == "w") ? decl[q] : taken[q])
                 if (decl[q].dflag == undefined) { ops = true }
             }
@@ -9253,13 +9312,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return variants["$" + st]
         }
         var allB = ""
-        for (i = 0; i < lp.length; i++) { allB = allB + "b" }
+        var allW = ""
+        for (i = 0; i < lp.length; i++) { allB = allB + "b"; allW = allW + "w" }
+        for (i = 0; i < la.length; i++) { allB = allB + "w" }
         variantFor(allB)
+        var las = ""
         // The declaration with the listed names standing as st says; a name that takes its
         // prefix value is exported, through a nameref the variable it names (rt_nref_roex).
         var prefixDeclAs = function(b, st) {
-            var d = variantFor(st)
-            if (d == null) { storeStatusI(b, 0); return b }
+            var fp = prefixRefStores(b, decl, la, las)
+            b = fp.b
+            var d = variantFor(st + las)
+            if (d == null) {
+                storeStatusI(b, 0)
+                return prefixRefFail(fp)
+            }
             b = d(b)
             var k
             for (k = 0; k < asgs.length; k++) {
@@ -9268,12 +9335,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (attrOn(refVars, asgs[k].aname)) { b.NewCall(rtNrefRoex, [gepStr(b, asgs[k].aname), one]) }
                 else { b.NewCall(rtXmark, [gepStr(b, asgs[k].aname), one]) }
             }
-            return b
+            return prefixRefFail({b: b, f: fp.f})
         }
         return function(b) {
             var depth = slotOf(i32)
             b.NewStore(b.NewLoad(i32, gLsTop), depth)
             var k
+            las = ""
+            for (k = 0; k < la.length; k++) { las = las + (attrOn(refVars, decl[la[k]].a.name) ? "s" : "w") }
             // One refused only when this runs (roRtTest) sets its slot in roPs.
             var roPs = {}
             for (k = 0; k < asgs.length; k++) {
@@ -9326,10 +9395,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     hid = hidePrefix(hx, asgs, roPs)
                     pb = hx.b
                 }
-                pb = plain(pb)
+                if (las.indexOf("s") < 0) { pb = plain(pb) }
+                else {
+                    var dw = variantFor(allW + las)
+                    if (dw == null) { storeStatusI(pb, 0) } else { pb = dw(pb) }
+                }
                 unhidePrefix(hid)
                 pb.NewCall(rtPopLocals, pb.NewLoad(i32, depth))
-                return pb
+                return prefixRefFail(prefixRefStores(pb, decl, la, las))
             }
             if (!keeps && !(inFn && curFrame != null)) { return asWritten(b) }
             b.NewCall(rtPopLocals, b.NewLoad(i32, depth))
@@ -9373,6 +9446,46 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return enB
         }
+    }
+    // The operands of a prefix declaration lettered s (makePrefixDecl's la): the value is
+    // stored as NAME=VALUE stores it when the nameref is a local of a running call
+    // (rt_local_any), and only expanded otherwise. Answers {b, f}: f an i32 slot that says
+    // one was refused, which fails the builtin (prefixRefFail); null f for none lettered s.
+    // Twin of prefixRefStores in bash-interpreter.abnf.
+    function prefixRefStores(b, decl, la, las) {
+        if (las.indexOf("s") < 0) { return {b: b, f: null} }
+        var fp = slotOf(i32)
+        b.NewStore(zero, fp)
+        var k
+        for (k = 0; k < la.length; k++) {
+            if (las.charAt(k) != "s") { continue }
+            var a = decl[la[k]].a
+            var lcB = curF.NewBlock(""), glB = curF.NewBlock(""), jB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtLocalAny, llvm.constant.NewInt(i32, getVarId(a.name))), zero), lcB, glB)
+            var sp = slotOf(i32)
+            lcB.NewStore(zero, sp)
+            lcB = emitAssign(lcB, {name: a.name, op: a.op, idxT: null, lit: null, valT: a.valT, soft: sp}, false, null)
+            var fB = curF.NewBlock(""), okB = curF.NewBlock("")
+            lcB.NewCondBr(lcB.NewICmp(llvm.enum.IPredNE, lcB.NewLoad(i32, sp), zero), fB, okB)
+            fB.NewStore(one, fp)
+            fB.NewBr(jB)
+            okB.NewBr(jB)
+            if (a.valT != null) {
+                var r = a.valT.fn(glB)
+                glB = r.b
+                if (a.valT.c == undefined && a.valT.done != true) { glB = emitAbortCheck(glB) }
+            }
+            glB.NewBr(jB)
+            b = jB
+        }
+        return {b: b, f: fp}
+    }
+    // The status 1 of a builtin whose prefixRefStores refused a store (r).
+    function prefixRefFail(r) {
+        if (r.f == null) { return r.b }
+        var b = r.b
+        b.NewStore(b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, r.f), zero), one, b.NewLoad(i32, gStatus)), gStatus)
+        return b
     }
     // Hide each bound name behind its prefix binding: no array (at run time) and no
     // attribute (here, while the command is emitted) until unhidePrefix. Twin of hidePrefix

@@ -339,6 +339,10 @@ int rt_ar_nset(char *nm, char *k, char *v, int at, char *as);
 int ar_rmw(char *nm, char *key);
 int rt_arr_marks(char *nm);
 int rt_indbr(char *v);
+int rt_nref_el(char *t, char *n);
+int rt_varslot_add(char *n);
+int rt_nref_hid(char *t);
+int rt_local_any(int id);
 char *rt_nref_end(char *n);
 int rt_nref_loops(char *n);
 int rt_nref_glob(char *n);
@@ -7059,15 +7063,14 @@ int rt_nref_atmark(char *n, int at, int d)
     nref_quiet = nref_quiet + 1;
     t = rt_nref_end(n);
     nref_quiet = nref_quiet - 1;
-    if (t == 0 || rt_indbr(t) > 0) return 0;
+    if (t == 0 || rt_nref_el(t, n) > 0) return 0;
     id = rt_varslot_new(t);
     if (id >= 0 && rt_local_here(id, d) == 0) rt_local_new(id, d);
     rt_atmark(t, at);
     return 1;
 }
 
-/* Does the nameref n's chain end at NAME[SUB]? A function's localizing
- * declaration through it does nothing then. Twin of the nameref arm of
+/* Does the nameref n's chain end at NAME[SUB]? Twin of the nameref arm of
  * declOneN in bash-interpreter.abnf. */
 int rt_nref_elemend(char *n)
 {
@@ -7077,6 +7080,52 @@ int rt_nref_elemend(char *n)
     t = rt_nref_end(n);
     nref_quiet = nref_quiet - 1;
     return t != 0 && rt_indbr(t) > 0 ? 1 : 0;
+}
+
+/* A HIDDEN LOCAL: a function's localizing declaration through a nameref whose
+ * chain ends at NAME[SUB] makes a local literally named NAME[SUB] (bash 5.3),
+ * which a later lookup through a chain ending there finds in place of the
+ * element, while it is in effect; a NAME[SUB] written as such still names the
+ * element. Its slot and marks are an ordinary local's. nref_hid stays 0 until
+ * one is made. Answers the slot of the hidden local t, or -1 when there is
+ * none. Twin of hidLocal in bash-interpreter.abnf. */
+int nref_hid;
+int rt_nref_hid(char *t)
+{
+    int id;
+    if (nref_hid == 0) return -1;
+    id = rt_varslot(t);
+    return id >= 0 && rt_local_any(id) != 0 ? id : -1;
+}
+
+/* The [ of t, the end of the chain from n (rt_nref_end), as rt_indbr answers
+ * it, except -1 for a hidden local reached through a chain. */
+int rt_nref_el(char *t, char *n)
+{
+    int i = rt_indbr(t);
+    if (i > 0 && t != n && rt_nref_hid(t) >= 0) return -1;
+    return i;
+}
+
+/* A function's localizing declaration through the nameref n whose chain ends
+ * at NAME[SUB], in the call whose save stack starts at d: that hidden local,
+ * made unless it is one of the call's, marked with the attributes at
+ * (rt_atmark's); 1, or 0 for any other chain. */
+int rt_nref_hidnew(char *n, int at, int d)
+{
+    char *t;
+    int id;
+    if (rt_nref_void(n) != 0) return 0;
+    nref_quiet = nref_quiet + 1;
+    t = rt_nref_end(n);
+    nref_quiet = nref_quiet - 1;
+    if (t == 0 || rt_indbr(t) <= 0) return 0;
+    id = rt_varslot(t);
+    if (id < 0) id = rt_varslot_add(t);
+    if (rt_local_here(id, d) == 0) rt_local_new(id, d);
+    nref_hid = 1;
+    rt_atmark(varnames[id], at);
+    return 1;
 }
 
 /* export (x 1) or readonly of a function's nameref n whose target is known only
@@ -7091,7 +7140,7 @@ int rt_nref_roex(char *n, int x)
         nref_quiet = nref_quiet + 1;
         t = rt_nref_end(n);
         nref_quiet = nref_quiet - 1;
-        if (t != 0 && rt_indbr(t) > 0) {
+        if (t != 0 && rt_nref_el(t, n) > 0) {
             rt_berr(x != 0 ? "export" : "readonly", rt_strcat(rt_strcat("`", t), "'"), "not a valid identifier");
             return 0;
         }
@@ -7122,7 +7171,7 @@ int rt_nref_dpre(char *n, int at, int x, int kw, int hasv)
     t = rt_nref_end(n);
     nref_quiet = nref_quiet - 1;
     if (t == 0) return 0;
-    i = rt_indbr(t);
+    i = rt_nref_el(t, n);
     if (i <= 0) {
         rt_varslot_new(t);
         rt_atmark(t, at & 7);
@@ -7193,6 +7242,7 @@ char *rt_nref_name(char *n, int own)
 int rt_unset_ref(char *n, int ro)
 {
     char *e;
+    int i;
     if (rt_nref_isarr(n, 0) != 0) return 0;
     e = rt_nref_end(n);
     if (e == 0) {
@@ -7205,6 +7255,15 @@ int rt_unset_ref(char *n, int ro)
     if ((ro & 8) != 0) {
         rt_berr("unset", e, "cannot unset: readonly variable");
         return 1;
+    }
+    /* A hidden local stays declared. */
+    i = e != n && rt_indbr(e) > 0 ? rt_nref_hid(e) : -1;
+    if (i >= 0) {
+        gvars[i] = &unset_marker[0];
+        rt_arr_clear(e);
+        rt_xmark(e, 0);
+        rt_arr_smark(e);
+        return 0;
     }
     return rt_unset_name(e);
 }
@@ -7824,7 +7883,7 @@ int rt_declp(char *nm, char *flag, int assoc, char *who) {
     flag = rt_xletters(nm, flag);
     if (isarr == 0) {
         /* A nameref prints its own value, the name it refers to. */
-        if ((rt_arr_marks(nm) & 32) != 0) {
+        if ((rt_arr_marks(nm) & 32) != 0 || rt_nref_hid(nm) >= 0) {
             int id = rt_varslot(nm);
             v = id >= 0 ? gvars[id] : &unset_marker[0];
         } else v = rt_getvar_byname(nm);
@@ -8754,6 +8813,15 @@ int rt_ro_now(int id, int g)
     return (rt_arr_marks(varnames[id]) & 64) != 0 ? 1 : 0;
 }
 
+/* Is the binding of gvars[id] in effect a local of a running call (any entry
+ * of id on the local save stack)? Twin of globalEntry in bash-interpreter.abnf. */
+int rt_local_any(int id)
+{
+    int t = ls_top - 1;
+    while (t >= 0 && ls_id[t] != id) t = t - 1;
+    return t >= 0 ? 1 : 0;
+}
+
 /* The names a declaration anywhere in the program makes readonly, each with its
  * ro_ flag, registered when the program starts (rt_ro_reg), for the stores
  * whose names are known only when they run: a computed eval's
@@ -9112,9 +9180,16 @@ int rt_varslot(char *n)
  * arena, which a statement may give back. Answers -1 for no name. */
 int rt_varslot_new(char *n)
 {
-    int h;
     int i = rt_varslot(n);
     if (i >= 0 || rt_isname(n) == 0) return i;
+    return rt_varslot_add(n);
+}
+
+/* A new slot named n, whatever n is. */
+int rt_varslot_add(char *n)
+{
+    int h;
+    int i;
     if (nvars >= 1024) {
         rt_die("variables", 1, nvars, 1024);
     }
@@ -9273,6 +9348,7 @@ char *rt_getvar_ref(char *n, int quiet)
 char *rt_getvar_byname(char *n)
 {
     char *sel;
+    char *n0 = n;
     int i;
     int c0;
     int allDigits;
@@ -9280,6 +9356,10 @@ char *rt_getvar_byname(char *n)
     if (nref_any != 0) {
         n = rt_nref_end(n);
         if (n == 0) return rt_nref_gread();
+        if (n != n0 && nref_hid != 0 && rt_indbr(n) > 0) {
+            i = rt_nref_hid(n);
+            if (i >= 0) return gvars[i];
+        }
     }
     len = rt_strlen(n);
     /* NAME[SUB]: ${!r} with r='arr[1]' reads the element, and r='arr[@]' the joined
@@ -9344,6 +9424,7 @@ char *rt_getvar_byname(char *n)
 int rt_setvar_byname(char *n, char *v, int app, int at)
 {
     int i;
+    char *n0 = n;
     int bi = at & 32;
     int ro = at & 8;
     char *old;
@@ -9362,12 +9443,13 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
      * any nameref does (rt_nref_self_bad), before it is readonly. */
     if (ro != 0 && rt_nref_self_bad(n, v) != 0) return 0;
     if (ro != 0) {
-        rt_berr("", rt_nref_base(n), "readonly variable");
+        rt_berr("", rt_nref_base(n0), "readonly variable");
         arith_err = 1;
         sub_bad = 1;
         return 0;
     }
     i = rt_indbr(n);
+    if (i > 0 && n != n0 && nref_hid != 0 && rt_nref_hid(n) >= 0) i = -1;
     if (i > 0) {
         char *nm = rt_substr(n, 0, i);
         char *sub = rt_substr(n, i + 1, rt_strlen(n) - i - 2);
@@ -9396,7 +9478,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
         if (i >= 0) rt_arr_adopt(nm, i);
         return rt_arr_iset(nm, k, v);
     }
-    old = app != 0 ? rt_getvar_byname(n) : 0;
+    old = app != 0 ? rt_getvar_byname(n0) : 0;
     if (old == &unset_marker[0]) old = empty;
     if (at != 0) v = rt_attrv(old, v, at);
     else if (old != 0) v = rt_strcat(old, v);
@@ -9437,7 +9519,9 @@ char *rt_nref_base(char *n)
             nref_gbase = 1;
             return n;
         }
-        n = t;
+        i = rt_nref_el(t, n);
+        if (i > 0) return rt_substr(t, 0, i);
+        return t;
     }
     i = rt_indbr(n);
     if (i > 0) return rt_substr(n, 0, i);
@@ -9463,7 +9547,7 @@ char *rt_nref_elems(char *n, int once)
         if (i >= 0) return varnames[i];
         return empty;
     }
-    if (rt_indbr(t) > 0) return empty;
+    if (rt_nref_el(t, n) > 0) return empty;
     return t;
 }
 
@@ -9548,12 +9632,13 @@ int rt_prefix_ref(char *n, char *v, int at)
         rt_berr("", n, "readonly variable");
         return 0;
     }
-    i = rt_varslot_new(t == 0 || rt_indbr(t) > 0 ? n : t);
+    if (t != 0 && rt_nref_el(t, n) > 0) t = 0;
+    i = rt_varslot_new(t == 0 ? n : t);
     /* No slot (a name that is no identifier, which bash refuses before it can
      * become a nameref's value, or a full table): nothing to bind. */
     if (i < 0) return 0;
     rt_push_local(i);
-    if (t == 0 || rt_indbr(t) > 0) rt_nmark(n, 0);
+    if (t == 0) rt_nmark(n, 0);
     t = varnames[i];
     rt_xmark(t, 1);
     gvars[i] = v;
@@ -9609,7 +9694,7 @@ char *rt_nref_arr(char *n, int lit, int sub)
         arith_err = 1;
         return empty;
     }
-    if (rt_indbr(t) > 0) {
+    if (rt_nref_el(t, n) > 0) {
         rt_berr("", rt_strcat(rt_strcat("`", t), "'"), "not a valid identifier");
         arith_err = 1;
         return empty;
@@ -9635,7 +9720,7 @@ char *rt_nref_arname(char *n)
         if (ar_pfx_s != 0 && rt_streq(ar_pfx_s, "let: ") != 0) rt_nref_end(n);
         return n;
     }
-    i = rt_indbr(t);
+    i = rt_nref_el(t, n);
     if (i > 0) return rt_substr(t, 0, i);
     return t;
 }
@@ -9886,7 +9971,13 @@ int rt_vset(char *s, int cond)
     }
     nm = rt_nref_end(s);
     if (nm == 0) return 0;
-    if (nm != s) return rt_indbr(nm) > 0 ? 0 : rt_vset(nm, cond);
+    if (nm != s) {
+        if (rt_indbr(nm) > 0 && nref_hid != 0) {
+            i = rt_nref_hid(nm);
+            if (i >= 0) return rt_isset(gvars[i]);
+        }
+        return rt_indbr(nm) > 0 ? 0 : rt_vset(nm, cond);
+    }
     if (rt_arr_any(s) != 0) return rt_arr_has(s, "0");
     return rt_isset(rt_getvar_byname(s));
 }

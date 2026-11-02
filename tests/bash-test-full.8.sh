@@ -193,6 +193,37 @@ s158() {
   e=$( (s158q=1; s158h; s158i; s158j; s158k; declare -n g=s158q; g=k declare -x g; declare -p s158q g) 2>&1)
   check cro5 "$(s158s "$e")" 't 0;declare -- s158q="1";declare -n w="s158q";u 0;declare -- s158q="1";v 0;declare -x s158q="k";declare -n w="s158q";w 0;declare -rx s158q="k";declare -x s158q="k";declare -n g="s158q";'
 }
+# ===== SECTION 159: hidden NAME[SUB] locals, export through a prefix-bound nameref =====
+# A function's declare, local or typeset through its nameref whose chain ends at NAME[SUB]
+# makes a local literally named NAME[SUB]: every later lookup through a chain ending there
+# finds it in place of the element (reads, stores, +=, arithmetic, -i -u -x -r, unset,
+# local -p, ${REF@a}, declare -p NAME[SUB]), while ${!r} still reads the element. export and
+# readonly NAME=VALUE through a prefix-bound nameref store through a function's local
+# nameref with no attribute and change nothing through a global one; a prefix name readonly
+# only at run time keeps its array before eval. Every expected value is bash 5.3's.
+s159() {
+  local e
+  s159s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  local -a s159a=(a b c d)
+  s159f() { local -n w=$1; declare w; w=5; echo "${s159a[2]} $w"; local -p; w+=x; local r='s159a[2]'; echo "$w ${!r} ${#w} ${w:1} ${w@a}"; [[ -v w ]] && echo set; unset w; echo "[$w] [${w-u}]"; w=4; local -n v=$1; echo "$v"; declare -p 's159a[2]'; }
+  e=$(s159f 's159a[2]'; echo "${s159a[*]}")
+  check chl1 "$(s159s "$e")" 'c 5;declare -- s159a[2]="5";declare -n w="s159a[2]";5x c 2 x ;set;[] [u];4;declare -- s159a[2]="4";a b c d;'
+  s159g() { local -n w=$1; declare -i w; w=2*3; echo "$w ${s159a[1]}"; w+=1; (( w += 2 )); echo "$w $(( w * 2 ))"; local -u w=ab; echo "$w ${w@a}"; }
+  e=$(s159g 's159a[1]'; echo "${s159a[*]}")
+  check chl2 "$(s159s "$e")" '6 b;9 18;0 iu;a b c d;'
+  s159h() { local -n w=$1; declare -r w; export w=5; echo "a $?"; w=9; echo "b $?"; }
+  s159i() { local -n w=$1; typeset -x w=4; local -p; echo "${w@A} ${w@a}"; readonly w; unset w; echo "c $?"; }
+  e=$( (s159h 's159a[0]'; echo "d $?") 2>&1; s159i 's159a[3]' 2>&1; echo "${s159a[*]}")
+  check chl3 "$(s159s "$e")" 's159a[0]: readonly variable;a 1;s159a[0]: readonly variable;declare -x s159a[3]="4";declare -n w="s159a[3]";declare -x s159a[3]='"'4'"' x;unset: s159a[3]: cannot unset: readonly variable;c 1;a b c d;'
+  s159j() { local -n w=s159x; w=k export w=7 s159y=1; echo "e $?"; declare -p s159x; }
+  s159k() { local s159x=0; local -n w=s159x; w=k readonly w+=8; echo "f $?"; declare -p s159x; }
+  e=$( (s159x=1; s159j; declare -p s159x; s159k; declare -n g=s159x; g=k export g=9; echo "g $?"; declare -p s159x
+        declare -gn s159n=s159x; s159n=k export s159n=3; echo "h $?"; declare -p s159x) 2>&1)
+  check chp1 "$(s159s "$e")" 'e 0;declare -- s159x="7";declare -- s159x="7";f 0;declare -- s159x="08";g 0;declare -- s159x="9";h 0;declare -- s159x="9";'
+  s159l() { local -n w=$1; readonly w; }
+  e=$( (s159z=(1 2 3); s159l s159z; s159z=5 eval 'declare -p s159z'; echo "h $?"; declare -p s159z) 2>&1)
+  check chp2 "$(s159s "$e")" 's159z: readonly variable;declare -ar s159z=([0]="1" [1]="2" [2]="3");h 0;declare -ar s159z=([0]="1" [1]="2" [2]="3");'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -200,5 +231,6 @@ s155  # SECTION-CALL 155
 s156  # SECTION-CALL 156
 s157  # SECTION-CALL 157
 s158  # SECTION-CALL 158
+s159  # SECTION-CALL 159
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -1608,7 +1608,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (anyRef) {
             var rn = refTarget(name)
             if (rn != name) {
-                if (rn == "") { arithErr = true } else if (isElemRef(rn)) { elemRefSet(rn, false, val, false) } else { setVarVal(rn, val) }
+                if (rn == "") { arithErr = true } else if (isElemRef(rn) && !hidLocal(rn)) { elemRefSet(rn, false, val, false) } else { setVarVal(rn, val) }
                 return
             }
         }
@@ -1693,12 +1693,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (rn == "" && refGlobal(name) != "") { var gs = {v: false}; var gn = refGlobal(name); onRefGlobal(gn, function() { gs.v = isSetVar(gn) }); return gs.v }
             if (rn != name) { return isSetVar(rn) }
         }
+        if (isElemRef(name) && hidLocal(name)) { return varsHas[key] == true }
         if (isElemRef(name)) { var sp = splitSubX(name); return scHas(sp.name, subKey(sp.name, sp.key)) }
         if (!hasOwn(varsHas, key)) { return false }
         return varsHas[key]
     }
-    // NAME[SUB] as a NAME, which only an indirection makes: ${!r} with r='arr[1]' reads the
-    // element and r='arr[@]' the joined list. Twin of the same arm of rt_getvar_byname.
+    // NAME[SUB] as a NAME, which an indirection makes: ${!r} with r='arr[1]' reads the
+    // element and r='arr[@]' the joined list. One a nameref's chain ends at is a hidden
+    // local while there is one (hidLocal), as `declare -p NAME[SUB]` finds it too; an
+    // indirection reads the element regardless (indVal). Twin of the same arm of
+    // rt_getvar_byname.
     function isElemRef(name) { return name.length > 2 && name.charAt(name.length - 1) == "]" }
     function elemRefVal(name) {
         var sp = splitSubX(name)
@@ -1708,7 +1712,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The bare ${!r}: as getVarVal, except that r='arr[@]' answers every element as its own
     // field, as "${arr[@]}" does (and r='@' already does). Twin of rt_getvar_ind.
     function indVal(t) {
-        if (isElemRef(t)) { var sp = splitSubscript(t); if (sp.key == "@") { return encFields(scValList(sp.name)) } }
+        if (isElemRef(t)) {
+            var sp = splitSubscript(t)
+            if (sp.key == "@") { return encFields(scValList(sp.name)) }
+            return elemRefVal(t)
+        }
         return getVarVal(t)
     }
     // A store through a nameref whose target is the element NAME[SUB]: the subscript is
@@ -1931,9 +1939,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (rn != name) { return getVarVal(rn) }
         }
         if (isArr(name)) { return arrGet(name, "0") }
+        if (isElemRef(name)) { return hidLocal(name) ? hidVal(name) : elemRefVal(name) }
         var key = "$" + name
         if (hasOwn(vars, key) && (!hasOwn(varsHas, key) || varsHas[key])) { return vars[key] }
-        if (isElemRef(name)) { return elemRefVal(name) }
         // set -u: an unbound variable ends the (sub)shell. Expansion has no way to return a
         // status, so the abort is recorded and picked up by the command about to run.
         // languages/lib/bash-rt.c's rt_nounset writes the same diagnostic.
@@ -3564,8 +3572,39 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // name is a new variable instead. Twin of declOne in bash-to-llvm-ir.abnf.
             if (!isRef && anyRef && plus.indexOf("n") < 0 && attrOn(refVars, names[k]) && !(localizes() && !localHere(names[k]))) {
                 var tg = refTarget(names[k])
-                // A function's declaration of its own nameref to an element does nothing.
-                if (tg.indexOf("[") > 0 && localizes()) { return }
+                // A function's declaration of its own nameref to an element with -i, -u, -l, -r
+                // and -x alone (or none) and a plain value makes the hidden local NAME[SUB], and
+                // stores the value through the nameref; with anything else it does nothing.
+                // Twin of the rt_nref_hidnew arm of declOne in bash-to-llvm-ir.abnf.
+                if (tg.indexOf("[") > 0 && localizes()) {
+                    var hfl = flags.split("-").join("")
+                    var hi
+                    for (hi = 0; hi < hfl.length; hi++) { if ("iulrx".indexOf(hfl.charAt(hi)) < 0) { return } }
+                    if (plus != "" || (asgs[k] != null && (asgs[k].lit != null || asgs[k].idxT != null))) { return }
+                    hidNew(tg)
+                    if (integer) { intVars["$" + tg] = true }
+                    if (hfl.indexOf("u") >= 0 || hfl.indexOf("l") >= 0) {
+                        upVars["$" + tg] = hfl.indexOf("u") >= 0
+                        loVars["$" + tg] = hfl.indexOf("l") >= 0
+                    }
+                    if (asgs[k] != null) { runAssignV(asgs[k], false, v, true) }
+                    if (setRo) { roVars["$" + tg] = true }
+                    if (hfl.indexOf("x") >= 0) { exVars["$" + tg] = true }
+                    return
+                }
+                // export and readonly of a hidden local act on it as on a variable: a value
+                // stored through the nameref, refused when it is readonly, then the attribute.
+                if (hidLocal(tg) && (kw == "export" || kw == "readonly") && plus == "" && flags.split("-").join("").split("r").join("").split("x").join("") == "" && (asgs[k] == null || asgs[k].lit == null)) {
+                    if (asgs[k] != null && attrOn(roVars, tg)) {
+                        diagErr(tg + ": readonly variable\n")
+                        roFail = true
+                        return
+                    }
+                    if (asgs[k] != null) { runAssignV(asgs[k], false, v, true) }
+                    if (kw == "export" || flags.indexOf("x") >= 0) { exVars["$" + tg] = true }
+                    if (setRo) { roVars["$" + tg] = true }
+                    return
+                }
                 // export and readonly refuse the element as a name, status 0, and a value
                 // is still stored through the nameref, taking no attribute (bash 5.3).
                 if (tg.indexOf("[") > 0 && (kw == "export" || kw == "readonly") && flags.split("-").join("") == "" && plus == "" && (asgs[k] == null || asgs[k].lit == null)) {
@@ -3864,7 +3903,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (isPrint && names.length > 0) {
                     var pst = 0
                     for (k = 0; k < names.length; k++) {
-                        var line = declLineRaw(names[k])
+                        // NAME[SUB] is the hidden local of that name while there is one.
+                        var line = declLineRaw((darrs[k] != null && hidLocal(darrs[k])) ? darrs[k] : names[k])
                         if (line == "") { diagErr(((kw == "typeset") ? kw : "declare") + ": " + names[k] + ": not found\n"); pst = 1 }
                         else { emitOut(line + "\n") }
                     }
@@ -4525,6 +4565,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             g = g + 1
         }
         return n
+    }
+    // A HIDDEN LOCAL: a function's localizing declaration through a nameref whose chain ends
+    // at NAME[SUB] makes a local literally named NAME[SUB] (bash 5.3), which a later lookup
+    // through a chain ending there finds in place of the element, while it is in effect; a
+    // NAME[SUB] written as such still names the element. anyHid stays false until one is
+    // made. Twin of rt_nref_hid.
+    var anyHid = false
+    function hidLocal(t) { return anyHid && isElemRef(t) && globalEntry(t) != null }
+    function hidVal(t) { return (varsHas["$" + t] == true) ? vars["$" + t] : "" }
+    // The hidden local T, made a fresh local of the running call unless it is one already.
+    // Twin of rt_nref_hidnew.
+    function hidNew(t) {
+        anyHid = true
+        if (localHere(t)) { return }
+        declareLocal(t)
+        // What it hides is no variable, whatever the element holds.
+        var fr = localFrames[localFrames.length - 1]
+        fr[fr.length - 1].had = false
+        fr[fr.length - 1].val = ""
+        dropAttrs(t)
+        arrs[arrKey(t)] = null
+        unsetVar(t)
     }
     // Inside a function a circular chain that closes on a local - the nameref NAME itself or
     // one naming itself - resolves to the global variable of that name, read as no nameref
@@ -6747,7 +6809,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             refQuiet = false
             if (rt != "") {
                 if (look.charAt(look.length - 1) != "m") { shown = name }
-                name = splitSubscript(rt).name
+                name = hidLocal(rt) ? rt : splitSubscript(rt).name
             }
             else {
                 var gn = refGlobal(name)
@@ -6935,7 +6997,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (arithErr || abortSignal != null) { return }
-        if (isElemRef(a.name)) { elemRefSet(a.name, a.op == "+=", v, false); return }
+        if (isElemRef(a.name) && !hidLocal(a.name)) { elemRefSet(a.name, a.op == "+=", v, false); return }
         if (a.op == "+=") {
             // On an array name `+=` appends to element 0's text: e=(ab c); e+=d is `abd c`.
             if (isArr(a.name)) { elemSet(a.name, "0", arrGet(a.name, "0"), v) }
@@ -7032,8 +7094,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             name = en + "[" + sr.key + "]"
         }
+        var n0 = name
         if (anyRef) { name = refTarget(name); if (name == "") { arithErr = true; return "" } }
-        if (isElemRef(name)) { return elemRefSet(name, false, v, bi) }
+        if (isElemRef(name) && !((name != n0 || !bi) && hidLocal(name))) { return elemRefSet(name, false, v, bi) }
         if (isArr(name)) { elemSet(name, "0", null, v); return arrGet(name, "0") }
         if (attrOn(intVars, name)) {
             var iv = arEval(v)
@@ -8348,6 +8411,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (sp.key == null) {
                 var vn = anyRef ? refTarget(s) : s
                 if (vn == "") { return 1 }
+                if (vn != s && hidLocal(vn)) { return (varsHas["$" + vn] == true) ? 0 : 1 }
                 if (vn != s) { return (splitSubscript(vn).key != null) ? 1 : testUnary(op, vn, cond) }
                 return ((arrKeyList(s).length > 0) ? arrHas(s, "0") : isSetVar(s)) ? 0 : 1
             }
@@ -8646,9 +8710,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // chain on the nameref itself, as -n does, after bash 5.3 looked the chain up
                 // twice (two warnings).
                 var unRef = un
+                // A hidden local stays declared.
+                var unHid = false
                 if (anyRef && sp.key == null && !un) {
                     var ut = refTarget(sp.name)
-                    if (ut == "") { unRef = true; refTarget(sp.name) } else { sp = splitSubscript(ut) }
+                    unHid = ut != sp.name && hidLocal(ut)
+                    if (ut == "") { unRef = true; refTarget(sp.name) } else if (unHid) { sp = {name: ut, key: null} } else { sp = splitSubscript(ut) }
                 }
                 else if (anyRef && !un) { sp = {name: splitSubscript(refTarget(sp.name)).name, key: sp.key} }
                 if (!uv && sp.key == null && isFunc(sp.name) && !isSetVar(sp.name) && !isArr(sp.name) && !attrOn(dclVars, sp.name)) {
@@ -8662,12 +8729,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 else if (sp.key == null && unsetEvalBinding(sp.name)) { }
                 else if (sp.key == null) {
-                    if ((localHere(sp.name) && !tmpHere(sp.name)) || !unsetCallerLocal(sp.name)) {
+                    if (unHid || (localHere(sp.name) && !tmpHere(sp.name)) || !unsetCallerLocal(sp.name)) {
                         // A local made of the call's prefix binding keeps its export (bash's
                         // makunbound).
                         var keepX = attrOn(exVars, sp.name) && tmpOwn(sp.name) != null
                         unsetVar(sp.name); arrs[arrKey(sp.name)] = null; dropAttrs(sp.name)
-                        if (localHere(sp.name)) { dclVars["$" + sp.name] = true }
+                        if (unHid || localHere(sp.name)) { dclVars["$" + sp.name] = true }
                         exVars["$" + sp.name] = keepX
                     }
                 }
@@ -9659,6 +9726,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var lnm = decl[i].dname
             if (lnm != undefined && prefixHas(asgs, lnm) && lp.indexOf(lnm) < 0) { lp.push(lnm) }
         }
+        // Their NAME=VALUE operands (la, positions in decl) store into that temporary
+        // variable too, gone after the builtin, unless the nameref is a function's local,
+        // which is found first: the value is then stored through it with no attribute (bash
+        // 5.3). Each takes a letter after lp's, s for such a nameref (prefixRefStores).
+        var la = []
+        if ((kw == "export" || kw == "readonly") && unset == "" && bashDeclBadOpt(kw, flags) == "") {
+            for (i = 1; i < decl.length; i++) {
+                var la0 = decl[i].a
+                if (la0 != undefined && la0.idxT == null && la0.lit == null && prefixHas(asgs, la0.name)) { la.push(i) }
+            }
+        }
         var variants = {}
         var variantFor = function(st) {
             if (hasOwn(variants, "$" + st)) { return variants["$" + st] }
@@ -9667,7 +9745,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var q
             for (q = 1; q < decl.length; q++) {
                 var c = (decl[q].dname != undefined && lp.indexOf(decl[q].dname) >= 0) ? st.charAt(lp.indexOf(decl[q].dname)) : ""
-                if (c == "d") { drop = true; continue }
+                if (la.indexOf(q) >= 0) { c = st.charAt(lp.length + la.indexOf(q)) }
+                if (c == "d" || c == "s") { drop = true; continue }
                 vi.push((c == "w") ? decl[q] : taken[q])
                 if (decl[q].dflag == undefined) { ops = true }
             }
@@ -9675,7 +9754,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return variants["$" + st]
         }
         var allB = ""
-        for (i = 0; i < lp.length; i++) { allB = allB + "b" }
+        var allW = ""
+        for (i = 0; i < lp.length; i++) { allB = allB + "b"; allW = allW + "w" }
+        for (i = 0; i < la.length; i++) { allB = allB + "w" }
         variantFor(allB)
         return function() {
             vars["$LINENO"] = lnAt(ln)
@@ -9683,6 +9764,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var isRef = []
             var j
             for (j = 0; j < lp.length; j++) { isRef.push(attrOn(refVars, lp[j]) == true) }
+            var las = ""
+            for (j = 0; j < la.length; j++) { las = las + ((attrOn(refVars, decl[la[j]].a.name) == true) ? "s" : "w") }
             var saved = applyPrefix(asgs, true, false)
             var ab = takeAbort()
             if (ab != null) { restorePrefix(saved); return ab }
@@ -9691,9 +9774,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // -g reaches past the bindings to the global variables.
                 var hid = (flags.indexOf("g") < 0) ? hidePrefix(saved) : noPrefix
                 var r = anytype
-                r = plain()
+                var dw = (las.indexOf("s") < 0) ? plain : variantFor(allW + las)
+                if (dw == null) { r = 0; setStatus(0) } else { r = dw() }
                 unhidePrefix(hid)
                 restorePrefix(saved)
+                if (prefixRefStores(decl, la, las)) { setStatus(1); return 1 }
                 return r
             }
             for (k = 0; k < asgs.length; k++) { cell["$" + asgs[k].aname] = null }
@@ -9706,10 +9791,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (cell["$" + lp[k]] == null) { how = how + "w" }
                 else { how = how + "b" }
             }
-            var d = variantFor(how)
-            if (d == null) { setStatus(0); return 0 }
+            var sbad = prefixRefStores(decl, la, las)
+            var d = variantFor(how + las)
             var st = anytype
-            st = d()
+            if (d == null) { st = 0; setStatus(0) } else { st = d() }
+            if (sbad) { setStatus(1); st = 1 }
             // A name that takes its prefix value is exported, through a nameref the variable
             // it names (saved[k].name).
             for (k = 0; k < saved.length; k++) {
@@ -9718,6 +9804,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return st
         }
+    }
+    // The operands of a prefix declaration lettered s (makePrefixDecl's la): through a
+    // function's local nameref the value is stored as NAME=VALUE stores it, a readonly target
+    // failing the builtin; through any other it is only expanded. Answers whether one failed.
+    // Twin of prefixRefStores in bash-to-llvm-ir.abnf.
+    function prefixRefStores(decl, la, las) {
+        var bad = false
+        var k
+        for (k = 0; k < la.length; k++) {
+            if (las.charAt(k) != "s") { continue }
+            var a = decl[la[k]].a
+            if (globalEntry(a.name) == null) { if (a.valT != null) { wordJoin(a.valT()) }; continue }
+            if (roRefusedV(a.name, "m", "")) { bad = true; continue }
+            runAssign(a, false, false)
+        }
+        return bad
     }
     function prefixHas(asgs, nm) {
         var k
