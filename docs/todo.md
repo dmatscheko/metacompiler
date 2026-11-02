@@ -134,7 +134,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and local resolution; declare -ft; LC_ALL=C case mapping · P3 · SH · OPEN [V]
+### T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and local resolution; declare -ft; LC_ALL=C case mapping · P3 · SH · IN PROGRESS (SH worker, round 37) [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
 - `(( $((1/0)) ))` and `(( ${#x-a} ))`: bash abandons the command and prints the inner message without the "((: " prefix. Both our engines continue with status 1 and add the prefix.
