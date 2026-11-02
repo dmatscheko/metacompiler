@@ -4491,16 +4491,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Rational(a) IS a.to_r and Rational(a, b) is a.to_r / b.to_r, so both go
         // through asRat and inherit exactly what #to_r already answers - no second
         // conversion rule.
+        // A String argument is read strictly (rbnStrToRat / rbnStrToCpx).
         if (name == "Rational") {
-            var rp = asRat(v)
+            var rp = asRat(strConvArg(name, v))
             if (argv.length < 2) { return mkRat(rp.n, rp.d) }
-            var rq = asRat(argv[1])
+            var rq = asRat(strConvArg(name, rsText(argv[1])))
             if (numEq(rq.n, 0)) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
             return mkRat(numBin("*", rp.n, rq.d), numBin("*", rp.d, rq.n))
         }
         if (name == "Complex") {
-            if (argv.length < 2 && isCpx(v)) { return v }
-            return mkCpx(v, argv.length > 1 ? argv[1] : 0)
+            var cv = anytype
+            cv = strConvArg(name, v)
+            if (argv.length < 2 && isCpx(cv)) { return cv }
+            return mkCpx(cv, argv.length > 1 ? strConvArg(name, rsText(argv[1])) : 0)
         }
         if (name == "Array") {
             if (v === null || v === undefined) { return [] }
@@ -4539,6 +4542,69 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return mkFlo(toF(v))
         }
         return v
+    }
+    // A String given to Rational() / Complex(), read strictly: MRI's
+    // ArgumentError for what is no number. Other values pass through.
+    function strConvArg(name, v) {
+        if (typeof v != "string") { return v }
+        if (name == "Rational") {
+            var r = rbnStrToRat(v, true)
+            if (r === null) { raiseErr(name, "ArgumentError", "invalid value for convert(): " + strInspect(v)) }
+            return ratOfScan(name, r)
+        }
+        // MRI makes each part as it reads it, so a zero denominator raises ahead
+        // of the text after it.
+        var c = rbnStrToCpx(v, true)
+        var cx = anytype
+        cx = cpxOfScan(name, c)
+        if (!c.ok) { raiseErr(name, "ArgumentError", "invalid value for convert(): " + strInspect(v)) }
+        return cx
+    }
+    // The number a rbnStrToRat answer stands for: a Rational, or where MRI's
+    // parse_rat answers a Float, FloatDomainError for an infinite one and the
+    // signed zero. Twins: rubyRatOfScan in abnf/jsrtruby.go, rbRatOfScan in
+    // lib/ruby-rt.metajs.
+    function ratOfScan(frame, r) {
+        if (r.zd) { raiseErr(frame, "ZeroDivisionError", "divided by 0") }
+        if (r.f) {
+            if (r.inf) { raiseErr(frame, "FloatDomainError", "Infinity") }
+            return mkFlo(r.neg ? 0 / (0 - 1) : 0)
+        }
+        var n = anytype
+        var d = anytype
+        n = strToInum(r.n, 10, false).v
+        d = strToInum(r.d, 10, false).v
+        if (r.m > 0) { n = numBin("*", n, numBin("**", 10, r.m)) }
+        if (r.m < 0) { d = numBin("*", d, numBin("**", 10, 0 - r.m)) }
+        return mkRat(r.neg ? rneg(n) : n, d)
+    }
+    // The Complex a rbnStrToCpx answer stands for, each part made as str2num
+    // makes it (rbnCpxKind). Twins: rubyCpxOfScan in abnf/jsrtruby.go,
+    // rbCpxOfScan in lib/ruby-rt.metajs.
+    function cpxOfScan(frame, c) {
+        var re = anytype
+        var im = anytype
+        re = cpxScanPart(frame, c.re)
+        im = cpxScanPart(frame, c.im)
+        if (c.polar) { return cpxPolar(re, im) }
+        return mkCpx(re, im)
+    }
+    function cpxScanPart(frame, t) {
+        var k = rbnCpxKind(t)
+        if (k == "r") { return ratOfScan(frame, rbnStrToRat(t, false)) }
+        if (k == "f") { return mkFlo(rbnStrToDbl(t, false)) }
+        return strToInum(t, 10, false).v
+    }
+    // f_complex_polar of complex.c: a zero modulus or angle keeps the modulus
+    // with a Float zero imaginary part, a Float angle of exactly pi or pi/2 is
+    // exact, and otherwise both parts are Floats. Twins: rubyCpxPolar in
+    // abnf/jsrtruby.go, rbCpxPolar in lib/ruby-rt.metajs.
+    function cpxPolar(x, y) {
+        if (numEq(x, 0) || numEq(y, 0)) { return mkCpx(x, mkFlo(0)) }
+        if (isFlo(y) && y.f == Math.PI) { return mkCpx(rneg(x), mkFlo(0)) }
+        if (isFlo(y) && y.f == Math.PI / 2) { return mkCpx(mkFlo(0), x) }
+        var a = toF(y)
+        return mkCpx(mkFlo(toF(x) * Math.cos(a)), mkFlo(toF(x) * Math.sin(a)))
     }
     function trunc0(x) { return x < 0 ? Math.ceil(x) : Math.floor(x) }
     function isKernelConv(name) {
@@ -10495,6 +10561,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_sym" || name == "intern") { return mkSym(target) }
             if (name == "to_i") { return strToInum(target, args.length > 0 ? radixArg(args[0], false) : 10, false).v }
             if (name == "to_f") { return mkFlo(rbnStrToDbl(target, false)) }
+            if (name == "to_r") { return ratOfScan(name, rbnStrToRat(target, false)) }
+            if (name == "to_c") { return cpxOfScan(name, rbnStrToCpx(target, false)) }
             if (name == "upcase") { return target.toUpperCase() }
             // MRI maps case fully but has no Final_Sigma: unicodeCase mode 2 (abnf/casemap.go).
             if (name == "downcase") { return unicodeCase(target, 2) }

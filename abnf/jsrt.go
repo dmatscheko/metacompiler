@@ -8908,17 +8908,19 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 	// Kernel#Rational and Kernel#Complex, the ONLY spelling that builds either from
 	// two parts. Rational(a) IS a.to_r and Rational(a, b) is a.to_r / b.to_r, so
 	// both go through rubyAsRat and inherit exactly what #to_r answers.
+	// A String argument is read strictly (rubyStrToRat / rubyStrToCpx).
 	case "Rational":
-		p := rt.rubyAsRat(v)
+		p := rt.rubyAsRat(rt.rubyStrConvArg(name, v))
 		if len(args) < 2 {
-			return rubyMkRat(p.n, p.d)
+			return p
 		}
-		q := rt.rubyAsRat(args[1])
+		q := rt.rubyAsRat(rt.rubyStrConvArg(name, rubySV(args[1])))
 		if q.n == 0 {
 			rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
 		}
 		return rt.rubyRatArith("/", p, q)
 	case "Complex":
+		v = rt.rubyStrConvArg(name, v)
 		if len(args) < 2 {
 			if c, isCpx := v.(jsCpx); isCpx {
 				return c
@@ -8926,7 +8928,7 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 		}
 		var im interface{} = 0.0
 		if len(args) > 1 {
-			im = args[1]
+			im = rt.rubyStrConvArg(name, rubySV(args[1]))
 		}
 		return jsCpx{re: v, im: im}
 	case "Array":
@@ -11971,6 +11973,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "to_f":
 			f, _ := rubyStrToDbl(o, false)
 			return &jsFlo{f: f}
+		case "to_r":
+			return rt.rubyRatOfScan(name, rubyStrToRat(o, false))
+		case "to_c":
+			return rt.rubyCpxOfScan(name, rubyStrToCpx(o, false))
 		case "upcase":
 			return caseMapMode(o, caseUpper|caseFull)
 		case "downcase":

@@ -2217,6 +2217,411 @@ func rubyPolarPi(abs, ang float64) (float64, float64) {
 	return abs * math.Cos(math.Pi*ang), abs * math.Sin(math.Pi*ang)
 }
 
+// ----- String#to_r / #to_c, Rational(String) / Complex(String) ---------------
+//
+// Twins of the scanners in lib/ruby-num.js (rbnStrToRat, rbnStrToCpx and their
+// helpers), which state MRI's rules; a byte here is a UTF-16 unit there, and
+// both only act on ASCII.
+
+func rubyDigitByte(c byte) bool { return c >= '0' && c <= '9' }
+
+// rubyDigitsUs is rbnDigitsUs: the end and the digits, ok false without one.
+func rubyDigitsUs(s string, p int) (int, string, bool) {
+	if p >= len(s) || !rubyDigitByte(s[p]) {
+		return p, "", false
+	}
+	var d []byte
+	i := p
+	for ; i < len(s); i++ {
+		if rubyDigitByte(s[i]) {
+			d = append(d, s[i])
+		} else if s[i] != '_' || i+1 >= len(s) || !rubyDigitByte(s[i+1]) {
+			break
+		}
+	}
+	return i, string(d), true
+}
+
+// rubyRatNum is rbnRatNum: digits, the power of ten dividing them, ok.
+func rubyRatNum(s string, p *int) (string, float64, bool) {
+	d, ok := "", false
+	if *p < len(s) && s[*p] != '.' {
+		e, a, has := rubyDigitsUs(s, *p)
+		if !has {
+			return "", 0, false
+		}
+		*p, d, ok = e, a, true
+	}
+	fn := 0.0
+	if *p < len(s) && s[*p] == '.' {
+		*p++
+		e, f, has := rubyDigitsUs(s, *p)
+		if !has {
+			if d == "" {
+				d = "0"
+			}
+			return d, 0, true
+		}
+		*p, d, fn, ok = e, d+f, float64(len(f)), true
+	}
+	if !ok {
+		return "", 0, false
+	}
+	x := fn
+	if *p+1 < len(s) && (s[*p] == 'e' || s[*p] == 'E') {
+		*p++
+		sg := s[*p]
+		if sg == '+' || sg == '-' {
+			*p++
+		}
+		e, ed, has := rubyDigitsUs(s, *p)
+		if !has {
+			return d, x, true
+		}
+		*p = e
+		ev := 0.0
+		for i := 0; i < len(ed); i++ {
+			ev = ev*10 + float64(ed[i]-'0')
+		}
+		if ev != 0 {
+			if sg == '-' {
+				x = ev + fn
+			} else {
+				x = fn - ev
+			}
+		}
+	}
+	return d, x, true
+}
+
+func rubyWsTail(s string, p int) bool {
+	for p < len(s) && rubyIsSpace(s[p]) {
+		p++
+	}
+	return p == len(s)
+}
+
+// rubyRatScan is rbnStrToRat's answer.
+type rubyRatScan struct {
+	bad, zd, f, inf, neg bool
+	n, d                 string
+	m                    float64
+}
+
+// rubyRatExpMax is rbnRatExpMax.
+const rubyRatExpMax = 9942067
+
+// rubyStrToRat is rbnStrToRat (bad for its null).
+func rubyStrToRat(s string, strict bool) rubyRatScan {
+	p := 0
+	for p < len(s) && rubyIsSpace(s[p]) {
+		p++
+	}
+	neg := false
+	if p < len(s) && (s[p] == '+' || s[p] == '-') {
+		neg = s[p] == '-'
+		p++
+	}
+	nd, x, ok := rubyRatNum(s, &p)
+	if !ok {
+		return rubyRatScan{bad: strict, n: "0", d: "1"}
+	}
+	den := "1"
+	if p < len(s) && s[p] == '/' {
+		p++
+		dd, dx, dok := rubyRatNum(s, &p)
+		if !dok {
+			if strict {
+				return rubyRatScan{bad: true}
+			}
+		} else if strings.Trim(dd, "0") == "" {
+			return rubyRatScan{zd: true}
+		} else if strict && !rubyWsTail(s, p) {
+			return rubyRatScan{bad: true}
+		} else {
+			den = dd
+			x -= dx
+		}
+	} else if strict && !rubyWsTail(s, p) {
+		return rubyRatScan{bad: true}
+	}
+	if x <= -rubyRatExpMax || x >= rubyRatExpMax {
+		return rubyRatScan{f: true, inf: x < 0, neg: neg}
+	}
+	return rubyRatScan{neg: neg, n: nd, d: den, m: -x}
+}
+
+// rubyRatOfScan is ratOfScan of ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyRatOfScan(frame string, r rubyRatScan) interface{} {
+	if r.zd {
+		rt.rubyRaiseErr(frame, "ZeroDivisionError", "divided by 0")
+	}
+	if r.f {
+		if r.inf {
+			rt.rubyRaiseErr(frame, "FloatDomainError", "Infinity")
+		}
+		if r.neg {
+			return &jsFlo{f: math.Copysign(0, -1)}
+		}
+		return &jsFlo{f: 0}
+	}
+	n, _ := new(big.Int).SetString(r.n, 10)
+	d, _ := new(big.Int).SetString(r.d, 10)
+	if r.m != 0 {
+		k := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(math.Abs(r.m))), nil)
+		if r.m > 0 {
+			n.Mul(n, k)
+		} else {
+			d.Mul(d, k)
+		}
+	}
+	if r.neg {
+		n.Neg(n)
+	}
+	return rubyMkRatB(n, d)
+}
+
+// rubyCpxScan is rbnStrToCpx's answer.
+type rubyCpxScan struct {
+	ok, polar bool
+	re, im    string
+}
+
+// rubyCpxReader carries rbnStrToCpx's position and part buffer.
+type rubyCpxReader struct {
+	s      string
+	p      int
+	b      []byte
+	strict bool
+}
+
+func (c *rubyCpxReader) at(k int) byte {
+	if k < len(c.s) {
+		return c.s[k]
+	}
+	return 0
+}
+
+func rubyImagUnit(b byte) bool { return b == 'i' || b == 'I' || b == 'j' || b == 'J' }
+
+func (c *rubyCpxReader) sign() byte {
+	if b := c.at(c.p); b == '+' || b == '-' {
+		c.b = append(c.b, b)
+		c.p++
+		return b
+	}
+	return 0
+}
+
+func (c *rubyCpxReader) digits() bool {
+	if !rubyDigitByte(c.at(c.p)) {
+		return false
+	}
+	us := true
+	for b := c.at(c.p); rubyDigitByte(b) || b == '_'; b = c.at(c.p) {
+		if b == '_' {
+			if c.strict && us {
+				return false
+			}
+			us = true
+		} else {
+			c.b = append(c.b, b)
+			us = false
+		}
+		c.p++
+	}
+	if us {
+		c.p--
+		for c.at(c.p) == '_' {
+			c.p--
+		}
+	}
+	return true
+}
+
+func (c *rubyCpxReader) drop() { c.b = c.b[:len(c.b)-1] }
+
+func (c *rubyCpxReader) num() bool {
+	if c.at(c.p) != '.' && !c.digits() {
+		return false
+	}
+	if c.at(c.p) == '.' {
+		c.b = append(c.b, '.')
+		c.p++
+		if !c.digits() {
+			c.drop()
+			return false
+		}
+	}
+	if b := c.at(c.p); b == 'e' || b == 'E' {
+		c.b = append(c.b, b)
+		c.p++
+		c.sign()
+		if !c.digits() {
+			c.drop()
+			return false
+		}
+	}
+	return true
+}
+
+func (c *rubyCpxReader) rat() bool {
+	if !c.num() {
+		return false
+	}
+	if c.at(c.p) == '/' {
+		c.b = append(c.b, '/')
+		c.p++
+		if !c.digits() {
+			c.drop()
+			return false
+		}
+	}
+	return true
+}
+
+func (c *rubyCpxReader) take() string {
+	t := string(c.b)
+	c.b = c.b[:0]
+	return t
+}
+
+// read is rbnCpxRead.
+func (c *rubyCpxReader) read() rubyCpxScan {
+	unit := func(sg byte) string {
+		if sg == '-' {
+			return "-1"
+		}
+		return "1"
+	}
+	sg := c.sign()
+	if rubyImagUnit(c.at(c.p)) {
+		c.p++
+		return rubyCpxScan{ok: true, re: "0", im: unit(sg)}
+	}
+	if !c.rat() {
+		return rubyCpxScan{re: c.take(), im: "0"}
+	}
+	num := c.take()
+	if rubyImagUnit(c.at(c.p)) {
+		c.p++
+		return rubyCpxScan{ok: true, re: "0", im: num}
+	}
+	if c.at(c.p) == '@' {
+		c.p++
+		c.sign()
+		pok := c.rat()
+		ang := c.take()
+		if len(ang) < 1 || !rubyDigitByte(ang[len(ang)-1]) {
+			return rubyCpxScan{re: num, im: "0"}
+		}
+		return rubyCpxScan{ok: pok, re: num, im: ang, polar: true}
+	}
+	if b := c.at(c.p); b == '+' || b == '-' {
+		num2 := unit(c.sign())
+		if !rubyImagUnit(c.at(c.p)) {
+			if !c.rat() {
+				return rubyCpxScan{re: num, im: "0"}
+			}
+			num2 = c.take()
+		}
+		if !rubyImagUnit(c.at(c.p)) {
+			return rubyCpxScan{re: num, im: "0"}
+		}
+		c.p++
+		return rubyCpxScan{ok: true, re: num, im: num2}
+	}
+	return rubyCpxScan{ok: true, re: num, im: "0"}
+}
+
+// rubyStrToCpx is rbnStrToCpx.
+func rubyStrToCpx(s string, strict bool) rubyCpxScan {
+	c := &rubyCpxReader{s: s, strict: strict}
+	for c.p < len(s) && rubyIsSpace(s[c.p]) {
+		c.p++
+	}
+	r := c.read()
+	if r.ok {
+		for c.p < len(s) && rubyIsSpace(s[c.p]) {
+			c.p++
+		}
+		if strict && c.p < len(s) {
+			r.ok = false
+		}
+	}
+	return r
+}
+
+// rubyCpxOfScan is cpxOfScan of ruby-interpreter.abnf.
+func (rt *jsrt) rubyCpxOfScan(frame string, c rubyCpxScan) interface{} {
+	part := func(t string) interface{} {
+		if strings.Contains(t, "/") {
+			return rt.rubyRatOfScan(frame, rubyStrToRat(t, false))
+		}
+		if strings.ContainsAny(t, ".eE") {
+			f, _ := rubyStrToDbl(t, false)
+			return &jsFlo{f: f}
+		}
+		n, _ := rubyStrToInum(t, 10, false)
+		return rt.rubyBigNarrow(n)
+	}
+	re := part(c.re)
+	im := part(c.im)
+	if c.polar {
+		return rt.rubyCpxPolar(re, im)
+	}
+	return jsCpx{re: re, im: im}
+}
+
+// rubyRealZero: an Integer, Float or Rational that is zero.
+func rubyRealZero(v interface{}) bool {
+	switch t := v.(type) {
+	case float64:
+		return t == 0
+	case *jsFlo:
+		return t.f == 0
+	case jsRat:
+		return t.n == 0
+	}
+	return false
+}
+
+// rubyCpxPolar is cpxPolar of ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyCpxPolar(x, y interface{}) interface{} {
+	if rubyRealZero(x) || rubyRealZero(y) {
+		return jsCpx{re: x, im: &jsFlo{f: 0}}
+	}
+	if f, isF := y.(*jsFlo); isF && f.f == math.Pi {
+		return jsCpx{re: rt.rubyNeg(x), im: &jsFlo{f: 0}}
+	}
+	if f, isF := y.(*jsFlo); isF && f.f == math.Pi/2 {
+		return jsCpx{re: &jsFlo{f: 0}, im: x}
+	}
+	a := rubyToF(y)
+	return jsCpx{re: &jsFlo{f: rubyToF(x) * math.Cos(a)}, im: &jsFlo{f: rubyToF(x) * math.Sin(a)}}
+}
+
+// rubyStrConvArg is strConvArg of ruby-interpreter.abnf.
+func (rt *jsrt) rubyStrConvArg(name string, v interface{}) interface{} {
+	s, isStr := v.(string)
+	if !isStr {
+		return v
+	}
+	if name == "Rational" {
+		r := rubyStrToRat(s, true)
+		if r.bad {
+			rt.rubyRaiseErr(name, "ArgumentError", "invalid value for convert(): "+rt.rubyInspect(s))
+		}
+		return rt.rubyRatOfScan(name, r)
+	}
+	c := rubyStrToCpx(s, true)
+	cx := rt.rubyCpxOfScan(name, c)
+	if !c.ok {
+		rt.rubyRaiseErr(name, "ArgumentError", "invalid value for convert(): "+rt.rubyInspect(s))
+	}
+	return cx
+}
+
 // rubyLoop is Kernel#loop: the block again and again, until a break (the
 // caller's marker catch) or a StopIteration, whose #result is the answer. Twin
 // of js_rloop in lib/ruby-rt.metajs and loop in ruby-interpreter.abnf.

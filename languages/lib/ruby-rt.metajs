@@ -10034,6 +10034,8 @@ function rbMethod(target, name, args) {
             return rbStrToInum(target, tb, false)["v"]
         }
         if (name == "to_f") { return rbMkFlo(rbnStrToDbl(target, false)) }
+        if (name == "to_r") { return rbRatOfScan(name, rbnStrToRat(target, false)) }
+        if (name == "to_c") { return rbCpxOfScan(name, rbnStrToCpx(target, false)) }
         if (name == "upcase") { return rbUpper(target) }
         if (name == "downcase") { return rbLower(target) }
         if (name == "include?") { return target.indexOf(rbStr(rbArgAt(args, 0))) >= 0 }
@@ -12580,6 +12582,57 @@ function rbToSRadix(v) {
     return b
 }
 
+// Twins of strConvArg, ratOfScan, cpxOfScan and cpxPolar in
+// ruby-interpreter.abnf, which state the rules.
+function rbStrConvArg(name, v) {
+    if (typeof v != "string") { return v }
+    if (name == "Rational") {
+        var r = rbnStrToRat(v, true)
+        if (r === null) { rbRaiseErr(name, "ArgumentError", "invalid value for convert(): " + rbStrInspect(v)) }
+        return rbRatOfScan(name, r)
+    }
+    var c = rbnStrToCpx(v, true)
+    var cx = anytype
+    cx = rbCpxOfScan(name, c)
+    if (!c["ok"]) { rbRaiseErr(name, "ArgumentError", "invalid value for convert(): " + rbStrInspect(v)) }
+    return cx
+}
+function rbRatOfScan(frame, r) {
+    if (r["zd"]) { rbRaiseErr(frame, "ZeroDivisionError", "divided by 0") }
+    if (r["f"]) {
+        if (r["inf"]) { rbRaiseErr(frame, "FloatDomainError", "Infinity") }
+        return rbMkFlo(r["neg"] ? 0 / (0 - 1) : 0)
+    }
+    var n = anytype
+    var d = anytype
+    n = rbStrToInum(r["n"], 10, false)["v"]
+    d = rbStrToInum(r["d"], 10, false)["v"]
+    if (r["m"] > 0) { n = rbNumBin("*", n, rbNumBin("**", 10, r["m"])) }
+    if (r["m"] < 0) { d = rbNumBin("*", d, rbNumBin("**", 10, 0 - r["m"])) }
+    return rbMkRat(r["neg"] ? rbNeg(n) : n, d)
+}
+function rbCpxOfScan(frame, c) {
+    var re = anytype
+    var im = anytype
+    re = rbCpxScanPart(frame, c["re"])
+    im = rbCpxScanPart(frame, c["im"])
+    if (c["polar"]) { return rbCpxPolar(re, im) }
+    return rbMkCpx(re, im)
+}
+function rbCpxScanPart(frame, t) {
+    var k = rbnCpxKind(t)
+    if (k == "r") { return rbRatOfScan(frame, rbnStrToRat(t, false)) }
+    if (k == "f") { return rbMkFlo(rbnStrToDbl(t, false)) }
+    return rbStrToInum(t, 10, false)["v"]
+}
+function rbCpxPolar(x, y) {
+    if (rbEq(x, 0) || rbEq(y, 0)) { return rbMkCpx(x, rbMkFlo(0)) }
+    if (rbIsFlo(y) && y["f"] == Math.PI) { return rbMkCpx(rbNeg(x), rbMkFlo(0)) }
+    if (rbIsFlo(y) && y["f"] == Math.PI / 2) { return rbMkCpx(rbMkFlo(0), x) }
+    var a = rbToF(y)
+    return rbMkCpx(rbMkFlo(rbToF(x) * Math.cos(a)), rbMkFlo(rbToF(x) * Math.sin(a)))
+}
+
 function js_rkconv(name, args) {
     var v = anytype
     v = null
@@ -12588,18 +12641,21 @@ function js_rkconv(name, args) {
     // Kernel#Rational and Kernel#Complex, the ONLY spelling that builds either from
     // two parts. Rational(a) IS a.to_r and Rational(a, b) is a.to_r / b.to_r, so
     // both go through rbAsRat and inherit exactly what #to_r already answers.
+    // A String argument is read strictly (rbnStrToRat / rbnStrToCpx).
     if (name == "Rational") {
-        var rp = rbAsRat(v)
+        var rp = rbAsRat(rbStrConvArg(name, v))
         if (!rbIsArr(args) || args.length < 2) { return rbMkRat(rp["n"], rp["d"]) }
-        var rq = rbAsRat(args[1])
+        var rq = rbAsRat(rbStrConvArg(name, rbSV(args[1])))
         if (rbEq(rq["n"], 0)) { rbRaiseErr(name, "ZeroDivisionError", "divided by 0") }
         return rbMkRat(rbNumBin("*", rp["n"], rq["d"]), rbNumBin("*", rp["d"], rq["n"]))
     }
     if (name == "Complex") {
         var nargs = rbIsArr(args) ? args.length : 0
-        if (nargs < 2 && rbIsCpx(v)) { return v }
-        if (nargs > 1) { return rbMkCpx(v, args[1]) }
-        return rbMkCpx(v, 0)
+        var cv = anytype
+        cv = rbStrConvArg(name, v)
+        if (nargs < 2 && rbIsCpx(cv)) { return cv }
+        if (nargs > 1) { return rbMkCpx(cv, rbStrConvArg(name, rbSV(args[1]))) }
+        return rbMkCpx(cv, 0)
     }
     if (name == "Array") {
         if (rtIsNil(v)) { return [] }

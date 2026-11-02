@@ -1504,6 +1504,50 @@ def s191
   end
   check("cn191d", S191B.new.three == 3 && S191B.class_exec(4, 5) { |a| a } == 4)
 end
+# ===== SECTION 192: String#to_r / #to_c, Rational(String) / Complex(String) =====
+# MRI's parse_rat and parse_comp: leading whitespace, a sign, digits with single
+# underscores, a point, an exponent, "/" and a denominator; to_r / to_c read a
+# leading number (0 without one), Rational() / Complex() raise ArgumentError
+# for anything but a whole number, and a zero denominator is ZeroDivisionError
+# for both. to_c's parts are Integers, Floats or Rationals as written, with
+# "i" / "j" units and the "r@theta" polar form. /usr/bin/ruby 2.6 settles each.
+def s192
+  r = ["1/3", " 2.5 ", "abc", "-6/4", "1_000", "1__000", "0.75", ".5", "5.", "1.2.3", "1e3", "1E-2", "2e", "2e+",
+       "1/3e2", "3/4.5", "3/ 4", "6/-4", "1/3abc", "\t\n1/2", "12345678901234567890/3", "1.000000000000000000001",
+       "1e-30", "0x10", "1_0.5_0", "1.e5", "1e1_0", "  -0.5e-1  "]
+  check("sr192a", r.map(&:to_r) == [Rational(1, 3), Rational(5, 2), 0, Rational(-3, 2), 1000, 1, Rational(3, 4), Rational(1, 2),
+        5, Rational(6, 5), 1000, Rational(1, 100), 2, 2, Rational(1, 300), Rational(2, 3), 3, 6, Rational(1, 3), Rational(1, 2),
+        4115226300411522630, Rational(10**21 + 1, 10**21), Rational(1, 10**30), 0, Rational(21, 2), 1, 10**10,
+        Rational(-1, 20)] && r[0].to_r.class == Rational && r[2].to_r.class == Rational)
+  ok = r.map { |x| begin; Rational(x); rescue ArgumentError; :bad; end }
+  check("sr192b", ok == [Rational(1, 3), Rational(5, 2), :bad, Rational(-3, 2), 1000, :bad, Rational(3, 4), Rational(1, 2), 5,
+        :bad, 1000, Rational(1, 100), :bad, 2, Rational(1, 300), Rational(2, 3), :bad, :bad, :bad, Rational(1, 2),
+        4115226300411522630, Rational(10**21 + 1, 10**21), Rational(1, 10**30), :bad, Rational(21, 2), :bad, 10**10,
+        Rational(-1, 20)] && Rational(r[0], r[3]) == Rational(-2, 9))
+  zd = ["1/0", "3/0x", "1/0.0"].map { |x| [(begin; x.to_r; rescue ZeroDivisionError; :zd; end), (begin; Rational(x); rescue ZeroDivisionError; :zd; end)] }
+  em = begin; Rational(r[2]); rescue ArgumentError => e; e.message; end
+  check("sr192c", zd == [[:zd, :zd]] * 3 && em == "invalid value for convert(): \"abc\"")
+  c = ["1+2i", "i", "-i", "2i", "-2.5i", "1-i", "3", "1.5", "1/3", "1/3+2/3i", "1e2+1e-2i", "", "abc", "1+", "1+3",
+       "1 + 2i", "1+2j", "1+2I", "1__2", "1_", "1.", ".5", "1e+", "1/", "1/2/3", "3+4ix", "1.5/2", "1/2.5", "-0.0",
+       "1+-2i", "2e3i", "12_+3i"]
+  check("sc192d", c.map(&:to_c) == [Complex(1, 2), Complex(0, 1), Complex(0, -1), Complex(0, 2), Complex(0, -2.5), Complex(1, -1),
+        Complex(3, 0), Complex(1.5, 0), Complex(Rational(1, 3), 0), Complex(Rational(1, 3), Rational(2, 3)), Complex(100.0, 0.01),
+        Complex(0, 0), Complex(0, 0), Complex(1, 0), Complex(1, 0), Complex(1, 0), Complex(1, 2), Complex(1, 2), Complex(12, 0),
+        Complex(1, 0), Complex(1, 0), Complex(0.5, 0), Complex(1.0, 0), Complex(1, 0), Complex(Rational(1, 2), 0),
+        Complex(3, 4), Complex(Rational(3, 4), 0), Complex(Rational(1, 2), 0), Complex(-0.0, 0), Complex(1, 0),
+        Complex(0, 2000.0), Complex(12, 0)] &&
+        c.map { |x| x.to_c.rectangular.map(&:class) }.values_at(0, 7, 9, 10, 22) ==
+        [[Integer, Integer], [Float, Integer], [Rational, Rational], [Float, Float], [Float, Integer]])
+  ck = c.map { |x| begin; Complex(x); rescue ArgumentError; :bad; end }
+  check("sc192e", (0...ck.size).select { |i| ck[i] == :bad } == [11, 12, 13, 14, 15, 18, 19, 20, 22, 23, 24, 25, 27, 29, 31] &&
+        ck[0, 11] == c.map(&:to_c)[0, 11] && ck[30] == Complex(0, 2000.0) &&
+        (begin; Complex("1/0.5"); rescue ZeroDivisionError; :zd; end) == :zd && Complex(c[6], c[8]) == Complex(3, Rational(1, 3)))
+  pl = ["1@0", "0@2", "2@3.141592653589793", "2@1.5707963267948966", "1/2@1.5707963267948966", "1@1/2", "-1@1", "1@2."]
+  q = pl.map(&:to_c)
+  check("sc192f", q[0..4].map(&:inspect) == ["(1+0.0i)", "(0+0.0i)", "(-2+0.0i)", "(0.0+2i)", "(0.0+(1/2)*i)"] &&
+        q[5] == Complex(Math.cos(0.5), Math.sin(0.5)) && q[6] == Complex(-Math.cos(1), -Math.sin(1)) &&
+        q[7] == Complex(Math.cos(2), Math.sin(2)) && (begin; Complex(pl[7]); rescue ArgumentError; :bad; end) == :bad)
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1542,5 +1586,6 @@ s188() # SECTION-CALL 188
 s189() # SECTION-CALL 189
 s190() # SECTION-CALL 190
 s191() # SECTION-CALL 191
+s192() # SECTION-CALL 192
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

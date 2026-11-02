@@ -1163,9 +1163,11 @@ utf16-strings.js          <- java-rt.metajs, csharp-rt.metajs, java and csharp
 ruby-respond.js           <- ruby-rt.metajs, ruby interpreter (respond_to? on a
                              builtin; Go twin: rubyRespondNames in
                              abnf/jsrtruby.go, kept equal by a go test)
-ruby-num.js               <- ruby-rt.metajs, ruby interpreter (String#to_f and
-                             Float(String), MRI's rb_cstr_to_dbl; Go twin:
-                             rubyStrToDbl in abnf/jsrt.go)
+ruby-num.js               <- ruby-rt.metajs, ruby interpreter (String#to_f,
+                             #to_r, #to_c and Float() / Rational() / Complex()
+                             of a String; Go twins: rubyStrToDbl in
+                             abnf/jsrt.go, rubyStrToRat / rubyStrToCpx in
+                             abnf/jsrtruby.go)
 hex-float.js              <- python-rt.metajs, swift-rt.metajs, ruby-rt.metajs,
                              dart-rt.metajs and the python, swift, ruby, dart and
                              metajs interpreters (a hexadecimal float numeral,

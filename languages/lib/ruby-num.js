@@ -1,7 +1,9 @@
-// ruby-num.js -- MRI's string-to-Float conversion (rb_cstr_to_dbl and its
-// ruby_strtod), behind String#to_f and Kernel#Float, for ruby-interpreter.abnf
-// (include) and languages/lib/ruby-rt.metajs (import), each of which also brings
-// lib/hex-float.js. Go twin: rubyStrToDbl in abnf/jsrt.go.
+// ruby-num.js -- MRI's string-to-number conversions: rb_cstr_to_dbl and its
+// ruby_strtod (String#to_f, Kernel#Float), parse_rat (String#to_r,
+// Kernel#Rational) and parse_comp (String#to_c, Kernel#Complex), for
+// ruby-interpreter.abnf (include) and languages/lib/ruby-rt.metajs (import),
+// each of which also brings lib/hex-float.js. Go twins: rubyStrToDbl in
+// abnf/jsrt.go, rubyStrToRat / rubyStrToCpx in abnf/jsrtruby.go.
 //
 // Written in the subset both engines accept: no exponent literals.
 
@@ -306,4 +308,278 @@ function rbnHalfAway(mode, head, tail) {
     }
     if (mode == "rd" || head.length == 0) { return false }
     return (head.charCodeAt(head.length - 1) - 48) % 2 == 1
+}
+
+// ----- String#to_r / #to_c, Kernel#Rational(String) / #Complex(String) -----
+
+// rb_int_parse_cstr(s from p, base 10, RB_INT_PARSE_UNDERSCORE): {e, d}, where
+// the digits stop and the digits read (an underscore only between two digits),
+// or null without a digit at p.
+function rbnDigitsUs(s, p) {
+    if (p >= s.length || !rbnDigit(s.charAt(p))) { return null }
+    var d = ""
+    var i = p
+    while (i < s.length) {
+        var c = s.charAt(i)
+        if (rbnDigit(c)) { d = d + c }
+        else if (c != "_" || i + 1 >= s.length || !rbnDigit(s.charAt(i + 1))) { break }
+        i = i + 1
+    }
+    return {e: i, d: d}
+}
+
+// The value of a digit string as a double: an exponent only needs to be known
+// to lie past rbnRatExpMax.
+function rbnDigitsNum(d) {
+    var v = 0
+    var i = 0
+    while (i < d.length) {
+        v = v * 10 + (d.charCodeAt(i) - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// read_num of rational.c, from st.p: {d, x}, the significand's digits and the
+// power of ten dividing it, with st.p past what was read; null when nothing
+// was. A point needs no digit after it ("5." is 5), and an exponent letter is
+// only read after a digit and before at least one more character.
+function rbnRatNum(s, st) {
+    var d = ""
+    var ok = false
+    if (st.p < s.length && s.charAt(st.p) != ".") {
+        var a = rbnDigitsUs(s, st.p)
+        if (a === null) { return null }
+        st.p = a.e
+        d = a.d
+        ok = true
+    }
+    var fn = 0
+    if (st.p < s.length && s.charAt(st.p) == ".") {
+        st.p = st.p + 1
+        var f = rbnDigitsUs(s, st.p)
+        if (f === null) { return {d: d == "" ? "0" : d, x: 0} }
+        st.p = f.e
+        d = d + f.d
+        fn = f.d.length
+        ok = true
+    }
+    if (!ok) { return null }
+    var x = fn
+    if (st.p + 1 < s.length && (s.charAt(st.p) == "e" || s.charAt(st.p) == "E")) {
+        st.p = st.p + 1
+        var sg = s.charAt(st.p)
+        if (sg == "+" || sg == "-") { st.p = st.p + 1 }
+        var ex = rbnDigitsUs(s, st.p)
+        if (ex === null) { return {d: d, x: x} }
+        st.p = ex.e
+        var e = rbnDigitsNum(ex.d)
+        if (e != 0) { x = sg == "-" ? e + fn : fn - e }
+    }
+    return {d: d, x: x}
+}
+
+function rbnWsTail(s, p) {
+    var i = p
+    while (i < s.length && rbnSpace(s.charAt(i))) { i = i + 1 }
+    return i == s.length
+}
+
+function rbnZeroDigits(d) {
+    var i = 0
+    while (i < d.length) {
+        if (d.charAt(i) != "0") { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// From this power of ten MRI's 10**n is a Float ("in a**b, b may be too big":
+// the Integer would pass BIGLEN_LIMIT, 32M bits), and parse_rat answers a Float.
+var rbnRatExpMax = 9942067
+
+// parse_rat of rational.c, behind String#to_r (strict false) and Rational(String)
+// (strict true): leading whitespace, a sign, a significand, then "/" and a
+// second one. Answers null when strict and s is no Rational; {zd: true} for a
+// zero denominator (ZeroDivisionError even when not strict); {f: true, inf,
+// neg} where MRI answers an infinite (inf) or a zero Float; else {neg, n, d,
+// m}: the Rational (-1)^neg * n / d * 10^m, n and d decimal digit strings.
+// Not strict, what is no number is 0 and the text after one is ignored.
+function rbnStrToRat(s, strict) {
+    var st = {p: 0}
+    while (st.p < s.length && rbnSpace(s.charAt(st.p))) { st.p = st.p + 1 }
+    var neg = false
+    if (st.p < s.length && (s.charAt(st.p) == "+" || s.charAt(st.p) == "-")) {
+        neg = s.charAt(st.p) == "-"
+        st.p = st.p + 1
+    }
+    var num = rbnRatNum(s, st)
+    if (num === null) {
+        if (strict) { return null }
+        return {zd: false, f: false, neg: false, n: "0", d: "1", m: 0}
+    }
+    var den = "1"
+    var x = num.x
+    if (st.p < s.length && s.charAt(st.p) == "/") {
+        st.p = st.p + 1
+        var dn = rbnRatNum(s, st)
+        if (dn === null) {
+            if (strict) { return null }
+        } else if (rbnZeroDigits(dn.d)) {
+            return {zd: true}
+        } else if (strict && !rbnWsTail(s, st.p)) {
+            return null
+        } else {
+            den = dn.d
+            x = x - dn.x
+        }
+    } else if (strict && !rbnWsTail(s, st.p)) {
+        return null
+    }
+    if (x <= 0 - rbnRatExpMax || x >= rbnRatExpMax) { return {zd: false, f: true, inf: x < 0, neg: neg} }
+    return {zd: false, f: false, neg: neg, n: num.d, d: den, m: 0 - x}
+}
+
+// String#to_c and Complex(String): parse_comp of complex.c. Each part is read
+// into a buffer, digits and underscores apart, and becomes a number the way
+// str2num makes one (rbnCpxKind). Answers {ok, re, im, polar}: the two
+// buffers, polar when they are a modulus and an angle (the "r@theta" form), ok
+// false where Complex(String) raises.
+function rbnStrToCpx(s, strict) {
+    var st = {p: 0, b: ""}
+    while (st.p < s.length && rbnSpace(s.charAt(st.p))) { st.p = st.p + 1 }
+    var r = rbnCpxRead(s, st, strict)
+    if (r.ok) {
+        while (st.p < s.length && rbnSpace(s.charAt(st.p))) { st.p = st.p + 1 }
+        if (strict && st.p < s.length) { r.ok = false }
+    }
+    return r
+}
+
+function rbnImagUnit(c) { return c == "i" || c == "I" || c == "j" || c == "J" }
+
+// read_sign of complex.c: a sign is copied into the buffer.
+function rbnCpxSign(s, st) {
+    var c = s.charAt(st.p)
+    if (st.p < s.length && (c == "+" || c == "-")) {
+        st.b = st.b + c
+        st.p = st.p + 1
+        return c
+    }
+    return ""
+}
+
+// read_digits of complex.c. A doubled underscore ends the read only when
+// strict; after a trailing underscore the position steps back over it onto the
+// last digit, as MRI's do-while does.
+function rbnCpxDigits(s, st, strict) {
+    if (st.p >= s.length || !rbnDigit(s.charAt(st.p))) { return false }
+    var us = true
+    while (st.p < s.length && (rbnDigit(s.charAt(st.p)) || s.charAt(st.p) == "_")) {
+        if (s.charAt(st.p) == "_") {
+            if (strict && us) { return false }
+            us = true
+        } else {
+            st.b = st.b + s.charAt(st.p)
+            us = false
+        }
+        st.p = st.p + 1
+    }
+    if (us) {
+        st.p = st.p - 1
+        while (s.charAt(st.p) == "_") { st.p = st.p - 1 }
+    }
+    return true
+}
+
+// The buffer without the character a failed read put there.
+function rbnCpxDrop(st) { st.b = st.b.substring(0, st.b.length - 1) }
+
+// read_num of complex.c: digits, then "." and digits, then e[sign]digits.
+function rbnCpxNum(s, st, strict) {
+    if (st.p >= s.length || s.charAt(st.p) != ".") {
+        if (!rbnCpxDigits(s, st, strict)) { return false }
+    }
+    if (st.p < s.length && s.charAt(st.p) == ".") {
+        st.b = st.b + "."
+        st.p = st.p + 1
+        if (!rbnCpxDigits(s, st, strict)) {
+            rbnCpxDrop(st)
+            return false
+        }
+    }
+    if (st.p < s.length && (s.charAt(st.p) == "e" || s.charAt(st.p) == "E")) {
+        st.b = st.b + s.charAt(st.p)
+        st.p = st.p + 1
+        rbnCpxSign(s, st)
+        if (!rbnCpxDigits(s, st, strict)) {
+            rbnCpxDrop(st)
+            return false
+        }
+    }
+    return true
+}
+
+// read_rat_nos of complex.c: a number, then "/" and digits.
+function rbnCpxRat(s, st, strict) {
+    if (!rbnCpxNum(s, st, strict)) { return false }
+    if (st.p < s.length && s.charAt(st.p) == "/") {
+        st.b = st.b + "/"
+        st.p = st.p + 1
+        if (!rbnCpxDigits(s, st, strict)) {
+            rbnCpxDrop(st)
+            return false
+        }
+    }
+    return true
+}
+
+// The buffer read so far, the next part starting a fresh one.
+function rbnCpxTake(st) {
+    var t = st.b
+    st.b = ""
+    return t
+}
+
+// read_comp of complex.c.
+function rbnCpxRead(s, st, strict) {
+    var sign = rbnCpxSign(s, st)
+    if (st.p < s.length && rbnImagUnit(s.charAt(st.p))) {
+        st.p = st.p + 1
+        return {ok: true, re: "0", im: sign == "-" ? "-1" : "1", polar: false}
+    }
+    if (!rbnCpxRat(s, st, strict)) { return {ok: false, re: rbnCpxTake(st), im: "0", polar: false} }
+    var num = rbnCpxTake(st)
+    if (st.p < s.length && rbnImagUnit(s.charAt(st.p))) {
+        st.p = st.p + 1
+        return {ok: true, re: "0", im: num, polar: false}
+    }
+    if (st.p < s.length && s.charAt(st.p) == "@") {
+        st.p = st.p + 1
+        rbnCpxSign(s, st)
+        var pok = rbnCpxRat(s, st, strict)
+        var ang = rbnCpxTake(st)
+        if (ang.length < 1 || !rbnDigit(ang.charAt(ang.length - 1))) { return {ok: false, re: num, im: "0", polar: false} }
+        return {ok: pok, re: num, im: ang, polar: true}
+    }
+    if (st.p < s.length && (s.charAt(st.p) == "+" || s.charAt(st.p) == "-")) {
+        var num2 = rbnCpxSign(s, st) == "-" ? "-1" : "1"
+        if (st.p >= s.length || !rbnImagUnit(s.charAt(st.p))) {
+            if (!rbnCpxRat(s, st, strict)) { return {ok: false, re: num, im: "0", polar: false} }
+            num2 = rbnCpxTake(st)
+        }
+        if (st.p >= s.length || !rbnImagUnit(s.charAt(st.p))) { return {ok: false, re: num, im: "0", polar: false} }
+        st.p = st.p + 1
+        return {ok: true, re: num, im: num2, polar: false}
+    }
+    return {ok: true, re: num, im: "0", polar: false}
+}
+
+// str2num of complex.c: the kind of number a part's buffer makes - "r" a
+// Rational (rb_cstr_to_rat), "f" a Float (rb_cstr_to_dbl), "i" an Integer
+// (rb_cstr_to_inum), each lenient.
+function rbnCpxKind(t) {
+    if (t.indexOf("/") >= 0) { return "r" }
+    if (t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0) { return "f" }
+    return "i"
 }
