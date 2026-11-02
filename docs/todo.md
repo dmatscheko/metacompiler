@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1172** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1173** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -132,12 +132,10 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1170 bash: parameter operators on arrays, missing element 0, set -u, circular array namerefs · P3 · SH · IN PROGRESS (SH worker, round 53) [V]
-Found while closing T-1166; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- Interpreter: `${x:-d}`, `${x-e}`, `${x:+f}`, `${x+g}`, `${x?i}` treat an array name as unset (isSetVar ignores arrays at the param-op site, ~line 3229 of bash-interpreter.abnf). `x=(p q)` gives "d e"; oracle "p p f g". Same through namerefs (`${w:-dflt}` gives "dflt", oracle "xv").
-- Compiler: for an array with no element 0 (`y=([1]=a)`), `${y-e}` is empty and `${y+g}` gives "g"; oracle "e" and "" (rt_var returns empty when element 0 is missing).
-- Both engines: with `set -u`, reading `"$y"` for such an array should fail with "y: unbound variable", status 1.
-- Both engines: a circular local nameref given `declare -a w=x` / `local -A w=x` / `declare -ai w+=3` disagrees with the oracle (`declare -an w=()` there; bash prints uninitialised memory in its diagnostic — assert only the stable parts).
+### T-1172 bash: -a declarations through namerefs to unset globals, second operand after a circular nameref became an array · P3 · SH · OPEN [V]
+Found while closing T-1170; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Compiler only (pre-existing): `f() { local -n w=$1; declare -a w=x; echo "s $?"; declare -p w; }; f g; declare -p g` — oracle and interpreter "s 0", `declare -n w="g"`, stderr "declare: g: not found"; run/native "s 1", `declare -an w=([0]="g")`.
+- Both engines: `f() { local -n w=w; declare -a w=x w=3; echo "s $?"; declare -p w; }; f` — oracle status 1, `declare -an w=()`, plus "declare: `3': invalid variable name for name reference" after the freed-memory line; ours status 0, `declare -a w=([0]="3")`. Rule: a value given to an array nameref is checked as a nameref name.
 
 # C — C subset
 
@@ -1213,6 +1211,7 @@ T-1165 kotlin: direct `java.lang.System.x()` calls in the compiler — merged e2
 T-1168 kotlin: System.err, `java` name shadowing in qualified java.lang rewrites — merged c274ffc6: System.err in all engines, a program binding named java (or own object System) hides java.lang.System in the compiler; master four-leg probe matches kotlinc 2.2.21 on stdout and stderr
 T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local nameref (compiler), `export +x` — merged d715bc7a: hidden NAME[SUB] array locals, compiler callee through caller's local nameref (emitted only for nameref names), declaration option-word errors; master probe matches bash 5.3
 T-1169 kotlin (compiler): class property vs top-level object of the same name, `kotlin.io.println` — merged 00293308: a member property hides a same-named top-level class/enum/object in the compiler, fully-qualified kotlin.io.println/print and kotlin.text.Regex; master four-leg probe matches kotlinc 2.2.21
+T-1170 bash: parameter operators on arrays, missing element 0, set -u, circular array namerefs — merged 8a6948b8: parameter operators on array names (element 0) in the interpreter, missing element 0 in the compiler, set -u for such arrays and ${unset-w} under set -u, circular -a/-A local namerefs; master probe matches bash 5.3; hot rt_var path cost-neutral
 
 # Settled — do not re-open
 
