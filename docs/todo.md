@@ -103,7 +103,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1164 kotlin: java.lang.Long::name in the compiler, function types from collection element types · P3 · KT · OPEN [V]
+### T-1164 kotlin: java.lang.Long::name in the compiler, function types from collection element types · P3 · KT · IN PROGRESS (KT worker, round 53) [V]
 Found while closing T-1161; oracle kotlinc 2.2.21.
 - Compiler (run and native): `val f = java.lang.Long::signum; println(f(-5L))` fails "js runtime error: method call 'signum' on a number"; kotlinc and the interpreter print -1. In `makeQualRef` a dotted base starting with `java` routes to `makeQualRef("Long", name)`, making an unbound kotlin Long reference instead of the java static. Pre-existing.
 - All engines: an expected function type that comes only from a collection's element type is not applied — `val fs: List<(Int) -> Int> = listOf(Math::abs); fs[0] is Function1<*, *>` prints false (kotlinc true). Push the declared element type into the builder's arguments (the element-adopt path handles only literal element types today).
