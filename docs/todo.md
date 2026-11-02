@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1140** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1141** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -107,17 +107,11 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1138 kotlin: static Array<T>::class, KClass no-reflect suffix decision, function-reference javaClass and member-ref arity, receiver-lambda arity · P3 · KT · IN PROGRESS (KT worker, round 41) [V]
+### T-1140 kotlin: builtin method reference arity (`"ab"::plus`, `Int::plus`) · P3 · KT · OPEN [V]
 
-Found while working T-1136. The oracle is kotlinc 2.2.21 (stdlib only).
+Found while working T-1138. The oracle is kotlinc 2.2.21 (stdlib only).
 
-1. The static type literal `Array<Dog>::class` prints `class Array<Dog>` in all engines; the oracle prints `class [LDog; (Kotlin reflection is not available)`. As a result, `Array<Dog>::class.java.name` gives `Array<Dog>` where the oracle gives `[LDog;`, and `arr::class == Array<Dog>::class` is false where the oracle says true. Fixing it needs the element type's JVM binary name resolved for a static type argument (see ktProgBin).
-2. `::two.javaClass.name` fails in all engines with "member 'name' of undefined". The oracle prints an unreproducible `P5Kt$main$r$1`, so assert a relation: it is non-empty, and it agrees with toString's prefix.
-3. Member references such as `Dog::bark` answer `is FunctionN` with arity 0. They should count the receiver: `Dog::bark` with no parameters is Function1.
-4. A lambda passed to a receiver-typed parameter (`apply { }`, `fun f(b: Int.() -> Int)`) records no receiver arity. Only a declared `val x: R.() -> T` does.
-5. An explicit lambda parameter named `it` is still noted as a use of the implicit `it`. That can give an enclosing parameterless lambda arity 1 (`{ { it: Int -> it } }`).
-
-Not in scope: the `(Kotlin reflection is not available)` suffix on KClass toString. Section 138 of tests/kotlin-test-full.kt documents that we leave it out. That is a user-level decision, because a KClass and its java Class are currently the same handle.
+A bound reference to a builtin method with parameters (`"ab"::plus`, `5::plus`, `listOf(1)::contains`) answers `is Function0` in all engines; the oracle says Function1. An unbound builtin method reference with parameters (`Int::plus`, `String::substring`) is short by its parameter count, where the oracle gives Function2, and so on. Program methods are already right, through ktRefParams and js_ktrefarity. The missing piece is a builtin-method arity table for the Kotlin receivers we implement: String, Int/Long/Double, List/MutableList, Map, Set, and so on. Build it by measuring against kotlinc (one probe per receiver type listing `is FunctionN` for each method name), the way the Ruby rbArityRows table was measured, and keep the Go twin and the JS copy equal with a Go test. Overloads: for a reference whose expected type is not given, kotlinc rejects ambiguous overloads, so only unambiguous names matter.
 
 Verify with `tests/probe.sh kotlin` on all four legs.
 
@@ -1206,6 +1200,7 @@ T-1133 kotlin: array class of mixed/non-java.lang elements, compiled top-level l
 T-1135 ruby: unary operator send/method, Integer respond_to? << >> ~, Hash#index, Float-range eager enumerator sizes, endless Range#size — merged e9110a33: -@/+@/~ by name (send/method), Integer << >> ~ in respond/arity tables, Hash#index with deprecation warning (compiled via js_rhidxwarn at .index sites), Float-range eager enumerators with sizes, Range#size per MRI range_size separated from the for-in trip count (endless -> Infinity, non-numeric -> nil); 4-leg probe matches ruby 2.6 stdout + stderr except the multi-line call-site line (filed); matrix 605/605; bench +0.04%
 T-1136 kotlin: uninitialized top-level lateinit read, lambda `is FunctionN`, lambda javaClass.name, array ::class — merged b2479ff9: uninitialized lateinit reads throw (top-level/local/template; check only at lateinit reads when null, js_ktlatechk), stray top-level lateinit flag no longer leaks onto the next class property, lambda/function arity for is FunctionN (implicit it, receivers, !is, when), null is List<*>? true, lambda javaClass.name relation, array ::class names; 4-leg probe matches kotlinc 2.2.21; kotlin gates green after rebase; bench +0.03%
 T-1134 bash: NAME[SUB]=(list), export/readonly through circular local nameref, other stores to circular array nameref, valueless readonly nameref stores, nested brackets in computed decl operands — merged c92fc735: NAME[SUB]=(list) abandons the line (declares array under declare/local/export/readonly), export/readonly through circular local nameref act on the global with bash's warnings, stores to circular array nameref leave it alone, value-before-readonly check for valueless readonly namerefs, nested-bracket subscripts in declaration operands; full-syntax ratchet split into 7 parts (part 5 was pushed over the brake); 4-leg probe + stderr match bash 5.3; matrix 605/605; bench -0.04%
+T-1138 kotlin: static Array<T>::class, KClass no-reflect suffix decision, function-reference javaClass and member-ref arity, receiver-lambda arity — merged d520bee5: static Array<T>::class (incl. nested/primitive element arrays), function-reference javaClass stand-in, reference arity for program methods/props/constructors (js_ktrefarity), receiver-param lambda arity, explicit it-parameter scoping; also fixed compiled js_ktrecvlam passing the receiver twice (two invalid-Kotlin feature tests corrected); 4-leg probe matches kotlinc 2.2.21; kotlin gates green; bench +0.04%
 
 # Settled — do not re-open
 
