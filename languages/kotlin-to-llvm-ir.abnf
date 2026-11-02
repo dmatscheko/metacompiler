@@ -7261,21 +7261,25 @@ KwContract  = "contract" KwEnd ;
         }
     }
     // What a declared type asks of a value, or null for nothing: {dw} its own width
-    // or float type, {el} its elements', {fr} a function's result. Twin of kPlanOf in
+    // or float type, {el} its elements', and for a function type {fa} its parameter
+    // count and {fr} the result's type ("" for none). Twin of kPlanOf in
     // kotlin-interpreter.abnf.
     function ktAdoptPlan(ty) {
         if (ty == undefined || ty == "") { return null }
         var el = ktLitElems(ty)
         if (el != null) { return {el: el} }
-        var fr = ktFnRetTy(ty)
-        if (fr != "") { return {fr: fr} }
+        var fa = ktFnTyArity(ty)
+        if (fa >= 0) { return {fa: fa, fr: ktFnRetTy(ty)} }
         var dw = ktWidthOfType(ty)
         if (dw.w == 0 && dw.flo != true) { return null }
         return {dw: dw}
     }
+    // js_ktfnadopt(v, fa, fr): a reference takes the declared type's arity, any
+    // other function the result type fr. Twin of kAdoptPlan in
+    // kotlin-interpreter.abnf.
     function emitAdoptPlan(b, v, sp) {
         if (sp.el != undefined) { return callExt(b, "js_ktadoptel", [v, emitStr(b, sp.el.v), emitStr(b, sp.el.k)]) }
-        if (sp.fr != undefined) { return callExt(b, "js_ktadoptfn", [v, emitStr(b, sp.fr)]) }
+        if (sp.fa != undefined) { return callExt(b, "js_ktfnadopt", [v, emitNum(b, sp.fa), emitStr(b, sp.fr)]) }
         return emitAdoptV(b, v, sp.dw)
     }
 
@@ -8709,8 +8713,20 @@ KwContract  = "contract" KwEnd ;
     // a TYPE (an unbound one) is a run-time question here exactly as it is in the
     // interpreter half - js_ktrefbase answers a marker for a base that resolves to
     // neither a binding nor a receiver member, which is what makes `String::length`
-    // work without a String descriptor.
+    // work without a String descriptor. A java.lang static that no class or object
+    // of the program shadows has the arity ktJavaStaticArity measures. Twin of
+    // makePropRef in kotlin-interpreter.abnf.
     function makeQualRef(baseName, name) {
+        var t = ktQualRefThunk(baseName, name)
+        var ja = name == "class" ? -1 : ktJavaStaticArity(baseName, name)
+        if (ja < 0) { return t }
+        return function(b) {
+            var r = t(b)
+            if (classNames["$" + baseName] != undefined) { return r }
+            return {b: r.b, v: callExt(r.b, "js_ktfnadopt", [r.v, emitNum(r.b, ja), emitStr(r.b, "")])}
+        }
+    }
+    function ktQualRefThunk(baseName, name) {
         // `T::class` of a reified T is the class its call site handed over.
         if (name == "class" && isReifiedHere(baseName)) {
             return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, reifiedKSlot(baseName))])} }

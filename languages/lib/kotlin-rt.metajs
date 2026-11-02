@@ -8869,12 +8869,19 @@ function k4bAdoptAll(arr, ty) {
         i = i + 1
     }
 }
-// jsrtkotlin.go js_ktadoptfn: a function value whose declared type fixes its
-// result's width - `val f: () -> Long = { 1 }` - answers through a wrapper that
-// retypes each result.
-function js_ktadoptfn(f, ty) {
-    if (typeof f != "function") { return f }
-    return function() { return k4bAdoptOne(f.apply(undefined, arguments), ty) }
+// jsrtkotlin.go js_ktfnadopt: a callable reference takes the declared function
+// type's arity n; any other function whose type fixes its result's width - `val
+// f: () -> Long = { 1 }` - answers through a wrapper of arity n that retypes
+// each result.
+function js_ktfnadopt(f, n, ty) {
+    if (k4IsRef(ktRefOf(f))) {
+        fnMetaSet(f, "", n)
+        return f
+    }
+    if (ty == "" || typeof f != "function") { return f }
+    var wf = function() { return k4bAdoptOne(f.apply(undefined, arguments), ty) }
+    fnMetaSet(wf, "", n)
+    return wf
 }
 // jsrtkotlin.go js_ktvararr: the list a `vararg xs: ty` parameter collects is the
 // array Kotlin binds, its primitive array or else an Array.

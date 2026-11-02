@@ -8458,6 +8458,13 @@ fun s189() {
 // (abs, max, parseInt) needs an expected type, which a declared function type or
 // the parameter it is passed to gives.
 fun clk190(f: () -> Long) = f() > 0L && f() > 0L
+// A reference's FunctionN arity is its expected function type's, which also picks
+// an overload or adapts a defaulted member; without one, the static's own.
+class B190(val k: Int) {
+    fun add(x: Int, y: Int = 1): Int = k + x + y
+}
+fun ar190(f: (String, Int) -> Int): Boolean = f is Function2<*, *, *> && f !is Function1<*, *>
+fun pick190(): (Int, Int) -> Int = Math::max
 
 fun s190() {
     val ab: (Int) -> Int = Math::abs
@@ -8473,6 +8480,20 @@ fun s190() {
     val pi: (String) -> Int = Integer::parseInt
     check("jstatic190c", pi("42") + 1 == 43 && listOf("1", "22").map(Integer::parseInt).sum() == 23 &&
         ab.toString() == "function abs (Kotlin reflection is not available)")
+    val p2: (String, Int) -> Int = Integer::parseInt
+    val ad: (Int) -> Int = B190(10)::add
+    val lg: (Int) -> Long = { it * 2L }
+    check("jstatic190d", ab is Function1<*, *> && ab !is Function0<*> && mx is Function2<*, *, *> &&
+        pi is Function1<*, *> && pi !is Function2<*, *, *> && p2 is Function2<*, *, *> && p2("ff", 16) == 255 &&
+        ar190(Integer::parseInt) && pick190() is Function2<*, *, *> && pick190()(3, 8) == 8 &&
+        ad is Function1<*, *> && ad !is Function2<*, *, *> && ad(5) == 16 && lg is Function1<*, *> && lg(4) == 8L)
+    val sq1 = Math::sqrt
+    val pw = Math::pow
+    val cmp = Integer::compare
+    val bc = java.lang.Long::bitCount
+    check("jstatic190e", sq1 is Function1<*, *> && sq1 !is Function0<*> && pw is Function2<*, *, *> &&
+        cmp is Function2<*, *, *> && n is Function0<*> && ih is Function1<*, *> && bc is Function1<*, *> &&
+        sq1(9.0) == 3.0 && cmp(1, 2) < 0)
 }
 
 

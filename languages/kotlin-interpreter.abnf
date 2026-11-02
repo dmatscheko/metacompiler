@@ -3039,8 +3039,9 @@ NotMemberKw = :script(~~ "pure";
         return v
     }
     // What a declared type asks of a value, or null for nothing: {ty} its own width
-    // or float type (kAdoptTy), {el} its elements' (kAdoptEl), {fr} a function's
-    // result (kAdoptFn). Memoised by the type's text. Twin of ktAdoptPlan in
+    // or float type (kAdoptTy), {el} its elements' (kAdoptEl), and for a function
+    // type {fa} its parameter count and {fr} the result's type ("" for none,
+    // kAdoptFn). Memoised by the type's text. Twin of ktAdoptPlan in
     // kotlin-to-llvm-ir.abnf.
     var kPlanMemo = {}
     function kPlanOf(dt) {
@@ -3050,18 +3051,28 @@ NotMemberKw = :script(~~ "pure";
         var p = anytype
         p = null
         var el = ktLitElems(dt)
-        var fr = ktFnRetTy(dt)
+        var fa = ktFnTyArity(dt)
         if (el != null) { p = {el: el} }
-        else if (fr != "") { p = {fr: fr} }
+        else if (fa >= 0) { p = {fa: fa, fr: ktFnRetTy(dt)} }
         else if (kTypeWidth(dt) > 0 || kTypeFlo(dt)) { p = {ty: dt} }
         kPlanMemo["$" + dt] = p
         return p
     }
+    // A callable reference takes the arity of the function type it is given, which
+    // kotlinc resolves an overloaded or defaulted target by (`val p: (String, Int)
+    // -> Int = Integer::parseInt` is a Function2); its results already have their
+    // type, so it is not wrapped.
     function kAdoptPlan(v, p) {
         if (p.el != undefined) { return kAdoptEl(v, p.el.v, p.el.k) }
-        if (p.fr != undefined) { return typeof v == "function" ? kAdoptFn(v, p.fr) : v }
+        if (p.fa != undefined) {
+            if (kIsRef(v)) { kRefSetArity(v, p.fa) }
+            else if (p.fr != "" && typeof v == "function") { return kAdoptFn(v, p.fr, p.fa) }
+            return v
+        }
         return kAdoptTy(v, p.ty)
     }
+    // A reference r whose arity (kRefArity) is n.
+    function kRefSetArity(r, n) { r.kparams = r.kbound ? n : n - 1 }
     // One value retyped by a declared type: a local, a parameter, a return value.
     function kAdoptVal(v, dt) {
         if (dt == undefined || dt == null || dt == "") { return v }
@@ -3069,10 +3080,11 @@ NotMemberKw = :script(~~ "pure";
         return p == null ? v : kAdoptPlan(v, p)
     }
     // A function value whose declared type fixes its result's width - `val f: () ->
-    // Long = { 1 }` - answers through a wrapper that retypes each result. Twin of
-    // js_ktadoptfn in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
-    function kAdoptFn(f, rty) {
-        return function() { return kAdoptTy(f.apply(undefined, arguments), rty) }
+    // Long = { 1 }` - answers through a wrapper of the type's arity n that retypes
+    // each result. Twin of js_ktfnadopt in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kAdoptFn(f, rty, n) {
+        return fnMetaSet(function() { return kAdoptTy(f.apply(undefined, arguments), rty) }, "", n)
     }
     // An initializer of a declared Array<T> tags the array with the JVM class T fixes
     // (ktDeclArrClass), read on the first run, once every type has been seen. Twin of
@@ -12758,7 +12770,19 @@ NotMemberKw = :script(~~ "pure";
     // The two are only told apart at run time, by whether the base resolves to a value
     // and whether that value is a class descriptor, so the test is made inside the
     // thunk rather than at walk time. `base::class` is neither: it is a CLASS LITERAL.
+    // A java.lang static that no binding of the program shadows has the arity
+    // ktJavaStaticArity measures. Twin of makeQualRef in kotlin-to-llvm-ir.abnf.
     function makePropRef(baseName, name, pos) {
+        var t = kQualRefThunk(baseName, name, pos)
+        var ja = name == "class" ? -1 : ktJavaStaticArity(baseName, name)
+        if (ja < 0) { return t }
+        return function() {
+            var r = t()
+            if (kIsRef(r) && (!hasVar(baseName) || getVar(baseName) === hostGlobals[baseName])) { kRefSetArity(r, ja) }
+            return r
+        }
+    }
+    function kQualRefThunk(baseName, name, pos) {
         // `T::class` of a (reified) type parameter T of the function walked here.
         var tps = curTParams()
         var tpIdx = -1

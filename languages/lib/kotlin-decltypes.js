@@ -101,31 +101,46 @@ function ktLitElTy(t) { return t.indexOf("<") >= 0 ? t : ktLitTy(t) }
 // nothing, and for a function type with a receiver (`T.() -> Long`, whose value
 // carries its own receiver protocol).
 function ktFnRetTy(ty) {
+    var t = ktPlainFnTy(ty)
+    return t == "" ? "" : ktLitTy(t.substring(ktMatchClose(t, 0, "(", ")") + 3))
+}
+// The parameter count of a plain function type (as ktFnRetTy reads it), which is
+// the kotlin.jvm.functions class of a callable reference of that type; -1 for any
+// other type.
+function ktFnTyArity(ty) {
+    var t = ktPlainFnTy(ty)
+    return t == "" ? -1 : ktTyParamCount(t, 0, ktMatchClose(t, 0, "(", ")"))
+}
+// A plain function type `(A) -> T` without its nullable parentheses and
+// `suspend`, or "".
+function ktPlainFnTy(ty) {
     var t = (ty.length > 0 && ty.charAt(ty.length - 1) == "?") ? ty.substring(0, ty.length - 1) : ty
     if (t.length > 1 && t.charAt(0) == "(" && ktMatchClose(t, 0, "(", ")") == t.length - 1) { t = t.substring(1, t.length - 1) }
     if (t.substring(0, 7) == "suspend") { t = t.substring(7) }
     if (t.length == 0 || t.charAt(0) != "(") { return "" }
     var e = ktMatchClose(t, 0, "(", ")")
-    if (e < 0 || t.substring(e + 1, e + 3) != "->") { return "" }
-    return ktLitTy(t.substring(e + 3))
+    return (e < 0 || t.substring(e + 1, e + 3) != "->") ? "" : t
 }
 // The arity of a receiver function type `R.(A, B) -> T`, the kotlin.jvm.functions
 // class every value of it has: its parameters and the receiver.
 function ktRecvFnArity(t) {
     var i = t.indexOf(".(")
     var e = i < 0 ? -1 : ktMatchClose(t, i + 1, "(", ")")
-    if (e < 0) { return 1 }
+    return e < 0 ? 1 : ktTyParamCount(t, i + 1, e) + 1
+}
+// The parameter count of the function-type parameter list t[open..close].
+function ktTyParamCount(t, open, close) {
     var n = 1
     var depth = 0
     var any = false
-    for (var j = i + 2; j < e; j++) {
+    for (var j = open + 1; j < close; j++) {
         var c = t.charAt(j)
         if (!ktIsWs(c)) { any = true }
         if (c == "(" || c == "<") { depth++ }
         else if (c == ")" || (c == ">" && t.charAt(j - 1) != "-")) { depth-- }
         else if (c == "," && depth == 0) { n++ }
     }
-    return any ? n + 1 : 1
+    return any ? n : 0
 }
 // The parameter count of the member a `::` names, from the shapes of the program's
 // methods of its name (l, [min, max, names, ...] each): theirs when every one
@@ -174,6 +189,29 @@ for (var ktBati = 0; ktBati < ktBatn.length; ktBati++) {
 function ktBuiltinArity(name) {
     var s = ktBuiltinArityTab["$" + name]
     return s == undefined ? "0" : s
+}
+// The parameter count of a java.lang static `base::name` - M Math, I Integer and
+// java.lang.Long, S System - measured with kotlinc 2.2.21 as `Math::sqrt is
+// FunctionN`; -1 for any other name. An overloaded static (abs, parseInt) is absent:
+// only an expected function type picks its overload (kAdoptPlan).
+var ktJavaStaticTab = {}
+var ktJstn = ("M.sqrt:1 M.cbrt:1 M.exp:1 M.expm1:1 M.log:1 M.log10:1 M.log1p:1 M.sin:1 M.cos:1 " +
+    "M.tan:1 M.asin:1 M.acos:1 M.atan:1 M.sinh:1 M.cosh:1 M.tanh:1 M.floor:1 M.ceil:1 M.rint:1 " +
+    "M.atan2:2 M.hypot:2 M.pow:2 M.toRadians:1 M.toDegrees:1 I.compare:2 I.signum:1 I.max:2 " +
+    "I.min:2 I.sum:2 I.bitCount:1 I.numberOfLeadingZeros:1 I.numberOfTrailingZeros:1 " +
+    "I.highestOneBit:1 I.lowestOneBit:1 I.rotateLeft:2 I.rotateRight:2 I.toHexString:1 " +
+    "I.toOctalString:1 I.toBinaryString:1 S.currentTimeMillis:0 S.nanoTime:0 " +
+    "S.identityHashCode:1").split(" ")
+for (var ktJsti = 0; ktJsti < ktJstn.length; ktJsti++) {
+    var ktJstc = ktJstn[ktJsti].indexOf(":")
+    ktJavaStaticTab["$" + ktJstn[ktJsti].substring(0, ktJstc)] = ktJstn[ktJsti].charCodeAt(ktJstc + 1) - 48
+}
+function ktJavaStaticArity(base, name) {
+    var jl = base.substring(0, 10) == "java.lang."
+    var b = jl ? base.substring(10) : base
+    var h = b == "Math" ? "M" : (b == "Integer" || (jl && b == "Long")) ? "I" : b == "System" ? "S" : ""
+    var n = h == "" ? undefined : ktJavaStaticTab["$" + h + "." + name]
+    return n == undefined ? -1 : n
 }
 // What arity spec `spec` gives a receiver of member-table row `kind`. Twin of
 // ktSpecArity in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.

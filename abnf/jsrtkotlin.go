@@ -1241,22 +1241,32 @@ func init() {
 			}
 			return boolH(ktEquals([]uint64{a[0], a[1], boolH(false)}, true))
 		}
-		// js_ktadoptfn(f, ty): a function value whose declared type fixes its
-		// result's width - `val f: () -> Long = { 1 }` - answers through a wrapper
-		// that retypes each result. Twin of kAdoptFn in kotlin-interpreter.abnf.
-		m["js_ktadoptfn"] = func(a []uint64) uint64 {
+		// js_ktfnadopt(f, n, ty): a value of a declared function type of n
+		// parameters. A callable reference takes the arity n, by which kotlinc
+		// resolves an overloaded or defaulted target. Any other function whose
+		// declared type fixes its result's width - `val f: () -> Long = { 1 }` -
+		// answers through a wrapper of arity n that retypes each result (ty, ""
+		// for none). Twin of kAdoptPlan in kotlin-interpreter.abnf.
+		m["js_ktfnadopt"] = func(a []uint64) uint64 {
 			f := u(a[0])
-			if !isCallable(f) {
+			n := int(rt.toNumber(u(a[1])))
+			if _, isRef := ktRefOf(f); isRef {
+				jsvFnMetaSet(f, "", n)
 				return a[0]
 			}
-			ty := rt.toString(u(a[1]))
-			return w(jsHostFunc("lambda", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			ty := rt.toString(u(a[2]))
+			if ty == "" || !isCallable(f) {
+				return a[0]
+			}
+			wf := jsHostFunc("lambda", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				res := rt.call(f, jsUndef, args)
 				if n := rt.ktAdoptTy(res, ty); n != nil {
 					return n
 				}
 				return res
-			}))
+			})
+			jsvFnMetaSet(wf, "", n)
+			return w(wf)
 		}
 		// A conversion method - toInt(), toLong(), toUInt(): (value, bits, unsigned).
 		m["js_ktconv"] = func(a []uint64) uint64 {
