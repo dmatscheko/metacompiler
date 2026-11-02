@@ -4741,13 +4741,13 @@ KwContract  = "contract" KwEnd ;
         var sysLead = ktLeadName(txt) == "System"
         if (items.length > 3 && ktLeadName(txt) == "java" && items[1].kind == "field" && items[1].name == "lang" &&
             items[2].kind == "field" && items[2].name == "System" && items[1].safe != true && items[2].safe != true) {
-            items = [makeVarRef("System")].concat(items.slice(3))
+            items = [ktJavaSystemRef(items[0])].concat(items.slice(3))
             if (txt.substring(0, 16) == "java.lang.System") { txt = txt.substring(10) }
             sysLead = true
         }
-        // `System.out.println()` takes the native no-argument path of a bare println()
-        // (makeCallBody).
-        if (sysLead && items.length == 3 && items[1].kind == "field" && items[1].name == "out" && items[1].safe != true &&
+        // `System.out.println()` / `System.err.println()` take the native no-argument
+        // path of a bare println() (makeCallBody).
+        if (sysLead && items.length == 3 && items[1].kind == "field" && (items[1].name == "out" || items[1].name == "err") && items[1].safe != true &&
             items[2].kind == "mcall" && (items[2].name == "println" || items[2].name == "print")) {
             items[2].sysOut = true
         }
@@ -4834,10 +4834,21 @@ KwContract  = "contract" KwEnd ;
                 // the __class chain and calls it first, so an override still wins;
                 // going through js_mcall instead would abort on a list and on an
                 // instance without one.
-                if (s.sysOut == true && s.args.length == 0 && ktNativeBuild && classNames["$System"] == undefined) {
-                    var soA = callExt(b, "js_arr_new", [])
-                    callExt(b, "js_arr_push", [soA, emitStr(b, "")])
-                    return {b: b, v: callExt(b, "js_call", [callExt(b, "js_ktfget", [cur, emitStr(b, s.name)]), hUndef, soA])}
+                // Only the stream objects buildMain declares carry __kjstatic; a
+                // program's own binding named System or java keeps its ordinary call.
+                if (s.sysOut == true && s.args.length == 0 && ktNativeBuild) {
+                    var soB = curF.NewBlock("")
+                    var plB = curF.NewBlock("")
+                    var soM = curF.NewBlock("")
+                    var isStream = callExt(b, "js_seq", [callExt(b, "js_get", [cur, emitStr(b, "__kjstatic")]), hTrue])
+                    b.NewCondBr(truthy(b, isStream), soB, plB)
+                    var soA = callExt(soB, "js_arr_new", [])
+                    callExt(soB, "js_arr_push", [soA, emitStr(soB, "")])
+                    var soV = callExt(soB, "js_call", [callExt(soB, "js_ktfget", [cur, emitStr(soB, s.name)]), hUndef, soA])
+                    soB.NewBr(soM)
+                    var plV = callExt(plB, "js_ktsmcall", [cur, emitStr(plB, s.name), callExt(plB, "js_arr_new", [])])
+                    plB.NewBr(soM)
+                    return {b: soM, v: soM.NewPhi([llvm.ir.NewIncoming(soV, soB), llvm.ir.NewIncoming(plV, plB)])}
                 }
                 if (s.name == "toString" && s.args.length == 0) {
                     return {b: b, v: callExt(b, "js_ktstr", [cur])}
@@ -8729,6 +8740,28 @@ KwContract  = "contract" KwEnd ;
             return {b: b, v: rv}
         }
     }
+    // `java.lang.System` read through javaRef, the `java` it starts from: the JVM's
+    // System (buildMain's "java.lang.System", which a program's own System does not
+    // hide) while that is the package handle, else the `lang.System` member chain
+    // of the program's own binding (a local, parameter, property or object named
+    // `java`), which Kotlin resolves before the package. Twin of kPkgMember in
+    // kotlin-interpreter.abnf, where the binding shadows the handle by scope.
+    function ktJavaSystemRef(javaRef) {
+        ktVarSeen["$System"] = true
+        return function(b) {
+            var jr = javaRef(b)
+            var pkgB = curF.NewBlock("")
+            var ownB = curF.NewBlock("")
+            var mrg = curF.NewBlock("")
+            var isPkg = callExt(jr.b, "js_sne", [callExt(jr.b, "js_get", [jr.v, emitStr(jr.b, "__pkg")]), hUndef])
+            jr.b.NewCondBr(truthy(jr.b, isPkg), pkgB, ownB)
+            var sv = pkgB.NewCall(rtKtGet(), [curScopeV, emitStr(pkgB, "java.lang.System")])
+            pkgB.NewBr(mrg)
+            var ov = callExt(ownB, "js_ktfget", [callExt(ownB, "js_ktfget", [jr.v, emitStr(ownB, "lang")]), emitStr(ownB, "System")])
+            ownB.NewBr(mrg)
+            return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(sv, pkgB), llvm.ir.NewIncoming(ov, ownB)])}
+        }
+    }
     // `base::name` and `base::class`. Whether the base is a VALUE (a bound reference) or
     // a TYPE (an unbound one) is a run-time question here exactly as it is in the
     // interpreter half - js_ktrefbase answers a marker for a base that resolves to
@@ -8737,8 +8770,6 @@ KwContract  = "contract" KwEnd ;
     // of the program shadows has the arity ktJavaStaticArity measures. Twin of
     // makePropRef in kotlin-interpreter.abnf.
     function makeQualRef(baseName, name) {
-        // A member of `java.lang.System` (`java.lang.System.out::println`) is one of System.
-        if (baseName.substring(0, 17) == "java.lang.System.") { baseName = baseName.substring(10) }
         var t = ktQualRefThunk(baseName, name)
         var ja = name == "class" ? -1 : ktJavaStaticArity(baseName, name)
         if (ja < 0) { return t }
@@ -8754,9 +8785,13 @@ KwContract  = "contract" KwEnd ;
             return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, reifiedKSlot(baseName))])} }
         }
         // The base is read as a value (`System::nanoTime`), so a builtin it names is
-        // declared; `java.lang.System` is read as System.
+        // declared.
         var jcls = name == "class" ? "" : ktJavaStaticCls(baseName)
-        if (name != "class") { ktVarSeen["$" + (jcls == "S" ? "System" : baseName.split(".")[0])] = true }
+        if (name != "class") { ktVarSeen["$" + baseName.split(".")[0]] = true }
+        // A `java.lang.System` base (`java.lang.System.out::println`) starts from
+        // ktJavaSystemRef.
+        var jsys = name != "class" && baseName.substring(0, 16) == "java.lang.System" &&
+                   (baseName.length == 16 || baseName.charAt(16) == ".") ? ktJavaSystemRef(makeVarRef("java")) : null
         return function(b) {
             // `Array<Dog>::class` is the java array class its element type fixes
             // ([LDog;), handed to js_ktclasslit as a type name. Twin of makePropRef
@@ -8810,11 +8845,20 @@ KwContract  = "contract" KwEnd ;
             // type of the last segment; System is a program-scope binding instead.
             var dsegs = baseName.split(".")
             var dlast = dsegs[dsegs.length - 1]
-            var jst = dsegs[0] == "java" && jcls != ""
+            var jst = dsegs[0] == "java" && (jcls != "" || jsys != null)
             if (jst || (dsegs.length > 1 && ktTypeNameSet["$" + dsegs[0]] != true && dsegs[0] != "kotlin" && dsegs[0] != "java" &&
                 classNames["$" + dlast] != 1 && interfaceNames["$" + dlast] != true)) {
-                var dv = jst ? b.NewCall(rtKtGet(), [curScopeV, emitStr(b, jcls == "S" ? "System" : "java")]) : b.NewCall(rtRefBase(), [curScopeV, emitStr(b, dsegs[0])])
-                for (var dk = jcls == "S" ? dsegs.length : 1; dk < dsegs.length; dk++) { dv = callExt(b, "js_ktfget", [dv, emitStr(b, dsegs[dk])]) }
+                var dk = 1
+                var dv = null
+                if (jsys != null) {
+                    var jsr = jsys(b)
+                    b = jsr.b
+                    dv = jsr.v
+                    dk = 3
+                } else {
+                    dv = b.NewCall(jst ? rtKtGet() : rtRefBase(), [curScopeV, emitStr(b, dsegs[0])])
+                }
+                for (; dk < dsegs.length; dk++) { dv = callExt(b, "js_ktfget", [dv, emitStr(b, dsegs[dk])]) }
                 var dref = callExt(b, "js_ktbref", [dv, emitStr(b, name), hUndef])
                 return {b: b, v: emitRefArity(b, dref, ktRefParams(memberArity["$" + name], name), ktBuiltinArity(name))}
             }
@@ -9609,9 +9653,10 @@ KwContract  = "contract" KwEnd ;
             }
         }
         // java.lang.System's two clocks and identityHashCode, declared only for a
-        // program that names System and does not declare it. Each clock is a closure
+        // program that names System: as "java.lang.System" (ktJavaSystemRef), and
+        // as System unless the program declares its own. Each clock is a closure
         // over js_ktclock(kind, us), identityHashCode one over js_ktidhash.
-        if (ktVarSeen["$System"] == true && classNames["$System"] == undefined) {
+        if (ktVarSeen["$System"] == true) {
             var sysV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [sysV, emitStr(b, "__kjstatic"), hTrue])
             var clocks = ["currentTimeMillis", "nanoTime"]
@@ -9624,13 +9669,18 @@ KwContract  = "contract" KwEnd ;
                 return deadBlock()
             }, false)
             callExt(b, "js_set", [sysV, emitStr(b, "identityHashCode"), callExt(b, "js_closure", [handle(idhF), curScopeV])])
-            // System.out: Kotlin's println / print (see below), as statics.
-            var outV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [outV, emitStr(b, "__kjstatic"), hTrue])
-            callExt(b, "js_set", [outV, emitStr(b, "println"), callExt(b, "js_ktprint", [])])
-            callExt(b, "js_set", [outV, emitStr(b, "print"), callExt(b, "js_ktwrite", [])])
-            callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
+            // System.out: Kotlin's println / print (see below), as statics; System.err
+            // the same on standard error.
+            var streams = [["out", "js_ktprint", "js_ktwrite"], ["err", "js_kteprint", "js_ktewrite"]]
+            for (var sti = 0; sti < streams.length; sti++) {
+                var outV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [outV, emitStr(b, "__kjstatic"), hTrue])
+                callExt(b, "js_set", [outV, emitStr(b, "println"), callExt(b, streams[sti][1], [])])
+                callExt(b, "js_set", [outV, emitStr(b, "print"), callExt(b, streams[sti][2], [])])
+                callExt(b, "js_set", [sysV, emitStr(b, streams[sti][0]), outV])
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "java.lang.System"), sysV])
+            if (classNames["$System"] == undefined) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV]) }
         }
         // println / print: Kotlin's OWN rendering, not the shared println host
         // function (which hands the raw runtime value to Go's %v). js_ktprint /

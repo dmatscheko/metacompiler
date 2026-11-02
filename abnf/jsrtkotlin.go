@@ -1851,18 +1851,25 @@ func init() {
 		// intercepting the call site keeps `::println` and `list.forEach(::println)`
 		// working, and keeps the shared println host function untouched for the
 		// other languages that use it.
-		m["js_ktprint"] = func(a []uint64) uint64 {
-			return rt.wrap(jsHostFunc("println", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				fmt.Fprint(outWriter, wtf8Clean(ktpLine(rt, args)+"\n"))
-				return jsUndef
-			}))
+		// js_kteprint / js_ktewrite are System.err's println / print: the same text
+		// on standard error. The writer is read at each call, as -pipe swaps
+		// outWriter.
+		ktPrinter := func(name, end string, toErr bool) func(a []uint64) uint64 {
+			return func(a []uint64) uint64 {
+				return rt.wrap(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+					w := outWriter
+					if toErr {
+						w = warnWriter
+					}
+					fmt.Fprint(w, wtf8Clean(ktpLine(rt, args)+end))
+					return jsUndef
+				}))
+			}
 		}
-		m["js_ktwrite"] = func(a []uint64) uint64 {
-			return rt.wrap(jsHostFunc("print", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				fmt.Fprint(outWriter, wtf8Clean(ktpLine(rt, args)))
-				return jsUndef
-			}))
-		}
+		m["js_ktprint"] = ktPrinter("println", "\n", false)
+		m["js_ktwrite"] = ktPrinter("print", "", false)
+		m["js_kteprint"] = ktPrinter("println", "\n", true)
+		m["js_ktewrite"] = ktPrinter("print", "", true)
 
 		// The text of a value: what println writes, what "$v" interpolates and what
 		// v.toString() answers.

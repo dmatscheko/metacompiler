@@ -4293,8 +4293,12 @@ NotMemberKw = :script(~~ "pure";
         },
         // System.out is the stream Kotlin's println / print write to, so its members
         // are those functions; __kjstatic keeps `System.out::println` a one-argument
-        // reference.
-        out: {__kjstatic: true, println: hostGlobals["println"], print: hostGlobals["print"]}
+        // reference. System.err writes the same text to standard error. Twin of
+        // js_kteprint / js_ktewrite in abnf/jsrtkotlin.go.
+        out: {__kjstatic: true, println: hostGlobals["println"], print: hostGlobals["print"]},
+        err: {__kjstatic: true,
+              println: function() { eprintln(arguments.length == 0 ? "" : kstr(arguments[0])) },
+              print: function() { eprint(arguments.length == 0 ? "" : kstr(arguments[0])) }}
     }
     // Kotlin's number types as VALUES, for their COMPANION CONSTANTS. Long.MAX_VALUE
     // cannot be written as a plain number at all - which is the whole reason a sized

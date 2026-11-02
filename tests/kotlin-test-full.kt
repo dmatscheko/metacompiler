@@ -8544,6 +8544,48 @@ fun s192() {
     check("sysout192b", System.out.println("ok192") == Unit)
 }
 
+// ===== SECTION 193: System.err, a program binding named java =====
+// System.err is standard error's stream, one of its own. A local, parameter or
+// property named `java` hides the package: `java.lang.System` is then its member
+// chain, for a call and for a callable reference alike.
+class Log193(val tag: String) {
+    val seen = mutableListOf<String>()
+    fun println(s: String) { seen.add(tag + s) }
+}
+class Sys193(tag: String) {
+    val out = Log193(tag)
+    fun nanoTime(): Long = 193L
+}
+class Lang193(tag: String) { val System = Sys193(tag) }
+class J193(tag: String) { val lang = Lang193(tag) }
+class H193 {
+    val java = J193("h")
+    fun run(): String {
+        java.lang.System.out.println("1")
+        val r = java.lang.System.out::println
+        r("2")
+        return java.lang.System.out.seen.joinToString(",") + java.lang.System.nanoTime()
+    }
+}
+fun p193(java: J193): String {
+    java.lang.System.out.println("p")
+    return java.lang.System.out.seen[0]
+}
+fun s193() {
+    System.err.print("")
+    java.lang.System.err.print("")
+    val ep: (String) -> Unit = System.err::print
+    ep("")
+    check("syserr193a", System.err !== System.out && System.err === java.lang.System.err && ep is Function1<*, *>)
+    val java = J193("l")
+    java.lang.System.out.println("x")
+    val g = java.lang.System.out::println
+    g("y")
+    val n = java.lang.System::nanoTime
+    check("javashadow193b", java.lang.System.out.seen == listOf("lx", "ly") && n() == 193L &&
+        H193().run() == "h1,h2193" && p193(J193("q")) == "qp")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -8733,6 +8775,7 @@ fun main() {
     s190() // SECTION-CALL 190
     s191() // SECTION-CALL 191
     s192() // SECTION-CALL 192
+    s193() // SECTION-CALL 193
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

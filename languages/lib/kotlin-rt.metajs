@@ -2738,7 +2738,7 @@ function js_jband(l, r) {
 // and these externs:
 //
 //     js_char  js_char_code  js_char_like  js_kindex            (abnf/jsrt.go)
-//     js_ktprint  js_ktwrite  js_ktstr              (jsrtkotlin 1087/1093/1102)
+//     js_ktprint  js_ktwrite  js_kteprint  js_ktewrite  js_ktstr  (jsrtkotlin)
 //
 // NOT PORTED HERE, deliberately:
 //
@@ -4761,6 +4761,15 @@ function js_ktprint() {
 
 function js_ktwrite() {
     return function(a) { print(k2Line(a)) }
+}
+
+// js_kteprint / js_ktewrite (jsrtkotlin.go): System.err's println / print.
+function js_kteprint() {
+    return function(a) { eprintln(k2Line(a)) }
+}
+
+function js_ktewrite() {
+    return function(a) { eprint(k2Line(a)) }
 }
 
 // js_ktstr (jsrtkotlin.go:1102): the text of a value - what println writes, what
