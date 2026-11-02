@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1127** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1128** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -138,15 +138,15 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1124 bash: test/[ -eq "integer expected"; compiled circular nameref loses -i; compiled `type` refuses unprintable bodies · P3 · SH · IN PROGRESS (SH worker, round 39) [V]
+### T-1127 bash: test arity errors, declare through circular -i nameref, readonly circular warning · P3 · SH · OPEN [V]
 
-Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
-- `test x -eq 3`, `[ 'x+0' -eq 3 ]` and `test 'a[1]' -eq 0` print "integer expected" (test: x: integer expected) and return status 2. Both our engines evaluate the operands as arithmetic and return 0 or 1. Only `[[ ]]` evaluates arithmetic; `test`/`[` take plain integers (leading/trailing blanks and a sign allowed). Repro: scratchpad/SH38/t4.sh.
-- Compiled only: with a global `declare -i l=3`, `f(){ local -n l=l; l=7; l+=8; }` gives 78 instead of 15. refAttrs uses rt_nref_base, which returns "" for a circular chain, so -i is lost.
-- Compiled `type $x` (emitFnTextOf) still fails at compile time when any function body cannot be printed. Make it lazy, like the r38 declare -f fix.
-- Known compiled limitation, document it or fix it: `local -i n; local -n n` (no value, second local) keeps -i, because attributes are fixed at compile time.
+Found while probing T-1124. All three diverge from bash 5.3 (LC_ALL=C) in the interpreter, the compiled run, or both:
 
-Keep the hot runtime functions cost-neutral (check with `tests/bench.sh bash --draws 5 --paired`).
+1. Malformed `test` expressions. `test 1 -eq 1 x` must print `test: too many arguments` and return status 2. `test x -eq` must print `test: x: unary operator expected` and return status 2. `[ 1 -eq 1 x ]` must print `[: too many arguments` and return status 2.
+2. `declare -i w=1; m(){ local -n w=w; declare w=9+1; }; m; echo w=$w` must print bash's warnings (`local: warning: w: circular name reference`, then three `warning: w: circular name reference` lines), then `declare: \`9+1': invalid variable name for name reference`, then `w=1`.
+3. `readonly r=1; f(){ local -n r=r; }; f` is missing bash's `local: warning: r: circular name reference` line, which comes before `local: r: readonly variable`.
+
+Verify each one with a four-leg probe (`tests/probe.sh bash`) against `/opt/homebrew/bin/bash`, and diff the `.err` files too.
 
 # C — C subset
 
@@ -1177,6 +1177,7 @@ T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endl
 T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local -n drops -i; compiled declare -f listing — DONE r38 (d8fa8690): circular local nameref element/literal stores and warning counts, ${v~}/${v~~}, -n drops -i/-u/-l/-c, lazy compiled declare -f/-ft, arith element store on a scalar; paired bench +0.05%; master-probed vs bash 5.3 (stdout+stderr)
 T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/SingletonList); emptyArray class — DONE r36 (7a6b2a15, c4b42938): Unit is never null (casts, is, ?., ?:, !!, *NotNull, Pair holding Unit) in all engines, Any() as java.lang.Object, EmptyList/Singleton*/ArrayList result classes by size, explicit-type Array class; also fixed the interpreter's anonymous function swallowing the statement's ';'; master-probed vs kotlinc 2.2.21
 T-1123 ruby: ArithmeticSequence respond_to? (halves split), Hash key, endless-step map/each_with_object, last → FloatDomainError — DONE r55 (fcfc144c): ArithmeticSequence respond_to?/own methods in both halves, Hash key via eql? parts, blockless map/with_object/each_with_object on endless streams, #last per MRI (FloatDomainError/ZeroDivisionError/RangeError); paired bench 0.00%; master-probed vs ruby 2.6
+T-1124 bash: test/[ -eq "integer expected"; compiled circular nameref loses -i; compiled `type` refuses unprintable bodies — merged f8f91736: test/[ integer-expected status 2 (digits fast path), compiled circular nameref keeps -i, lazy compiled type; local -i n; local -n n documented LIMIT; SECTION 129 in new bash-test-full.6.sh; 4-leg probe + stderr match bash 5.3; full matrix 605/605; bench -0.63%
 
 # Settled — do not re-open
 
