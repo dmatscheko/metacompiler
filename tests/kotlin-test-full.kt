@@ -7486,6 +7486,54 @@ fun s171() {
 }
 
 
+// ===== SECTION 172: compute / replace, and live list views =====
+// java.util.Map's compute / computeIfPresent / replace (a null result removes the
+// key); an Array's asList and a List's asReversed are VIEWS that write through both
+// ways; a sealed builder's subList refuses writes, an Arrays.asList's takes a set.
+fun s172() {
+    val k = listOf("a", "b", "z", "q")
+    val m = mutableMapOf<String, Int?>(k[0] to 1, k[1] to 2)
+    check("mc172a", m.compute(k[0]) { _, x -> (x ?: 0) + 1 } == 2 && m.compute(k[2]) { _, x -> (x ?: 0) + 10 } == 10 &&
+        m.compute(k[1]) { _, _ -> null } == null && m.toString() == "{a=2, z=10}" &&
+        m.computeIfPresent(k[0]) { s, x -> x!! + s.length } == 3 && m.computeIfPresent(k[3]) { _, x -> x } == null &&
+        m.computeIfPresent(k[2]) { _, _ -> null } == null && m.toString() == "{a=3}")
+    m[k[3]] = null
+    check("mc172b", m.computeIfPresent(k[3]) { _, _ -> 5 } == null && m.replace(k[3], 3) == null &&
+        m.replace(k[1], 5) == null && m.toString() == "{a=3, q=3}" && m.replace(k[0], 3, 7) &&
+        !m.replace(k[0], 3, 8) && !m.replace(k[1], null, 1) && m.replace(k[3], 3, null) &&
+        m.toString() == "{a=7, q=null}")
+    val arr = arrayOf(3, 1, 2)
+    val al = arr.asList()
+    arr[0] = 5
+    (al as MutableList<Int>)[1] = 6
+    check("av172c", al.javaClass.name == "java.util.Arrays\$ArrayList" && al == listOf(5, 6, 2) &&
+        arr.contentToString() == "[5, 6, 2]" && uoe170 { al.add(1) } == "Unull")
+    arr.sort()
+    val ia = intArrayOf(4, 5)
+    val il = ia.asList()
+    ia.fill(arr.size)
+    check("av172d", al == listOf(2, 5, 6) && il == listOf(3, 3) &&
+        il.javaClass.name == "kotlin.collections.ArraysKt___ArraysJvmKt\$asList\$3")
+    val ml = mutableListOf(1, 2, 3)
+    val rv = ml.asReversed()
+    ml.add(4)
+    val seen = rv.toString()
+    rv[0] = 40
+    rv.add(0)
+    check("av172e", seen == "[4, 3, 2, 1]" && ml == listOf(0, 1, 2, 3, 40) && rv == listOf(40, 3, 2, 1, 0))
+    rv.removeIf { it % 2 == 0 }
+    ml += 9
+    check("av172f", ml == listOf(1, 3, 9) && rv == listOf(9, 3, 1) &&
+        runCatching { for (x in rv) { if (x == 3) ml.add(7) } }.exceptionOrNull() is ConcurrentModificationException)
+    val bl = buildList { add(1); add(2); add(3) }
+    val bs = bl.subList(0, 2) as MutableList<Int>
+    val ls = listOf(1, 2, 3).subList(0, 2) as MutableList<Int>
+    check("ro172g", uoe170 { bs.set(0, 9) } == "Unull" && uoe170 { bs.add(9) } == "Unull" &&
+        uoe170 { bs.clear() } == "Unull" && uoe170 { ls.add(9) } == "Unull" &&
+        uoe170 { ls.removeAt(0) } == "Unull" && uoe170 { ls.set(0, 9) } == "1" && bl == listOf(1, 2, 3))
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7654,6 +7702,7 @@ fun main() {
     s169() // SECTION-CALL 169
     s170() // SECTION-CALL 170
     s171() // SECTION-CALL 171
+    s172() // SECTION-CALL 172
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -7512,7 +7512,7 @@ NotMemberKw = :script(~~ "pure";
         if (name == "reversed" || name == "asReversed") {
             out = []
             for (i = es.length - 1; i >= 0; i--) { out.push(es[i]) }
-            return {v: name == "asReversed" ? kArrClassed(out, ktReversedClass(kArrJvmClass(es))) : out}
+            return {v: name == "asReversed" ? ktLink(es, kArrClassed(out, ktReversedClass(kArrJvmClass(es))), true) : out}
         }
         if (name == "sorted") { return {v: kSortBy(es, null, false)} }
         if (name == "sortedDescending") { return {v: kSortBy(es, null, true)} }
@@ -7562,15 +7562,20 @@ NotMemberKw = :script(~~ "pure";
             for (i = lo; i < hi; i++) { out.push(es[i]) }
             return {v: out}
         }
+        // asList is a live view of the array (ktLink).
+        if (name == "asList") {
+            out = es.slice(0)
+            return {v: ktLink(es, kArrClassed(out, ktaAsListClass(arrKind(es))), false)}
+        }
         // The ARRAY-to-collection conversions. An Array and a List are the same host
         // array in this value model, so every one of them is a COPY of the elements -
-        // which is what Kotlin's toList/toMutableList/toTypedArray do. `asList` is
-        // Kotlin's VIEW (writes through to the array) and `asSequence`/`asIterable`
-        // are views too; the copy is observably different only for a program that
-        // mutates the array afterwards and then reads the view, which this subset does
-        // not model. Grouped here so the whole family answers with one shape.
+        // which is what Kotlin's toList/toMutableList/toTypedArray do. `asSequence`
+        // and `asIterable` are Kotlin VIEWS; the copy is observably different only for
+        // a program that mutates the array afterwards and then reads the view, which
+        // this subset does not model. Grouped here so the whole family answers with
+        // one shape.
         if (name == "toList" || name == "toMutableList" || name == "asSequence" ||
-            name == "asIterable" || name == "asList" || name == "toIntArray" ||
+            name == "asIterable" || name == "toIntArray" ||
             name == "toLongArray" || name == "toShortArray" || name == "toByteArray" ||
             name == "toDoubleArray" || name == "toFloatArray" || name == "toBooleanArray" ||
             name == "toCharArray" || name == "toTypedArray") {
@@ -8141,6 +8146,28 @@ NotMemberKw = :script(~~ "pure";
                 kMapDropAt(m, kMapFind(m, f))
             }
             return {v: name == "putIfAbsent" ? cur : nv}
+        }
+        // compute, computeIfPresent and replace are java.util.Map's defaults too:
+        // compute stores the function's value or, when it is null, removes the key;
+        // computeIfPresent only runs on a non-null value; replace(k, v) writes only a
+        // present key and answers the old value, replace(k, old, new) only when the
+        // key holds `old`, answering whether it wrote. Twin of the same cases of
+        // ktMapMethod in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+        if (name == "compute" || name == "computeIfPresent" || name == "replace") {
+            i = kMapFind(m, f)
+            var was = anytype
+            was = i >= 0 ? m.vals[i] : null
+            if (name == "replace") {
+                if (i < 0) { return {v: args.length > 2 ? false : null} }
+                if (args.length > 2 && !kEqVals(was, args[1])) { return {v: false} }
+                kMapPut(m, f, args[args.length - 1])
+                return {v: args.length > 2 ? true : was}
+            }
+            if (name == "computeIfPresent" && was === null) { return {v: null} }
+            var cv = anytype
+            cv = args[1](f, was)
+            if (cv !== null) { kMapPut(m, f, cv) } else if (kMapFind(m, f) >= 0) { kMapDropAt(m, kMapFind(m, f)) }
+            return {v: cv}
         }
         // remove(key, value) removes the entry only when it holds that value.
         if (name == "remove" && args.length > 1) {
@@ -8874,6 +8901,17 @@ NotMemberKw = :script(~~ "pure";
             tgtKind = "Collection"
         }
         if (Array.isArray(tgt)) {
+            // A linked list (ktLink) runs the call once more with its link held,
+            // then copies its contents to the lists it is linked to.
+            var lkp = anytype
+            lkp = ktLinkOf(tgt)
+            if (lkp !== null && lkp.__lnkBusy !== true) {
+                var lkr = anytype
+                lkp.__lnkBusy = true
+                try { lkr = mcall(target, name, args, spec) } finally { lkp.__lnkBusy = false }
+                ktLinkSync(tgt, null)
+                return lkr
+            }
             var tak = arrKind(tgt)
             if (tak == 4 || tak == 3 || tak < 0 - 3) {
                 var rol = kRoGuard(tgt, name, args)
@@ -11844,6 +11882,7 @@ NotMemberKw = :script(~~ "pure";
             var es = src.slice(0)
             if (es.length != dst.length || add) { arrModBump(dst) }
             kArrSetTo(dst, es)
+            if (ktLinkOf(dst) !== null) { ktLinkSync(dst, null) }
         } else if (kIsSet(dst) && kIsSet(src)) {
             var ks = src.keys.slice(0)
             var n = dst.keys.length
@@ -13115,6 +13154,11 @@ NotMemberKw = :script(~~ "pure";
         "sliceArray"]
     function kResultKind(recv, name) {
         if (name == "asSequence") { return 2 }
+        // An Array's asList is an Arrays$ArrayList; a subList keeps its list's
+        // read-only rules (a ListBuilder's BuilderSubList, an Arrays$ArrayList's).
+        // Twin of ktResultKind in abnf/jsrtkotlin.go, which has the rules.
+        if (name == "asList") { return recv == 1 ? -4 : 0 }
+        if (name == "subList") { return recv == -5 ? recv : (recv == -4 || recv == 4 ? -4 : 0) }
         if (kArrResults.indexOf(name) >= 0) { return ktaResultKind(recv, name) }
         if ((recv == 1 || recv >= 5) && name == "plus") { return recv }
         if (recv == 2 && kSeqKeeps.indexOf(name) >= 0) { return 2 }
@@ -13737,6 +13781,7 @@ NotMemberKw = :script(~~ "pure";
             var wix = kNum(i)
             if (wix < 0 || wix >= o.length) { kIndexOob("IndexOutOfBoundsException", wix, o.length) }
             o[wix] = v
+            if (ktLinkOf(o) !== null) { ktLinkSync(o, null) }
             return
         }
         if (kIsMap(o)) {
@@ -14052,7 +14097,7 @@ NotMemberKw = :script(~~ "pure";
         "binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
         "clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
         "commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
-        "component2:LRAD component3:LRAD computeIfAbsent:M concatToString:A contains:LRAQGDSMBT " +
+        "component2:LRAD component3:LRAD compute:M computeIfAbsent:M computeIfPresent:M concatToString:A contains:LRAQGDSMBT " +
         "containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
         "contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
         "copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +

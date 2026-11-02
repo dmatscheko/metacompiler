@@ -495,6 +495,81 @@ function ktSubListClass(jc) {
     return ""
 }
 
+// A primitive array's asList (kind k, 5 and up) is an anonymous AbstractList of
+// ArraysKt___ArraysJvmKt, numbered by element type (Byte 1 .. Char 8, ktaElems
+// order here); "" for an unsigned array and for an Array, whose Arrays$ArrayList
+// is its kind (-4). Go twin: ktaAsListClass in abnf/jsrtkotlin.go.
+var ktaAsListNums = [3, 4, 6, 5, 8, 7, 1, 2]
+function ktaAsListClass(k) {
+    if (k < 5 || k - 5 >= ktaAsListNums.length) { return "" }
+    return "kotlin.collections.ArraysKt___ArraysJvmKt$asList$" + ktaAsListNums[k - 5]
+}
+
+// A live list view - an Array's asList, a List's asReversed - is a list of its
+// own, linked both ways to the list it reads: each side's props __lnk lists
+// {a: the other list, rev: whether it reads it reversed}. java's view shares its
+// backing list's storage; here a member call, an indexed write or a `+=` on either
+// side copies its contents across (ktLinkSync), through every list linked on
+// (views form a tree, so `from` is the only edge to skip), a size change counting
+// as a structural change of the copy. Go twin: ktLink / ktLinkSync in
+// abnf/jsrtkotlin.go.
+function ktLink(owner, view, rev) {
+    ktLinkAdd(owner, view, rev)
+    ktLinkAdd(view, owner, rev)
+    return view
+}
+function ktLinkAdd(a, b, rev) {
+    var p = anytype
+    p = arrProps(a)
+    if (p === undefined) {
+        p = {}
+        arrPropsSet(a, p)
+    }
+    if (p.__lnk === undefined) { p.__lnk = [] }
+    p.__lnk.push({a: b, rev: rev})
+}
+// The props of a linked list, else null.
+function ktLinkOf(a) {
+    var p = anytype
+    p = arrProps(a)
+    if (p === undefined) { return null }
+    if (p.__lnk === undefined) { return null }
+    return p
+}
+function ktLinkSync(a, from) {
+    var ls = anytype
+    ls = arrProps(a).__lnk
+    for (var i = 0; i < ls.length; i++) {
+        var b = anytype
+        b = ls[i].a
+        if (b !== from) {
+            ktLinkCopy(b, a, ls[i].rev)
+            ktLinkSync(b, a)
+        }
+    }
+}
+function ktLinkCopy(dst, src, rev) {
+    var n = src.length
+    var i = 0
+    if (dst.length != n) {
+        while (dst.length > 0) { dst.pop() }
+        for (i = 0; i < n; i++) { dst.push(src[i]) }
+        arrModBump(dst)
+    } else {
+        for (i = 0; i < n; i++) { dst[i] = src[i] }
+    }
+    var hi = n - 1
+    i = 0
+    while (rev && i < hi) {
+        var t = anytype
+        t = dst[i]
+        dst[i] = dst[hi]
+        dst[hi] = t
+        i++
+        hi--
+    }
+}
+
 // l.asReversed(): a ReversedList over a MutableList, else a ReversedListReadOnly.
 // kotlin picks the overload by the receiver's static type, which a value does not
 // carry, so the mutable classes stand for a MutableList receiver.

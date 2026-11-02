@@ -1137,8 +1137,17 @@ function ktArrWord(k) {
 // List. Twin of ktResultKind in abnf/jsrtkotlin.go.
 function ktResultKind(recv, name) {
     if (name == "asSequence") { return 2 }
+    if (name == "asList") {
+        if (recv == 1) { return 0 - 4 }
+        return 0
+    }
+    if (name == "subList") {
+        if (recv == 0 - 5) { return recv }
+        if (recv == 0 - 4 || recv == 4) { return 0 - 4 }
+        return 0
+    }
     if (k3IsCopyName(name)) {
-        if (name == "toList" || name == "toMutableList" || name == "asIterable" || name == "asList") { return 0 }
+        if (name == "toList" || name == "toMutableList" || name == "asIterable") { return 0 }
         return ktaResultKind(recv, name)
     }
     if (name == "copyOf" || name == "copyOfRange" || name == "sortedArray" ||
@@ -2468,6 +2477,7 @@ function js_ktfill(dst, src, add) {
     if (ktIsArr(dst) && ktIsArr(src)) {
         if (dst.length != src.length || add === true) { arrModBump(dst) }
         k3Replace(dst, src)
+        if (ktLinkOf(dst) !== null) { ktLinkSync(dst, null) }
         if (gone !== undefined) { k4ViewWrite(dst, gone) }
         return dst
     }
@@ -5160,7 +5170,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "asReversed") {
         for (i = es.length - 1; i >= 0; i = i - 1) { out.push(es[i]) }
-        return ktArrClassed(out, ktReversedClass(ktArrJvmClass(es)))
+        return ktLink(es, ktArrClassed(out, ktReversedClass(ktArrJvmClass(es))), true)
     }
     if (name == "sorted") { return ktSortBy(es, null, false) }
     if (name == "sortedDescending") { return ktSortBy(es, null, true) }
@@ -5207,6 +5217,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     // The ARRAY-to-collection conversions. An Array and a List are the same host
     // array in this value model, so every one of them is a COPY of the elements.
+    if (name == "asList") { return ktLink(es, ktArrClassed(k3Copy(es), ktaAsListClass(arrKind(es))), false) }
     if (k3IsCopyName(name)) { return k3Copy(es) }
     if (name == "copyOf") { return k3CopyOf(es, args) }
     if (name == "copyOfRange") {
@@ -5774,7 +5785,6 @@ function k3IsCopyName(name) {
     if (name == "toMutableList") { return true }
     if (name == "asSequence") { return true }
     if (name == "asIterable") { return true }
-    if (name == "asList") { return true }
     if (name == "toIntArray") { return true }
     if (name == "toLongArray") { return true }
     if (name == "toShortArray") { return true }
@@ -6085,6 +6095,34 @@ function k3MapDefault(m, keys, vals, name, f, args) {
     return nv
 }
 
+// compute, computeIfPresent and replace: java.util.Map's defaults. Twin of
+// kMapMethod in kotlin-interpreter.abnf, which has the rules.
+function k3MapCompute(m, keys, vals, name, f, args) {
+    var was = anytype
+    var cv = anytype
+    var i = ktMapFind(keys, f)
+    var three = args.length > 2
+    was = null
+    if (i >= 0) { was = vals[i] }
+    if (name == "replace") {
+        if (i < 0 || (three && !ktEqVals(was, args[1]))) {
+            if (three) { return false }
+            return null
+        }
+        ktMapPut(m, f, args[args.length - 1])
+        if (three) { return true }
+        return was
+    }
+    if (name == "computeIfPresent" && was === null) { return null }
+    cv = ktCall2(ktArg(args, 1), f, was)
+    if (cv !== null) { ktMapPut(m, f, cv) }
+    else {
+        i = ktMapFind(keys, f)
+        if (i >= 0) { ktMapDropAt(m, i) }
+    }
+    return cv
+}
+
 // ============================================================================
 // ktMapMethod -- jsrtkotlin.go:4596
 //
@@ -6143,6 +6181,7 @@ function ktMapMethod(m, name, args) {
         return v
     }
     if (k3IsMapDefault(name)) { return k3MapDefault(m, keys, vals, name, f, args) }
+    if (name == "compute" || name == "computeIfPresent" || name == "replace") { return k3MapCompute(m, keys, vals, name, f, args) }
     if (name == "remove") {
         i = ktMapFind(keys, f)
         if (args.length > 1) {
@@ -8309,6 +8348,14 @@ function js_ktset(o, key, val) {
             var wix = k4Int(key)
             if (wix < 0 || wix >= o.length) { ktIndexOob("IndexOutOfBoundsException", wix, o.length) }
         }
+        if (arrProps(o) !== undefined) {
+            if (ktLinkOf(o) !== null) {
+                var sr = anytype
+                sr = k4bSetMember(o, key, val)
+                ktLinkSync(o, null)
+                return sr
+            }
+        }
     }
     if (ktIsObj(o)) {
         if (rtIsDictObj(o)) {
@@ -8683,7 +8730,7 @@ function k4BuiltinLacks(recv, name) {
             "binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
             "clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
             "commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
-            "component2:LRAD component3:LRAD computeIfAbsent:M concatToString:A contains:LRAQGDSMBT " +
+            "component2:LRAD component3:LRAD compute:M computeIfAbsent:M computeIfPresent:M concatToString:A contains:LRAQGDSMBT " +
             "containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
             "contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
             "copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
@@ -10353,6 +10400,9 @@ function ktSmcall(recv, name, args) {
         }
         var lv = ktSeqMethodK(rv, name, as, rvKind)
         if (!ktMiss(lv)) {
+            if (arrProps(rv) !== undefined) {
+                if (ktLinkOf(rv) !== null) { ktLinkSync(rv, null) }
+            }
             if (ktIsArr(lv) && lv !== rv) {
                 var rk = arrKind(rv)
                 var lk = ktResultKind(rk, name)

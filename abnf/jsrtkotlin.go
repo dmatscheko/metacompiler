@@ -1332,6 +1332,9 @@ func init() {
 					}
 					da.elems = append([]interface{}{}, sa.elems...)
 					da.dropIdx()
+					if ktLinks(da) != nil {
+						ktLinkSync(da, nil)
+					}
 					rt.ktViewWrite(dst, gone)
 					return a[0]
 				}
@@ -2034,6 +2037,9 @@ func init() {
 					}
 				}
 				if v, handled := rt.ktSeqMethodK(lst, mname, arr.elems, recvKind); handled {
+					if lst.props != nil && ktLinks(lst) != nil {
+						ktLinkSync(lst, nil)
+					}
 					if out, isOut := v.(*jsArray); isOut && out != lst {
 						// A range (recvKind Collection) is an Iterable but no
 						// Collection, so its sorted copy stays an ArrayList.
@@ -3468,6 +3474,11 @@ func init() {
 					if ix < 0 || ix >= len(ao.elems) {
 						rt.ktIndexOob("IndexOutOfBoundsException", ix, len(ao.elems))
 					}
+				}
+				if ao.props != nil && ktLinks(ao) != nil {
+					r := baseSet(a)
+					ktLinkSync(ao, nil)
+					return r
 				}
 			}
 			if mo, isObj := u(a[0]).(*jsObject); isObj {
@@ -6348,7 +6359,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			out[len(es)-1-i] = e
 		}
 		if name == "asReversed" {
-			return ktArrClassed(arr(out), ktReversedClass(ktArrJvmClass(o))), true
+			return ktLink(o, ktArrClassed(arr(out), ktReversedClass(ktArrJvmClass(o))), true), true
 		}
 		return arr(out), true
 	case "sorted", "sortedDescending":
@@ -6410,14 +6421,17 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			return arr(append([]interface{}{}, es[:len(es)-k]...)), true
 		}
 		return arr(append([]interface{}{}, es[len(es)-k:]...)), true
+	// asList is a live view of the array (ktLink).
+	case "asList":
+		return ktLink(o, ktArrClassed(arr(append([]interface{}{}, es...)), ktaAsListClass(o.kind)), false), true
 	// The ARRAY-to-collection conversions. An Array and a List are the same host array
 	// (told apart only by its kind number), so every one of them is a COPY of the elements - which is
-	// what Kotlin's toList/toMutableList/toTypedArray/to*Array do. `asList`,
-	// `asSequence` and `asIterable` are Kotlin VIEWS (a write through the array shows
-	// in them); the copy differs observably only for a program that mutates the array
-	// and then reads the view, which this subset does not model. Twin of the same
-	// grouped arm in kotlin-interpreter.abnf.
-	case "toList", "toMutableList", "asSequence", "asIterable", "asList",
+	// what Kotlin's toList/toMutableList/toTypedArray/to*Array do. `asSequence` and
+	// `asIterable` are Kotlin VIEWS (a write through the array shows in them); the
+	// copy differs observably only for a program that mutates the array and then
+	// reads the view, which this subset does not model. Twin of the same grouped arm
+	// in kotlin-interpreter.abnf.
+	case "toList", "toMutableList", "asSequence", "asIterable",
 		"toIntArray", "toLongArray", "toShortArray", "toByteArray",
 		"toDoubleArray", "toFloatArray", "toBooleanArray", "toCharArray",
 		"toTypedArray":
@@ -7747,6 +7761,38 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			return cur, true
 		}
 		return nv, true
+	// compute, computeIfPresent and replace: java.util.Map's defaults. Twin of
+	// kMapMethod in kotlin-interpreter.abnf, which has the rules.
+	case "compute", "computeIfPresent", "replace":
+		var was interface{} = jsNull
+		i := rt.ktMapFind(keys, f)
+		if i >= 0 {
+			was = vals.elems[i]
+		}
+		if name == "replace" {
+			three := len(args) > 2
+			if i < 0 || (three && !rt.ktEqVals(was, args[1])) {
+				if three {
+					return false, true
+				}
+				return jsNull, true
+			}
+			rt.ktMapPut(m, f, args[len(args)-1])
+			if three {
+				return true, true
+			}
+			return was, true
+		}
+		if name == "computeIfPresent" && was == jsNull {
+			return jsNull, true
+		}
+		cv := rt.ktCall(argAt(args, 1), f, was)
+		if cv != jsNull {
+			rt.ktMapPut(m, f, cv)
+		} else if j := rt.ktMapFind(keys, f); j >= 0 {
+			rt.ktMapDropAt(m, j)
+		}
+		return cv, true
 	case "remove":
 		i := rt.ktMapFind(keys, f)
 		if len(args) > 1 {
@@ -9376,7 +9422,7 @@ var ktBuiltinMembers = func() map[string]string {
 		"binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
 		"clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
 		"commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
-		"component2:LRAD component3:LRAD computeIfAbsent:M concatToString:A contains:LRAQGDSMBT " +
+		"component2:LRAD component3:LRAD compute:M computeIfAbsent:M computeIfPresent:M concatToString:A contains:LRAQGDSMBT " +
 		"containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
 		"contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
 		"copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
@@ -11117,6 +11163,69 @@ func ktArrClassed(a *jsArray, jc string) *jsArray {
 	return a
 }
 
+// ktaAsListClass is a primitive array's asList class, "" for any other kind. Twin
+// of ktaAsListClass in languages/lib/kotlin-math.js, which has the rule.
+func ktaAsListClass(k int) string {
+	nums := [...]int{3, 4, 6, 5, 8, 7, 1, 2}
+	if k < ktArrPrim || k-ktArrPrim >= len(nums) {
+		return ""
+	}
+	return "kotlin.collections.ArraysKt___ArraysJvmKt$asList$" + strconv.Itoa(nums[k-ktArrPrim])
+}
+
+// A live list view (an Array's asList, a List's asReversed) linked both ways to the
+// list it reads, under the props key __lnk. Twin of ktLink / ktLinkSync in
+// languages/lib/kotlin-math.js, which has the rules.
+type ktLinkEnd struct {
+	a   *jsArray
+	rev bool
+}
+
+func ktLink(owner, view *jsArray, rev bool) *jsArray {
+	ktLinkAdd(owner, view, rev)
+	ktLinkAdd(view, owner, rev)
+	return view
+}
+
+func ktLinkAdd(a, b *jsArray, rev bool) {
+	p, has := a.props.(*jsObject)
+	if !has {
+		p = newJSObject()
+		a.props = p
+	}
+	ls, _ := p.props["__lnk"].([]ktLinkEnd)
+	p.set("__lnk", append(ls, ktLinkEnd{b, rev}))
+}
+
+func ktLinks(a *jsArray) []ktLinkEnd {
+	if p, has := a.props.(*jsObject); has {
+		ls, _ := p.props["__lnk"].([]ktLinkEnd)
+		return ls
+	}
+	return nil
+}
+
+func ktLinkSync(a, from *jsArray) {
+	for _, l := range ktLinks(a) {
+		if l.a == from {
+			continue
+		}
+		dst, n := l.a, len(a.elems)
+		if len(dst.elems) != n {
+			dst.elems = make([]interface{}, n)
+			dst.dropIdx()
+			dst.mod++
+		}
+		for i, e := range a.elems {
+			if l.rev {
+				i = n - 1 - i
+			}
+			dst.elems[i] = e
+		}
+		ktLinkSync(dst, a)
+	}
+}
+
 // The JVM classes of the objects a collection of JVM class jc hands out, "" where
 // none is known. Twins of ktSubListClass, ktReversedClass, ktValuesClass and
 // ktIterClass in languages/lib/kotlin-math.js, which has the rules.
@@ -11229,6 +11338,22 @@ func ktResultKind(recv int, name string) int {
 	switch name {
 	case "asSequence":
 		return ktArrSeq
+	// An Array's asList is an Arrays$ArrayList, and a subList keeps its list's
+	// read-only rules (ktRoRule): a ListBuilder's BuilderSubList refuses every write,
+	// an Arrays$ArrayList's RandomAccessSubList takes a set but no add or remove.
+	case "asList":
+		if recv == ktArrArray {
+			return ktArrAsList
+		}
+		return 0
+	case "subList":
+		switch recv {
+		case ktArrBuilt:
+			return ktArrBuilt
+		case ktArrAsList, ktArrFixed:
+			return ktArrAsList
+		}
+		return 0
 	// to<E>Array answers its primitive array, toTypedArray an Array<T>, and the
 	// copying members the receiver's own array kind.
 	case "toTypedArray":
