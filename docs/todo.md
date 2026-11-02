@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1174** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1175** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,9 +103,9 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1171 kotlin: range type constructors (IntRange, LongRange, CharRange) · P3 · KT · IN PROGRESS (KT worker, round 57) [V]
-Found while closing T-1169; oracle kotlinc 2.2.21. All engines.
-- `IntRange(1, 3)` as a constructor call fails: interpreter "call of a non function: IntRange"; run/native "call of a non function value: [object Object]". kotlinc prints `1..3`, and `kotlin.ranges.IntRange(1, 3).toList()` gives `[1, 2, 3]`. The type name is bound only as a value carrying the companion constants (`IntRange.EMPTY`), not as a callable. Check `LongRange(1L, 3L)`, `CharRange('a', 'c')`, `IntProgression.fromClosedRange(1, 9, 2)`, `.first/.last/.step`, `is IntRange`, and that `IntRange.EMPTY` still works.
+### T-1174 kotlin: javaClass of a range's Long bound · P3 · KT · OPEN [V]
+Found while closing T-1171; oracle kotlinc 2.2.21.
+- `(1L..4L).last.javaClass` prints "class java.lang.Long" in the interpreter; kotlinc prints "long" (`longArrayOf(5L)[0].javaClass` is already right). Check run and native too, and the same for `.first`, `IntRange.first/last` ("int"), `CharRange.first` ("char"), `LongProgression.step`, and `.javaClass.name`. Static result types of range/progression members are the likely gap (kotlin-decltypes.js).
 
 # GO — Go  (oracle: `go run`)
 
@@ -1213,6 +1213,7 @@ T-1166 bash: hidden NAME[SUB] array locals, a callee through the caller's local 
 T-1169 kotlin (compiler): class property vs top-level object of the same name, `kotlin.io.println` — merged 00293308: a member property hides a same-named top-level class/enum/object in the compiler, fully-qualified kotlin.io.println/print and kotlin.text.Regex; master four-leg probe matches kotlinc 2.2.21
 T-1170 bash: parameter operators on arrays, missing element 0, set -u, circular array namerefs — merged 8a6948b8: parameter operators on array names (element 0) in the interpreter, missing element 0 in the compiler, set -u for such arrays and ${unset-w} under set -u, circular -a/-A local namerefs; master probe matches bash 5.3; hot rt_var path cost-neutral
 T-1167 ruby: Float object identity (NaN/non-flonum), module reflection after include into builtins, NaN hash keys — merged 5e0fe8d3 (partial): Float object identity with MRI's flonum rule (jsFlo pointer box in abnf/jsrt.go, full suite + native-full + ruby/python benches neutral), NaN hash keys, builtin mixin reflection, Enumerator.new, endless each_slice/each_cons/zip breaks, most missing builtins; String to_r/to_c/setbyte/grapheme/undump carried; master four-leg probe matches ruby 2.6
+T-1171 kotlin: range type constructors (IntRange, LongRange, CharRange) — merged 800486c5: IntRange/LongRange/CharRange/UIntRange/ULongRange constructors, *Progression.fromClosedRange with kotlin's step checks, kotlin.ranges/kotlin.Int qualified names in the compiler; master four-leg probe matches kotlinc 2.2.21
 
 # Settled — do not re-open
 
