@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1107** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1109** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -164,28 +164,21 @@ Spec: ext/standard/html.c.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1096 bash: array element through a nameref in the compiler (`declare -n r=t; r[z]=3`) · P3 · SH · IN PROGRESS (SH worker, round 34) [V]
+### T-1107 bash: attribute change on a readonly variable; circular-nameref store; declare -n e=a[1] · P3 · SH · OPEN [V]
 
-The compiler aborts with "an array through a nameref is not supported by this compiler" on `declare -n r=tt; r[q]=2`, and also on reads like `${r[q]}`, `${!r[@]}` and `${#r[@]}`. The interpreter handles them. Resolve the nameref at run time through the same slot lookup that rt_decl_opt uses for computed options.
+Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
+- `readonly z=1; declare -i z` must fail with "declare: z: readonly variable" and rc=1. The same goes for -u, -l, -a, -A and +i. Both engines accept the change.
+- A store through a circular nameref, `c1[1]=4`: bash warns twice, stores the value and returns rc=0. Ours returns rc=1.
+- `declare -n e=a[1]; echo ${e[0]}`: bash prints an empty line; the interpreter prints 2.
+- `declare -n` with -a/-A: bash sometimes drops it silently and sometimes says "reference variable cannot be an array". Find which case is which in variables.c / builtins/declare.def, then match it. Currently the interpreter prints `declare -an` and the compiler refuses the program.
 
-Related, both engines: in diagnostics about a nameref (cannot convert, readonly variable, cannot destroy), bash names the nameref itself, but ours name its target.
+### T-1108 bash: bad-substitution message names the whole word; `]` from an expansion inside a subscript; stray `]]` order · P3 · SH · OPEN [V]
 
-### T-1097 bash: export -p / readonly -p NAME set the attribute; bad substitution aborts the command line · P3 · SH · IN PROGRESS (SH worker, round 34) [V]
-
-Oracle: /opt/homebrew/bin/bash 5.3.
-- `export -p nope` and `readonly -p nope` with a name give that name the attribute and print nothing. Afterwards `typeset -p nope` prints `declare -rx nope`. Ours treat them as queries, print "not found" and return 1.
-- After a bad substitution, bash abandons the rest of the command. Ours keeps expanding the remaining words: `echo ${#x-a} ${#y-b}` prints two messages where bash prints one, and a `$(...)` later on the same line still runs. This holds for every kind of bad substitution, in both engines.
-- `"${s:$'-1'}"`: bash re-reads this as `${s:-1}` and prints `hello`; ours prints `o`.
-- `m[[]=7` should be a syntax error ("unexpected EOF while looking for matching `]'", exit 2); ours accepts it.
-
-### T-1098 bash: subscript quote rule for run-time arithmetic text (variable values, let) + token cosmetics · P3 · SH · IN PROGRESS (SH worker, round 34) [V]
-
-When arithmetic text comes from a variable's value or a `let` argument, bash expands a subscript in it as if inside double quotes. For `z="iv['\$x']"; $(( z ))` and `let 'w=iv['\''$x'\'']'` the error token is `'1'`. Ours prints `'$x'`, and something odd for `let`.
-
-Residuals left by the subscript-quote work:
-- `$(( iv[ '1' ] ))`: bash's token keeps a trailing blank ("'1' "); ours drops it.
-- A double-quoted `"'1'"` inside a subscript, when the arithmetic text also contains `$`: bash shows `\'1\'`; ours shows `'1'`.
-- A `$'x'` inside a word with no closing `}`: bash's message shows it translated (`x`); ours shows it as written.
+Oracle: /opt/homebrew/bin/bash 5.3, LC_ALL=C.
+- The "bad substitution" message must name the whole word: the full double-quoted content (`"pre ${#x-a} post"`) or the full unquoted word (`x${#x-a}y`, `x${m[$'x'[]-v}y`). In it, a command substitution appears in deparsed form and an unquoted `$'x'` appears as `'x'`.
+- With `g='1]'`, bash reports `$(( iv[$g+1] ))` as an error at "]+1"; ours ends the subscript at the `]` that came from the expansion.
+- In `$(( iv[ '1' ] ]] ))`, bash first reports the stray "]]" against the whole text; ours evaluates the subscript first and reports `'1'`.
+- Compiler: the lexical curFrame.locs lets a local from an earlier `$()` in the same function show through. Check whether this changes visible output in a probe before fixing it.
 
 # C — C subset
 
@@ -1190,6 +1183,9 @@ T-1092 ruby: `for x in obj` over any object with #each (user Enumerable) — DON
 T-1086 ruby: deferred Enumerator size after forcing; with_index value on to_enum; top-level to_enum — DONE r50 (c9434a56): user-#each Enumerator size nil, to_enum.with_index, receiver-less to_enum/enum_for; master-probed
 T-1099 kotlin: class-property value read inside a builtin receiver returns a host function (compiled legs) — DONE r30 (85e28ad6): bare name in value position reads only builtin properties (ktBuiltinProps), miss path skips stdlib globals; master-probed vs kotlinc 2.2.21
 T-1100 kotlin: buildSet { } (and buildSet(capacity)) — DONE r30 (3c71c232): buildSet { } / buildSet(cap) { } (SetBuilder); master-probed
+T-1096 bash: array element through a nameref in the compiler (`declare -n r=t; r[z]=3`) — DONE r34 (52cb090f): arrays through a nameref in both engines (rt_nref_arr), nameref-named diagnostics; master-probed vs bash 5.3
+T-1097 bash: export -p / readonly -p NAME set the attribute; bad substitution aborts the command line — DONE r34 (68f75ed1): export/readonly -p NAME set the attribute, first expansion error ends the command (later $() not run), $'-1' operator forms, unclosed NAME[ syntax error; master-probed
+T-1098 bash: subscript quote rule for run-time arithmetic text (variable values, let) + token cosmetics — DONE r34 (555340e0): run-time arithmetic subscripts expand as in double quotes once, expansion results not re-expanded, token residuals; master-probed. Whole-word bad-substitution message filed
 
 # Settled — do not re-open
 
