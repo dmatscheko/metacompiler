@@ -5365,6 +5365,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var roG = (global || curFrame == null) ? one : b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtRoBind, llvm.constant.NewInt(i32, getVarId(names[j]))), zero), i32)
                 b.NewStore(b.NewOr(b.NewLoad(i32, roFlag(names[j])), roG), roFlag(names[j]))
                 fnRoNote(names[j], global)
+            } else if (setRo && curFrame != null && !global) {
+                // The function's own local: its mark, which a store by a name known only
+                // when it runs reads (rt_ro_name).
+                b.NewCall(rtRoBind, llvm.constant.NewInt(i32, getVarId(names[j])))
             }
             // A name with an attribute has a slot, where refAttrs looks for it.
             if (integer || cl != "" || setRo) { getVarId(names[j]) }
@@ -8350,10 +8354,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 evBad.NewStore(llvm.constant.NewInt(i32, 2), gExitCode)
                 evBad.NewStore(one, gExited)
                 evBad.NewBr(viaUnwind(curExit, curExitRd))
-                // A readonly variable's refusal abandons the line.
-                evOk = emitAbortCheck(evOk)
-                storeStatusI(evOk, 0)
-                return evOk
+                // A readonly variable's refusal fails eval, status 1; in a subshell or a
+                // command substitution it ends that, status 1 (bash 5.3).
+                var evRo = curF.NewBlock(""), evTop = curF.NewBlock(""), evGo = curF.NewBlock(""), evEnd = curF.NewBlock("")
+                evOk.NewCondBr(evOk.NewICmp(llvm.enum.IPredNE, evOk.NewLoad(i32, gArithErr), zero), evRo, evGo)
+                var evSub = curF.NewBlock("")
+                evRo.NewCondBr(evRo.NewICmp(llvm.enum.IPredEQ, evRo.NewLoad(i32, gSsDepth), zero), evTop, evSub)
+                emitAbortCheck(evSub).NewBr(evEnd)
+                evTop.NewStore(zero, gArithErr)
+                storeStatusI(evTop, 1)
+                evTop.NewBr(evEnd)
+                storeStatusI(evGo, 0)
+                evGo.NewBr(evEnd)
+                return evEnd
             }
             if (cmd == "read") { return emitRead(b, argTs, cmk) }
             if (cmd == "mapfile" || cmd == "readarray") { return emitMapfile(b, cmd, argTs) }

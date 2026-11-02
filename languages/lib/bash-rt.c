@@ -9918,10 +9918,10 @@ int rt_unset_name(char *n)
  * NAME=VALUE words separated by blanks, `;` and newlines, with comments. A
  * VALUE takes the shell's quoting - '...', "...", backslashes - and stops at
  * the first unquoted blank, `;` or newline; a `#` starting a word starts a
- * comment. Answers 0 when the whole string ran or a readonly variable refused
- * its value (arith_err, rt_ro_name), 1 at the first thing that is not an
- * assignment or would need an expansion ($, a backquote, a leading `~`, an
- * operator), which the emitter reports. */
+ * comment. Answers 0 when the whole string ran, arith_err set when a readonly
+ * variable (rt_ro_name) refused a value on its last line, 1 at the first thing
+ * that is not an assignment or would need an expansion ($, a backquote, a
+ * leading `~`, an operator), which the emitter reports. */
 int rt_eval_assign(char *s)
 {
     int len = rt_strlen(s);
@@ -9932,6 +9932,10 @@ int rt_eval_assign(char *s)
     int c;
     char *v;
     char *nm;
+    char *ln;
+    int ro;
+    int q;
+    long n;
     while (1) {
         while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
         if (s[i] == 0) return 0;
@@ -9991,9 +9995,25 @@ int rt_eval_assign(char *s)
         }
         v[o] = 0;
         nm = rt_substr(s, start, vs - 1 - start);
-        /* A readonly variable refuses its value and abandons the line. */
-        rt_setvar_byname(nm, v, 0, rt_ro_name(nm));
-        if (arith_err != 0) return 0;
+        ro = rt_ro_name(nm);
+        if (ro != 0) {
+            /* A readonly variable refuses its value, reported at the string's own
+             * line, and abandons the rest of that line; the next one runs. The
+             * last line's refusal is left in arith_err, which fails eval. */
+            ln = rt_getvar_byname("LINENO");
+            n = 0;
+            for (q = 0; ln[q] >= 48 && ln[q] <= 57; q = q + 1) n = n * 10 + (ln[q] - 48);
+            for (q = 0; q < start; q = q + 1) if (s[q] == 10) n = n + 1;
+            rt_setvar_byname("LINENO", rt_int2str(n), 0, 0);
+            rt_setvar_byname(nm, v, 0, ro);
+            rt_setvar_byname("LINENO", ln, 0, 0);
+            while (s[i] != 0 && s[i] != 10) i = i + 1;
+            if (s[i] == 0) return 0;
+            arith_err = 0;
+            sub_bad = 0;
+            continue;
+        }
+        rt_setvar_byname(nm, v, 0, 0);
         while (s[i] == 32 || s[i] == 9) i = i + 1;
         if (s[i] == 59) i = i + 1;
     }

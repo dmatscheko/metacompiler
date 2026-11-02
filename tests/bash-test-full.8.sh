@@ -151,6 +151,13 @@ s157() {
   s157h() { local -n w=''; echo "h $?"; declare -p w; w=5; }
   e=$( (s157h; echo "${w-unset}") 2>&1)
   check crn7 "$(s157s "$e")" 'local: `'"'"': not a valid identifier;h 1;declare -- w;unset;'
+  local -r s157r=1
+  local s157o= s157t= s157u=
+  s157k() { local -n w=$1; eval "$2"; s157o="$s157o k $?"; }
+  s157k s157r 'w=8' 2>/dev/null; s157o="$s157o l $?"
+  e=$'s157t=1\ns157r=2\ns157u=3'; eval "$e" 2>/dev/null; s157o="$s157o m $? $s157t $s157u"
+  e='s157r=2'; eval "$e" 2>/dev/null || s157o="$s157o n $?"
+  check crn9 "$s157o" ' k 1 l 0 m 0 1 3 n 1'
 }
 # ===== END SECTIONS =====
 
