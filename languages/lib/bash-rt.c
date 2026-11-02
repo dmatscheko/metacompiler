@@ -326,8 +326,10 @@ char *rt_nref_end(char *n);
 int rt_nref_glob(char *n);
 int rt_nref_close(char *n);
 int rt_nref_gstore(char *n);
+int rt_nref_gset(char *n, char *v, int app, int at);
 int rt_nref_fstore(char *n, char *v);
 int rt_nref_unglob(void);
+char *rt_nref_gread(void);
 int rt_unset_name(char *n);
 char *rt_subx(char *s);
 char *rt_subxa(char *nm, char *s);
@@ -5020,6 +5022,7 @@ int *ar_h;            /* record + 1, 0 = empty */
 int ar_hsz;           /* a power of two, or 0 before the first record */
 long arr_rows;        /* the rows of every record: 0 answers rt_arr_any at once */
 int nref_quiet;       /* >0: a circular nameref is not warned about (rt_nref_end) */
+char *nref_cstart;    /* the name the last circular chain rt_nref_end met started at */
 int nref_glob;        /* 1 + the slot rt_nref_glob put the global binding in effect for, else 0 */
 char *nref_circ;      /* the circular nameref an element store waits to drop (rt_nref_circ) */
 
@@ -6404,6 +6407,14 @@ int rt_nmark(char *nm, int on) {
     return 0;
 }
 
+/* rt_setvar_byname's store with rt_nref_gstore's binding in effect. */
+int rt_nref_gset(char *n, char *v, int app, int at)
+{
+    int r = rt_setvar_byname(n, v, app, at);
+    rt_nref_unglob();
+    return r;
+}
+
 /* A for loop's nameref control variable n stores the word v through a chain
  * that closes on a local as any scalar store does (rt_nref_gstore): 1 when it
  * did, 0 when the store is n's own. */
@@ -6500,6 +6511,7 @@ char *rt_nref_end(char *n)
         if (v == &unset_marker[0] || v[0] == 0) return n;
         if (g == 8) {
             if (nref_quiet == 0) rt_berr("warning", s, "circular name reference");
+            nref_cstart = s;
             return 0;
         }
         n = v;
@@ -8519,6 +8531,18 @@ char *rt_subxa(char *nm, char *s)
     return rt_subxm(s, rt_isassoc(nm) != 0 ? 0 : 1);
 }
 
+/* A read through the circular chain rt_nref_end just met (nref_cstart): the
+ * global variable it closes on (rt_nref_glob), else unset. */
+char *rt_nref_gread(void)
+{
+    char *v;
+    int i = rt_nref_glob(nref_cstart);
+    if (i < 0) return &unset_marker[0];
+    v = rt_getvar_byname(varnames[i]);
+    rt_nref_unglob();
+    return v;
+}
+
 char *rt_getvar_byname(char *n)
 {
     char *sel;
@@ -8527,15 +8551,8 @@ char *rt_getvar_byname(char *n)
     int allDigits;
     int len;
     if (nref_any != 0) {
-        sel = rt_nref_end(n);
-        i = sel == 0 ? rt_nref_glob(n) : -1;
-        if (i >= 0) {
-            sel = rt_var(varnames[i], gvars[i]);
-            rt_nref_unglob();
-            return sel;
-        }
-        n = sel;
-        if (n == 0) return &unset_marker[0];
+        n = rt_nref_end(n);
+        if (n == 0) return rt_nref_gread();
     }
     len = rt_strlen(n);
     /* NAME[SUB]: ${!r} with r='arr[1]' reads the element, and r='arr[@]' the joined
@@ -8604,12 +8621,8 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
     int ro = at & 8;
     char *old;
     at = at & 7;
-    if (nref_any != 0 && rt_nref_gstore(n) != 0) {
-        i = rt_setvar_byname(n, v, app, at | bi | ro);
-        rt_nref_unglob();
-        return i;
-    }
     if (nref_any != 0) {
+        if (rt_nref_gstore(n) != 0) return rt_nref_gset(n, v, app, at | bi | ro);
         n = rt_nref_end(n);
         if (n == 0) {
             arith_err = 1;
