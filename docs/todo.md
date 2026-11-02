@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1125** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1126** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -103,13 +103,15 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/SingletonList); emptyArray class · P3 · KT · IN PROGRESS (KT worker, round 36) [V]
+### T-1125 kotlin: program-class toString/hashCode agreement; synchronized; Integer.toHexString; data-class hashCode with Unit; printing a function value · P3 · KT · OPEN [V]
 
-Oracle: kotlinc 2.2.21. All three engines differ:
-- `(Unit as Any).toString()` prints `kotlin.Unit`. Ours throws "NullPointerException: null cannot be cast to non-null type kotlin.Any"; Unit must not count as null in casts.
-- `Any()` fails with "unknown name: Any". It must construct a plain object of class java.lang.Object, with toString `java.lang.Object@<hash>`, equality by identity and a hashCode.
-- `listOf(1,2).filter { false }.toList().javaClass.name` is kotlin.collections.EmptyList, and with one element java.util.Collections$SingletonList. Ours says java.util.ArrayList. Check which stdlib ops (toList, toSet, toMap, filter+toList…) return EmptyList/Singleton* vs ArrayList, and keep the read-only rules consistent with T-1106's table.
-- `emptyArray<Int>().javaClass.name` is `[Ljava.lang.Integer;`; ours is `[Ljava.lang.Object;`.
+Oracle: kotlinc 2.2.21.
+- In every program class, toString and hashCode must agree: for `class Foo`, `f.toString() == "Foo@" + f.hashCode().toString(16)` is true. Ours prints `Foo@1` but hashes the class name to 70822, in all engines. Pick one per-object identity number and use it in both.
+- `synchronized(lock) { ... }` runs the block and returns its value; the interpreter and llvm.Run fail with "unknown name: synchronized".
+- `Integer.toHexString(x)` (and the java.lang.Integer/Long statics in common use: toBinaryString, parseInt, MAX_VALUE) fails with "unknown name: Integer".
+- A data class's generated hashCode still treats a Unit property as null (compiler, around line 7715).
+- `println(f)` for a function value prints JS source in the interpreter; kotlinc prints the function type, for example `() -> kotlin.Unit` for a lambda. Check what each kind of function value prints.
+- Array copies (copyOf, plus) lose an explicit element-type class; on the JVM they keep it.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1173,6 +1175,7 @@ T-1117 bash: (( )) inner expansion errors; circular-nameref @a/@A warnings and l
 T-1119 kotlin: stale subList index read / for-loop CME; casts to concrete java.util classes; RandomAccess — DONE r35 (7f42e176): stale subList index read / for / iterators / indices throw CME (paired bench -0.02%), casts to concrete java.util classes checked with JVM messages, RandomAccess/Cloneable/Serializable markers per JVM class and program supertypes; master-probed vs kotlinc 2.2.21
 T-1120 ruby: "cannot convert endless range" must be a catchable RangeError; endless-range enumerators without a block; Range#%; ArithmeticSequence#hash — DONE r54 (1570c52a, 20b5d84f): catchable RangeError for endless to_a/splat, streaming endless String step and blockless each/each_entry, Range#% (tested only after % finds a non-number: paired bench +0.01%), ArithmeticSequence#hash, Float values toward Float::INFINITY; master-probed vs ruby 2.6
 T-1121 bash: circular local nameref element/array stores; ${v~} / ${v~~}; local -n drops -i; compiled declare -f listing — DONE r38 (d8fa8690): circular local nameref element/literal stores and warning counts, ${v~}/${v~~}, -n drops -i/-u/-l/-c, lazy compiled declare -f/-ft, arith element store on a scalar; paired bench +0.05%; master-probed vs bash 5.3 (stdout+stderr)
+T-1122 kotlin: `Unit as Any`; Any(); collection-op result classes (EmptyList/SingletonList); emptyArray class — DONE r36 (7a6b2a15, c4b42938): Unit is never null (casts, is, ?., ?:, !!, *NotNull, Pair holding Unit) in all engines, Any() as java.lang.Object, EmptyList/Singleton*/ArrayList result classes by size, explicit-type Array class; also fixed the interpreter's anonymous function swallowing the statement's ';'; master-probed vs kotlinc 2.2.21
 
 # Settled — do not re-open
 
