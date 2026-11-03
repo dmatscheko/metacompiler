@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1182 bash: written `declare -p NAME=VALUE` operands · P3 · SH · OPEN [V]
+### T-1182 bash: written `declare -p NAME=VALUE` operands · P3 · SH · IN PROGRESS (SH worker, round 60) [V]
 Found while closing T-1181; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - All engines: a written `declare -p` operand with an assignment is looked up as a literal name. `x=abc; declare -p x=1` gives "declare: x=1: not found" with status 1 in bash, and the same goes for `a[0]=2` and `x+=1`. Ours prints `declare -- x="abc"` with status 0. The operand text, with its value expanded, is the name looked up. The computed form was fixed in T-1181.
 - Note, no action: `f(){ declare -n h; declare -A h; local h=([q]=1); }` segfaults bash 5.3 itself, so there is no oracle answer.
