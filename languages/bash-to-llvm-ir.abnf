@@ -60,21 +60,22 @@ a command name computed at run time can only reach echo, the trivial builtins an
 // A top-level separator run that holds a newline also ENDS A LINE ({nl}): an expansion
 // error abandons the rest of its line, as bash abandons the command line it read.
 Program     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, up.pos); runProgram(takeAll()) ~~>
-            = BsSplice OptSep [ Statement { TopSep Statement } TopOptSep ] [ SynErr ] ;
+            = BsSplice Linebreak [ Statement { TopSep Statement } TopOptSep ] [ SynErr ] ;
 TopSep      = TopAmpSep | TopSepRun ;
 TopOptSep   = [ TopSep ] ;
-TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in, up.start, up.pos) ~~> = AmpTok { NotCaseTerm SepTok } ;
-TopSepRun   <~~ pushLineEnd(up.in, up.start, up.pos) ~~> = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
+TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in, up.start, up.pos) ~~> = AmpTok { "\n" } ;
+TopSepRun   <~~ pushLineEnd(up.in, up.start, up.pos) ~~> = NotCaseTerm SepTok { "\n" } ;
 // What the statements leave unparsed is bash's syntax error: the lines before it run, then
 // it is reported (synErrLine).
 SynErr      <~~ push({synerr: up.start}) ~~> = AnyCh :whitespace() { AnyCh | "\n" } ;
 
-// Statement separators: one or more ; or newlines. Leading whitespace (incl. #comments) is
-// skipped before each separator token, so blank and comment-only lines vanish here.
-// NotCaseTerm is here, not only in CaseSep: ";;" / ";&" / ";;&" terminate a CASE CLAUSE and
-// nothing else - `echo 1 ;; echo 2` is a syntax error in real bash.
+// Statement separators: a ; or a newline, then any more newlines. Leading whitespace (incl.
+// #comments) is skipped before each token, so blank and comment-only lines vanish here. A ;
+// after a newline or after another ; is bash's syntax error, and so is one opening a list
+// (Linebreak). NotCaseTerm: ";;" / ";&" / ";;&" terminate a CASE CLAUSE and nothing else -
+// `echo 1 ;; echo 2` is a syntax error in real bash.
 OptSep      = [ Sep ] ;
-Sep         = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
+Sep         = NotCaseTerm SepTok { "\n" } ;
 SepTok      = ";" | "\n" ;
 
 // `LIST &` runs the list asynchronously and "&" is itself a list separator. Exactly one "&"
@@ -82,7 +83,7 @@ SepTok      = ";" | "\n" ;
 // statement list and linkAsync() folds it into the statement it followed.
 ListSep     = AmpSep | Sep ;
 ListOptSep  = [ ListSep ] ;
-AmpSep      <~~ push({amp: 1}) ~~> = AmpTok { NotCaseTerm SepTok } ;
+AmpSep      <~~ push({amp: 1}) ~~> = AmpTok { "\n" } ;
 AmpTok      = "&" NotAmp ;
 
 Statement   = AndOrList ;
@@ -91,12 +92,12 @@ Statement   = AndOrList ;
 // final ; or newline before the closing keyword (fi / done / }), and a reserved word in
 // command position (guarded in SimpleCommand) stops the list so that keyword can match.
 CompoundList <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
-            = OptSep Statement { ListSep Statement } ListOptSep ;
+            = Linebreak Statement { ListSep Statement } ListOptSep ;
 // An eval or trap string, its continuations joined (see compileSnippet).
 Spliced     <~~ push(up.in) ~~> = BsSplice :whitespace() { AnyCh | "\n" } ;
 // An eval or trap string runs line by line like a script (see makeLines).
 Snippet     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, up.pos); push(makeLines(splitLines(takeAll()))) ~~>
-            = OptSep [ Statement { TopSep Statement } TopOptSep ] [ SynErr ] ;
+            = Linebreak [ Statement { TopSep Statement } TopOptSep ] [ SynErr ] ;
 
 
 // --- compound statements
@@ -171,7 +172,7 @@ ForWords    <~~ push({words: takeAll()}) ~~>
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) ~~>
-            = FuncDefHead OptSep FuncBody [ RedirList ] ;
+            = FuncDefHead Linebreak FuncBody [ RedirList ] ;
 // The redirections after the body belong to it: they apply at every call (`f() { echo a; }
 // >/dev/null; f` prints nothing).
 // A function body may be any compound command; { LIST; } and ( LIST ) are the two that
