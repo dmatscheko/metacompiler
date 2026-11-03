@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Full-syntax test: Bash (the practical POSIX-plus-bash shell language) - part 5
-# of 8, sections 90 to 123. SECTION 96's grown table alone takes ~20M of the step
+# of 9, sections 90 to 123. SECTION 96's grown table alone takes ~20M of the step
 # brake. The split is explained in tests/bash-test-full.sh.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part

@@ -3534,10 +3534,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var fnQuery = (flags.indexOf("F") >= 0) ? "F" : ((flags.indexOf("f") >= 0) ? "f" : "")
         var fqi
         for (fqi = 0; fnQuery != "" && fqi < flags.length; fqi++) {
-            if ("-fFpt".indexOf(flags.charAt(fqi)) < 0) { fail(kw + " " + flags + " is not supported") }
+            if ("-fFptaAincglu".indexOf(flags.charAt(fqi)) < 0) { fail(kw + " " + flags + " is not supported") }
         }
         for (fqi = 0; fnQuery != "" && fqi < plus.length; fqi++) {
             if ("+t".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
+        }
+        // fnLit[k]: the declaration that assigns operand k's array literal under a -f / -F
+        // query (bashDeclFnLitHead), else null. Twin of fnLit in makeDecl in
+        // bash-to-llvm-ir.abnf.
+        var fnLit = []
+        for (fqi = 0; fnQuery != "" && fqi < names.length; fqi++) {
+            var fa = asgsWritten[fqi]
+            fnLit.push((fa != null && fa.lit != null && listAt[fqi] == null) ? makeDecl(bashDeclFnLitHead(kw, flags).concat([{a: fa}]), [], ln, true) : null)
         }
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         // readonly's -n takes its attribute away, as export's does, and readonly is never
@@ -4086,7 +4094,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 setStatus(1)
                 return 1
             }
-            if (fnQuery != "") { return declFuncs(kw, fnQuery, names, flags, plus) }
+            if (fnQuery != "") {
+                var fnNames = []
+                var fnVals = []
+                for (k = 0; k < names.length; k++) {
+                    fnNames.push((darrs[k] != null) ? darrs[k] : names[k])
+                    fnVals.push((asgsWritten[k] != null && asgsWritten[k].lit == null) ? vals[k] : null)
+                }
+                return declFuncs(kw, fnQuery, fnNames, fnVals, flags, plus)
+            }
             // `local` without names, whatever its options, lists the running call's locals
             // in byte order; `local -p NAME` prints only a local of it (bash 5.3). Twin of the
             // same arm in makeDecl in bash-to-llvm-ir.abnf.
@@ -4169,7 +4185,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vals = []
             var mine = []
             for (k = 0; k < names.length; k++) { mine.push("") }
-            for (k = 0; k < names.length && (!query || isPrint); k++) {
+            for (k = 0; k < names.length && (!query || isPrint || fnQuery != ""); k++) {
                 var a = asgs[k]
                 if (listAt[k] != null) {
                     var lab = declListPre(listAt[k], kw)
@@ -4177,7 +4193,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     vals.push("")
                     continue
                 }
-                if (a != null && a.lit != null) {
+                if (fnQuery != "" && fnLit[k] != null) {
+                    var fst = anytype
+                    fst = fnLit[k]()
+                    if (typeof fst == "object") { return fst }
+                }
+                else if (a != null && a.lit != null) {
                     if (lates[k] != "") { lateFor(k) }
                     var svLate = litLate
                     litLate = mine
@@ -4185,9 +4206,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     litLate = svLate
                     if (lates[k] != "") { lateFor(-1) }
                 }
-                // -p looks a NAME=VALUE operand up as the word it expands to (declpWord).
+                // -p looks a NAME=VALUE operand up as the word it expands to (declpWord), and
+                // so do -f and -F (declFuncs).
                 var aw = asgsWritten[k]
-                if (isPrint && aw != null && aw.lit == null) { vals.push(asgWordText(aw)) }
+                if ((isPrint || fnQuery != "") && aw != null && aw.lit == null) { vals.push(asgWordText(aw)) }
                 else { vals.push((a != null && a.lit == null && a.valT != null) ? wordJoin(a.valT()) : "") }
                 var ab = takeAbort()
                 if (ab != null) { return ab }
@@ -9353,16 +9375,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // on each function, a name that is none failing silently. Otherwise they print: -f the
     // definitions, -F the names, and a function's attribute line `declare -ft NAME` when no
     // name is given or with -p; with no name an attribute picks the functions holding it,
-    // and with -p a name that is none is "not found". Twin of emitDeclFuncs in
-    // bash-to-llvm-ir.abnf.
-    function declFuncs(kw, q, names, flags, plus) {
+    // and with -p a name that is none is "not found". vals[k] is the word a NAME=VALUE
+    // operand expanded to, else null: -p looks it up as a name, and without -p it ends the
+    // builtin with "cannot use `-f' to make functions", status 1 (bash 5.3). Twin of
+    // emitDeclFuncs in bash-to-llvm-ir.abnf.
+    function declFuncs(kw, q, names, vals, flags, plus) {
         var p = flags.indexOf("p") >= 0
         var tOn = flags.indexOf("t") >= 0
         var tOff = plus.indexOf("t") >= 0
         var st = 0
         var k
+        var bad = (!p && names.length > 0) ? bashDeclFnBadOpt(kw, flags) : ""
+        if (bad != "") { diagErr(bad); setStatus(1); return 1 }
+        var noFn = kw + ": cannot use `-f' to make functions\n"
         if (!p && names.length > 0 && (tOn || tOff)) {
             for (k = 0; k < names.length; k++) {
+                if (vals[k] != null) { diagErr(noFn); setStatus(1); return 1 }
                 if (!isFunc(names[k])) { st = 1; continue }
                 funcLogNote("$" + names[k])
                 funcTr["$" + names[k]] = !tOff
@@ -9379,6 +9407,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var full = p || names.length == 0
         for (k = 0; k < list.length; k++) {
+            if (names.length > 0 && vals[k] != null) {
+                if (!p) { diagErr(noFn); setStatus(1); return 1 }
+                diagErr(kw + ": " + vals[k] + ": not found\n")
+                st = 1
+                continue
+            }
             if (!isFunc(list[k])) {
                 if (p) { diagErr(kw + ": " + list[k] + ": not found\n") }
                 st = 1

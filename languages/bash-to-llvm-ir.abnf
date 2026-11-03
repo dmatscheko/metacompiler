@@ -4698,10 +4698,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var fnQuery = (flags.indexOf("F") >= 0) ? "F" : ((flags.indexOf("f") >= 0) ? "f" : "")
         var fqi
         for (fqi = 0; fnQuery != "" && fqi < flags.length; fqi++) {
-            if ("-fFpt".indexOf(flags.charAt(fqi)) < 0) { fail(kw + " " + flags + " is not supported") }
+            if ("-fFptaAincglu".indexOf(flags.charAt(fqi)) < 0) { fail(kw + " " + flags + " is not supported") }
         }
         for (fqi = 0; fnQuery != "" && fqi < plus.length; fqi++) {
             if ("+t".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
+        }
+        // fnLit[j]: the declaration that assigns operand j's array literal under a -f / -F
+        // query (bashDeclFnLitHead), else null. Twin of fnLit in makeDecl in
+        // bash-interpreter.abnf.
+        var fnLit = []
+        for (fqi = 0; fnQuery != "" && fqi < names.length; fqi++) {
+            var fa = asgs[fqi]
+            fnLit.push((fa != null && fa.lit != null && listAt[fqi] == null) ? makeDecl(bashDeclFnLitHead(kw, flags).concat([{a: fa}]), []) : null)
         }
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         // readonly -n takes nothing: see setRo in makeDecl in bash-interpreter.abnf.
@@ -5950,7 +5958,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeStatusI(b, 1)
                 return b
             }
-            if (fnQuery != "") { return emitDeclFuncs(b, kw, fnQuery, names, flags, plus) }
+            if (fnQuery != "") {
+                var fnNames = []
+                var fnVals = []
+                for (j = 0; j < names.length; j++) {
+                    fnNames.push((darrs[j] != null) ? darrs[j] : names[j])
+                    fnVals.push((asgsWritten[j] != null && asgsWritten[j].lit == null) ? pre.vals[j] : null)
+                }
+                return emitDeclFuncs(b, kw, fnQuery, fnNames, fnVals, flags, plus)
+            }
             // `local` without names, whatever its options, lists the running call's locals
             // (rt_local_names); `local -p NAME` prints only a local of it (rt_local_p). Twin
             // of the same arm in makeDecl in bash-interpreter.abnf.
@@ -6081,12 +6097,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             refuseP = (isRef || plusArr || bareArr || rtRefuse || late != null || anyQuoted() || listOps.length > 0) && (!query || isPrint) ? slotOf(i32) : null
             if (refuseP != null) { b.NewStore(zero, refuseP) }
             var mine = []
-            for (j = 0; j < names.length && (!query || isPrint); j++) {
+            for (j = 0; j < names.length && (!query || isPrint || fnQuery != ""); j++) {
                 var a = asgs[j]
                 vals.push(null)
                 mine.push(null)
                 if (listAt[j] != null) { b = declListPre(b, listAt[j], kw); continue }
-                if (a != null && a.lit != null) {
+                if (fnQuery != "" && fnLit[j] != null) { b = fnLit[j](b) }
+                else if (a != null && a.lit != null) {
                     if (lates[j] != "") { lateFor(j) }
                     mine[j] = slotOf(i8ptr)
                     b.NewStore(emptyPtr(b), mine[j])
@@ -6096,9 +6113,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     litLate = svLate
                     if (lates[j] != "") { lateFor(-1) }
                 }
-                // -p looks a NAME=VALUE operand up as the word it expands to. Twin of
-                // asgWordText in bash-interpreter.abnf.
-                else if (isPrint && asgsWritten[j] != null) {
+                // -p looks a NAME=VALUE operand up as the word it expands to, and so do -f
+                // and -F (emitDeclFuncs). Twin of asgWordText in bash-interpreter.abnf.
+                else if ((isPrint || fnQuery != "") && asgsWritten[j] != null) {
                     var aw = asgsWritten[j]
                     var txt = gepStr(b, aw.name)
                     if (aw.idxT != null) {
@@ -8558,17 +8575,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // name is given or with -p; with no name an attribute picks the functions holding it,
     // and with -p a name that is none is "not found". With no name, the functions printed are
     // the ones defined when it runs, so a definition the printer does not model stops the
-    // shell then (status 2) instead of refusing the program. Twin of declFuncs in
+    // shell then (status 2) instead of refusing the program. vals[k] is the i8* word a
+    // NAME=VALUE operand expanded to, else null: see declFuncs. Twin of declFuncs in
     // bash-interpreter.abnf.
-    function emitDeclFuncs(b, kw, q, names, flags, plus) {
+    function emitDeclFuncs(b, kw, q, names, vals, flags, plus) {
         var p = flags.indexOf("p") >= 0
         var tOn = flags.indexOf("t") >= 0
         var tOff = plus.indexOf("t") >= 0
         var trB = llvm.constant.NewInt(i32, fnTrBit)
         var st = zero
         var k
+        var bad = (!p && names.length > 0) ? bashDeclFnBadOpt(kw, flags) : ""
+        if (bad != "") { emitDiag(b, gepStr(b, bad)); storeStatusI(b, 1); return b }
+        var noFn = kw + ": cannot use `-f' to make functions\n"
         if (!p && names.length > 0 && (tOn || tOff)) {
             for (k = 0; k < names.length; k++) {
+                if (vals[k] != null) { emitDiag(b, gepStr(b, noFn)); storeStatusI(b, 1); return b }
                 if (funcFor(names[k]) == null) { st = one; continue }
                 var sv = b.NewLoad(i32, fnSlot(names[k]))
                 var nv = tOff ? b.NewAnd(sv, llvm.constant.NewInt(i32, -1 - fnTrBit)) : b.NewOr(sv, trB)
@@ -8582,6 +8604,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var list = (names.length == 0) ? bashSortNames(declaredFuncList) : names
         var full = p || names.length == 0
         for (k = 0; k < list.length; k++) {
+            if (names.length > 0 && vals[k] != null) {
+                if (!p) { emitDiag(b, gepStr(b, noFn)); storeStatusI(b, 1); return b }
+                emitDiag(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, kw + ": "), vals[k]]), gepStr(b, ": not found\n")]))
+                st = one
+                continue
+            }
             var fn = list[k]
             var nf = gepStr(b, kw + ": " + fn + ": not found\n")
             if (funcFor(fn) == null) {

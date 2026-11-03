@@ -774,6 +774,29 @@ function bashDeclQuery(flags) {
     return flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0
 }
 
+// THE ARRAY LITERALS OF A -f / -F QUERY. bash 5.3 assigns a NAME=(...) operand as the words
+// expand, by a declaration with only the options that shape the value (-g, -A or else -a,
+// and -c/-i/-l/-u), and the query then looks for a function NAME (`declare -fi q=(1+1)`
+// leaves `declare -ai q=([0]="2")`, status 1). Answers that declaration's head items.
+function bashDeclFnLitHead(kw, flags) {
+    var o = (flags.indexOf("g") >= 0) ? "g" : ""
+    o = o + ((flags.indexOf("A") >= 0) ? "A" : ((flags.indexOf("a") >= 0) ? "a" : ""))
+    var k
+    for (k = 0; k < 4; k++) { if (flags.indexOf("cilu".charAt(k)) >= 0) { o = o + "cilu".charAt(k) } }
+    var head = [{dkw: (kw == "local") ? "declare" : kw}]
+    if (o != "") { head.push({dflag: "-" + o}) }
+    return head
+}
+// The report of a -f / -F query with operands and no -p that names an option it refuses
+// (bash 5.3: -n, then -i, -A, -a; "KW: -X: invalid option", status 1), or "".
+function bashDeclFnBadOpt(kw, flags) {
+    var k
+    for (k = 0; k < 4; k++) {
+        if (flags.indexOf("niAa".charAt(k)) >= 0) { return kw + ": -" + "niAa".charAt(k) + ": invalid option\n" }
+    }
+    return ""
+}
+
 // Does a declaration with these options change an attribute a readonly variable keeps?
 // bash 5.3 refuses -a/-A/-i/-l/-u/-c/-n and +a/+A/+i/+l/+u/+c on one ("NAME: readonly
 // variable", status 1, none of the line's attributes applied); -x, -g, -r, -t, +t and +n
