@@ -119,9 +119,54 @@ s177() {
   while IFS= read -r x; do o+="${x#*: line };"; done <<< "$e"
   check fr2 "$o" "$((l + 5)): s177g: readonly function;$((l + 5)): s177g: readonly function;$l;"
 }
+# ===== SECTION 178: declare -f / -F operands, +p/+f/+F, and where a readonly function is reported =====
+# In a -f / -F query every word after the options names a function, whatever it spells: an
+# option word or a word that is no identifier after an operand is a name looked up like any
+# other (silently missing, "not found" under -p, "not a function" for export -f and readonly
+# -f). +p prints as -p does; +f and +F change nothing, so a name is only checked (status 1
+# for no function). A readonly function's redefinition inside a `for NAME` or `case` is
+# reported on that command's first line, and outside every function on the last line of its
+# command line (here, an eval string's). Every expected value is bash 5.3's.
+s178() {
+  local e
+  s178s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$( { s178g() { :; }; s178h() { :; }; function s178a-b { :; }
+       declare -F s178g +r s178h; echo "s=$?"; declare -Fp s178g -x s178h; echo "s=$?"; declare -F s178g -- s178h; echo "s=$?"
+       declare -Fp s178g 'x y' "-z"; echo "s=$?"; declare -F s178a-b; echo "s=$?"; declare -Fp -- -x s178a-b; echo "s=$?"
+       export -f s178g -y; echo "s=$?"; readonly -f s178h +q; echo "s=$?"; declare -Fp s178h; } 2>&1 )
+  check fo1 "$(s178s "$e")" 's178g;s178h;s=1;declare -f s178g;declare: -x: not found;declare -f s178h;s=1;s178g;s178h;s=1;declare -f s178g;declare: x y: not found;declare: -z: not found;s=1;s178a-b;s=0;declare: -x: not found;declare -f s178a-b;s=1;export: -y: not a function;s=1;readonly: +q: not a function;s=1;declare -fr s178h;'
+  e=$( { s178g() { :; }; declare -fx s178g
+       declare -F +p s178g; echo "s=$?"; declare -f +p s178g; echo "s=$?"; declare -F +p s178n; echo "s=$?"
+       declare -F +f s178g; echo "s=$?"; declare -F +f s178n; echo "s=$?"; declare -f +F s178g; echo "s=$?"
+       declare -F +F +p s178g; echo "s=$?"; declare -F +x +p s178g; echo "s=$?"; declare -F +f s178g y=1; echo "s=$?"; } 2>&1 )
+  check fo2 "$(s178s "$e")" 'declare -fx s178g;s=0;s178g () ;{ ;    :;};declare -fx s178g;s=0;declare: s178n: not found;s=1;s=0;s=1;s=0;declare -fx s178g;s=0;declare -fx s178g;s=0;declare: cannot use `-f'"'"' to make functions;s=1;'
+  s178r() { s178g() { :; }; declare -fr s178g; local l0=$LINENO
+            eval 'if true; then
+s178g() { :; }
+:
+fi'
+            eval '{
+s178g() { :; }
+} ; :
+:'
+            for i in 1; do
+              :
+              s178g() { :; }
+            done
+            case a in
+              a)
+                s178g() { :; } ;;
+            esac
+            echo "$l0"; }
+  e=$(s178r 2>&1)
+  local l=${e##*$'\n'} o= x
+  while IFS= read -r x; do o+="${x#*: line };"; done <<< "$e"
+  check fo3 "$o" "$((l + 4)): s178g: readonly function;$((l + 7)): s178g: readonly function;$((l + 9)): s178g: readonly function;$((l + 13)): s178g: readonly function;$l;"
+}
 # ===== END SECTIONS =====
 
 s176  # SECTION-CALL 176
 s177  # SECTION-CALL 177
+s178  # SECTION-CALL 178
 echo "full: $checks checks, $fails failures"
 exit $fails

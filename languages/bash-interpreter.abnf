@@ -60,12 +60,12 @@ globbing against a real directory, and getopts.") ;
 // The production tag runs all top level statement thunks and exits with the final status.
 // A top-level separator run that holds a newline also ENDS A LINE ({nl}): an expansion
 // error abandons the rest of its line, as bash abandons the command line it read.
-Program     <~~ runProgram(takeAll()) ~~>
+Program     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, up.pos); runProgram(takeAll()) ~~>
             = BsSplice OptSep [ Statement { TopSep Statement } TopOptSep ] ;
 TopSep      = TopAmpSep | TopSepRun ;
 TopOptSep   = [ TopSep ] ;
-TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in) ~~> = AmpTok { NotCaseTerm SepTok } ;
-TopSepRun   <~~ pushLineEnd(up.in) ~~> = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
+TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in, up.start) ~~> = AmpTok { NotCaseTerm SepTok } ;
+TopSepRun   <~~ pushLineEnd(up.in, up.start) ~~> = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
 
 // Statement separators: one or more ; or newlines. Leading whitespace (incl. #comments) is
 // skipped before each separator token, so blank and comment-only lines vanish here.
@@ -96,7 +96,7 @@ CompoundList <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
 // An eval or trap string, its continuations joined (see compileSnippet).
 Spliced     <~~ push(up.in) ~~> = BsSplice :whitespace() { AnyCh | "\n" } ;
 // An eval or trap string runs line by line like a script (see makeLines).
-Snippet     <~~ push(makeLines(splitLines(takeAll()))) ~~>
+Snippet     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, up.pos); push(makeLines(splitLines(takeAll()))) ~~>
             = OptSep [ Statement { TopSep Statement } TopOptSep ] ;
 
 
@@ -118,7 +118,7 @@ ElseClause  <~~ push(mkElse(pop())) ~~>
 // they are the same "unquoted but unsplit" context an assignment's right hand side is.
 // The body of a clause is an ordinary statement list, except that its separator run must not
 // swallow the leading ";" of the ";;" that ends the clause - which is what NotCaseTerm guards.
-CaseStmt    <~~ push(makeCase(takeAll(), lnOf(up.start))) ~~>
+CaseStmt    <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, up.start, up.start); push(makeCase(takeAll(), lnOf(up.start))) ~~>
             = KwCase NsWord KwIn CaseSepOpt { CaseClause } KwEsac ;
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = CaseOpen CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
@@ -165,7 +165,7 @@ CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
 // Each word is one iteration value (no re-splitting).
-ForStmt     <~~ push(makeFor(takeAll(), lnOf(up.start))) ~~>
+ForStmt     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, up.start, up.start); push(makeFor(takeAll(), lnOf(up.start))) ~~>
             = KwFor ForName [ ForIn ] Sep LoopBody ;
 // A for loop's body is do LIST done or, as bash also takes it, { LIST; }.
 LoopBody    = ( KwDo CompoundList KwDone ) | ( "{" BraceKwEnd CompoundList "}" ) ;
@@ -520,7 +520,7 @@ ExpSeg      = ArithExp | CmdSub | BackSub | FunSub | ReplySub | DollarBrace | Do
 // word segment is that output with its trailing newlines removed (exactly like the shell).
 // The list is parsed with the normal whitespace rule; the enclosing word's "no skipping"
 // state is restored automatically when the production returns.
-CmdSub      <~~ push(mkCmdSub(pop(), bashCsLines(arSrc(up.start + 2, up.pos - 1), srcLine(up.start), up.start + 2))) ~~>
+CmdSub      <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, up.start, -1); push(mkCmdSub(pop(), bashCsLines(arSrc(up.start + 2, up.pos - 1), srcLine(up.start), up.start + 2))) ~~>
             = "$(" :whitespace(Whitespace) CompoundList ")" ;
 // Inside `...` a backslash before $, ` or \ (and before " when the `...` stands in double
 // quotes) is removed first, and the remaining text is then parsed as the list (POSIX 2.6.3):
@@ -3400,6 +3400,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // bash-to-llvm-ir.abnf.
     function makeDecl(items, redirs, ln, keepTc) {
         var kw = items[0].dkw
+        items = bashDeclFnWords(items)
         // A `--` before every operand ends the options and is no operand. Twin of dashEnd in
         // makeDecl in bash-to-llvm-ir.abnf.
         var de = 1
@@ -3534,8 +3535,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var fnQuery = (flags.indexOf("F") >= 0) ? "F" : ((flags.indexOf("f") >= 0) ? "f" : "")
         var fqi
         for (fqi = 0; fnQuery != "" && fqi < plus.length; fqi++) {
-            if ("+aAinrtxclug".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
+            if ("+aAinrtxclugpfF".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
         }
+        // A query's +p prints as -p does (bash 5.3: `declare -F +p g` is `declare -f g`).
+        if (fnQuery != "" && plus.indexOf("p") >= 0) { flags = flags + "p" }
         // fnLit[k]: the declaration that assigns operand k's array literal under a -f / -F
         // query (bashDeclFnLitHead), else null. Twin of fnLit in makeDecl in
         // bash-to-llvm-ir.abnf.
@@ -4389,7 +4392,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pending.pop()
                 if (typeof st == "object") { return st }
             }
-            if (errs != "") { st = failSt }
+            if (errs != "" || dt.fails > 0) { st = failSt }
             setStatus(st)
             return st
         }
@@ -10569,7 +10572,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var fname = items[0].fname
         var bodyT = mkRedirected(items.slice(1))
         var roLn = {l: lnOf(start + src.length)}
-        fnDefsSeen = bashFnDefClaim(fnDefsSeen, {s: start, lb: start + bashFnBodyOff(src, fname), at: function(p) { roLn.l = lnOf(p) }})
+        fnDefsSeen = bashFnDefClaim(fnDefsSeen, {s: start, lb: start + bashFnBodyOff(src, fname), pin: false, at: function(p) { roLn.l = lnOf(p) }})
         return function() {
             if ((funcAttrs(fname) & 1) != 0) {
                 vars["$LINENO"] = lnAt(roLn.l)
@@ -10587,10 +10590,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // Build all statement thunks, then run them top to bottom. The exit code of the whole
     // metacompiler run is the status of the last command (or an explicit exit N).
-    // The {nl} marker a top-level separator run with a newline in it leaves (see Program).
-    function pushLineEnd(t) {
+    // The {nl} marker a top-level separator run with a newline in it leaves (see Program); the
+    // line it ends, at offset p, is the one the definitions in it report on (bashFnDefPin).
+    function pushLineEnd(t, p) {
         var i
-        for (i = 0; i < t.length; i++) { if (t.charAt(i) == "\n") { push({nl: 1}); return } }
+        for (i = 0; i < t.length; i++) {
+            if (t.charAt(i) == "\n") { fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, p); push({nl: 1}); return }
+        }
     }
     // The top-level items as lines of statements, each list folded by linkAsync.
     function splitLines(items) {

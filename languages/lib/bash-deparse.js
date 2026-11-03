@@ -804,8 +804,8 @@ function bashDeclFnBadOpt(kw, flags) {
 // -f / -F declaration with operands and without -p does: {on, off} the bits it sets, then
 // clears, set: false when it prints the functions instead, and pick: the bits a listing
 // with no operand picks the functions by (0: every one). -c, -l and -u each clear
-// the other two, so two of them cancel. +a, +A, +i and +n change nothing yet still make it
-// set, as does any attribute; -g and +g do not. export sets x (with -n clears it), readonly
+// the other two, so two of them cancel. +a, +A, +i, +n, +f and +F change nothing yet still
+// make it set, as does any attribute; -g and +g do not. export sets x (with -n clears it), readonly
 // sets r (with -n does nothing), and both always set; readonly's -a or -A lists only
 // arrays, so no function (pick 64, a bit none holds).
 var bashFnAttrLetters = "rtxclu"
@@ -822,7 +822,7 @@ function bashFnAttrOps(kw, flags, plus) {
         if (plus.indexOf(c) >= 0) { off = off | (1 << k) }
     }
     var set = on != 0
-    for (k = 0; k < plus.length; k++) { if ("aAinrtxclu".indexOf(plus.charAt(k)) >= 0) { set = true } }
+    for (k = 0; k < plus.length; k++) { if ("aAinrtxcluFf".indexOf(plus.charAt(k)) >= 0) { set = true } }
     return {on: on, off: off, set: set, pick: on}
 }
 // Where the body of the definition src of function fname starts: the offset past its head
@@ -838,12 +838,14 @@ function bashFnBodyOff(src, fname) {
     return i
 }
 // THE LINE A REFUSED REDEFINITION IS REPORTED ON. bash 5.3 reports a definition inside a
-// function body on the line where the body of the textually last definition anywhere in
-// that function body starts (`f() { g() {<nl>:<nl>}; h() { :; }; }` reports g on h's line),
-// and one outside every function on the line it ends on. seen: the definitions of the text
-// being compiled so far, in source order, each {s: its start, lb: the last body start in
-// it, at: told the line's offset when it is found inside a function}. me, the definition
-// whose own children are compiled, claims the entries inside it; answers the list with me.
+// `for NAME` or `case` command on that command's first line, the innermost one's; else one
+// inside a function body on the line where the body of the textually last definition
+// anywhere in that function body starts (`f() { g() {<nl>:<nl>}; h() { :; }; }` reports g on
+// h's line); else on the last line of the top-level command line it is in (`if`'s `fi`).
+// seen: the definitions of the text being compiled so far, in source order, each {s: its
+// start, lb: the last body start in it, at: told the line's offset, pin: told it for good}.
+// me, the definition whose own children are compiled, claims the entries inside it; answers
+// the list with me.
 function bashFnDefClaim(seen, me) {
     var k = seen.length - 1
     var lb = -1
@@ -852,11 +854,22 @@ function bashFnDefClaim(seen, me) {
         k = k - 1
     }
     var j
-    for (j = k + 1; j < seen.length; j++) { seen[j].at(lb) }
+    for (j = k + 1; j < seen.length; j++) { if (!seen[j].pin) { seen[j].at(lb) } }
     if (lb > me.lb) { me.lb = lb }
     var out = seen.slice(0, k + 1)
     out.push(me)
     return out
+}
+// A `for NAME` or `case` command from offset s (or, s -1, a top-level command line ending at
+// offset p) tells the definitions in it not yet pinned the line at offset p (bashFnDefClaim).
+// p -1, for a $( ) from s, keeps each one's own last line, which bash-lines.js renumbers.
+// Answers the list, emptied by a top-level line, which no later definition can be inside.
+function bashFnDefPin(seen, s, p) {
+    var k
+    for (k = seen.length - 1; k >= 0 && seen[k].s > s; k--) {
+        if (!seen[k].pin) { seen[k].pin = true; if (p >= 0) { seen[k].at(p) } }
+    }
+    return (s < 0) ? [] : seen
 }
 // The letters of a function's attribute bits, in bash's order.
 function bashFnAttrText(bits) {
@@ -1003,7 +1016,8 @@ function bashSubNeedsX(t) {
 // field with a letter the builtin does not take answers {badOpt: bashDeclBadOpt's report}
 // instead: the builtin does nothing and fails with status 2. An empty field of a `declare
 // -p` or `typeset -p` is the variable named "", printed or "not found" by the engine: voids
-// counts them (`local -p ""` finds none).
+// counts them (`local -p ""` finds none). fails counts the fields a -f / -F query without -p
+// looks up as no function silently, each making the status 1.
 //
 // The builtin reads the SUB of a computed NAME[SUB]=VALUE as it stands, as an assignment
 // statement does (AsgIdx): an associative array's as a word, an indexed array's as
@@ -1029,7 +1043,9 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
     var assoc = false
     var nref = false
     var pq = false
+    var fq = false
     var voids = 0
+    var fails = 0
     var i
     var k
     for (i = 1; i < items.length; i++) {
@@ -1038,6 +1054,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             text = text + " " + it.dflag
             sflags = sflags + " " + it.dflag
             if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("p") >= 0) { pq = true }
+            if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("f") >= 0 || it.dflag.indexOf("F") >= 0)) { fq = true }
             if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("n") >= 0) { nref = !xr }
             if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("a") >= 0 || it.dflag.indexOf("A") >= 0)) { arr = true }
             if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("A") >= 0) { assoc = true }
@@ -1063,7 +1080,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             var optWord = opts && f.length > 1 && (f.charAt(0) == "-" || (f.charAt(0) == "+" && !xr))
             if (optWord && !bashDeclFlagText(f)) {
                 var bo = bashDeclBadOpt(items[0].dkw, " " + f)
-                if (bo != "") { return {text: text, pre: "", operands: 0, bad: [], badOpt: bo} }
+                if (bo != "") { return {text: text, pre: "", operands: 0, bad: [], fails: 0, badOpt: bo} }
             }
             if (optWord && bashDeclFlagText(f)) {
                 text = text + " " + f
@@ -1072,9 +1089,15 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
                 if (f.charAt(0) == "-" && f.indexOf("A") >= 0) { assoc = true }
                 if (f.charAt(0) == "-" && f.indexOf("n") >= 0) { nref = !xr }
                 if (f.charAt(0) == "-" && f.indexOf("p") >= 0) { pq = true }
+                if (f.charAt(0) == "-" && (f.indexOf("f") >= 0 || f.indexOf("F") >= 0)) { fq = true }
                 continue
             }
             opts = false
+            // A -f / -F query looks every other field up as a function name (bashDeclFnWords).
+            if (fq && bashDeclOperand(f, false, quote, false) == "") {
+                if (pq) { bad.push(f + ": not found") } else if (xr) { bad.push(f + ": not a function") } else { fails = fails + 1 }
+                continue
+            }
             if (f == "" && pq && items[0].dkw == "local") { bad.push(": not found"); continue }
             if (f == "" && pq && !xr) { voids = voids + 1; continue }
             var op = bashDeclOperand(f, arr, quote, !xr)
@@ -1091,7 +1114,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             text = text + " " + op
         }
     }
-    return {text: text, pre: pre, operands: operands, bad: bad, voids: voids}
+    return {text: text, pre: pre, operands: operands, bad: bad, voids: voids, fails: fails}
 }
 // AN OPTION WORD AFTER AN OPERAND. bash marks every array literal (NAME=(...), NAME+=(...))
 // that follows an unquoted word beginning with "-" for the kind its letters name - A
@@ -1151,8 +1174,52 @@ function bashDeclOptWord(s) {
 }
 function bashDeclFlagText(f) {
     var i
-    for (i = 1; i < f.length; i++) { if ("aAirxulgnpfF".indexOf(f.charAt(i)) < 0) { return false } }
+    for (i = 1; i < f.length; i++) { if ("aAirxulgnpfFtc".indexOf(f.charAt(i)) < 0) { return false } }
     return true
+}
+// THE OPERANDS OF A -f / -F QUERY. Every word after the options of a declaration whose written
+// options make it one names a function, whatever it spells (bash 5.3: `declare -F g +r` looks
+// for a function "+r", status 1; `declare -F a-b` finds `function a-b`). items are a
+// declaration's. When each computed operand is a word that expands to itself (bashConstWord),
+// those after the options are made the names {dname} they spell, a leading "--" left to end
+// the options. Otherwise, or with a leading quoted -X/+X, answers items as they are.
+function bashDeclFnWords(items) {
+    var fq = false
+    var i
+    for (i = 1; i < items.length; i++) {
+        var df = items[i].dflag
+        if (df != undefined && df.charAt(0) == "-" && (df.indexOf("f") >= 0 || df.indexOf("F") >= 0)) { fq = true }
+    }
+    if (!fq) { return items }
+    var out = []
+    var lead = true
+    for (i = 0; i < items.length; i++) {
+        var it = items[i]
+        if (it.dkw != undefined || it.dflag != undefined) { out.push(it); continue }
+        if (it.dyn == undefined) { out.push(it); lead = false; continue }
+        var w = (it.dsrc != undefined) ? bashConstWord(it.dsrc) : null
+        if (w == null) { return items }
+        if (lead && it.dsrc == "--") { out.push(it); lead = false; continue }
+        if (lead && w.length > 1 && (w.charAt(0) == "-" || w.charAt(0) == "+")) { return items }
+        out.push({dname: w})
+        lead = false
+    }
+    return out
+}
+// The one field of a word written s that has no expansion, pattern or backslash, its quotes
+// removed; null for any other word.
+function bashConstWord(s) {
+    var out = ""
+    var q = ""
+    var i
+    for (i = 0; i < s.length; i++) {
+        var ch = s.charAt(i)
+        if (q != "" && ch == q) { q = ""; continue }
+        if (q == "" && (ch == "'" || ch == "\"")) { q = ch; continue }
+        if ((q != "'" && "$`\\".indexOf(ch) >= 0) || (q == "" && "*?[~{".indexOf(ch) >= 0)) { return null }
+        out = out + ch
+    }
+    return (q == "" && s != "") ? out : null
 }
 // The index of the "]" that closes the "[" at f[j], brackets inside counted; -1 for none.
 // Twin of rt_sub_close in lib/bash-rt.c.
