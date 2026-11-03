@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1189** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1190** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -129,10 +129,9 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1187 bash: a quoted assignment-shaped -f/-F operand, `function a=b` (interp) · P3 · SH · IN PROGRESS (SH worker, round 65) [V]
-Found while closing T-1186; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- All engines: `g(){ :; }; h(){ :; }; declare -F g 'a=b' h 2>&1; echo "st=$?"`. bash prints g, then "declare: cannot use `-f' to make functions", then st=1, and h is NOT printed. Ours prints g, h, st=1, because bashDeclFnWords turns the constant word 'a=b' into a plain function name. The unquoted `a=b` is already right.
-- Interpreter only: `function a=b { :; }` fails to parse. Check what bash does with it (definition, `declare -F`, and calling it) before implementing.
+### T-1189 bash: keyword-less function definitions whose name holds "=" (`=x() {`, `1=2() {`) · P3 · SH · OPEN [V]
+Found while closing T-1187; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. All engines.
+- `=x() { echo hi; }; '=x'; 1=2() { echo onetwo; }; '1=2'; declare -F`: bash prints hi, onetwo, `declare -f 1=2`, `declare -f =x`. Ours fails to parse at 1:3, because FuncNameTok excludes "=". The name may hold "=" only when the word does not spell an assignment: `x=y() { :; }` must stay a syntax error. This needs a negative lookahead for an assignment word.
 
 # C — C subset
 
@@ -1226,6 +1225,7 @@ T-1184 bash: `declare -f` with `+a`/`+i`/`-x`/`-r`, missing SECTION 175 header �
 T-1185 bash: option words after a -f/-F operand, `declare -f +p/+f/+F`, readonly-function line in a top-level compound — DONE - option and other non-identifier words after a -f/-F query operand are function names (not found / not a function / silent status 1), declare -f +p/+f/+F, readonly-function redefinition lines pinned per bash's reader (if/brace/for/case/while/eval), interp computed -t/-c options; oracle-probed on all legs incl. stderr and exit status; bench module IR byte-identical
 T-1186 bash: interleaving of "not found" with a run-time -f/-F -p operand (interp) — DONE - every field of a -f/-F query is an operand of the spelled text, looked up in operand order (not found interleaved as bash), a computed or written -- before a computed operand kept; interp oracle-probed (stdout+stderr order), compiler refuses computed -f/-F operands by design; bench module IR byte-identical
 T-1179 ruby: exact Integer powers capped at exponent 4096, 0**-n, binary String iterator encodings — DONE - exact Integer powers up to MRI's 32Mi-bit limit in all engines (repeated squaring; runtime bignum multiply gets Karatsuba + a two-prime NTT, an algorithm in the runtime library, no optimizer pass), 0**-n raises ZeroDivisionError, binary String each_char/each_line yield ASCII-8BIT, paren-less call as a rescue-modifier fallback is a syntax error; MRI 2.6's 32-bit exponent truncation not replicated (oracle bug); oracle-probed on all legs (Ruby + Python products through Karatsuba/NTT); full suite + full native green after rebase; paired bench python +0.03% ruby -0.00%
+T-1187 bash: a quoted assignment-shaped -f/-F operand, `function a=b` (interp) — DONE - a quoted assignment-shaped -f/-F operand behaves as the unquoted one (cannot use `-f' to make functions / not found / not a function), `function a=b` definitions parse in both grammars and are listed, printed with the function keyword, called, made readonly, refused by export; oracle-probed on all legs; bash gates green after rebase; bench module IR byte-identical
 
 # Settled — do not re-open
 
