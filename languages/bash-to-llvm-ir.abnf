@@ -175,12 +175,17 @@ FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) 
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
 FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
 FuncBraceBody <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" ;
-FuncDefHead = ( KwFunction FuncName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
+FuncDefHead = ( KwFunction FuncKwName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
 FuncName    = FuncNameTok :whitespace(Whitespace) ;
 // A bash function name is a WORD, not an identifier: `show-len() {...}`, `ble/foo() {...}`
 // and `py-repr() {...}` are all real definitions in the wild.
 FuncNameTok <~~ push({fname: up.in}) ~~>
             = !@+" \t\n\r;&|<>(){}$'\"\\`=" ;
+// After the keyword the name may also hold "=": NAME=VALUE() is an assignment and then a
+// syntax error, but `function a=b { ...; }` defines a=b (bash 5.3).
+FuncKwName  = FuncKwNameTok :whitespace(Whitespace) ;
+FuncKwNameTok <~~ push({fname: up.in}) ~~>
+            = !@+" \t\n\r;&|<>(){}$'\"\\`" ;
 
 Name        = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
 
@@ -4576,6 +4581,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var asgs = []
         // A NAME[SUB] operand as written ({darr}), else null: it declares an array.
         var darrs = []
+        // A -f / -F operand spelled as an assignment in quotes ({dasg}, bashDeclFnWords).
+        var fnAsgs = []
         // The operands in order: {j} a written name or assignment (names[j] / asgs[j]), or
         // {dyn} the words of a computed one (emitDeclDyn).
         var order = []
@@ -4604,6 +4611,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dyn != undefined) { order.push({dyn: it.dyn}); anyDyn = true; continue }
             order.push({j: names.length})
             lates.push((it.dlate != undefined) ? it.dlate : "")
+            fnAsgs.push(it.dasg != undefined)
             if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null) }
             else { names.push(it.a.name); asgs.push(it.a); darrs.push(null) }
         }
@@ -5980,7 +5988,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var fnVals = []
                 for (j = 0; j < names.length; j++) {
                     fnNames.push((darrs[j] != null) ? darrs[j] : names[j])
-                    fnVals.push((asgsWritten[j] != null && asgsWritten[j].lit == null) ? pre.vals[j] : null)
+                    fnVals.push((asgsWritten[j] != null && asgsWritten[j].lit == null) ? pre.vals[j] : (fnAsgs[j] ? gepStr(b, names[j]) : null))
                 }
                 return emitDeclFuncs(b, kw, fnQuery, fnNames, fnVals, flags, plus)
             }
@@ -8597,58 +8605,100 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // declare -f / -F, export -f and readonly -f: see declFuncs. With no name, the functions
     // printed are the ones defined when it runs, so a definition the printer does not model
     // stops the shell then (status 2) instead of refusing the program. vals[k] is the i8*
-    // word a NAME=VALUE operand expanded to, else null. Twin of declFuncs in
-    // bash-interpreter.abnf.
+    // word a NAME=VALUE operand expanded to, else null; it is compared with every defined
+    // name that holds "=". Twin of declFuncs in bash-interpreter.abnf.
     function emitDeclFuncs(b, kw, q, names, vals, flags, plus) {
         var p = flags.indexOf("p") >= 0
         var ops = bashFnAttrOps(kw, flags, plus)
         var st = zero
         var k
+        var i1t = llvm.constant.NewInt(llvm.types.I1, 1)
         var bad = (!p && names.length > 0) ? bashDeclFnBadOpt(kw, flags) : ""
         if (bad != "") { emitDiag(b, gepStr(b, bad)); storeStatusI(b, 1); return b }
         var noFn = kw + ": cannot use `-f' to make functions\n"
         var xr = kw == "export" || kw == "readonly"
+        var eqFns = []
+        for (k = 0; k < declaredFuncList.length; k++) { if (declaredFuncList[k].indexOf("=") >= 0) { eqFns.push(declaredFuncList[k]) } }
+        // The block a refused NAME=VALUE operand ends the builtin in, made when one may be.
+        var endB = null
+        var stopUnless = function(b, found) {
+            var stopB = curF.NewBlock(""), goB = curF.NewBlock("")
+            b.NewCondBr(found, goB, stopB)
+            emitDiag(stopB, gepStr(stopB, noFn))
+            storeStatusI(stopB, 1)
+            if (endB == null) { endB = curF.NewBlock("") }
+            stopB.NewBr(endB)
+            return goB
+        }
+        // Operand k, a NAME=VALUE word, against each function fn that holds "=": calls each(b, fn,
+        // hit) and answers {b, found}, the i1s that it names fn and any of them.
+        var eqHits = function(b, k, each) {
+            var found = llvm.constant.NewInt(llvm.types.I1, 0)
+            var j
+            for (j = 0; j < eqFns.length; j++) {
+                var hit = b.NewAnd(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [vals[k], gepStr(b, eqFns[j])]), zero), fnIsDefined(b, eqFns[j]))
+                b = each(b, eqFns[j], hit)
+                found = b.NewOr(found, hit)
+            }
+            return {b: b, found: found}
+        }
+        // The attributes set on function fn, where guard (an i1, or null for a named operand)
+        // holds. Answers {b, st}, st an i32: 1 when refused.
+        var setFn = function(b, fn, guard) {
+            var sv = b.NewLoad(i32, fnSlot(fn))
+            var isDef = fnIsDefined(b, fn)
+            if (guard != null) { isDef = b.NewAnd(isDef, guard) }
+            var ok = isDef
+            if (xr && guard == null) { b = emitDiagIf(b, b.NewXor(isDef, i1t), gepStr(b, kw + ": " + fn + ": not a function\n")) }
+            if (kw == "export" && ops.on != 0 && fn.indexOf("=") >= 0) {
+                b = emitDiagIf(b, isDef, gepStr(b, "export: " + fn + ": cannot export\n"))
+                ok = llvm.constant.NewInt(llvm.types.I1, 0)
+            } else {
+                if ((ops.off & 1) != 0) {
+                    var roHit = b.NewAnd(isDef, b.NewICmp(llvm.enum.IPredNE, b.NewAnd(sv, llvm.constant.NewInt(i32, fnAtBit)), zero))
+                    b = emitDiagIf(b, roHit, gepStr(b, kw + ": " + fn + ": readonly function\n"))
+                    ok = b.NewAnd(ok, b.NewXor(roHit, i1t))
+                }
+                var nv = b.NewAnd(b.NewOr(sv, llvm.constant.NewInt(i32, ops.on * fnAtBit)), llvm.constant.NewInt(i32, -1 - ops.off * fnAtBit))
+                fnStore(b, b.NewSelect(ok, nv, sv), fn)
+            }
+            var refused = b.NewXor(ok, i1t)
+            if (guard != null) { refused = b.NewAnd(isDef, refused) }
+            return {b: b, st: b.NewZExt(refused, i32)}
+        }
         if (!p && names.length > 0 && ops.set) {
             for (k = 0; k < names.length; k++) {
+                if (vals[k] != null && eqFns.length > 0) {
+                    var sr = eqHits(b, k, function(b, fn, hit) { var r = setFn(b, fn, hit); st = r.b.NewOr(st, r.st); return r.b })
+                    b = sr.b
+                    if (!xr) { b = stopUnless(b, sr.found); continue }
+                    var nfx = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, kw + ": "), vals[k]]), gepStr(b, ": not a function\n")])
+                    b = emitDiagIf(b, b.NewXor(sr.found, i1t), nfx)
+                    st = b.NewOr(st, b.NewZExt(b.NewXor(sr.found, i1t), i32))
+                    continue
+                }
                 if (vals[k] != null && !xr) { emitDiag(b, gepStr(b, noFn)); storeStatusI(b, 1); return b }
                 if (vals[k] != null || funcFor(names[k]) == null) {
                     if (xr) { emitDiag(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, kw + ": "), (vals[k] != null) ? vals[k] : gepStr(b, names[k])]), gepStr(b, ": not a function\n")])) }
                     st = one
                     continue
                 }
-                var sv = b.NewLoad(i32, fnSlot(names[k]))
-                var isDef = fnIsDefined(b, names[k])
-                var ok = isDef
-                if (xr) { b = emitDiagIf(b, b.NewXor(isDef, llvm.constant.NewInt(llvm.types.I1, 1)), gepStr(b, kw + ": " + names[k] + ": not a function\n")) }
-                if ((ops.off & 1) != 0) {
-                    var roHit = b.NewAnd(isDef, b.NewICmp(llvm.enum.IPredNE, b.NewAnd(sv, llvm.constant.NewInt(i32, fnAtBit)), zero))
-                    b = emitDiagIf(b, roHit, gepStr(b, kw + ": " + names[k] + ": readonly function\n"))
-                    ok = b.NewAnd(ok, b.NewXor(roHit, llvm.constant.NewInt(llvm.types.I1, 1)))
-                }
-                var nv = b.NewAnd(b.NewOr(sv, llvm.constant.NewInt(i32, ops.on * fnAtBit)), llvm.constant.NewInt(i32, -1 - ops.off * fnAtBit))
-                fnStore(b, b.NewSelect(ok, nv, sv), names[k])
-                st = b.NewOr(st, b.NewXor(b.NewZExt(ok, i32), one))
+                var r = setFn(b, names[k], null)
+                b = r.b
+                st = b.NewOr(st, r.st)
             }
             storeStatus(b, st)
+            if (endB != null) { b.NewBr(endB); b = endB }
             return b
         }
         var list = (names.length == 0) ? bashSortNames(declaredFuncList) : names
         var full = p || names.length == 0
-        for (k = 0; k < list.length; k++) {
-            if (names.length > 0 && vals[k] != null) {
-                if (!p) { emitDiag(b, gepStr(b, noFn)); storeStatusI(b, 1); return b }
-                emitDiag(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, kw + ": "), vals[k]]), gepStr(b, ": not found\n")]))
-                st = one
-                continue
-            }
-            var fn = list[k]
+        // Function fn printed, where guard (an i1, or null for a named operand or none) holds.
+        // Answers {b, st}, st an i32: 1 when a named one is no function.
+        var showFn = function(b, fn, guard) {
             var nf = gepStr(b, kw + ": " + fn + ": not found\n")
-            if (funcFor(fn) == null) {
-                if (p) { emitDiag(b, nf) }
-                st = one
-                continue
-            }
             var def = fnIsDefined(b, fn)
+            if (guard != null) { def = b.NewAnd(def, guard) }
             var atBits = b.NewAnd(b.NewLoad(i32, fnSlot(fn)), llvm.constant.NewInt(i32, -fnAtBit))
             var shown = def
             if (ops.pick != 0 && names.length == 0) { shown = b.NewAnd(def, b.NewICmp(llvm.enum.IPredNE, b.NewAnd(atBits, llvm.constant.NewInt(i32, ops.pick * fnAtBit)), zero)) }
@@ -8672,10 +8722,38 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 line = gepStr(b, fn + "\n")
             }
             b.NewCall(rtPrints, b.NewSelect(shown, line, emptyPtr(b)))
-            if (p && names.length > 0) { b = emitDiagIf(b, b.NewXor(def, llvm.constant.NewInt(llvm.types.I1, 1)), nf) }
-            if (names.length > 0) { st = b.NewOr(st, b.NewXor(b.NewZExt(def, i32), one)) }
+            if (guard != null || names.length == 0) { return {b: b, st: zero} }
+            if (p) { b = emitDiagIf(b, b.NewXor(def, i1t), nf) }
+            return {b: b, st: b.NewXor(b.NewZExt(def, i32), one)}
+        }
+        for (k = 0; k < list.length; k++) {
+            if (names.length > 0 && vals[k] != null && eqFns.length > 0) {
+                var pr = eqHits(b, k, function(b, fn, hit) { return showFn(b, fn, hit).b })
+                b = pr.b
+                if (!p) { b = stopUnless(b, pr.found); continue }
+                var nfv = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, kw + ": "), vals[k]]), gepStr(b, ": not found\n")])
+                b = emitDiagIf(b, b.NewXor(pr.found, i1t), nfv)
+                st = b.NewOr(st, b.NewZExt(b.NewXor(pr.found, i1t), i32))
+                continue
+            }
+            if (names.length > 0 && vals[k] != null) {
+                if (!p) { emitDiag(b, gepStr(b, noFn)); storeStatusI(b, 1); return b }
+                emitDiag(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, kw + ": "), vals[k]]), gepStr(b, ": not found\n")]))
+                st = one
+                continue
+            }
+            var fn = list[k]
+            if (funcFor(fn) == null) {
+                if (p) { emitDiag(b, gepStr(b, kw + ": " + fn + ": not found\n")) }
+                st = one
+                continue
+            }
+            var sh = showFn(b, fn, null)
+            b = sh.b
+            st = b.NewOr(st, sh.st)
         }
         storeStatus(b, st)
+        if (endB != null) { b.NewBr(endB); b = endB }
         return b
     }
     // An i32: 1 when nameV names a function whose definition is in force. lit: the name when

@@ -184,13 +184,18 @@ FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) 
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
 FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
 FuncBraceBody <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" ;
-FuncDefHead = ( KwFunction FuncName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
+FuncDefHead = ( KwFunction FuncKwName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
 FuncName    = FuncNameTok :whitespace(Whitespace) ;
 // A bash function name is a WORD, not an identifier. The corpus is full of real ones:
 //     show-len() { ... }   py-repr() { ... }   ble/foo() { ... }   test-hyphen() { ... }
 // so anything that is not a blank, a separator, a metacharacter or a quote is allowed.
 FuncNameTok <~~ push({fname: up.in}) ~~>
             = !@+" \t\n\r;&|<>(){}$'\"\\`=" ;
+// After the keyword the name may also hold "=": NAME=VALUE() is an assignment and then a
+// syntax error, but `function a=b { ...; }` defines a=b (bash 5.3).
+FuncKwName  = FuncKwNameTok :whitespace(Whitespace) ;
+FuncKwNameTok <~~ push({fname: up.in}) ~~>
+            = !@+" \t\n\r;&|<>(){}$'\"\\`" ;
 
 Name        = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
 
@@ -3416,6 +3421,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var asgs = []
         // A NAME[SUB] operand as written ({darr}), else null: it declares an array.
         var darrs = []
+        // A -f / -F operand spelled as an assignment in quotes ({dasg}, bashDeclFnWords).
+        var fnAsgs = []
         var i
         var opts = ""
         var anyDyn = false
@@ -3444,6 +3451,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (it.dflag != undefined && it.dflag.charAt(0) == "+") { plus = plus + it.dflag; continue }
             if (it.dflag != undefined) { flags = flags + it.dflag; continue }
+            fnAsgs.push(it.dasg != undefined)
             if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null); lates.push("") }
             else { names.push(it.a.name); asgs.push(it.a); darrs.push(null); lates.push((it.dlate != undefined) ? it.dlate : "") }
         }
@@ -4103,7 +4111,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var fnVals = []
                 for (k = 0; k < names.length; k++) {
                     fnNames.push((darrs[k] != null) ? darrs[k] : names[k])
-                    fnVals.push((asgsWritten[k] != null && asgsWritten[k].lit == null) ? vals[k] : null)
+                    fnVals.push((asgsWritten[k] != null && asgsWritten[k].lit == null) ? vals[k] : (fnAsgs[k] ? names[k] : null))
                 }
                 return declFuncs(kw, fnQuery, fnNames, fnVals, flags, plus)
             }
@@ -9381,13 +9389,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // with no name an attribute picks the functions holding any of them, and with -p a name
     // that is none is "not found". vals[k] is the word a NAME=VALUE operand expanded to, else
     // null: -p looks it up as a name, export and readonly report it as no function, and
-    // declare ends with "cannot use `-f' to make functions", status 1 (bash 5.3). Twin of
-    // emitDeclFuncs in bash-to-llvm-ir.abnf.
+    // declare ends with "cannot use `-f' to make functions", status 1 (bash 5.3) - unless the
+    // whole word names a function, which it then is (after `function a=b { :; }`, `declare -F
+    // a=b` prints a=b). export refuses a function whose name holds "=": "NAME: cannot
+    // export". Twin of emitDeclFuncs in bash-to-llvm-ir.abnf.
     function declFuncs(kw, q, names, vals, flags, plus) {
         var p = flags.indexOf("p") >= 0
         var ops = bashFnAttrOps(kw, flags, plus)
         var st = 0
         var k
+        names = names.slice(0)
+        vals = vals.slice(0)
+        for (k = 0; k < names.length; k++) {
+            if (vals[k] != null && isFunc(vals[k])) { names[k] = vals[k]; vals[k] = null }
+        }
         var bad = (!p && names.length > 0) ? bashDeclFnBadOpt(kw, flags) : ""
         if (bad != "") { diagErr(bad); setStatus(1); return 1 }
         var noFn = kw + ": cannot use `-f' to make functions\n"
@@ -9397,6 +9412,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (vals[k] != null && !xr) { diagErr(noFn); setStatus(1); return 1 }
                 if (vals[k] != null || !isFunc(names[k])) {
                     if (xr) { diagErr(kw + ": " + ((vals[k] != null) ? vals[k] : names[k]) + ": not a function\n") }
+                    st = 1
+                    continue
+                }
+                if (kw == "export" && ops.on != 0 && names[k].indexOf("=") >= 0) {
+                    diagErr("export: " + names[k] + ": cannot export\n")
                     st = 1
                     continue
                 }

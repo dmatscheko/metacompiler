@@ -179,11 +179,32 @@ s179() {
   e=$( { v=-x; declare -- "$v" s179q=1; echo "s=$?"; declare -p s179q; v=-p; declare -- "$v"; echo "s=$?"; } 2>&1 )
   check fp2 "$(s179s "$e")" "declare: \`-x': not a valid identifier;s=1;declare -- s179q=\"1\";declare: \`-p': not a valid identifier;s=1;"
 }
+# ===== SECTION 180: assignment-shaped function names and -f / -F operands =====
+# A -f / -F operand spelled NAME=VALUE, NAME+=VALUE or NAME[SUB]=VALUE, quoted or not, is
+# looked up as a function first; only one that names none is "cannot use `-f' to make
+# functions", ending the builtin. After `function`, a name may hold "=" (it then prints with
+# the keyword), is called by the quoted word, and is refused by export ("cannot export").
+# Every expected value is bash 5.3's.
+s180() {
+  local e
+  s180s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$( { s180g() { :; }; s180h() { :; }
+       declare -F s180g 's180a=b' s180h; echo "s=$?"; declare -F s180g "s180a+=b" s180h; echo "s=$?"
+       declare -F s180g s180a\[1]=b s180h; echo "s=$?"; declare -F s180g '=b' '1=b' s180h; echo "s=$?"
+       declare -Fp s180g 's180a=b'; echo "s=$?"; export -f 's180a=b'; echo "s=$?"; } 2>&1 )
+  check fq1 "$(s180s "$e")" "s180g;declare: cannot use \`-f' to make functions;s=1;s180g;declare: cannot use \`-f' to make functions;s=1;s180g;declare: cannot use \`-f' to make functions;s=1;s180g;s180h;s=1;declare -f s180g;declare: s180a=b: not found;s=1;export: s180a=b: not a function;s=1;"
+  e=$( { function s180a=b { echo "in $#"; }; function s180c+=d () { echo cd; }; function =s180x { :; }
+       s180a=b; echo "s=$? v=$s180a"; 's180a=b' x y; "s180c+=d"; declare -F 's180a=b' s180a=b 's180c+=d' =s180x; echo "s=$?"
+       declare -f 's180c+=d' =s180x; declare -fr s180a=b; echo "s=$?"; declare -Fp 's180a=b'; export -f s180a=b =s180x; echo "s=$?"
+       unset -f 's180c+=d'; declare -F s180c+=d; echo "s=$?"; } 2>&1 )
+  check fq2 "$(s180s "$e")" "s=0 v=b;in 2;cd;s180a=b;s180a=b;s180c+=d;=s180x;s=0;function s180c+=d () ;{ ;    echo cd;};=s180x () ;{ ;    :;};s=0;declare -fr s180a=b;export: s180a=b: cannot export;export: =s180x: cannot export;s=1;declare: cannot use \`-f' to make functions;s=1;"
+}
 # ===== END SECTIONS =====
 
 s176  # SECTION-CALL 176
 s177  # SECTION-CALL 177
 s178  # SECTION-CALL 178
 s179  # SECTION-CALL 179
+s180  # SECTION-CALL 180
 echo "full: $checks checks, $fails failures"
 exit $fails

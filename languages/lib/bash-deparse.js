@@ -665,7 +665,9 @@ var dpPrintErr = ""     // what the printer met and does not model, "" when noth
 
 function dpPrintFunc(fd, ind, top) {
     var inner = ind + "    "
-    var head = top ? fd.name + " () \n" : "function " + fd.name + " () \n" + ind
+    // The keyword stays where the name would read back as an assignment (bash 5.3 prints
+    // `function a=b () `), and on every nested definition.
+    var head = (top && !bashAsgWord(fd.name)) ? fd.name + " () \n" : "function " + fd.name + " () \n" + ind
     var b = fd.body
     var text = ""
     if (b.k == "group") { text = head + "{ \n" + inner + dpPrintList(b.body, inner, false) + "\n" + ind + "}" + dpPrintRedirs(b.rd) }
@@ -1188,7 +1190,10 @@ function bashDeclFlagText(f) {
 // for a function "+r", status 1; `declare -F a-b` finds `function a-b`). items are a
 // declaration's. When each computed operand is a word that expands to itself (bashConstWord),
 // those after the options are made the names {dname} they spell, a leading "--" left to end
-// the options. Otherwise, or with a leading quoted -X/+X, answers items as they are.
+// the options; one that spells an assignment (NAME=, NAME+=, NAME[SUB]=) is marked {dasg},
+// as the same word unquoted would be one (bash 5.3: `declare -F g 'a=b' h` prints g, then
+// "cannot use `-f' to make functions"). Otherwise, or with a leading quoted -X/+X, answers
+// items as they are.
 function bashDeclFnWords(items) {
     var fq = false
     var i
@@ -1207,7 +1212,8 @@ function bashDeclFnWords(items) {
         if (w == null) { return items }
         if (lead && it.dsrc == "--") { out.push(it); lead = false; continue }
         if (lead && w.length > 1 && (w.charAt(0) == "-" || w.charAt(0) == "+")) { return items }
-        out.push({dname: w})
+        if (bashAsgWord(w)) { out.push({dname: w, dasg: true}) }
+        else { out.push({dname: w}) }
         lead = false
     }
     return out
@@ -1232,6 +1238,8 @@ function bashConstWord(s) {
     }
     return (q == "" && s != "") ? out : null
 }
+// Does w spell an assignment, NAME[SUB]=VALUE or NAME[SUB]+=VALUE with the subscript optional?
+function bashAsgWord(w) { return w.indexOf("=") > 0 && bashDeclOperand(w, false, bashSq, false) != "" }
 // The index of the "]" that closes the "[" at f[j], brackets inside counted; -1 for none.
 // Twin of rt_sub_close in lib/bash-rt.c.
 function bashSubClose(f, j) {
