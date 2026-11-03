@@ -130,7 +130,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1193 bash: `set -x` tracing, the `time` keyword, PIPESTATUS after a simple command, newlines before `in` · P3 · SH · OPEN [V]
+### T-1193 bash: `set -x` tracing, the `time` keyword, PIPESTATUS after a simple command, newlines before `in` · P3 · SH · IN PROGRESS (SH worker, round 69) [V]
 Found while closing T-1191 (worker-reported; verify on the oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3 first). All engines unless noted.
 - `set -x` traces nothing. bash writes `+ CMD` lines to stderr, built from the expanded words with bash's quoting (`+ echo 'a b'`). They are prefixed by PS4 (default "+ "), whose first character repeats for nesting depth. Assignments, for/case/[[ ]]/(( )) headers and `set +x` itself are traced too. Implement it in both engines; check the quoting of each word class on the oracle.
 - `time` is "command not found" (127). It is a reserved word that times the whole pipeline and prints `real/user/sys` on stderr (TIMEFORMAT). The timings are not deterministic, so assert the format and status only. `time -p` and a bare `time` count too.
