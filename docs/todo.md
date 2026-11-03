@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1184** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1185** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,11 +128,10 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1183 bash: `declare -f NAME=(list)` and `declare -F NAME=VALUE` · P3 · SH · IN PROGRESS (SH worker, round 61) [V]
-Found while closing T-1182; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. All engines.
-- `declare -f q=(1 2); echo "s=$?"; declare -p q`: bash assigns the literal (`declare -a q=([0]="1" [1]="2")`, and s=1). Ours assigns nothing, so `declare -p q` says "q: not found".
-- `declare -F r=1` (and `-f r=1`): bash prints "declare: cannot use `-f' to make functions" with status 1. Ours prints no message.
-- Check the mixed forms too: `declare -f g q=(1)` with g a function, and `local -f`, `typeset -F`.
+### T-1184 bash: `declare -f` with `+a`/`+i`/`-x`/`-r`, missing SECTION 175 header · P3 · SH · OPEN [V]
+Found while closing T-1183; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- All engines: `declare -f +a g` and `declare -f +i g` are refused at compile time ("is not supported"); bash accepts them with status 0. `declare -fx g` (export a function) and `declare -fr g` (readonly function: a later redefinition is refused with "g: readonly function") are not modelled. Verify each against the oracle before implementing, including what `declare -F`, `declare -pf` and a redefinition print afterwards.
+- Test-file defect: SECTION 175 in tests/bash-test-full.8.sh has no `# ===== SECTION 175: ... =====` header line, so the SECTION-deletion probe treats it as part of 174. Add the header.
 
 # C — C subset
 
@@ -1221,6 +1220,7 @@ T-1177 bash: `unset -n` on a non-nameref, unset of a caller's prefix binding (in
 T-1180 bash: `$!` before any background job, the readonly leak from a void indexed nameref (compiler), repeated `:=` refusals, the variable named "" — DONE - $! unset before any job, a refused := stops the line, the compiler's readonly leak from a void indexed nameref, the variable named "" behind a void assoc nameref modelled; oracle-probed on all legs incl. stderr and exit status
 T-1181 bash: computed `declare -p` operand (compiler), `${!#x}`, `declare -n h; declare -A h` — DONE - computed declare -p/local -p operands compile and are looked up literally, ${!#x} and the other bad indirections are bad substitutions, ${!@} names its target as bash does, a local declare -n then -A keeps -n with the removing-nameref warning on a later literal; oracle-probed on all legs incl. stderr and exit status
 T-1182 bash: written `declare -p NAME=VALUE` operands — DONE - written NAME=VALUE / NAME[SUB]=VALUE / NAME+=VALUE operands of declare/typeset/local -p are looked up by their expanded text (not found, status 1), array literals under -p are assigned then printed, option words and -- after operands handled; oracle-probed on all legs incl. stderr and exit status
+T-1183 bash: `declare -f NAME=(list)` and `declare -F NAME=VALUE` — DONE - declare/local/typeset -f/-F NAME=(list) assigns the literal (local in a function), NAME=VALUE gives cannot use `-f' to make functions and stops the builtin, -fp looks the word up as written, -f/-F with -a/-A/-i/-n give the invalid-option report; new ratchet part tests/bash-test-full.9.sh (part 8 at the step brake); oracle-probed on all legs incl. stderr and exit status; master paired bench +0.01%
 
 # Settled — do not re-open
 
