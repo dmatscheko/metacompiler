@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1179 ruby: exact Integer powers capped at exponent 4096, 0**-n, binary String iterator encodings · P3 · RB · OPEN [V]
+### T-1179 ruby: exact Integer powers capped at exponent 4096, 0**-n, binary String iterator encodings · P3 · RB · IN PROGRESS (RB worker, round 70) [V]
 Found while closing T-1178; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines.
 - Exact Integer powers stop at an exponent of 4096: `3**5000` gives `Infinity` typed as Integer (`.to_s.size` = 8). MRI gives the exact 2386-digit Integer, and `256**479000` / `3**4068000` are exact too. Negative exponents beyond the cap give Float 0.0 where MRI gives an exact Rational. The cap exists because bigPow is schoolbook in MetaJS. Make exact powers work up to MRI's own limit (the 32Mi-bit point where it warns and returns Float) while keeping the cost acceptable. Use a better multiplication algorithm in the runtime, NOT an optimizer pass.
 - `0 ** -5000` gives `Infinity`; MRI raises ZeroDivisionError "divided by 0". Check every negative exponent.
