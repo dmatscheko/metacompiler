@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1184 bash: `declare -f` with `+a`/`+i`/`-x`/`-r`, missing SECTION 175 header · P3 · SH · OPEN [V]
+### T-1184 bash: `declare -f` with `+a`/`+i`/`-x`/`-r`, missing SECTION 175 header · P3 · SH · IN PROGRESS (SH worker, round 62) [V]
 Found while closing T-1183; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - All engines: `declare -f +a g` and `declare -f +i g` are refused at compile time ("is not supported"); bash accepts them with status 0. `declare -fx g` (export a function) and `declare -fr g` (readonly function: a later redefinition is refused with "g: readonly function") are not modelled. Verify each against the oracle before implementing, including what `declare -F`, `declare -pf` and a redefinition print afterwards.
 - Test-file defect: SECTION 175 in tests/bash-test-full.8.sh has no `# ===== SECTION 175: ... =====` header line, so the SECTION-deletion probe treats it as part of 174. Add the header.
