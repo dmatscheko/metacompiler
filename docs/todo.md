@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1188** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1189** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,14 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1179 ruby: exact Integer powers capped at exponent 4096, 0**-n, binary String iterator encodings · P3 · RB · IN PROGRESS (RB worker, round 70) [V]
-Found while closing T-1178; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines.
-- Exact Integer powers stop at an exponent of 4096: `3**5000` gives `Infinity` typed as Integer (`.to_s.size` = 8). MRI gives the exact 2386-digit Integer, and `256**479000` / `3**4068000` are exact too. Negative exponents beyond the cap give Float 0.0 where MRI gives an exact Rational. The cap exists because bigPow is schoolbook in MetaJS. Make exact powers work up to MRI's own limit (the 32Mi-bit point where it warns and returns Float) while keeping the cost acceptable. Use a better multiplication algorithm in the runtime, NOT an optimizer pass.
-- `0 ** -5000` gives `Infinity`; MRI raises ZeroDivisionError "divided by 0". Check every negative exponent.
-- Binary (ASCII-8BIT) String each_char / each_line / each_codepoint / chars yield UTF-8 Strings; MRI yields ASCII-8BIT (`"h\xC3\xA9".b.each_char{|c| p c.encoding}`).
-- Do not replicate MRI 2.6's 32-bit truncation of a huge negative exponent on a Bignum base (`(2**70) ** -(2**62)` → `(1/1)`); record it as an oracle bug.
-- Low: the parser accepts `x = 1 rescue p $!`, which MRI rejects as a syntax error ("unexpected tGVAR"). Accepting an invalid program is lower priority than the items above.
+### T-1188 ruby: two expressions on one line, rescue-modifier laxness (yield/return, compiler `rescue y = 3`), lines(chomp:), each_codepoint on invalid UTF-8 · P3 · RB · OPEN [V]
+Found while closing T-1179 (worker-reported); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. Verify each on the oracle first.
+- Both grammars accept two expressions on one line with no separator: `x = 1 2` runs, where MRI gives a syntax error. This is the root of the rescue-modifier laxness. Fix the statement separator rule, not more guards. Then `x = … rescue yield 1` and `x = … rescue return 1` must be syntax errors too: the interpreter currently runs them, and the compiler fails with a parse error that is not MRI's.
+- Compiler only: `x = raise("z") rescue y = 3; p x, y` gives "undefined local variable or method `y'"; MRI and the interpreter print 3, 3.
+- All engines: `lines(chomp: true)` / `each_line(chomp: true)` ignore the keyword. `"a\nb\n".lines(chomp: true)` should give `["a", "b"]`; ours gives `["a\nb\n"]`.
+- All engines: `"a\xFFb".force_encoding("UTF-8").each_codepoint{}` yields the bytes; MRI raises ArgumentError "invalid byte sequence in UTF-8".
+- By design, record only: MRI 2.6's `(-3)**-1` gives an unnormalized `(1/-3)`; ours gives `(-1/3)`, as later Rubies do.
+- Performance note, no action unless cheap: native 3**4068000 takes about 95 s (MRI 0.2 s), because of the soft-float, boxed C floor. Record it as a known cost.
 
 # JS — JavaScript and TypeScript
 
@@ -1224,6 +1225,7 @@ T-1183 bash: `declare -f NAME=(list)` and `declare -F NAME=VALUE` — DONE - dec
 T-1184 bash: `declare -f` with `+a`/`+i`/`-x`/`-r`, missing SECTION 175 header — DONE - function attributes (declare -f +a/+i/-x/-r/-t/-c/-l/-u, export -f, readonly -f, -F listing by attribute, readonly-function redefinition and unset refusals with bash's line rule), SECTION 175 header added; oracle-probed on all legs incl. stderr and exit status; paired bench +0.06% no difference
 T-1185 bash: option words after a -f/-F operand, `declare -f +p/+f/+F`, readonly-function line in a top-level compound — DONE - option and other non-identifier words after a -f/-F query operand are function names (not found / not a function / silent status 1), declare -f +p/+f/+F, readonly-function redefinition lines pinned per bash's reader (if/brace/for/case/while/eval), interp computed -t/-c options; oracle-probed on all legs incl. stderr and exit status; bench module IR byte-identical
 T-1186 bash: interleaving of "not found" with a run-time -f/-F -p operand (interp) — DONE - every field of a -f/-F query is an operand of the spelled text, looked up in operand order (not found interleaved as bash), a computed or written -- before a computed operand kept; interp oracle-probed (stdout+stderr order), compiler refuses computed -f/-F operands by design; bench module IR byte-identical
+T-1179 ruby: exact Integer powers capped at exponent 4096, 0**-n, binary String iterator encodings — DONE - exact Integer powers up to MRI's 32Mi-bit limit in all engines (repeated squaring; runtime bignum multiply gets Karatsuba + a two-prime NTT, an algorithm in the runtime library, no optimizer pass), 0**-n raises ZeroDivisionError, binary String each_char/each_line yield ASCII-8BIT, paren-less call as a rescue-modifier fallback is a syntax error; MRI 2.6's 32-bit exponent truncation not replicated (oracle bug); oracle-probed on all legs (Ruby + Python products through Karatsuba/NTT); full suite + full native green after rebase; paired bench python +0.03% ruby -0.00%
 
 # Settled — do not re-open
 
