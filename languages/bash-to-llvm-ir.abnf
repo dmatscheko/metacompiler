@@ -60,11 +60,14 @@ a command name computed at run time can only reach echo, the trivial builtins an
 // A top-level separator run that holds a newline also ENDS A LINE ({nl}): an expansion
 // error abandons the rest of its line, as bash abandons the command line it read.
 Program     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, up.pos); runProgram(takeAll()) ~~>
-            = BsSplice OptSep [ Statement { TopSep Statement } TopOptSep ] ;
+            = BsSplice OptSep [ Statement { TopSep Statement } TopOptSep ] [ SynErr ] ;
 TopSep      = TopAmpSep | TopSepRun ;
 TopOptSep   = [ TopSep ] ;
-TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in, up.start) ~~> = AmpTok { NotCaseTerm SepTok } ;
-TopSepRun   <~~ pushLineEnd(up.in, up.start) ~~> = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
+TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in, up.start, up.pos) ~~> = AmpTok { NotCaseTerm SepTok } ;
+TopSepRun   <~~ pushLineEnd(up.in, up.start, up.pos) ~~> = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
+// What the statements leave unparsed is bash's syntax error: the lines before it run, then
+// it is reported (synErrLine).
+SynErr      <~~ push({synerr: up.start}) ~~> = AnyCh :whitespace() { AnyCh | "\n" } ;
 
 // Statement separators: one or more ; or newlines. Leading whitespace (incl. #comments) is
 // skipped before each separator token, so blank and comment-only lines vanish here.
@@ -93,7 +96,7 @@ CompoundList <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
 Spliced     <~~ push(up.in) ~~> = BsSplice :whitespace() { AnyCh | "\n" } ;
 // An eval or trap string runs line by line like a script (see makeLines).
 Snippet     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, up.pos); push(makeLines(splitLines(takeAll()))) ~~>
-            = OptSep [ Statement { TopSep Statement } TopOptSep ] ;
+            = OptSep [ Statement { TopSep Statement } TopOptSep ] [ SynErr ] ;
 
 
 // --- compound statements
@@ -387,7 +390,7 @@ HereLit     <~~ push(makeConst(up.in)) ~~> = !@+"$\\`" ;
 // Redirections. `<` declines a second "<" so a here-document HdScan refused cannot fall
 // through and be mis-read as two input redirections.
 Redir       <~~ push(mkRedir(takeAll())) ~~>
-            = [ IoNum ] RedirOp [ Word ] ;
+            = [ IoNum ] RedirOp Word ;
 // Twin of IoNum in bash-interpreter.abnf; see there.
 IoNum       <~~ push({iofd: up.in}) ~~> = "0"..."9" :whitespace() { "0"..."9" } RedirNext ;
 RedirOp     <~~ push({redir: up.in}) ~~> = RedirTok ;
@@ -917,8 +920,9 @@ NotBar = :script(~~
     })()
 ~~) ;
 // Fails right after the "( )" of a keyword-less definition when its name spells an
-// assignment: NAME, an optional [SUB] (brackets nest), an optional "+", then "=". It reads
-// the name backwards from the "(", so it runs only on definitions, not on every command.
+// assignment: NAME, an optional [SUB] (brackets nest), an optional "+", then "=", or opens a
+// subscript it does not close (`a[=b() {` is bash's unclosed `]'). It reads the name
+// backwards from the "(", so it runs only on definitions, not on every command.
 // Twin of NotAsgName in bash-interpreter.abnf.
 NotAsgName = :script(~~
     (function() {
@@ -936,12 +940,15 @@ NotAsgName = :script(~~
         while ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (cc >= 48 && cc <= 57) || cc === 95) { i = i + 1; cc = c.peek(i) }
         if (cc === 91) {
             var depth = 0
+            var shut = false
             while (i <= end) {
                 if (cc === 91) { depth = depth + 1 }
-                if (cc === 93) { depth = depth - 1; if (depth === 0) { break } }
+                if (cc === 93) { depth = depth - 1; if (depth === 0) { shut = true; break } }
                 i = i + 1
                 cc = c.peek(i)
             }
+            // A subscript the name does not close is read on past it (NotReserved).
+            if (!shut) { return abnf.newToken("\x01asg-name", 0) }
             if (i >= end) { return undefined }
             i = i + 1
             cc = c.peek(i)
@@ -1226,6 +1233,11 @@ NotReserved = :script(~~
         while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
         // "}" standing alone is the reserved word that closes a brace group, never a command
         // (a bare "{" or "}" IS an ordinary word character elsewhere, for {single} and a}b).
+        // So is a "{" before a blank: one BraceGroup could not close is a syntax error.
+        if (cc == 123) {
+            var ob = c.peek(i + 1)
+            if (ob == -1 || ob == 32 || ob == 9 || ob == 10 || ob == 13) { return abnf.newToken("\x01open-brace", 0) }
+        }
         if (cc == 125) {
             var nb = c.peek(i + 1)
             if (nb == -1 || nb == 32 || nb == 9 || nb == 10 || nb == 13 || nb == 59 || nb == 38 || nb == 124 || nb == 41) {
@@ -1303,6 +1315,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // $LINENO inside a $( ) (see atLine).
     include("lib/bash-lines.js")
     include("lib/bash-deparse.js")
+    include("lib/bash-synerr.js")
 
     // ===================================================================================
     //  Stack / string helpers (self contained, no shared core).
@@ -7749,15 +7762,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return true
     }
-    // Its lines count from line0, or from the current command's line when line0 is 0. Twin of
-    // compileSnippet in bash-interpreter.abnf.
-    function compileSnippet(src, line0, lines) {
+    // Its lines count from line0, or from the current command's line when line0 is 0; who
+    // names an eval or trap string in a syntax error. Twin of compileSnippet in
+    // bash-interpreter.abnf.
+    function compileSnippet(src, line0, who) {
         if (snipIsEmpty(src)) { return function(b) { storeStatusI(b, 0); return b } }
         if (src.indexOf("\\\n") >= 0 || src.indexOf("<<") >= 0) { src = c.compile(c.parseFrom(c.agrammar, src, "Spliced")).stack[0] }
-        var sv = snipLine0
+        var sv = snipLine0, svW = snipWho
         snipLine0 = line0 > 0 ? line0 : emitLine
-        var t = arCompile(src, lines ? "Snippet" : "CompoundList", false)
+        if (who) { snipWho = who }
+        var t = arCompile(src, who ? "Snippet" : "CompoundList", false)
         snipLine0 = sv
+        snipWho = svW
         return function(b) {
             var svLn = lnCtx
             lnCtx = null
@@ -8991,7 +9007,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (src != "-") {
                     var flag = m.NewGlobalDef("trap_flag" + trapCount, zero)
                     trapCount = trapCount + 1
-                    trapList.push({flag: flag, src: src, body: compileSnippet(src, 1, true)})
+                    trapList.push({flag: flag, src: src, body: compileSnippet(src, 1, "exit trap")})
                     b.NewStore(one, flag)
                 }
                 storeStatusI(b, 0)
@@ -9009,7 +9025,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (allConst) {
                     if (esrc == "") { storeStatusI(b, 0); return b }
                     b.NewStore(llvm.constant.NewInt(i32, tcEval), tcSlot)
-                    var eb = compileSnippet(esrc, 0, true)(b)
+                    var eb = compileSnippet(esrc, 0, "eval")(b)
                     eb.NewStore(zero, tcSlot)
                     return eb
                 }
@@ -9453,22 +9469,51 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // statement list is a mix of thunks and markers. linkAsync folds the markers away.
     // The {nl} marker a top-level separator run with a newline in it leaves (see Program); the
     // line it ends, at offset p, is the one the definitions in it report on (bashFnDefPin).
-    function pushLineEnd(t, p) {
+    // The marker records where the next line starts (e).
+    function pushLineEnd(t, p, e) {
         var i
         for (i = 0; i < t.length; i++) {
-            if (t.charAt(i) == "\n") { fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, p); push({nl: 1}); return }
+            if (t.charAt(i) == "\n") { fnDefsSeen = bashFnDefPin(fnDefsSeen, -1, p); push({nl: 1, at: e}); return }
         }
     }
-    // The top-level items as lines of statements, each list folded by linkAsync.
+    // The top-level items as lines of statements, each list folded by linkAsync. A syntax
+    // error (SynErr) replaces the line it is on. Twin of splitLines in bash-interpreter.abnf.
     function splitLines(items) {
         var lines = [], cur = []
+        var from = 0
         var i
         for (i = 0; i < items.length; i++) {
-            if (typeof items[i] != "function" && items[i].nl != undefined) { lines.push(linkAsync(cur)); cur = [] }
+            if (typeof items[i] == "function") { cur.push(items[i]) }
+            else if (items[i].nl != undefined) { lines.push(linkAsync(cur)); cur = []; from = items[i].at }
+            else if (items[i].synerr != undefined) { cur = [synErrLine(from, items[i].synerr)] }
             else { cur.push(items[i]) }
         }
         lines.push(linkAsync(cur))
         return lines
+    }
+    // The syntax error of the line from offset from (lib/bash-synerr.js), reported at run
+    // time: the script exits with status 2, an eval or trap string ends with status 2 (1 for
+    // an array never closed), one inside a $( ) of an eval or trap string exits with status
+    // 1. Twin of synErrLine in bash-interpreter.abnf.
+    var snipWho = ""
+    function synErrLine(from, p) {
+        var t = arInSnip ? arSnip : c.srcSlice(0, 2147483647)
+        var se = bashSynErr(t, from, p, srcLine)
+        var ls = se.ls
+        var pfx = c.file + ": " + (arInSnip ? snipWho + ": " : "")
+        var msg = ""
+        var k
+        for (k = 0; k < ls.length; k++) { msg = msg + pfx + ls[k] + "\n" }
+        var code = se.code
+        if (arInSnip && !se.sub) { return function(b) { emitOnStderr(b, gepStr(b, msg)); storeStatusI(b, code); return b } }
+        var st = (arInSnip) ? 1 : code
+        return function(b) {
+            emitOnStderr(b, gepStr(b, msg))
+            b.NewStore(llvm.constant.NewInt(i32, st), gExitCode)
+            b.NewStore(one, gExited)
+            b.NewBr(viaUnwind(curExit, curExitRd))
+            return deadBlock()
+        }
     }
     function linkAsync(items) {
         var out = []

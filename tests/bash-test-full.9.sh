@@ -211,6 +211,65 @@ s181() {
        declare -F =s181x 1=s181 s181-a=b s181]=c s181[k]v=w s181++=p; declare -f 1=s181; echo "s=$?" )
   check fe1 "${e//$'\n'/;}" "x 2;one;ab;rc;kv;pp;v w;=s181x;1=s181;s181-a=b;s181]=c;s181[k]v=w;s181++=p;1=s181 () ;{ ;    echo one;};s=0"
 }
+# ===== SECTION 182: syntax errors in eval and trap strings =====
+# A string eval or an EXIT trap cannot parse runs its lines up to the bad one (none of that
+# line), reports bash's syntax error - the token, the end of the text with the compound
+# command still open, the quote never closed, or the [[ ]] parser's own words - and fails
+# with status 2; the shell goes on. One inside a $( ) ends the shell, status 1. A report is
+# "SCRIPT: eval: line N: ...", N the eval's line plus the line in the string; s182s drops
+# SCRIPT and makes N relative to the first report. Every expected value is bash 5.3's.
+s182() {
+  local e
+  s182s() {
+    local l r n b=
+    while IFS= read -r l; do
+      case $l in
+        *": line "*)
+          l=${l#*: }; r=${l#*line }; n=${r%%:*}; r=${r#*: }; [ -z "$b" ] && b=$n
+          case $r in *" on line "*) r="${r% on line *} on line $(( ${r##* on line } - b ))" ;; esac
+          l="${l%%line *}$(( n - b )) $r" ;;
+      esac
+      printf '%s;' "$l"
+    done <<< "$1"
+  }
+  s182r() {
+    eval 'fi'; echo "s=$?"
+    eval 'x=y() { :; }'; echo "s=$?"
+    eval $'echo one\necho (\necho two'; echo "s=$?"
+    eval $'if true; then\n echo x'; echo "s=$?"
+    eval 'echo "ab'; echo "s=$?"
+    eval 'a[=b() { :; }'; echo "s=$?"
+    eval 'f() {'; echo "s=$?"
+    eval 'echo a; done; echo b'; echo "s=$?"
+    eval 'echo a >'; echo "s=$?"
+    eval '{ echo a; } }'; echo "s=$?"
+    eval 'case a in b) ;; fi'; echo "s=$?"
+    eval 'for i in 1; do echo; fi'; echo "s=$?"
+    eval 'echo $(echo a'; echo "s=$?"
+    eval 'while true; do'; echo "s=$?"
+    eval 'echo a | | b'; echo "s=$?"
+    eval '((1+'; echo "s=$?"
+    eval 'x=1 ;;'; echo "s=$?"
+  }
+  e=$(s182r 2>&1)
+  check sx1 "$(s182s "$e")" "eval: 0 syntax error near unexpected token \`fi';eval: 0 \`fi';s=2;eval: 1 syntax error near unexpected token \`(';eval: 1 \`x=y() { :; }';s=2;one;eval: 3 syntax error near unexpected token \`newline';eval: 3 \`echo (';s=2;eval: 5 syntax error: unexpected end of file from \`if' command on line 3;s=2;eval: 4 unexpected EOF while looking for matching \`\"';s=2;eval: 5 unexpected EOF while looking for matching \`]';s=2;eval: 7 syntax error: unexpected end of file from \`{' command on line 6;s=2;eval: 7 syntax error near unexpected token \`done';eval: 7 \`echo a; done; echo b';s=2;eval: 8 syntax error near unexpected token \`newline';eval: 8 \`echo a >';s=2;eval: 9 syntax error near unexpected token \`}';eval: 9 \`{ echo a; } }';s=2;eval: 10 syntax error near unexpected token \`newline';eval: 10 \`case a in b) ;; fi';s=2;eval: 11 syntax error near unexpected token \`fi';eval: 11 \`for i in 1; do echo; fi';s=2;eval: 13 unexpected EOF while looking for matching \`)';s=2;eval: 14 syntax error: unexpected end of file from \`while' command on line 13;s=2;eval: 14 syntax error near unexpected token \`|';eval: 14 \`echo a | | b';s=2;eval: 15 unexpected EOF while looking for matching \`)';s=2;eval: 16 syntax error near unexpected token \`;;';eval: 16 \`x=1 ;;';s=2;"
+  s182c() {
+    eval '[[ a b ]]'; echo "s=$?"
+    eval '[[ -n ]]'; echo "s=$?"
+    eval '[[ ( a ]]'; echo "s=$?"
+    eval '[[ a == b c ]]'; echo "s=$?"
+    eval '[[ a =='; echo "s=$?"
+    eval '[[ ]]'; echo "s=$?"
+    eval '[[ ( ]]'; echo "s=$?"
+    eval '[[ a =~ (b) ]] ]]'; echo "s=$?"
+  }
+  e=$(s182c 2>&1)
+  check sx2 "$(s182s "$e")" "eval: 0 unexpected token \`b', conditional binary operator expected;eval: 0 syntax error near \`b';eval: 0 \`[[ a b ]]';s=2;eval: 1 unexpected argument \`]]' to conditional unary operator;eval: 1 syntax error near \`]]';eval: 1 \`[[ -n ]]';s=2;eval: 2 unexpected token \`]]', expected \`)';eval: 2 syntax error near \`]]';eval: 2 \`[[ ( a ]]';s=2;eval: 3 syntax error in conditional expression: unexpected token \`c';eval: 3 syntax error near \`c';eval: 3 \`[[ a == b c ]]';s=2;eval: 4 unexpected argument \`newline' to conditional binary operator;eval: 4 syntax error near \`==';eval: 4 \`[[ a ==';s=2;eval: 5 syntax error near \`]]';eval: 5 \`[[ ]]';s=2;eval: 6 expected \`)';eval: 6 syntax error near \`]]';eval: 6 \`[[ ( ]]';s=2;eval: 7 syntax error near unexpected token \`]]';eval: 7 \`[[ a =~ (b) ]] ]]';s=2;"
+  e=$( (trap 'echo t; fi' EXIT; eval 'echo in; fi; echo no' 2>/dev/null; echo "body $?") 2>&1 )
+  check sx3 "$(s182s "$e")" "body 2;exit trap: 0 syntax error near unexpected token \`fi';exit trap: 0 \`echo t; fi';"
+  e=$( { (eval $'echo a\necho $(fi)'; echo no); echo "st=$?"; } 2>&1 )
+  check sx4 "$(s182s "$e")" "a;eval: 0 syntax error near unexpected token \`fi' while looking for matching \`)';eval: 0 \`echo \$(fi)';st=1;"
+}
 # ===== END SECTIONS =====
 
 s176  # SECTION-CALL 176
@@ -219,5 +278,6 @@ s178  # SECTION-CALL 178
 s179  # SECTION-CALL 179
 s180  # SECTION-CALL 180
 s181  # SECTION-CALL 181
+s182  # SECTION-CALL 182
 echo "full: $checks checks, $fails failures"
 exit $fails

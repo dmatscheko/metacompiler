@@ -3908,32 +3908,82 @@
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-errexit.sh", "-q", "-exe", "tests/bash-abort-errexit.out"]
         },
         {
-            "name": "Bash parse error in a continued line after a moved here-document (interpreter, SHOULD FAIL)",
+            "name": "Bash syntax error in a continued line after a moved here-document (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "expectError": "Last good parse position: tests/bash-abort-test-splice.sh:10:5",
+            "expectError": "tests/bash-abort-test-splice.sh: line 10: `  c ) d'",
+            "expectExit": 2,
             "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test-splice.sh", "-q"]
         },
         {
-            "name": "Bash parse error in a continued line after a moved here-document (compiler, SHOULD FAIL)",
+            "name": "Bash syntax error in a continued line after a moved here-document (compiler, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "expectError": "Last good parse position: tests/bash-abort-test-splice.sh:10:5",
+            "expectError": "tests/bash-abort-test-splice.sh: line 10: `  c ) d'",
+            "expectExit": 2,
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-splice.sh", "-q"]
         },
         {
             "name": "Bash NAME[ in command position never closed is a syntax error (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "expectError": "Not everything could be parsed. Last good parse position: (code):1:7 (EOF)",
+            "expectError": "(code): line 1: unexpected EOF while looking for matching `]'",
+            "expectExit": 2,
             "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "m[[]=7", "-q"]
         },
         {
             "name": "Bash NAME[ in command position never closed is a syntax error (compiler, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "expectError": "Not everything could be parsed. Last good parse position: (code):1:7 (EOF)",
+            "expectError": "(code): line 1: unexpected EOF while looking for matching `]'",
+            "expectExit": 2,
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "m[[]=7", "-q"]
+        },
+        {
+            "name": "Bash a definition named NAME[ with the subscript never closed is a syntax error (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "(code): line 1: unexpected EOF while looking for matching `]'",
+            "expectExit": 2,
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "a[=b() { :; }", "-q"]
+        },
+        {
+            "name": "Bash a definition named NAME[ with the subscript never closed is a syntax error (compiler, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "(code): line 1: unexpected EOF while looking for matching `]'",
+            "expectExit": 2,
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "a[=b() { :; }", "-q"]
+        },
+        {
+            "name": "Bash an if never closed is a syntax error at the end of the file (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "(code): line 2: syntax error: unexpected end of file from `if' command on line 1",
+            "expectExit": 2,
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "if true; then echo a", "-q"]
+        },
+        {
+            "name": "Bash an if never closed is a syntax error at the end of the file (compiler, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "(code): line 2: syntax error: unexpected end of file from `if' command on line 1",
+            "expectExit": 2,
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "if true; then echo a", "-q"]
+        },
+        {
+            "name": "Bash top-level syntax error after the lines before it ran (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "tests/bash-abort-test-synerr.sh: line 13: syntax error near unexpected token `fi'",
+            "expectExit": 2,
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test-synerr.sh", "-q"]
+        },
+        {
+            "name": "Bash top-level syntax error after the lines before it ran, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-synerr.sh", "-q", "-exe", "tests/bash-abort-synerr.out"]
         },
         {
             "name": "Speed Test",
