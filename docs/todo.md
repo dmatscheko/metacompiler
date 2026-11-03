@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1186** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1187** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,12 +128,9 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1185 bash: option words after a -f/-F operand, `declare -f +p/+f/+F`, readonly-function line in a top-level compound · P3 · SH · IN PROGRESS (SH worker, round 63) [V]
-Found while closing T-1184 (worker-reported; verify each on the oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3 first).
-- All engines, stderr only: an option word after an operand in a -f/-F query is a function name to bash. `g(){ :; }; declare -F g +r` prints nothing in bash; `declare -Fp g -x` gives "declare: -x: not found". Ours says "`+r': not a valid identifier" / "`-x': not a valid identifier", because bashDeclLate returns null for -f and the word goes through bashDeclText.
-- All engines: `declare -f +p NAME`, `+f` and `+F` are refused at compile time. bash: +p acts like -p (`declare -F +p g` → "declare -f g"); +f/+F print nothing, status 0.
-- All engines, stderr line number only: a readonly-function redefinition nested in a top-level `if`, brace group or `for`, outside any function. bash reports the end line of the whole top-level command (`fi`, the outer `}`) or the `for` line; ours reports the definition's own line.
-- Interpreter only, low: a computed option word with t or c (`o=-c; declare $o x=abc` → bash `declare -c x="Abc"`) is "not a valid identifier", because bashDeclFlagText's letter set lacks t and c. The compiler refuses computed options by design. Fix the interpreter and assert it by probe, not by the ratchet.
+### T-1186 bash: interleaving of "not found" with a run-time -f/-F -p operand (interp) · P3 · SH · OPEN [V]
+Found while closing T-1185; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. Interpreter only, low.
+- `g(){ :; }; h(){ :; }; v='x y'; declare -Fp g "$v" h 2>&1`: bash prints in operand order (`declare -f g`, "declare: x y: not found", `declare -f h`). The interpreter writes the "not found" line before the stdout lines, because makeDeclDyn reports bad fields before it runs the spelled declaration. Stream contents are correct; only the order differs under 2>&1. Report each field in operand order. The compiler refuses computed -f/-F operands by design, so assert by probe.
 
 # C — C subset
 
@@ -1224,6 +1221,7 @@ T-1181 bash: computed `declare -p` operand (compiler), `${!#x}`, `declare -n h; 
 T-1182 bash: written `declare -p NAME=VALUE` operands — DONE - written NAME=VALUE / NAME[SUB]=VALUE / NAME+=VALUE operands of declare/typeset/local -p are looked up by their expanded text (not found, status 1), array literals under -p are assigned then printed, option words and -- after operands handled; oracle-probed on all legs incl. stderr and exit status
 T-1183 bash: `declare -f NAME=(list)` and `declare -F NAME=VALUE` — DONE - declare/local/typeset -f/-F NAME=(list) assigns the literal (local in a function), NAME=VALUE gives cannot use `-f' to make functions and stops the builtin, -fp looks the word up as written, -f/-F with -a/-A/-i/-n give the invalid-option report; new ratchet part tests/bash-test-full.9.sh (part 8 at the step brake); oracle-probed on all legs incl. stderr and exit status; master paired bench +0.01%
 T-1184 bash: `declare -f` with `+a`/`+i`/`-x`/`-r`, missing SECTION 175 header — DONE - function attributes (declare -f +a/+i/-x/-r/-t/-c/-l/-u, export -f, readonly -f, -F listing by attribute, readonly-function redefinition and unset refusals with bash's line rule), SECTION 175 header added; oracle-probed on all legs incl. stderr and exit status; paired bench +0.06% no difference
+T-1185 bash: option words after a -f/-F operand, `declare -f +p/+f/+F`, readonly-function line in a top-level compound — DONE - option and other non-identifier words after a -f/-F query operand are function names (not found / not a function / silent status 1), declare -f +p/+f/+F, readonly-function redefinition lines pinned per bash's reader (if/brace/for/case/while/eval), interp computed -t/-c options; oracle-probed on all legs incl. stderr and exit status; bench module IR byte-identical
 
 # Settled — do not re-open
 
