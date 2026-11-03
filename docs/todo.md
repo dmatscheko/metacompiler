@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1181 bash: computed `declare -p` operand (compiler), `${!#x}`, `declare -n h; declare -A h` · P3 · SH · OPEN [V]
+### T-1181 bash: computed `declare -p` operand (compiler), `${!#x}`, `declare -n h; declare -A h` · P3 · SH · IN PROGRESS (SH worker, round 59) [V]
 Found while closing T-1180; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - Compiler only: `e=x; declare -p "$e"` fails at compile time with "a computed operand of `declare -p` is not supported by this compiler". bash prints `declare -- x="abc"`, and the interpreter is right. Support computed operands, the "" from T-1180 included.
 - All engines: `echo "${!#x}"` is "${!#x}: bad substitution" in bash and abandons the line. Ours prints an empty line and continues with status 0.
