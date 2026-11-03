@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1183** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1184** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,10 +128,11 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1182 bash: written `declare -p NAME=VALUE` operands · P3 · SH · IN PROGRESS (SH worker, round 60) [V]
-Found while closing T-1181; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- All engines: a written `declare -p` operand with an assignment is looked up as a literal name. `x=abc; declare -p x=1` gives "declare: x=1: not found" with status 1 in bash, and the same goes for `a[0]=2` and `x+=1`. Ours prints `declare -- x="abc"` with status 0. The operand text, with its value expanded, is the name looked up. The computed form was fixed in T-1181.
-- Note, no action: `f(){ declare -n h; declare -A h; local h=([q]=1); }` segfaults bash 5.3 itself, so there is no oracle answer.
+### T-1183 bash: `declare -f NAME=(list)` and `declare -F NAME=VALUE` · P3 · SH · OPEN [V]
+Found while closing T-1182; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. All engines.
+- `declare -f q=(1 2); echo "s=$?"; declare -p q`: bash assigns the literal (`declare -a q=([0]="1" [1]="2")`, and s=1). Ours assigns nothing, so `declare -p q` says "q: not found".
+- `declare -F r=1` (and `-f r=1`): bash prints "declare: cannot use `-f' to make functions" with status 1. Ours prints no message.
+- Check the mixed forms too: `declare -f g q=(1)` with g a function, and `local -f`, `typeset -F`.
 
 # C — C subset
 
@@ -1219,6 +1220,7 @@ T-1178 ruby: each_* return value, Proc#[] arity, class_eval/attr_accessor, each_
 T-1177 bash: `unset -n` on a non-nameref, unset of a caller's prefix binding (interp), `${1:=x}`, stores after readonly on a circular assoc nameref — DONE - unset -n on a non-nameref is a no-op (readonly refused), the interp's caller prefix binding no longer comes back as a nameref, ${N:=W} on positional/special params refuses before W expands, stores through a readonly void assoc nameref refused per site, indexed variant export/readonly are no-ops; oracle-probed on all legs incl. stderr and exit status; readonly -p listing by design
 T-1180 bash: `$!` before any background job, the readonly leak from a void indexed nameref (compiler), repeated `:=` refusals, the variable named "" — DONE - $! unset before any job, a refused := stops the line, the compiler's readonly leak from a void indexed nameref, the variable named "" behind a void assoc nameref modelled; oracle-probed on all legs incl. stderr and exit status
 T-1181 bash: computed `declare -p` operand (compiler), `${!#x}`, `declare -n h; declare -A h` — DONE - computed declare -p/local -p operands compile and are looked up literally, ${!#x} and the other bad indirections are bad substitutions, ${!@} names its target as bash does, a local declare -n then -A keeps -n with the removing-nameref warning on a later literal; oracle-probed on all legs incl. stderr and exit status
+T-1182 bash: written `declare -p NAME=VALUE` operands — DONE - written NAME=VALUE / NAME[SUB]=VALUE / NAME+=VALUE operands of declare/typeset/local -p are looked up by their expanded text (not found, status 1), array literals under -p are assigned then printed, option words and -- after operands handled; oracle-probed on all legs incl. stderr and exit status
 
 # Settled — do not re-open
 
