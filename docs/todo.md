@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1192** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1193** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,14 +69,15 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1188 ruby: two expressions on one line, rescue-modifier laxness (yield/return, compiler `rescue y = 3`), lines(chomp:), each_codepoint on invalid UTF-8 · P3 · RB · IN PROGRESS (RB worker, round 71) [V]
-Found while closing T-1179 (worker-reported); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. Verify each on the oracle first.
-- Both grammars accept two expressions on one line with no separator: `x = 1 2` runs, where MRI gives a syntax error. This is the root of the rescue-modifier laxness. Fix the statement separator rule, not more guards. Then `x = … rescue yield 1` and `x = … rescue return 1` must be syntax errors too: the interpreter currently runs them, and the compiler fails with a parse error that is not MRI's.
-- Compiler only: `x = raise("z") rescue y = 3; p x, y` gives "undefined local variable or method `y'"; MRI and the interpreter print 3, 3.
-- All engines: `lines(chomp: true)` / `each_line(chomp: true)` ignore the keyword. `"a\nb\n".lines(chomp: true)` should give `["a", "b"]`; ours gives `["a\nb\n"]`.
-- All engines: `"a\xFFb".force_encoding("UTF-8").each_codepoint{}` yields the bytes; MRI raises ArgumentError "invalid byte sequence in UTF-8".
-- By design, record only: MRI 2.6's `(-3)**-1` gives an unnormalized `(1/-3)`; ours gives `(-1/3)`, as later Rubies do.
-- Performance note, no action unless cheap: native 3**4068000 takes about 95 s (MRI 0.2 s), because of the soft-float, boxed C floor. Record it as a known cost.
+### T-1192 ruby: commands as nested arguments and in interpolation, inherited `B::X`, rescue modifier catching non-StandardError, compiler break/$! in rescue · P3 · RB · OPEN [V]
+Found while closing T-1188 (worker-reported; verify on the oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6 first).
+- All engines, now loud parse errors (before, silently wrong output): `p(g 1)`, a command as the only argument in parentheses (MRI 2), and `a.concat Array g 3`, a constant-named command nested in a command argument (MRI `[6]`). This blocks stdlib rdoc/parser/changelog.rb, rubygems/config_file.rb and rubygems/request_set/gem_dependency_api.rb. Accepting a command anywhere in LowNot cost +11% parse instructions, so find the narrower MRI positions (`command_args` / paren_args with one command).
+- All engines: `"#{g 10}"`, a command inside string interpolation, fails to parse. TplExpr takes an Expression; MRI takes a full statement list (`"#{a = 1; a + 1}"` too).
+- All engines: `B::X` for a constant inherited from a superclass raises NameError; MRI gives the value.
+- All engines: the rescue modifier catches every Exception; MRI catches only StandardError (`(raise Interrupt rescue 1)` propagates the Interrupt). Check `exit` / SystemExit too.
+- Compiler only: `break v` from a rescue clause inside a while loop gives nil instead of v; `$!` is not restored after a `break` out of a begin/rescue inside a block.
+- Low, accepted but MRI rejects: `[yield 1]`, `f(a, yield 1)`, `retry` in a modifier fallback, `y = (return 1)` ("void value expression"). Also `foo 1 and bar` reads `1 and bar` as the argument.
+- By design, record only: a blockless `each_codepoint` on invalid UTF-8 raises immediately, because our enumerators are eager; MRI's is lazy.
 
 # JS — JavaScript and TypeScript
 
@@ -1232,6 +1233,7 @@ T-1179 ruby: exact Integer powers capped at exponent 4096, 0**-n, binary String 
 T-1187 bash: a quoted assignment-shaped -f/-F operand, `function a=b` (interp) — DONE - a quoted assignment-shaped -f/-F operand behaves as the unquoted one (cannot use `-f' to make functions / not found / not a function), `function a=b` definitions parse in both grammars and are listed, printed with the function keyword, called, made readonly, refused by export; oracle-probed on all legs; bash gates green after rebase; bench module IR byte-identical
 T-1189 bash: keyword-less function definitions whose name holds "=" (`=x() {`, `1=2() {`) — DONE - keyword-less function names may hold "=" unless the word spells an assignment (backward :script guard after the parens, so no cost on non-definitions), assignment-shaped x=y() stays a syntax error; oracle-probed on all legs; bench module IR byte-identical, parse time within noise
 T-1190 bash: syntax errors - `eval` of bad text aborts the program, top-level report and exit status 2, `a[=b() {` — DONE - syntax errors reported as bash does (unexpected token / newline / end of file from KW command / unexpected EOF while looking for matching, [[ ]] messages) via the shared languages/lib/bash-synerr.js, lines before the bad one run, top-level exit 2 after the EXIT trap, eval/trap strings fail with status 2 and the script goes on (constant strings in the compiler too), a[=b() and stray ; rejected; oracle-probed on all legs incl. stderr and exit status; matrix rows with expectExit 2; parse time unchanged; computed eval in the compiler by design
+T-1188 ruby: two expressions on one line, rescue-modifier laxness (yield/return, compiler `rescue y = 3`), lines(chomp:), each_codepoint on invalid UTF-8 — DONE - statements need a terminator (StmtTerm replaces the optional ; everywhere), so x = 1 2 and rescue yield/return fallbacks are syntax errors; KwCmd return/break/next/yield/raise/super commands, line joins, stacked modifiers, x::m / expr::C parse as MRI (stdlib corpus 613 -> 714 files); compiler rescue-modifier locals live in the enclosing frame; lines/each_line(chomp:); each_codepoint raises on invalid UTF-8; oracle-probed on all legs; full suite + full native green; paired bench +0.02% (noise), parse +1.9%
 
 # Settled — do not re-open
 
