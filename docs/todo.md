@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1185 bash: option words after a -f/-F operand, `declare -f +p/+f/+F`, readonly-function line in a top-level compound · P3 · SH · OPEN [V]
+### T-1185 bash: option words after a -f/-F operand, `declare -f +p/+f/+F`, readonly-function line in a top-level compound · P3 · SH · IN PROGRESS (SH worker, round 63) [V]
 Found while closing T-1184 (worker-reported; verify each on the oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3 first).
 - All engines, stderr only: an option word after an operand in a -f/-F query is a function name to bash. `g(){ :; }; declare -F g +r` prints nothing in bash; `declare -Fp g -x` gives "declare: -x: not found". Ours says "`+r': not a valid identifier" / "`-x': not a valid identifier", because bashDeclLate returns null for -f and the word goes through bashDeclText.
 - All engines: `declare -f +p NAME`, `+f` and `+F` are refused at compile time. bash: +p acts like -p (`declare -F +p g` → "declare -f g"); +f/+F print nothing, status 0.
