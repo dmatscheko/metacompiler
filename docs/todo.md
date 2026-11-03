@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1187** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1188** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,9 +128,10 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1186 bash: interleaving of "not found" with a run-time -f/-F -p operand (interp) · P3 · SH · IN PROGRESS (SH worker, round 64) [V]
-Found while closing T-1185; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. Interpreter only, low.
-- `g(){ :; }; h(){ :; }; v='x y'; declare -Fp g "$v" h 2>&1`: bash prints in operand order (`declare -f g`, "declare: x y: not found", `declare -f h`). The interpreter writes the "not found" line before the stdout lines, because makeDeclDyn reports bad fields before it runs the spelled declaration. Stream contents are correct; only the order differs under 2>&1. Report each field in operand order. The compiler refuses computed -f/-F operands by design, so assert by probe.
+### T-1187 bash: a quoted assignment-shaped -f/-F operand, `function a=b` (interp) · P3 · SH · OPEN [V]
+Found while closing T-1186; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- All engines: `g(){ :; }; h(){ :; }; declare -F g 'a=b' h 2>&1; echo "st=$?"`. bash prints g, then "declare: cannot use `-f' to make functions", then st=1, and h is NOT printed. Ours prints g, h, st=1, because bashDeclFnWords turns the constant word 'a=b' into a plain function name. The unquoted `a=b` is already right.
+- Interpreter only: `function a=b { :; }` fails to parse. Check what bash does with it (definition, `declare -F`, and calling it) before implementing.
 
 # C — C subset
 
@@ -1222,6 +1223,7 @@ T-1182 bash: written `declare -p NAME=VALUE` operands — DONE - written NAME=VA
 T-1183 bash: `declare -f NAME=(list)` and `declare -F NAME=VALUE` — DONE - declare/local/typeset -f/-F NAME=(list) assigns the literal (local in a function), NAME=VALUE gives cannot use `-f' to make functions and stops the builtin, -fp looks the word up as written, -f/-F with -a/-A/-i/-n give the invalid-option report; new ratchet part tests/bash-test-full.9.sh (part 8 at the step brake); oracle-probed on all legs incl. stderr and exit status; master paired bench +0.01%
 T-1184 bash: `declare -f` with `+a`/`+i`/`-x`/`-r`, missing SECTION 175 header — DONE - function attributes (declare -f +a/+i/-x/-r/-t/-c/-l/-u, export -f, readonly -f, -F listing by attribute, readonly-function redefinition and unset refusals with bash's line rule), SECTION 175 header added; oracle-probed on all legs incl. stderr and exit status; paired bench +0.06% no difference
 T-1185 bash: option words after a -f/-F operand, `declare -f +p/+f/+F`, readonly-function line in a top-level compound — DONE - option and other non-identifier words after a -f/-F query operand are function names (not found / not a function / silent status 1), declare -f +p/+f/+F, readonly-function redefinition lines pinned per bash's reader (if/brace/for/case/while/eval), interp computed -t/-c options; oracle-probed on all legs incl. stderr and exit status; bench module IR byte-identical
+T-1186 bash: interleaving of "not found" with a run-time -f/-F -p operand (interp) — DONE - every field of a -f/-F query is an operand of the spelled text, looked up in operand order (not found interleaved as bash), a computed or written -- before a computed operand kept; interp oracle-probed (stdout+stderr order), compiler refuses computed -f/-F operands by design; bench module IR byte-identical
 
 # Settled — do not re-open
 
