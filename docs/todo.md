@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1186 bash: interleaving of "not found" with a run-time -f/-F -p operand (interp) · P3 · SH · OPEN [V]
+### T-1186 bash: interleaving of "not found" with a run-time -f/-F -p operand (interp) · P3 · SH · IN PROGRESS (SH worker, round 64) [V]
 Found while closing T-1185; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. Interpreter only, low.
 - `g(){ :; }; h(){ :; }; v='x y'; declare -Fp g "$v" h 2>&1`: bash prints in operand order (`declare -f g`, "declare: x y: not found", `declare -f h`). The interpreter writes the "not found" line before the stdout lines, because makeDeclDyn reports bad fields before it runs the spelled declaration. Stream contents are correct; only the order differs under 2>&1. Report each field in operand order. The compiler refuses computed -f/-F operands by design, so assert by probe.
 
