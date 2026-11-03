@@ -199,6 +199,18 @@ s180() {
        unset -f 's180c+=d'; declare -F s180c+=d; echo "s=$?"; } 2>&1 )
   check fq2 "$(s180s "$e")" "s=0 v=b;in 2;cd;s180a=b;s180a=b;s180c+=d;=s180x;s=0;function s180c+=d () ;{ ;    echo cd;};=s180x () ;{ ;    :;};s=0;declare -fr s180a=b;export: s180a=b: cannot export;export: =s180x: cannot export;s=1;declare: cannot use \`-f' to make functions;s=1;"
 }
+# ===== SECTION 181: keyword-less function names holding "=" =====
+# NAME() { ...; } takes any word as NAME, "=" included, as long as the word does not spell
+# an assignment (NAME=, NAME+=, NAME[SUB]=): =x, 1=2, a-b=c, a]=c, a[k]v=w and a++=p are
+# function names, printed without the keyword. Every expected value is bash 5.3's.
+s181() {
+  local e
+  e=$( =s181x() { echo "x $#"; }; 1=s181() { echo one; }; s181-a=b() { echo ab; }; s181]=c () { echo rc; }
+       s181[k]v=w() { echo kv; }; s181++=p() { echo pp; }; s181q=v; s181r[1]+=w
+       '=s181x' a b; 1=s181; s181-a=b; s181]=c; s181[k]v=w; s181++=p; echo "$s181q ${s181r[1]}"
+       declare -F =s181x 1=s181 s181-a=b s181]=c s181[k]v=w s181++=p; declare -f 1=s181; echo "s=$?" )
+  check fe1 "${e//$'\n'/;}" "x 2;one;ab;rc;kv;pp;v w;=s181x;1=s181;s181-a=b;s181]=c;s181[k]v=w;s181++=p;1=s181 () ;{ ;    echo one;};s=0"
+}
 # ===== END SECTIONS =====
 
 s176  # SECTION-CALL 176
@@ -206,5 +218,6 @@ s177  # SECTION-CALL 177
 s178  # SECTION-CALL 178
 s179  # SECTION-CALL 179
 s180  # SECTION-CALL 180
+s181  # SECTION-CALL 181
 echo "full: $checks checks, $fails failures"
 exit $fails

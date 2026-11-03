@@ -184,15 +184,12 @@ FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) 
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
 FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
 FuncBraceBody <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" ;
-FuncDefHead = ( KwFunction FuncKwName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
-FuncName    = FuncNameTok :whitespace(Whitespace) ;
-// A bash function name is a WORD, not an identifier. The corpus is full of real ones:
-//     show-len() { ... }   py-repr() { ... }   ble/foo() { ... }   test-hyphen() { ... }
-// so anything that is not a blank, a separator, a metacharacter or a quote is allowed.
-FuncNameTok <~~ push({fname: up.in}) ~~>
-            = !@+" \t\n\r;&|<>(){}$'\"\\`=" ;
-// After the keyword the name may also hold "=": NAME=VALUE() is an assignment and then a
-// syntax error, but `function a=b { ...; }` defines a=b (bash 5.3).
+FuncDefHead = ( KwFunction FuncKwName [ "(" ")" ] ) | ( FuncKwName "(" ")" NotAsgName ) ;
+// A bash function name is a WORD, not an identifier: `show-len() {...}`, `ble/foo() {...}`,
+// `=x() {...}` and `1=2() {...}` are all definitions: anything that is not a blank, a
+// separator, a metacharacter or a quote. Without the keyword a word that spells an
+// assignment (NAME=, NAME+=, NAME[SUB]=) is an assignment, so `x=y() { :; }` is a syntax
+// error (NotAsgName), while `function a=b { ...; }` defines a=b (bash 5.3).
 FuncKwName  = FuncKwNameTok :whitespace(Whitespace) ;
 FuncKwNameTok <~~ push({fname: up.in}) ~~>
             = !@+" \t\n\r;&|<>(){}$'\"\\`" ;
@@ -995,6 +992,39 @@ KwEsac      = "esac" KwEnd ;
 NotBar = :script(~~
     (function() {
         if (c.peek(0) === 124) { return abnf.newToken("\x01bar", 0) }
+    })()
+~~) ;
+// Fails right after the "( )" of a keyword-less definition when its name spells an
+// assignment: NAME, an optional [SUB] (brackets nest), an optional "+", then "=". It reads
+// the name backwards from the "(", so it runs only on definitions, not on every command.
+NotAsgName = :script(~~
+    (function() {
+        var i = -2
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i - 1; cc = c.peek(i) }
+        i = i - 1
+        cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i - 1; cc = c.peek(i) }
+        var end = i
+        while (cc > 32 && cc !== 59 && cc !== 38 && cc !== 124 && cc !== 60 && cc !== 62 && cc !== 40 && cc !== 41 && cc !== 123 && cc !== 125 && cc !== 36 && cc !== 39 && cc !== 34 && cc !== 92 && cc !== 96) { i = i - 1; cc = c.peek(i) }
+        i = i + 1
+        cc = c.peek(i)
+        if (!((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95)) { return undefined }
+        while ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (cc >= 48 && cc <= 57) || cc === 95) { i = i + 1; cc = c.peek(i) }
+        if (cc === 91) {
+            var depth = 0
+            while (i <= end) {
+                if (cc === 91) { depth = depth + 1 }
+                if (cc === 93) { depth = depth - 1; if (depth === 0) { break } }
+                i = i + 1
+                cc = c.peek(i)
+            }
+            if (i >= end) { return undefined }
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc === 43 && i < end) { i = i + 1; cc = c.peek(i) }
+        if (cc === 61 && i <= end) { return abnf.newToken("\x01asg-name", 0) }
     })()
 ~~) ;
 // Fails before an IO-numbered redirection (`2>`, `10<`): after `a=x` that is the
