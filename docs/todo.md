@@ -129,7 +129,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1190 bash: syntax errors - `eval` of bad text aborts the program, top-level report and exit status 2, `a[=b() {` · P3 · SH · OPEN [V]
+### T-1190 bash: syntax errors - `eval` of bad text aborts the program, top-level report and exit status 2, `a[=b() {` · P3 · SH · IN PROGRESS (SH worker, round 67) [V]
 Found while closing T-1189; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. All engines.
 - `eval 'x=y() { :; }'; echo "s=$?"`: bash prints "eval: line 1: syntax error near unexpected token `('" plus the offending line, then continues with s=2. The interpreter aborts the whole program with the parse dump. The compiler fails at compile time, even though a constant eval string with a syntax error must compile into a run-time report and status 2. Computed eval text that fails to parse must report and continue too.
 - Top-level: a script with a syntax error (`x=y() { :; }`) gets bash's "FILE: line N: syntax error near unexpected token `('" / "FILE: line N: `x=y() { :; }'" and exit 2. bash runs the commands before the bad line first. Ours prints the generic parse dump and exits 1. Decide how far the grammar can report bash's token. At minimum, give exit status 2 and a bash-shaped first line for the common cases (unexpected `(`, `)`, `fi`, `done`, `}`, unexpected end of file).
