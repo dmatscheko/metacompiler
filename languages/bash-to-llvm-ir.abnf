@@ -2181,6 +2181,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSubx = rtDecl("rt_subx", true, [1])
     var rtSubEmpty = rtDecl("rt_sub_empty", false, [1, 1, 1])
     var rtSubDflt = rtDecl("rt_sub_dflt", false, [1, 1, 1, 0, 1, 0, 1])
+    var rtNoAssign = rtDecl("rt_no_assign", false, [1, 0])
     var rtPrefixRef = rtDecl("rt_prefix_ref", false, [1, 1, 0])
     var rtVset = rtDecl("rt_vset", false, [1, 0])
     var rtSubxa = rtDecl("rt_subxa", true, [1, 1])
@@ -2790,7 +2791,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), one, zero])))
                     }
                     var de = emptyPtr(b)
-                    if (idxWordT != null) {
+                    // A default for the positional parameters is refused (rt_no_assign), before
+                    // the word expands unless through an indirection.
+                    var posAs = idxO == "=" && (name == "@" || name == "*")
+                    if (idxWordT != null && !(posAs && errName == null)) {
                         // the word is used when the arm the subscript selects is blank (unset, for +)
                         var useW = b.NewSelect(whole, blankL, blankE)
                         if (idxO == "+") { useW = b.NewXor(useW, llvm.constant.NewInt(llvm.types.I1, 1)) }
@@ -2823,16 +2827,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         // elemOpValue and listDefault in bash-interpreter.abnf.
                         var stB = curF.NewBlock(""), sjB = curF.NewBlock("")
                         b.NewCondBr(b.NewSelect(whole, blankL, blankE), stB, sjB)
-                        if (attrOn(refVars, name)) {
-                            var rsB = curF.NewBlock("")
-                            var sdArr = stB.NewICmp(llvm.enum.IPredNE, stB.NewCall(rtNrefIsarr, [gepStr(stB, name), one]), zero)
-                            var sdAsW = stB.NewAnd(whole, stB.NewICmp(llvm.enum.IPredNE, stB.NewCall(rtIsAssoc, gepStr(stB, name)), zero))
-                            stB.NewCondBr(stB.NewAnd(sdArr, stB.NewXor(sdAsW, llvm.constant.NewInt(llvm.types.I1, 1))), sjB, rsB)
-                            stB = rsB
+                        // Through an indirection the target, @ or *, is known only when this runs.
+                        if (posAs && errName != null) { stB.NewCall(rtNoAssign, [stB.NewSelect(star, gepStr(stB, "*"), gepStr(stB, "@")), one]) }
+                        else if (posAs) { stB.NewCall(rtNoAssign, [gepStr(stB, name), zero]) }
+                        else {
+                            if (attrOn(refVars, name)) {
+                                var rsB = curF.NewBlock("")
+                                var sdArr = stB.NewICmp(llvm.enum.IPredNE, stB.NewCall(rtNrefIsarr, [gepStr(stB, name), one]), zero)
+                                var sdAsW = stB.NewAnd(whole, stB.NewICmp(llvm.enum.IPredNE, stB.NewCall(rtIsAssoc, gepStr(stB, name)), zero))
+                                stB.NewCondBr(stB.NewAnd(sdArr, stB.NewXor(sdAsW, llvm.constant.NewInt(llvm.types.I1, 1))), sjB, rsB)
+                                stB = rsB
+                            }
+                            var sdAt = roStore(name) ? llvm.constant.NewInt(i32, 8) : (attrOn(refVars, name) ? refAttrs(stB, gepStr(stB, name), true) : zero)
+                            stB.NewCall(rtSubDflt, [nmOf(stB), kk, stB.NewSelect(whole, de, pickedE), stB.NewSelect(star, llvm.constant.NewInt(i32, 2), stB.NewZExt(whole, i32)), gepStr(stB, name), sdAt,
+                                                   attrOn(refVars, name) ? tcWho(stB) : emptyPtr(stB)])
                         }
-                        var sdAt = roStore(name) ? llvm.constant.NewInt(i32, 8) : (attrOn(refVars, name) ? refAttrs(stB, gepStr(stB, name), true) : zero)
-                        stB.NewCall(rtSubDflt, [nmOf(stB), kk, stB.NewSelect(whole, de, pickedE), stB.NewSelect(star, llvm.constant.NewInt(i32, 2), stB.NewZExt(whole, i32)), gepStr(stB, name), sdAt,
-                                               attrOn(refVars, name) ? tcWho(stB) : emptyPtr(stB)])
                         stB.NewBr(sjB)
                         b = sjB
                     }
@@ -3039,7 +3048,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var blank = colon ? isEmptyStr(b, v)
                               : b.NewICmp(llvm.enum.IPredEQ, v, unsetPtr(b))
             var d = emptyPtr(b)
-            if (wordT != null) {
+            // A positional or special parameter is refused before the word expands
+            // (rt_no_assign).
+            var noAs = o == "=" && t6.v == null && !isIdentText(name)
+            if (wordT != null && !noAs) {
                 var r = lazyWord(b, (o == "+") ? b.NewXor(blank, llvm.constant.NewInt(llvm.types.I1, 1)) : blank, wordT, o == "-" || o == "+")
                 b = r.b
                 d = r.v
@@ -3056,8 +3068,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o == "=" && t6.v != null) {
                 var dsB = curF.NewBlock(""), djB = curF.NewBlock("")
                 b.NewCondBr(blank, dsB, djB)
-                dsB.NewCall(rtSetByName, [t6.v, d, zero, refAttrs(dsB, t6.v, true)])
-                dsB.NewBr(djB)
+                var dsOk = curF.NewBlock("")
+                dsB.NewCondBr(dsB.NewICmp(llvm.enum.IPredNE, dsB.NewCall(rtNoAssign, [t6.v, one]), zero), djB, dsOk)
+                dsOk.NewCall(rtSetByName, [t6.v, d, zero, refAttrs(dsOk, t6.v, true)])
+                // A refused store - a readonly variable, a bad subscript (rt_take_subbad) -
+                // abandons the line with status 2 (arith_err 3), as at the literal name.
+                var dsBad = dsOk.NewICmp(llvm.enum.IPredNE, dsOk.NewCall(rtTakeSubbad), zero)
+                dsOk.NewStore(dsOk.NewSelect(dsBad, llvm.constant.NewInt(i32, 3), dsOk.NewLoad(i32, gArithErr)), gArithErr)
+                dsOk.NewBr(djB)
                 b = djB
             }
             if (o == "=" && t6.v == null) {
@@ -3068,7 +3086,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var stored = d
                 // A readonly name abandons the line with status 2 (arith_err 3), as an
                 // expansion error does.
-                if (roRefusedV(sb, name)) { sb.NewStore(llvm.constant.NewInt(i32, 3), gArithErr) }
+                if (noAs) { sb.NewCall(rtNoAssign, [gepStr(sb, name), zero]) }
+                else if (roRefusedV(sb, name)) { sb.NewStore(llvm.constant.NewInt(i32, 3), gArithErr) }
                 else {
                     sb = emitStoreAttr(setB, name, d)
                     stored = sb.NewCall(rtGetByName, gepStr(sb, name))
@@ -8757,7 +8776,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 for (; uk < argTs.length; uk++) {
                     // A name that is no variable (unset, no array, not declared) unsets the
                     // function of that name instead.
-                    if (!uv && (argTs[uk].c == undefined || funcFor(argTs[uk].c) != null)) {
+                    if (!uv && !un && (argTs[uk].c == undefined || funcFor(argTs[uk].c) != null)) {
                         var rn = evalWord(b, argTs[uk])
                         b = rn.b
                         var noVar = b.NewAnd(b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtIsset, b.NewCall(rtGetByName, rn.v)), zero),
@@ -8768,8 +8787,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         b = varB
                     }
                     // A name built by expansion (`unset "d[$((i+1))]"`) is resolved at run time;
-                    // the attribute and local bookkeeping below needs a literal one.
-                    if (argTs[uk].c == undefined) {
+                    // the attribute and local bookkeeping below needs a literal one. So is a
+                    // -n of a name no nameref here, which unsets only one when this runs.
+                    if (argTs[uk].c == undefined || (un && !attrOn(refVars, argTs[uk].c))) {
                         var ru = evalWord(b, argTs[uk])
                         b = ru.b
                         ust = b.NewOr(ust, b.NewCall(rtUnsetWord, [ru.v, un ? one : zero, frameDepth(b), fnSlot]))

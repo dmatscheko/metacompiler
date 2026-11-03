@@ -1709,7 +1709,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (isElemRef(name) && hidLocal(name)) { return varsHas[key] == true }
         if (isElemRef(name)) { var sp = splitSubX(name); return scHas(sp.name, subKey(sp.name, sp.key)) }
-        if (!hasOwn(varsHas, key)) { return false }
+        // The special parameters always are ($!, a fixed value, too).
+        if (!hasOwn(varsHas, key)) { return name == "#" || name == "?" || name == "$" || name == "-" || name == "!" }
         return varsHas[key]
     }
     // NAME IS SET for ${NAME-w}, ${NAME+w} and ${NAME?w}: a set scalar, or an array with an
@@ -3258,13 +3259,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o == "-") { return blank ? dfltWord(wordT) : v }
             if (o == "+") { return blank ? "" : dfltWord(wordT) }
             if (o == "=") {
+                if (blank && tn != null && tn != "" && !isIdentText(tn) && !isElemRef(tn)) { return noAssign(tn, indirect, wordT) }
                 if (blank) {
                     var d = (wordT != null) ? wordJoin(wordT()) : ""
                     if (gp != "" && !refQuiet) { diagErr("warning: " + gp + ": maximum nameref depth (8) exceeded\n") }
                     // A readonly NAME abandons the line with status 2 (bash 5.3), as an
                     // expansion error does.
                     if (tn != null && roRefusedV(tn, "m", "")) { storeFail(); return "" }
+                    if (refVoid && voidRo(refPn)) { diagErr(": readonly variable\n"); storeFail(); return "" }
                     if (tn != null && !refVoid) { d = storeAttr(tn, d, false) }
+                    // A bad subscript of the element a nameref names is refused as a
+                    // readonly name is.
+                    if (takeSubBad()) { storeFail(); return "" }
                     return d
                 }
                 return v
@@ -3319,6 +3325,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (allDigits(v) || isIdentText(v)) { return true }
         var sp = splitSubscript(v)
         return sp.key != null && sp.key != "" && isIdentText(sp.name)
+    }
+    // ${NAME=WORD} of a positional or special parameter, which no assignment makes: bash 5.3
+    // refuses it before expanding WORD ("$1: cannot assign in this way"), or through an
+    // indirection (ind) after it ("1: invalid variable name"); either abandons the line with
+    // status 1. Twin of rt_no_assign in languages/lib/bash-rt.c.
+    function noAssign(nm, ind, wordT) {
+        if (ind && wordT != null) { wordJoin(wordT()) }
+        diagErr(ind ? nm + ": invalid variable name\n" : "$" + nm + ": cannot assign in this way\n")
+        abortSignal = {ret: 1, isExit: 1, soft: 1}
+        return ""
     }
     // ${v?word} / ${v:?word} on an unset (or, with the colon, empty) value: the word - or
     // bash's own text when it is empty - on standard error, and the (sub)shell ends with
@@ -3537,13 +3553,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return
             }
             if (selfV) { diagErr(kw + ": warning: " + names[k] + ": circular name reference\n") }
-            // export and readonly of a nameref that is an associative array (refIsAs) find no
-            // variable: nothing changes, status 0, except that readonly makes the variable bash
-            // finds instead readonly (vro), after which each refuses as a readonly variable
-            // named "" - twice, status 1, with a value. Twin of rt_nref_voidro.
-            if ((kw == "export" || kw == "readonly") && flags.indexOf("n") < 0 && refIsAs(names[k]) && (aw == null || aw.idxT == null)
+            // export and readonly of a nameref that is an array (refIsArr) find no variable:
+            // nothing changes, status 0, except that for an associative one readonly makes the
+            // variable bash finds instead readonly (vro), after which each refuses as a
+            // readonly variable named "" - twice, status 1, with a value. Twin of
+            // rt_nref_voidro.
+            if ((kw == "export" || kw == "readonly") && flags.indexOf("n") < 0 && refIsArr(names[k]) && (aw == null || aw.idxT == null)
                 && (asgs[k] == null || asgs[k].lit == null)) {
                 var vra = arrs[arrKey(names[k])]
+                if (!vra.assoc) { return }
                 if (vra.vro == true) {
                     diagErr(": readonly variable\n")
                     if (asgs[k] != null) { diagErr(": readonly variable\n"); roFail = true }
@@ -5100,6 +5118,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (blank) { paramErr(qn, wordT, colon) }
             return joined
         }
+        if (blank && o == "=" && isPosName(name)) { return noAssign(name, qn.charAt(0) == "!", wordT) }
         if (blank && o == "=") { return listDefault(name, sub, wordT, qn, circ) }
         if (blank) { return (o == "-") ? dfltWord(wordT) : ((wordT != null) ? wordJoin(wordT()) : "") }
         return joined
@@ -6952,6 +6971,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // binds it (cm).
     // asRef: the nameref an arithmetic element store resolved NAME through, else "".
     function roRefused(name, who, look, asRef) {
+        if (look.charAt(look.length - 1) == "m" && voidRo(name)) { diagErr(": readonly variable\n"); return true }
         // A store through a nameref is refused by the variable it names; one that binds the
         // name (look ends in m) names that variable, an array or element store the nameref
         // (bash's assign_array_element reports the name as written). Through a circular one
@@ -6990,7 +7010,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // roRefused for a store of a value: a nameref with no value takes the value first, which
     // must name a variable before the nameref's readonly refuses it (refSelfBad, refRoBad).
     function roRefusedV(name, look, asRef) {
-        if (refVoid(name)) { return false }
+        if (refVoid(name) && !voidRo(name)) { return false }
         return roRefused(name, "", look, asRef)
     }
     // Is NAME a nameref with no value (unset or empty)? A store through it is one to the
@@ -7175,6 +7195,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // dropped, status 0, and `unset` of it unsets it as -n does. Twin of rt_nref_isarr.
     function refIsArr(name) { return anyRef && noRef == 0 && attrOn(refVars, name) && isArr(name) }
     function refIsAs(name) { return refIsArr(name) && arrs[arrKey(name)].assoc }
+    // Is NAME one that readonly made the variable bash finds instead readonly (vro)? A
+    // scalar store through it - one that binds the name - is then refused as a store to the
+    // readonly variable "". Twin of rt_nref_voidro's mark 65536.
+    function voidRo(name) { return refIsAs(name) && arrs[arrKey(name)].vro == true }
     // A read of one: its elements, and their count or its length (whole), read as unset; its
     // value names no variable, which abandons the line with status 1.
     function refArrRead(whole, lenp) {
@@ -7475,7 +7499,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A binding of the temporary environment is exported while the command runs.
             exVars["$" + nm] = true
             saved[saved.length - 1].nv = v
-            saved[saved.length - 1].an = asgs[k].aname
+            // The name as written; a function's binding is its frame entry, whose an is the
+            // nameref attribute restoreLocal puts back.
+            saved[saved.length - 1].pname = asgs[k].aname
             touchVar(nm); vars["$" + nm] = v; varsHas["$" + nm] = true
         }
         return saved
@@ -8873,6 +8899,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             for (; ui < args.length; ui++) {
                 if (uf) { if (isFunc(args[ui])) { setFunc(args[ui], null, null, null) }; continue }
+                // `unset -n` of a name that is no nameref - an element, a function - leaves it
+                // alone, a readonly one refused (bash 5.3's unbind_nameref). Twin of the un
+                // arm of rt_unset_word.
+                if (un && !attrOn(refVars, args[ui])) {
+                    if (attrOn(roVars, args[ui])) { diagErr("unset: " + args[ui] + ": cannot unset: readonly variable\n"); ust = 1 }
+                    continue
+                }
                 var sp = splitSubscript(args[ui])
                 // Through a nameref that is an array it finds nothing to unset, except that one
                 // that is an associative array is itself unset, as by -n (rt_unset_ref).
@@ -9957,7 +9990,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return r
             }
             for (k = 0; k < asgs.length; k++) { cell["$" + asgs[k].aname] = null }
-            for (k = 0; k < saved.length; k++) { cell["$" + saved[k].an] = saved[k].nv }
+            for (k = 0; k < saved.length; k++) { cell["$" + saved[k].pname] = saved[k].nv }
             restorePrefix(saved)
             // A refused (readonly) prefix name, which has no value, stays as written.
             var how = ""
@@ -9974,7 +10007,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A name that takes its prefix value is exported, through a nameref the variable
             // it names (saved[k].name).
             for (k = 0; k < saved.length; k++) {
-                var p = lp.indexOf(saved[k].an)
+                var p = lp.indexOf(saved[k].pname)
                 if (unset.indexOf("x") < 0 && p >= 0 && how.charAt(p) == "b") { exVars["$" + saved[k].name] = true }
             }
             return st
@@ -10181,6 +10214,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // is an associative array stores nothing (refIsAs).
                 var fVoid = refIsAs(fname)
                 var fRef = anyRef && attrOn(refVars, fname) && refGlobal(fname) == ""
+                // One readonly made refuse a scalar store (voidRo) is asked before noRef hides it.
+                if (voidRo(fname) && roRefused(fname, "", "m", "")) { setStatus(1); return 1 }
                 if (fRef) { noRef = noRef + 1 }
                 // A readonly name - the nameref's own readonly for one - ends the loop at its
                 // first pass, status 1.

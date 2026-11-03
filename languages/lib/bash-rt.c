@@ -282,6 +282,7 @@ char *rt_eown(char *old, char *v, int n);
 int rt_release(long m, long lm);
 int rt_mf_next(void);
 int rt_isname(char *t);
+int rt_no_assign(char *n, int ind);
 int rt_isasgref(char *t);
 int rt_rd_badname(char *nm);
 char *rt_slicefields(char *f, int off, int n, char *sep, int star);
@@ -357,6 +358,7 @@ int rt_arith_failed(void);
 char *rt_getvar_ref(char *n, int quiet);
 int rt_nref_void(char *n);
 int rt_nref_voidro(char *n, int ro, int asg);
+int rt_nref_vro(char *n);
 int rt_nref_unglob(void);
 char *rt_nref_gread(void);
 int rt_unset_name(char *n);
@@ -6475,6 +6477,20 @@ int rt_isname(char *t)
     return 1;
 }
 
+/* ${NAME=WORD} landing on n, when n is a positional or special parameter,
+ * which no assignment makes: "$n: cannot assign in this way", or through an
+ * indirection (ind 1) "n: invalid variable name", and the line is abandoned
+ * with status 1 (arith_err). Answers 1 then, 0 for a NAME or NAME[SUB].
+ * Twin of noAssign in bash-interpreter.abnf. */
+int rt_no_assign(char *n, int ind)
+{
+    if (n[0] == 0 || rt_isname(n) != 0 || rt_indbr(n) >= 0) return 0;
+    if (ind == 0) rt_berr("", rt_strcat("$", n), "cannot assign in this way");
+    else rt_berr("", n, "invalid variable name");
+    arith_err = 1;
+    return 1;
+}
+
 /* A name a builtin may store into (read, printf -v): a NAME, or NAME[SUB] with
  * SUB not empty and its brackets balanced up to the last byte, as bash's
  * valid_array_reference. Twin of bashIsRef in lib/bash-deparse.js. */
@@ -6816,9 +6832,15 @@ int rt_nref_gset(char *n, char *v, int app, int at)
 /* A for loop's nameref control variable n stores the word v through a chain
  * that closes on a local as any scalar store does (rt_nref_gstore): 1 when it
  * did, 0 when the store is n's own, 2 when the variable it lands on is readonly
- * (at & 8), which names n after the chain's warning and ends the loop. */
+ * (at & 8), which names n after the chain's warning and ends the loop. One that
+ * is an associative array stores nothing, unless rt_nref_vro refuses it. */
 int rt_nref_fstore(char *n, char *v, int at)
 {
+    if (rt_nref_isarr(n, 0) != 0 && rt_isassoc(n) != 0) {
+        if (rt_nref_vro(n) == 0) return 1;
+        arith_err = 0;
+        return 2;
+    }
     if (rt_nref_close(n) < 0) return 0;
     if ((at & 8) != 0) {
         if (nref_quiet == 0) rt_berr("warning", n, "maximum nameref depth (8) exceeded");
@@ -6868,8 +6890,8 @@ int rt_nref_isarr(char *n, int sub)
     return 1;
 }
 
-/* export and readonly of the nameref n that is an associative array
- * (rt_nref_isarr) find no variable: nothing changes, except that readonly (ro 1)
+/* export and readonly of the nameref n that is an array (rt_nref_isarr) find no
+ * variable: nothing changes, except that for an associative one readonly (ro 1)
  * makes the variable bash finds instead readonly (mark 65536), after which each
  * refuses as a readonly variable named "" - twice, failing, with a value (asg 1).
  * Answers 0 for any other n, else 1, or 3 when refused. Twin of the same check
@@ -6877,7 +6899,8 @@ int rt_nref_isarr(char *n, int sub)
 int rt_nref_voidro(char *n, int ro, int asg)
 {
     int r;
-    if (rt_nref_isarr(n, 0) == 0 || rt_isassoc(n) == 0) return 0;
+    if (rt_nref_isarr(n, 0) == 0) return 0;
+    if (rt_isassoc(n) == 0) return 1;
     r = rt_ar_find(n);
     if ((ar_mk[r] & 65536) == 0) {
         if (ro != 0) ar_mk[r] = ar_mk[r] | 65536;
@@ -6887,6 +6910,19 @@ int rt_nref_voidro(char *n, int ro, int asg)
     if (asg == 0) return 1;
     rt_berr("", "", "readonly variable");
     return 3;
+}
+
+/* A scalar store through the nameref n that is an array (rt_nref_isarr) changes
+ * nothing, except that one rt_nref_voidro made readonly refuses it as a store
+ * to the readonly variable "" (arith_err): answers 1 then, else 0. Twin of
+ * voidRo in bash-interpreter.abnf. */
+int rt_nref_vro(char *n)
+{
+    int r = rt_ar_find(n);
+    if (r < 0 || (ar_mk[r] & 65536) == 0) return 0;
+    rt_berr("", "", "readonly variable");
+    arith_err = 1;
+    return 1;
 }
 
 /* A store that lands on the nameref n itself (its value unset or empty) must name
@@ -7338,7 +7374,7 @@ int rt_unset_ref(char *n, int ro, int d, int fn)
         rt_arr_smark(e);
         return 0;
     }
-    return rt_unset_word(e, 1, d, fn);
+    return rt_unset_word(e, 2, d, fn);
 }
 
 /* The attribute letters `at` (bash's order: a/A i n r t x c l u) with the n of a
@@ -9538,7 +9574,10 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
     char *old;
     at = at & 7;
     if (nref_any != 0) {
-        if (rt_nref_isarr(n, 0) != 0) return 0;
+        if (rt_nref_isarr(n, 0) != 0) {
+            if (rt_nref_vro(n) != 0) sub_bad = 1;
+            return 0;
+        }
         if (rt_nref_gstore(n) != 0) return rt_nref_gset(n, v, app, at | bi | ro);
         n = rt_nref_end(n);
         if (n == 0) {
@@ -9872,7 +9911,10 @@ int rt_ar_nset(char *nm, char *k, char *v, int at, char *as)
 {
     int i = -1;
     int r;
-    if (rt_nref_isarr(nm, k != 0 ? 2 : 0) != 0) return 0;
+    if (rt_nref_isarr(nm, k != 0 ? 2 : 0) != 0) {
+        if (k == 0) rt_nref_vro(nm);
+        return 0;
+    }
     if (nref_any != 0 && (rt_arr_marks(nm) & 32) != 0 && rt_nref_end(nm) == 0) {
         i = rt_nref_glob(nm);
         if (k == 0 && i >= 0 && rt_arr_any(varnames[i]) == 0) {
@@ -10134,7 +10176,8 @@ int rt_unset_name(char *n)
 
 /* `unset [-n] WORD` where the word came out of an expansion, run in a call whose
  * frame starts at depth d (-1 outside a function; fn is $FUNCNAME's slot): a
- * NAME[SUB] as rt_unset_name; without -n (un 0), a nameref as rt_unset_ref; a
+ * NAME[SUB] as rt_unset_name; without -n (un 0), a nameref as rt_unset_ref,
+ * which passes un 2 for the variable its chain ends at; a
  * readonly variable is refused; a local of this call stays declared (rt_unset_x),
  * a caller's is dropped (rt_unset_up). Twin of the literal unset arm of the
  * emitter, and of the unset arm of runCommand in bash-interpreter.abnf. */
@@ -10144,6 +10187,13 @@ int rt_unset_word(char *n, int un, int d, int fn)
     int id = rt_varslot(n);
     int own = 0;
     int t = d;
+    /* -n of a name that is no nameref - an element too - leaves it alone, a
+     * readonly one refused (bash 5.3's unbind_nameref). */
+    if (un == 1 && (rt_arr_marks(n) & 32) == 0) {
+        if ((rt_ro_name(n) & 8) == 0) return 0;
+        rt_berr("unset", n, "cannot unset: readonly variable");
+        return 1;
+    }
     if (len > 2 && n[len - 1] == 93) return rt_unset_name(n);
     while (id >= 0 && d >= 0 && t < ls_top && own == 0) {
         if (ls_id[t] == id && ls_tmp[t] != 1) own = 16;

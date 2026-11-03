@@ -406,6 +406,89 @@ s168() {
   check nde1 "$(s168s "$e")" '<u> <q> <>;hi;`s168v[1]'"'"': not a valid identifier;s=2;s168a: `s168v[1]'"'"': not a valid identifier;s=2;s168r[@]: bad array subscript;s=2;'
   unset -n s168r
 }
+# ===== SECTION 169: unset -n of a name that is no nameref; unset of a caller's prefix binding =====
+# `unset -n NAME` unsets only a nameref: a variable, an array, a function or NAME[SUB] stays,
+# a readonly one is refused. A function's `unset` of the prefix binding its caller's call
+# gave it uncovers the global binding. Every expected value is bash 5.3's.
+s169() {
+  local e
+  s169s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s169f() { local y=1; unset -n y; declare -p y; }
+  s169g() { echo g; }
+  s169i() { unset s169x; declare -p s169x; }
+  s169o() { s169x=1 s169i; echo "o:${s169x-U}"; }
+  s169j() { local nm=s169z; unset "$nm"; declare -p s169z; }
+  s169p() { s169z=1 s169j; echo "p:${s169z-U}"; }
+  e=$( (s169a=1; s169b=(1 2 3); s169t=v; declare -n s169r=s169t; readonly s169q=1
+        unset -n s169a 's169b[1]' s169b s169g; echo "a:$? ${s169a-U} ${s169b[*]}"; s169g; s169f
+        unset -n s169r; echo "r:${s169r-U} ${s169t-U}"; unset -n s169q; echo "q:$?"
+        v=s169a; unset -n "$v"; echo "c:${s169a-U}"
+        s169x=G; s169o; s169z=G; s169p) 2>&1)
+  check unn1 "$(s169s "$e")" 'a:0 1 1 2 3;g;declare -- y="1";r:U v;unset: s169q: cannot unset: readonly variable;q:1;c:1;declare -- s169x="G";o:G;declare -- s169z="G";p:G;'
+}
+# ===== SECTION 170: a default for a positional or special parameter =====
+# ${N=WORD} and ${N:=WORD} on an unset (or empty) positional or special parameter - $1,
+# $10, $@, $* - are refused before WORD expands ("$1: cannot assign in this way"), through
+# an indirection after it ("1: invalid variable name"); either abandons the line with status
+# 1. A set one ($#, $?, $-, $0) expands as it is. A store through a nameref that is refused
+# - readonly, a bad subscript - abandons the line with status 2. Every expected value is
+# bash 5.3's.
+s170() {
+  local e
+  s170s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s170f() { echo "${2=y}"; echo no; }
+  s170g() { : ${1:=${s170z:=7}}; echo no; }
+  e=$( (s170g; echo no) 2>&1; echo "a:$? ${s170z-U}"
+       (s170f; echo no) 2>&1; echo "b:$?"
+       (s170f p; echo no) 2>&1; echo "c:$?"
+       (s170f p q; echo "d:$?") 2>&1)
+  check noa1 "$(s170s "$e")" '$1: cannot assign in this way;a:1 U;$2: cannot assign in this way;b:1;$2: cannot assign in this way;c:1;q;no;d:0;'
+  s170h() { echo "${@:=x}"; echo no; }
+  s170i() { echo "${*=x}"; echo no; }
+  s170j() { echo "${10:=x}"; echo no; }
+  s170k() { echo "<${#:=x}> <${?:=x}> <${-:+set}> <${0:+set}>"; }
+  e=$( (s170h; echo no) 2>&1; echo "h:$?"; (s170i; echo no) 2>&1; echo "i:$?"; (s170j 1; echo no) 2>&1; echo "j:$?"; s170h p; s170k)
+  check noa2 "$(s170s "$e")" '$@: cannot assign in this way;h:1;$*: cannot assign in this way;i:1;$10: cannot assign in this way;j:1;p;no;<0> <0> <set> <set>;'
+  s170m() { local r=$1; : ${!r:=${s170y:=7}}; echo no; }
+  s170n() { local r='@'; echo "${!r=x}"; echo no; }
+  e=$( (s170m 2; echo no) 2>&1; echo "m:$?"; (s170n; echo no) 2>&1; echo "n:$?")
+  check noa3 "$(s170s "$e")" '2: invalid variable name;m:1;@: invalid variable name;n:1;'
+  e=$( (readonly s170t; declare -n s170r=s170t; : ${s170r:=5}; echo no) 2>&1; echo "s=$?"
+       (declare -n s170q='s170a[@]'; : ${s170q:=5}; echo no) 2>&1; echo "s=$?")
+  check noa4 "$(s170s "$e")" 's170t: readonly variable;s=2;s170a[@]: bad array subscript;s=2;'
+}
+# ===== SECTION 171: readonly through a nameref that is an array =====
+# A function's circular nameref given an associative array names no variable bash can
+# follow: readonly of it makes the variable bash finds instead - named "" - readonly, and
+# every later scalar store through it is refused as that variable's. An assignment or a
+# ${REF:=WORD} abandons the line (status 1, 2), a builtin's store or an arithmetic one
+# fails it (status 1; read's non-last name 2); an element, an array literal, mapfile,
+# read -a and a prefix binding still store nothing, status 0. export and readonly of one
+# that is an indexed array change nothing, status 0. Every expected value is bash 5.3's.
+s171() {
+  local e
+  s171s() { local l; while IFS= read -r l; do case $l in *"warning: w: circular name reference") ;; *": line "*) l=${l#*: line }; l=${l#*: }; printf '%s;' "$l" ;; *) printf '%s;' "$l" ;; esac; done <<< "$1"; }
+  s171a() { local -n w=w; declare -A w=x; readonly w; echo "r:$?"; w=3; echo no; }
+  s171b() { local -n w=w; declare -A w=x; readonly w; w+=3; echo no; }
+  s171c() { local -n w=w; declare -A w=x; readonly w; : ${w:=6}; echo no; }
+  e=$( (s171a; echo no) 2>&1; echo "a:$?"; (s171b; echo no) 2>&1; echo "b:$?"; (s171c; echo no) 2>&1; echo "c:$?")
+  check vro1 "$(s171s "$e")" 'r:0;: readonly variable;a:1;: readonly variable;b:1;: readonly variable;c:2;'
+  s171d() {
+    local -n w=w; declare -A w=x; readonly w
+    read w <<< "r"; echo "d:$?"; read w s171u <<< "r s"; echo "d2:$? ${s171u-U}"
+    printf -v w x; echo "e:$?"; (( w = 4 )); echo "f:$?"; let w=5 s171v=1; echo "g:$? ${s171v-U}"
+    for w in 1 2; do echo in; done; echo "h:$?"
+    w[k]=1; echo "i:$?"; w=(a); echo "j:$?"; mapfile w <<< "m"; echo "k:$?"; read -a w <<< "q"; echo "l:$?"
+    w=3 eval 'echo "m:$?"'; readonly w; echo "n:$?"
+    : $(( w = 2 )); echo no
+  }
+  e=$( (s171d; echo no) 2>&1; echo "o:$?")
+  check vro2 "$(s171s "$e")" ': readonly variable;d:1;: readonly variable;d2:2 U;: readonly variable;e:1;: readonly variable;f:1;: readonly variable;g:1 U;: readonly variable;h:1;i:0;j:0;k:0;l:0;m:0;: readonly variable;n:0;: readonly variable;o:1;'
+  s171x() { local -n w=w; declare -a w=x 2>/dev/null; export w=1; echo "x:$?"; declare -p w; export w; echo "x2:$?"; declare -p w; }
+  s171y() { local -n w=w; declare -a w=x 2>/dev/null; readonly w 2>/dev/null; echo "y:$?"; declare -p w; }
+  e=$( (s171x; s171y) 2>&1)
+  check vro3 "$(s171s "$e")" 'x:0;declare -an w=();x2:0;declare -an w=();y:0;declare -an w=();'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -423,5 +506,8 @@ s165  # SECTION-CALL 165
 s166  # SECTION-CALL 166
 s167  # SECTION-CALL 167
 s168  # SECTION-CALL 168
+s169  # SECTION-CALL 169
+s170  # SECTION-CALL 170
+s171  # SECTION-CALL 171
 echo "full: $checks checks, $fails failures"
 exit $fails
