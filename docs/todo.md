@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1178 ruby: each_* return value, Proc#[] arity, class_eval/attr_accessor, each_index, Complex.polar, a**b warning, Math 1-ulp · P3 · RB · OPEN [V]
+### T-1178 ruby: each_* return value, Proc#[] arity, class_eval/attr_accessor, each_index, Complex.polar, a**b warning, Math 1-ulp · P3 · RB · IN PROGRESS (RB worker, round 69) [V]
 Found while closing T-1173; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
 - String each_* with a block return a copy instead of the receiver: each_char, each_byte, each_line, each_codepoint, each_grapheme_cluster (also on binary Strings) — `x.each_char{}.equal?(x)` false; MRI true.
 - `x[a, b, c]` on a Proc/lambda drops the last argument: `->(*c){c}[1,2,3]` gives [1,2] (MRI [1,2,3]); `->(a,b,c){}[1,2,3]` raises ArgumentError. `.call` and `.()` work.
