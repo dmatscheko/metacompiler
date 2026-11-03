@@ -129,7 +129,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1191 bash: `select`, `! !`, eval syntax error under `set -e` · P3 · SH · OPEN [V]
+### T-1191 bash: `select`, `! !`, eval syntax error under `set -e` · P3 · SH · IN PROGRESS (SH worker, round 68) [V]
 Found while closing T-1190 (worker-reported; verify on the oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3 first). All engines.
 - `select` is not supported. `select x in a b; do echo "$x"; break; done <<< 2` should print the numbered menu on stderr and then `b`. A bare `select` is "syntax error near unexpected token `newline'" with exit 2; ours says "select: command not found", 127. Implement the compound command (PS3, REPLY, the menu layout on stderr, EOF ending the loop, break) in both engines.
 - `! ! true; echo $?` is silent with status 0 in bash; ours prints "!: command not found".
