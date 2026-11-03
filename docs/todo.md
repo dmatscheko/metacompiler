@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1181** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1182** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,12 +128,11 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1180 bash: `$!` before any background job, the readonly leak from a void indexed nameref (compiler), repeated `:=` refusals, the variable named "" · P3 · SH · IN PROGRESS (SH worker, round 58) [V]
-Found while closing T-1177; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
-- All engines: `$!` is unset until a background job runs. bash: `echo "[$!] ${!-u}"` → `[] u`; `${!:=x}` → "$!: cannot assign in this way" with status 1; under `set -u` → "$!: unbound variable". Ours: `[0] 0`. The interpreter also counts up fake pids. Keep both engines consistent.
-- Compiler only (run + native): `s6(){ local -n w=w; declare -a w=(p q); readonly w; }; s6; declare -p w; s7(){ local -n w=w; echo $?; }; s7`. bash: "declare: w: not found", then s7 prints 0. Compiled: `declare -r w`, then "local: w: readonly variable" and 1. The interpreter is right. Assert only the deterministic parts, because bash's readonly stderr here reads freed memory.
-- Reported by the worker, needs an oracle check: a `:=` store that is refused does not stop the rest of the line from expanding. `unset t; readonly t; declare -n q5=t; : ${q5:=5} ${q5:=6}`: bash says "t: readonly variable" once, ours twice. The target must be UNSET and readonly, or `:=` never stores.
-- All engines: the variable named "" is not modelled. Through a circular assoc nameref, `w=3` stores into a function-local variable named "". `declare -p ""` gives `declare -- ="3"`, and two such namerefs in one function share it. Ours drops the store. Low priority.
+### T-1181 bash: computed `declare -p` operand (compiler), `${!#x}`, `declare -n h; declare -A h` · P3 · SH · OPEN [V]
+Found while closing T-1180; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
+- Compiler only: `e=x; declare -p "$e"` fails at compile time with "a computed operand of `declare -p` is not supported by this compiler". bash prints `declare -- x="abc"`, and the interpreter is right. Support computed operands, the "" from T-1180 included.
+- All engines: `echo "${!#x}"` is "${!#x}: bad substitution" in bash and abandons the line. Ours prints an empty line and continues with status 0.
+- All engines: in a function, `declare -n h; declare -A h; declare -p h` prints `declare -An h` in bash, and a scalar store goes to "". Then `h=([0]=6)` prints "warning: h: removing nameref attribute" and gives `declare -A h=([0]="6" )`. Ours drops -n at the declare and never warns.
 
 # C — C subset
 
@@ -1219,6 +1218,7 @@ T-1176 bash: computed `unset $v` (compiler), declaration builtins on a circular 
 T-1173 ruby: String#to_r/to_c/setbyte/grapheme_clusters/undump, unicode_normalize, Class.new reflection — merged (6 commits to caf91324): String#to_r/to_c and Rational()/Complex() of a String, setbyte, undump/dump, in-place scrub!/encode!, UAX#29 grapheme clusters, UAX#15 unicode_normalize(!)/normalized?, Class.new reflection; Did-you-mean recorded as a limit; master four-leg probe matches ruby 2.6; master paired bench -0.00%
 T-1178 ruby: each_* return value, Proc#[] arity, class_eval/attr_accessor, each_index, Complex.polar, a**b warning, Math 1-ulp — DONE - every code item fixed and oracle-probed in all three legs (each_* return the receiver, Proc#[] takes any number of arguments, run-time attr_* and class_eval passing the class, blockless each_index, Complex.polar/rect, the a**b warning with MRI's limit); Math sin/cos 1-ulp recorded as a platform-libm LIMIT; Did you mean? and non-UTF encodings recorded as LIMITS
 T-1177 bash: `unset -n` on a non-nameref, unset of a caller's prefix binding (interp), `${1:=x}`, stores after readonly on a circular assoc nameref — DONE - unset -n on a non-nameref is a no-op (readonly refused), the interp's caller prefix binding no longer comes back as a nameref, ${N:=W} on positional/special params refuses before W expands, stores through a readonly void assoc nameref refused per site, indexed variant export/readonly are no-ops; oracle-probed on all legs incl. stderr and exit status; readonly -p listing by design
+T-1180 bash: `$!` before any background job, the readonly leak from a void indexed nameref (compiler), repeated `:=` refusals, the variable named "" — DONE - $! unset before any job, a refused := stops the line, the compiler's readonly leak from a void indexed nameref, the variable named "" behind a void assoc nameref modelled; oracle-probed on all legs incl. stderr and exit status
 
 # Settled — do not re-open
 
