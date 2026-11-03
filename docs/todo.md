@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1179** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1180** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,16 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1178 ruby: each_* return value, Proc#[] arity, class_eval/attr_accessor, each_index, Complex.polar, a**b warning, Math 1-ulp · P3 · RB · IN PROGRESS (RB worker, round 69) [V]
-Found while closing T-1173; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
-- String each_* with a block return a copy instead of the receiver: each_char, each_byte, each_line, each_codepoint, each_grapheme_cluster (also on binary Strings) — `x.each_char{}.equal?(x)` false; MRI true.
-- `x[a, b, c]` on a Proc/lambda drops the last argument: `->(*c){c}[1,2,3]` gives [1,2] (MRI [1,2,3]); `->(a,b,c){}[1,2,3]` raises ArgumentError. `.call` and `.()` work.
-- `attr_accessor` inside `class_eval` or a `Class.new` block does not define the accessors; `class_eval` does not pass the class to its block (`C.class_eval { |k| p k }`).
-- `Array#each_index` without a block crashes the engine (MRI returns an Enumerator).
-- `Complex.polar` is missing.
-- The warning "in a**b, b may be too big" (stderr) is missing for huge exponents.
-- Math.sin / Math.cos are 1 ulp off MRI on some inputs — find the inputs, check whether it is the libm used by each leg; do not hand-roll an approximation (record as a limit if it is the platform libm).
-- Record as limits: "Did you mean?" suggestions in NoMethodError messages; ISO-8859-1 / Shift_JIS / UTF-16 encodings.
+### T-1179 ruby: exact Integer powers capped at exponent 4096, 0**-n, binary String iterator encodings · P3 · RB · OPEN [V]
+Found while closing T-1178; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines.
+- Exact Integer powers stop at an exponent of 4096: `3**5000` gives `Infinity` typed as Integer (`.to_s.size` = 8). MRI gives the exact 2386-digit Integer, and `256**479000` / `3**4068000` are exact too. Negative exponents beyond the cap give Float 0.0 where MRI gives an exact Rational. The cap exists because bigPow is schoolbook in MetaJS. Make exact powers work up to MRI's own limit (the 32Mi-bit point where it warns and returns Float) while keeping the cost acceptable. Use a better multiplication algorithm in the runtime, NOT an optimizer pass.
+- `0 ** -5000` gives `Infinity`; MRI raises ZeroDivisionError "divided by 0". Check every negative exponent.
+- Binary (ASCII-8BIT) String each_char / each_line / each_codepoint / chars yield UTF-8 Strings; MRI yields ASCII-8BIT (`"h\xC3\xA9".b.each_char{|c| p c.encoding}`).
+- Do not replicate MRI 2.6's 32-bit truncation of a huge negative exponent on a Bignum base (`(2**70) ** -(2**62)` → `(1/1)`); record it as an oracle bug.
+- Low: the parser accepts `x = 1 rescue p $!`, which MRI rejects as a syntax error ("unexpected tGVAR"). Accepting an invalid program is lower priority than the items above.
 
 # JS — JavaScript and TypeScript
 
@@ -1221,6 +1218,7 @@ T-1172 bash: -a declarations through namerefs to unset globals, second operand a
 T-1175 bash: nameref refusals naming the target, readonly through a callee's nameref, array assignment to a circular assoc nameref — merged d924ee3e: make_local_variable rule for declarations through a function's nameref (refusals name the nameref; a callee may hide a caller's readonly local, not a readonly global), circular associative array namerefs drop stores and read unset; master probe matches bash 5.3
 T-1176 bash: computed `unset $v` (compiler), declaration builtins on a circular assoc nameref, `${e[0]:=v}` through a NAME[SUB] nameref — merged 79c58121: computed unset $v in the compiler (rt_unset_word; also literal unset through a nameref), export/readonly on a circular assoc nameref, ${e[0]:=v} through a NAME[SUB] nameref; master probe matches bash 5.3; bench +0.15% on non-hot paths (master re-check blocked by a stale bench lock)
 T-1173 ruby: String#to_r/to_c/setbyte/grapheme_clusters/undump, unicode_normalize, Class.new reflection — merged (6 commits to caf91324): String#to_r/to_c and Rational()/Complex() of a String, setbyte, undump/dump, in-place scrub!/encode!, UAX#29 grapheme clusters, UAX#15 unicode_normalize(!)/normalized?, Class.new reflection; Did-you-mean recorded as a limit; master four-leg probe matches ruby 2.6; master paired bench -0.00%
+T-1178 ruby: each_* return value, Proc#[] arity, class_eval/attr_accessor, each_index, Complex.polar, a**b warning, Math 1-ulp — DONE - every code item fixed and oracle-probed in all three legs (each_* return the receiver, Proc#[] takes any number of arguments, run-time attr_* and class_eval passing the class, blockless each_index, Complex.polar/rect, the a**b warning with MRI's limit); Math sin/cos 1-ulp recorded as a platform-libm LIMIT; Did you mean? and non-UTF encodings recorded as LIMITS
 
 # Settled — do not re-open
 
