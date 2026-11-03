@@ -2225,6 +2225,27 @@ func rubyBoxInspect(t *jsRBin) string {
 	return sb.String()
 }
 
+// rubyBinCodepoints answers the code points of the bytes b of a String in
+// encoding enc up to its first invalid UTF-8 sequence, and whether one stopped
+// it. Twin of rbsBinCodepoints in ruby-str.js.
+func rubyBinCodepoints(b, enc string) (*jsArray, bool) {
+	out := &jsArray{}
+	for i := 0; i < len(b); {
+		if enc != "UTF-8" {
+			out.elems = append(out.elems, float64(b[i]))
+			i++
+			continue
+		}
+		r, k := utf8.DecodeRuneInString(b[i:])
+		if r == utf8.RuneError && k <= 1 {
+			return out, true
+		}
+		out.elems = append(out.elems, float64(r))
+		i += k
+	}
+	return out, false
+}
+
 // rubyU8Len counts the characters of UTF-8 bytes b, a byte that starts no valid
 // character as one. Twin of rbsU8Len in ruby-str.js.
 func rubyU8Len(b string) int {
@@ -3401,6 +3422,24 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		}
 		for _, g := range arr.elems {
 			rt.call(blk, jsUndef, []interface{}{g})
+		}
+		return t
+	case "codepoints", "each_codepoint":
+		// Twin of the codepoints arm of binMethod in ruby-interpreter.abnf.
+		cps, bad := rubyBinCodepoints(t.b, enc)
+		if blk != nil {
+			for _, cp := range cps.elems {
+				rt.call(blk, jsUndef, []interface{}{cp})
+			}
+		}
+		if bad {
+			rt.rubyRaiseErr(name, "ArgumentError", "invalid byte sequence in UTF-8")
+		}
+		if name == "codepoints" {
+			return cps
+		}
+		if blk == nil {
+			return rubyEnumAt(rubyMkEnum(cps), t, name, pos)
 		}
 		return t
 	case "each_char", "each_line":

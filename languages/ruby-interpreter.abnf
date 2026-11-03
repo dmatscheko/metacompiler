@@ -119,7 +119,22 @@ GuardedItems = Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
               [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ] ;
 // def self.m: a method of the class object itself, not of its instances.
 SelfRecv    <~~ push({selfrecv: true, srecv: pop()}) ~~>
-            = SelfRecvHead "." ;
+            = SelfRecvHead "." | ColonRecvHead "::" ;
+// `def Foo::Bar::m`: the receiver is every segment but the last.
+ColonRecvHead <~~ push(up.in) ~~>
+            = KwSelf | Name { MoreSegs "::" Name } ;
+// Succeeds when `::NAME::` follows, so the segment is not the method name.
+MoreSegs    = :script(~~ "pure";
+    (function() {
+        var no = abnf.newToken("\x01lastseg", 0)
+        if (c.peek(0) !== 58 || c.peek(1) !== 58) { return no }
+        var i = 2
+        var cc = c.peek(i)
+        while ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) { i = i + 1; cc = c.peek(i) }
+        if (i > 2 && cc === 58 && c.peek(i + 1) === 58) { return undefined }
+        return no
+    })()
+~~) ;
 // `def obj.m` also names the receiver with an @ivar, a @@classvar, a $global or a
 // scoped constant (`def @obj.foo`, `def Foo::Bar.m`) - all of them singleton defs.
 // The receiver TEXT is carried up so that anything but `self` becomes a def on that
@@ -327,22 +342,51 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // site; Semi and Require push nothing, so it cannot sit on Statement itself.
 Statement   = Semi | Require | PosStmt ;
 PosStmt     <~~ var sti = takeAll(); settleSfx(sti[0]); push(stmtAt(sti)) ~~>
-            = "" <~~ push(up.pos) ~~> ( DoWhileStmt | ModStmt ) ;
+            = "" <~~ push(up.pos) ~~> ( DoWhileStmt | ModStmt ) StmtTerm ;
+// A statement ends at a line break, a `;`, the end of the file, or a token that closes
+// the enclosing construct (`end`, a bracket, `else`/`elsif`/`ensure`/`when`/`then`/`do`
+// /`in`). Anything else on the same line is MRI's "syntax error, unexpected ...": `x = 1 2`
+// is two expressions with no separator. A `\` line join is whitespace, not a break; a
+// heredoc token already ends with its terminator line's break.
+StmtTerm    = :script(~~ "pure";
+    (function() {
+        if (c.peek(-1) === 10) { return undefined }
+        var i = 0
+        var cc = c.peek(i)
+        while (true) {
+            if (cc === 32 || cc === 9 || cc === 13) { i = i + 1; cc = c.peek(i) }
+            else if (cc === 92 && c.peek(i + 1) === 10) { i = i + 2; cc = c.peek(i) }
+            else if (cc === 92 && c.peek(i + 1) === 13 && c.peek(i + 2) === 10) { i = i + 3; cc = c.peek(i) }
+            else { break }
+        }
+        if (cc < 0 || cc === 10 || cc === 35 || cc === 59 || cc === 125 || cc === 41 || cc === 93) { return undefined }
+        var ws = ["end", "else", "elsif", "ensure", "when", "then", "do", "in"]
+        for (var w = 0; w < ws.length; w++) {
+            var k = ws[w]
+            var ok = true
+            for (var j = 0; j < k.length; j++) { if (c.peek(i + j) !== k.charCodeAt(j)) { ok = false; break } }
+            if (ok) {
+                var t = c.peek(i + k.length)
+                if (!(t === 95 || (t >= 48 && t <= 57) || (t >= 65 && t <= 90) || (t >= 97 && t <= 122) || t >= 128 || t === 63 || t === 33)) { return undefined }
+            }
+        }
+        return abnf.newToken("\x01nostmtsep", 0)
+    })()
+~~) ;
 Semi        = ";" ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
-            = StmtRescue [ SameLine NotAfterSemi ModKw ModCond ] ;
+            = StmtRescue { SameLine ( ModKw ModCond | ModRescue SimpleStmt ) } ;
+// `a if b rescue c`: a rescue modifier may follow another modifier, `(a if b) rescue c`.
+ModRescue   = KwRescue <~~ push({mod: "rescue"}) ~~> ;
 // STMT rescue STMT: the STATEMENT modifier form of rescue. MRI allows the modifier at
 // exactly three places - a statement, an assignment's right-hand side (AssignRhs) and a
 // parenthesised body (reached through ParenBody) - and REJECTS `f(a rescue b)', so it is
 // not part of the expression chain.
-// NotAfterSemi is what keeps a one-line `def f; raise "x"; rescue; 1; end' intact:
-// ExprStmt consumes the `;', so without it this rule would steal the def's own
-// rescue CLAUSE.
 StmtRescue  <~~ push(makeRescueMod(takeAll())) ~~>
-            = SimpleStmt [ SameLine NotAfterSemi KwRescue SimpleStmt ] ;
+            = SimpleStmt [ SameLine KwRescue SimpleStmt ] ;
 // `remove_method :m if method_defined? :m` - the condition of a modifier is a full
 // statement-level expression, so a paren-less call is one of the forms it may take.
 ModCond     = CommandForm | Expression ;
@@ -351,7 +395,7 @@ SimpleStmt  = PutsStmt | MultiAssign | AppendStmt | CommandStmt | PatAssign | Ex
 // when the pattern does not match, so it is a statement and not a test. FatArrowAhead
 // is a cheap fast-fail: without it EVERY statement would parse its expression twice.
 PatAssign   <~~ push(makePatAssign(takeAll())) ~~>
-            = FatArrowAhead Expression "=>" PatTop [ ";" ] ;
+            = FatArrowAhead Expression "=>" PatTop ;
 // NAME arg[, arg] [block]: the parenthesis-less command call (`describe "x" do .. end`,
 // `include Comparable`, `alias_method :other, :real`). It lives at STATEMENT level
 // only: inside an argument list `f(double, 21)` a bare name is a VALUE, not a call of
@@ -600,10 +644,12 @@ DqPathChar  = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" 
 // Kept at statement level (needs a comma after the first target) so it never
 // interferes with a nested expression.
 MultiAssign <~~ var mi = takeAll(); noteLexAssign(mi, up.start); push(makeMultiAssign(mi)) ~~>
-            = MSplat "=" !"=" RetVal { "," RetVal } [ ";" ]
-            | MGroup "=" !"=" RetVal { "," RetVal } [ ";" ]
-            | MTarget "=" !"=" NotTilde RetVal "," RetVal { "," RetVal } [ ";" ]
-            | MTarget "," [ MTarget { "," MTarget } [ "," ] ] "=" RetVal { "," RetVal } [ ";" ] ;
+            = MSplat "=" !"=" MRhs
+            | MGroup "=" !"=" MRhs
+            | MTarget "=" !"=" NotTilde RetVal "," RetVal { "," RetVal }
+            | MTarget "," [ MTarget { "," MTarget } [ "," ] ] "=" MRhs ;
+// `a, b = f x`: the right side may be one paren-less call.
+MRhs        = CommandForm | RetVal { "," RetVal } ;
 // A multiple-assignment target: a splat target (*rest, which collects the leftover
 // values into an array), a parenthesized nested group ((m, n), o = [5, 6], 7) or an
 // ordinary target. Longest first, so *x and (x, y) are not read as a plain Target.
@@ -630,7 +676,7 @@ PutsStmt    <~~ push(makePuts(takeAll())) ~~>
 PutsCall    <~~ push(makePuts(takeAll())) ~~>
             = KwPuts <~~ push({cmd: up.in}) ~~> ParenNext "(" [ Expression { "," Expression } [ "," ] ] ")" ;
 
-ExprStmt    = Expression [ ";" ] ;
+ExprStmt    = Expression ;
 
 // Every expression pushes exactly one thunk: function() -> value. A ternary
 // cond ? a : b binds looser than the boolean operators (like Ruby).
@@ -640,17 +686,23 @@ ExprStmt    = Expression [ ";" ] ;
 // forms && || ! keep their tight precedence inside OrExpr/AndExpr/NotExpr below.
 Expression  = LowOr ;
 LowOr       <~~ push(makeOrAnd(takeAll(), true)) ~~>
-            = LowAnd { OrWord LowAnd } ;
+            = LowAnd { OrWord WordAnd } ;
 LowAnd      <~~ push(makeOrAnd(takeAll(), false)) ~~>
-            = LowNot { AndWord LowNot } ;
-// `x and puts "a"': a puts / print command is an operand of the word operators.
-LowNot      = LowNotOp | PutsStmt | PatTest ;
+            = LowNot { AndWord WordRhs } ;
+// After a word operator a paren-less call is an operand too (`x and f a`); the
+// first operand of a statement already had CommandStmt's chance.
+WordAnd     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = WordRhs { AndWord WordRhs } ;
+WordRhs     = CommandForm | LowNot ;
+// `x and puts "a"', `x or return 1': a puts / print or keyword command is an operand
+// of the word operators.
+LowNot      = LowNotOp | PutsStmt | KwCmd | PatTest ;
 // EXPR in PATTERN is a boolean test (Ruby 3.0). SameLine is what keeps the `in` of a
 // `case SUBJ` newline `in ...' clause from being read as a test on the subject.
 PatTest     <~~ push(makePatTest(takeAll())) ~~>
             = AssignExpr [ SameLine KwIn Pattern ] ;
 LowNotOp    <~~ push(makeNot(pop())) ~~>
-            = NotWord LowNot ;
+            = NotWord WordRhs ;
 OrWord      = "or" KwEnd ;
 AndWord     = "and" KwEnd ;
 NotWord     = "not" KwEnd ;
@@ -671,40 +723,8 @@ Assignment  <~~ var ai = takeAll(); noteLexAssign([ai[0]], up.start); push(makeA
 // error while `x = f 1 rescue p 5' is not. NoRescueNext keeps a fallback that is
 // not an expression from being re-read as a statement modifier on the assignment.
 AssignRhs   <~~ push(makeRescueMod(takeAll())) ~~>
-            = ( SplatRhs | CommandForm ) [ SameLine KwRescue RhsCore ]
-            | AssignExpr ( SameLine KwRescue AssignExpr NotCmdTail | NoRescueNext ) ;
-// Fails after a fallback that is one word followed, on the same line, by what can
-// only be its argument (`rescue p $!', `rescue puts "w"', `rescue foo bar'). A
-// sign, `*`, `&`, `[` or `(` after it may be an operator, and passes.
-NotCmdTail  = :script(~~
-    (function() {
-        function isId(ch) { return (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 }
-        // Whether the word w stands at p, whole.
-        function wordIs(p, w) {
-            for (var k = 0; k < w.length; k++) { if (c.peek(p + k) !== w.charCodeAt(k)) { return false } }
-            var a = c.peek(p + w.length)
-            return !isId(a) && a !== 63 && a !== 33
-        }
-        var ws = -1
-        while (isId(c.peek(ws)) || c.peek(ws) === 63 || c.peek(ws) === 33) { ws = ws - 1 }
-        var f0 = c.peek(ws + 1)
-        if (ws === -1 || !isId(f0) || (f0 >= 48 && f0 <= 57) || wordIs(ws + 1, "defined?")) { return undefined }
-        var b = ws
-        while (c.peek(b) === 32 || c.peek(b) === 9) { b = b - 1 }
-        if (b === ws || !wordIs(b - 5, "rescue") || isId(c.peek(b - 6))) { return undefined }
-        var i = 0
-        while (c.peek(i) === 32 || c.peek(i) === 9) { i = i + 1 }
-        if (i === 0) { return undefined }
-        var cc = c.peek(i)
-        var bad = abnf.newToken("\x01cmdtail", 0)
-        if ((cc >= 48 && cc <= 57) || cc === 34 || cc === 39 || cc === 36 || cc === 64 || cc === 96) { return bad }
-        if (cc === 33 && c.peek(i + 1) !== 61 && c.peek(i + 1) !== 126) { return bad }
-        if (!isId(cc)) { return undefined }
-        var mods = ["if", "unless", "while", "until", "rescue", "and", "or", "then", "do", "end", "in"]
-        for (var k = 0; k < mods.length; k++) { if (wordIs(i, mods[k])) { return undefined } }
-        return bad
-    })()
-~~) ;
+            = ( SplatRhs | KwCmd | CommandForm ) [ SameLine KwRescue RhsCore ]
+            | AssignExpr ( SameLine KwRescue AssignExpr | NoRescueNext ) ;
 // Fails when `rescue` follows on the same line.
 NoRescueNext = :script(~~
     (function() {
@@ -717,7 +737,7 @@ NoRescueNext = :script(~~
         return abnf.newToken("\x01rescue", 0)
     })()
 ~~) ;
-RhsCore     = SplatRhs | CommandForm | AssignExpr ;
+RhsCore     = SplatRhs | KwCmd | CommandForm | AssignExpr ;
 SplatRhs    <~~ push(makeSplatRhs(pop())) ~~>
             = "*" !"*" AssignExpr ;
 // ||= and &&= (conditional assignment) are accepted but not implemented (no short
@@ -735,19 +755,6 @@ AssignOp    = "||=" | "&&=" | "**=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" 
 NotColonGlued = :script(~~
     (function() {
         if (c.peek(0) === 58) { return abnf.newToken("\x01coloncolon", 0) }
-    })()
-~~) ;
-// NotAfterSemi succeeds (matching empty) only when the token just before the
-// current position is NOT a ';'. StmtRescue needs it because ExprStmt swallows the
-// separator: without it `def f; raise "x"; rescue; 1; end' read the def's rescue
-// CLAUSE as a statement modifier on the raise, and ModStmt read the loop of
-// `i = 0; while i < 3; i += 1; end` as a `while` modifier on the assignment.
-NotAfterSemi = :script(~~
-    (function() {
-        var i = -1
-        var cc = c.peek(i)
-        while (cc === 32 || cc === 9 || cc === 13) { i = i - 1; cc = c.peek(i) }
-        if (cc === 59) { return abnf.newToken("\x01semi", 0) }
     })()
 ~~) ;
 NotTilde = :script(~~
@@ -958,7 +965,7 @@ PowExpr     <~~ push(makePow(takeAll())) ~~>
 // obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
 // block (do..end or {..}) becomes the last argument of the method call.
 PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary PrimaryEnd { CallSfx | CmdMethodSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
+            = Primary PrimaryEnd { CallSfx | CmdMethodSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx | ConstSfx } ;
 // obj.m a, b - the parenthesis-less call WITH a receiver (`ScratchPad.record []`,
 // `self.class.send :define_method, m do |x| ... end`, `a.should_receive :m`). It has
 // to be a SUFFIX rather than a statement form of its own, because the suffix loop is
@@ -970,13 +977,37 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // The place (a variable) the primary reads, when the primary IS one: see notePlace.
 PrimaryEnd  = :whitespace() "" <~~ push({phead: hasOwn(placeAt, "p" + up.pos) ? placeAt["p" + up.pos] : null}) ~~> :whitespace(Whitespace) ;
 CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ SameLine Block ] ;
+            = MDot MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ SameLine Block ] ;
 MethodSfx   <~~ var mp = peekMPos(); push(sfxAt(methodSfx(popName(), takeAll()), mp)) ~~>
-            = "." MethodName <~~ push({mname: noteMName(up.in), mpos: up.pos}) ~~> MArgs ;
+            = ( "." | Colon2 ) MethodName <~~ push({mname: noteMName(up.in), mpos: up.pos}) ~~> MArgs ;
 // p.(x): the parenthesis-only call shorthand for a Proc (Proc#call).
 CallSfx     <~~ push({kind: "mcall", name: "call", args: takeAll()}) ~~>
             = "." "(" [ Arg { "," Arg } ] ")" ;
-FieldSfx    = "." MethodName <~~ push({kind: "field", name: noteMName(up.in)}) ~~> ;
+FieldSfx    = MDot MethodName <~~ push({kind: "field", name: noteMName(up.in)}) ~~> ;
+// `Foo::bar` and `Foo::bar(x)` are method calls, the same as with a `.`; after a `::`
+// only a lower-case name or one with an argument list is a method, `Foo::Bar` being a
+// constant (ScopedConst). A `::` that opens a line is a top-level constant (TopConst).
+MDot        = "." | Colon2 LowerNext ;
+Colon2      = "::" ColonSameLine ;
+// After a `::`: fails when a line break (not a `\` join) stands in front of it.
+ColonSameLine = :script(~~ "pure";
+    (function() {
+        var i = -3
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13) { i = i - 1; cc = c.peek(i) }
+        if (cc === 10 && c.peek(i - 1) !== 92 && !(c.peek(i - 1) === 13 && c.peek(i - 2) === 92)) { return abnf.newToken("\x01nl", 0) }
+        return undefined
+    })()
+~~) ;
+// `self::X`, `obj.class::X`: a constant of the class or module a value is.
+ConstSfx    = Colon2 ConstSeg <~~ push({kind: "cconst", name: up.in}) ~~> ;
+LowerNext   = :script(~~ "pure";
+    (function() {
+        var cc = c.peek(0)
+        if ((cc >= 97 && cc <= 122) || cc === 95) { return undefined }
+        return abnf.newToken("\x01nolower", 0)
+    })()
+~~) ;
 // Safe navigation obj&.m / obj&.m(args): yields nil (and skips the call, not even
 // evaluating the arguments) when the receiver is nil, else a normal method/field.
 SafeMethodSfx <~~ var sp = peekMPos(); push(sfxAt({kind: "smcall", name: popName(), args: takeAll()}, sp)) ~~>
@@ -1257,10 +1288,16 @@ ForVar      = ForGroup | ForPathAhead Target <~~ push({ftgt: pop()}) ~~>
 // with an explicit list passes exactly that list - so `super` and `super()` differ.
 SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
             = KwSuper [ "(" <~~ push({explicit: true}) ~~> [ Arg { "," Arg } ] ")" ] [ SameLine Block ] ;
+// `super a, b`: the paren-less form passes exactly its list, like super(a, b) (KwCmd).
+SuperCmd    <~~ push(makeSuper(takeAll())) ~~>
+            = KwSuper CmdArgAhead "" <~~ push({explicit: true}) ~~> Arg { "," Arg } [ SameLine Block ] ;
 
 // yield / yield(args) / yield args: call the block the current method was given.
+// The paren-less form is a command (KwCmd); `yield(1) + 2` adds to the yield's value.
 YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
-            = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine NoModKw Arg { "," Arg } ] ;
+            = KwYield [ "(" [ Arg { "," Arg } ] ")" ] ;
+YieldCmd    <~~ push(makeYield(takeAll(), up.pos)) ~~>
+            = KwYield NotParenNext SameLine NoModKw Arg { "," Arg } ;
 
 // The numeric tower. Integers are exact (hex 0xff, binary 0b1010, octal 0o17 and
 // Ruby's bare-zero form 017, decimal with '_' separators, all via lib/numbers.abnf
@@ -1294,7 +1331,15 @@ FloatLit    <~~ push(makeConst(mkFlo(parseFloat(up.in.split("_").join(""))))) ~~
 
 // A scoped constant Foo::Bar::Baz: walked down the module/class chain at run time.
 ScopedConst <~~ push(makeScopedConst(up.in)) ~~>
-            = Name "::" Name { "::" Name } ;
+            = Name "::" ConstSeg { "::" ConstSeg } ;
+ConstSeg    = UpperNext Name NotParenNext ;
+UpperNext   = :script(~~ "pure";
+    (function() {
+        var cc = c.peek(0)
+        if (cc >= 65 && cc <= 90) { return undefined }
+        return abnf.newToken("\x01noupper", 0)
+    })()
+~~) ;
 
 // A heredoc: <<ID / <<-ID / <<~ID, optionally with a quoted marker (<<~'ID' is raw,
 // <<~"ID" interpolates like the bare form). The body lives on the FOLLOWING lines, so
@@ -2013,17 +2058,27 @@ ErrName     = ErrSplat | ScopedName <~~ push({etype: up.in}) ~~> ;
 ErrSplat    <~~ pop() ~~>
             = "*" !"*" Expression ;
 
-// The optional argument of return/break/next must not start at a statement-modifier
-// keyword: in `break if C` the `if` belongs to the enclosing ModStmt - without the
-// NoModKw guard it parses as a block-if argument expression and swallows the loop's
-// `end`.
+// return/break/next/yield with a paren-less argument is a COMMAND (MRI's
+// command_call): a statement, an operand of and/or/not or an assignment's right side,
+// never an operand of an operator - `2 + yield 1` and `x = a rescue return 1` are
+// syntax errors. Where a value is expected only the bare keyword (and `yield(...)`)
+// is a Primary. The argument starts on the keyword's line and not at a
+// statement-modifier keyword: in `break if C` the `if` belongs to the enclosing
+// ModStmt.
+KwCmd       = ReturnCmd | BreakCmd | NextCmd | YieldCmd | RaiseCmd | SuperCmd ;
 ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ NoModKw CommandForm | NoModKw RetVal { "," RetVal } ] ;
+            = KwReturn ;
+ReturnCmd   <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn SameLine NoModKw ( CommandForm | RetVal { "," RetVal } ) ;
 RetVal      = SplatRhs | Expression ;
 BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
-            = KwBreak [ NoModKw CommandForm | NoModKw RetVal ] ;
+            = KwBreak ;
+BreakCmd    <~~ push(makeBreak(takeAll())) ~~>
+            = KwBreak SameLine NoModKw ( CommandForm | RetVal ) ;
 NextExpr    <~~ push(makeNext(takeAll())) ~~>
-            = KwNext [ NoModKw CommandForm | NoModKw RetVal { "," RetVal } ] ;
+            = KwNext ;
+NextCmd     <~~ push(makeNext(takeAll())) ~~>
+            = KwNext SameLine NoModKw ( CommandForm | RetVal { "," RetVal } ) ;
 // redo re-runs the current block body with the same element, without advancing the
 // iteration (it travels to the iterating method as its own control signal).
 RedoExpr    <~~ push(makeRedo(up.pos)) ~~>
@@ -2035,7 +2090,11 @@ RetryExpr   <~~ push(makeRetry()) ~~>
 // raise [EXPR[, EXPR]]: a bare raise re-raises the current exception; a class is
 // instantiated with the optional message argument.
 RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
-            = KwRaise [ Expression { "," Expression } ] ;
+            = KwRaise [ ParenNext "(" Expression { "," Expression } ")" | Expression { "," Expression } ] ;
+// `raise "x"` without parentheses is a command too, so `x = raise "z" rescue yield 1`
+// takes a command fallback where `x = raise("z") rescue yield 1` may not (KwCmd).
+RaiseCmd    <~~ push(makeRaise(takeAll(), up.pos)) ~~>
+            = KwRaise NotParenNext SameLine NoModKw Expression { "," Expression } ;
 
 // f(args): a top level method or a class (for C.new the .new is a method suffix).
 // A call may carry a trailing block, with or without parentheses (`loop { ... }`,
@@ -2378,15 +2437,25 @@ LineCont    = :script(~~
 // position. It gates the statement modifiers and the post-condition loop keyword,
 // so a block 'if'/'while'/'until' opening the next line is never read as a modifier.
 // Runs at parse time; peeks the raw source both backward and forward, self contained.
+// A `\` line join is not a line break (`warn \` with the argument on the next line).
 SameLine    = :script(~~
     (function() {
         var i = -1
         var cc = c.peek(i)
-        while (cc === 32 || cc === 9 || cc === 13) { i = i - 1; cc = c.peek(i) }
+        while (cc === 32 || cc === 9 || cc === 13 || (cc === 10 && c.peek(i - 1) === 92)
+               || (cc === 10 && c.peek(i - 1) === 13 && c.peek(i - 2) === 92)) {
+            if (cc === 10) { while (c.peek(i) !== 92) { i = i - 1 } }
+            i = i - 1
+            cc = c.peek(i)
+        }
         if (cc === 10) { return abnf.newToken("\x01nl", 0) }
         var j = 0
         var dd = c.peek(j)
-        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        while (dd === 32 || dd === 9 || dd === 13 || (dd === 92 && (c.peek(j + 1) === 10 || (c.peek(j + 1) === 13 && c.peek(j + 2) === 10)))) {
+            if (dd === 92) { while (c.peek(j) !== 10) { j = j + 1 } }
+            j = j + 1
+            dd = c.peek(j)
+        }
         if (dd === 10 || dd === 35 || dd === -1) { return abnf.newToken("\x01nl", 0) }
         return undefined
     })()
@@ -2396,6 +2465,9 @@ SameLine    = :script(~~
 // at all: the spacing that tells MRI an argument list from a parenthesised argument.
 ParenNext   = :script(~~
     (c.peek(0) === 40) ? undefined : abnf.newToken("\x01noparen", 0)
+~~) ;
+NotParenNext = :script(~~
+    (c.peek(0) === 40) ? abnf.newToken("\x01paren", 0) : undefined
 ~~) ;
 
 // CmdArgAhead succeeds (matching empty) only where a parenthesis-less argument list
@@ -2414,6 +2486,13 @@ CmdArgAhead = :script(~~
         while (true) {
             if (cc === 32 || cc === 9) { sawSpace = true; i = i + 1; cc = c.peek(i); continue }
             if (cc === 13) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 92 && (c.peek(i + 1) === 10 || (c.peek(i + 1) === 13 && c.peek(i + 2) === 10))) {
+                sawSpace = true
+                while (cc !== 10) { i = i + 1; cc = c.peek(i) }
+                i = i + 1
+                cc = c.peek(i)
+                continue
+            }
             break
         }
         if (!sawSpace) { return no }                      // `foo(1)` is a normal call
@@ -4208,6 +4287,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var gi = 0; gi < gs.length; gi++) { blockCall(blk, [gs[gi]]) }
             return t
         }
+        // codepoints / each_codepoint decode UTF-8 and stop at an invalid sequence
+        // with MRI's ArgumentError, after yielding the code points in front of it.
+        if (name == "codepoints" || name == "each_codepoint") {
+            var cerr = []
+            var cps = rbsBinCodepoints(b, enc, cerr)
+            if (blk != null) { for (var cq = 0; cq < cps.length; cq++) { blockCall(blk, [cps[cq]]) } }
+            if (cerr.length > 0) { raiseErr(name, "ArgumentError", cerr[0]) }
+            if (name == "codepoints") { return cps }
+            if (blk == null) { return enumAt(mkEnum(cps), t, name, args) }
+            return t
+        }
         // each_char / each_line yield what chars / lines answer: Strings in the
         // box's encoding.
         if (name == "each_char" || name == "each_line") {
@@ -5059,7 +5149,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "rstrip" || name == "rstrip!") { return {ok: true, v: smRstrip(s)} }
         if (name == "strip!") { return {ok: true, v: smLstrip(smRstrip(s))} }
         if (name == "swapcase" || name == "swapcase!") { return {ok: true, v: smSwapcase(s)} }
-        if (name == "lines") { return {ok: true, v: rbsLines(s, sargs.length > 0 ? sargs[0] : "\n")} }
         if (name == "partition" || name == "rpartition") {
             var sep = sargs[0]
             var at = name == "partition" ? s.indexOf(sep) : rbsRfind(s, sep, s.length)
@@ -5120,13 +5209,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The engine glue for smMethod: render every argument as a Ruby String and as a
     // number once, then dispatch. The block-taking members are handled beside it.
     function strExtra(target, name, args, blk) {
+        // `lines(chomp: true)`, `each_line(sep, chomp: true)`: the keyword is no
+        // separator. Twins: rbStrExtra in lib/ruby-rt.metajs, the String arm of
+        // rubyMethod in abnf/jsrt.go.
+        var sa = args
+        var chomp = false
+        if ((name == "lines" || name == "each_line") && args.length > 0 && isDict(args[args.length - 1])) {
+            var chi = dictFind(args[args.length - 1], mkSym("chomp"))
+            chomp = chi >= 0 && rtest(args[args.length - 1].vals[chi])
+            sa = args.slice(0, args.length - 1)
+        }
         var sargs = []
         var nargs = []
-        for (var i = 0; i < args.length; i++) {
-            sargs.push(rstr(args[i]))
-            nargs.push(toF(args[i]))
+        for (var i = 0; i < sa.length; i++) {
+            sargs.push(rstr(sa[i]))
+            nargs.push(toF(sa[i]))
         }
         if (nargs.length == 0) { nargs.push(0) }
+        if (name == "lines") { return {ok: true, v: rbsLines(target, sargs.length > 0 ? sargs[0] : "\n", chomp)} }
         // Without a block, each_byte / each_codepoint / each_grapheme_cluster /
         // each_line / upto answer an Enumerator over what they would yield.
         if (name == "each_byte" || name == "each_codepoint" || name == "each_grapheme_cluster" || name == "each_line"
@@ -5135,7 +5235,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "each_byte") { list = smUtf8Bytes(target) }
             if (name == "each_codepoint") { list = smCodePoints(target) }
             if (name == "each_grapheme_cluster") { list = rbsGraphemes(target) }
-            if (name == "each_line") { list = rbsLines(target, sargs.length > 0 ? sargs[0] : "\n") }
+            if (name == "each_line") { list = rbsLines(target, sargs.length > 0 ? sargs[0] : "\n", chomp) }
             if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, args.length > 1 && rtest(args[1])) }
             if (blk == null) { return {ok: true, v: enumAt(mkEnum(list), target, name, args)} }
             for (var k = 0; k < list.length; k++) { blockCall(blk, [boxOut(target, list[k])]) }
@@ -13219,6 +13319,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
                     else if (s.name == "to_s") { cur = isRStr(cur) || isBin(cur) ? cur : mkRStr(rstr(cur)) }
                     else { cur = boxOut(cur, mcall(cur, s.name, [], null)) }
+                } else if (s.kind == "cconst") {
+                    cur = valueConst(cur, s.name)
                 } else if (s.kind == "sfield") {
                     if (cur === null || cur === undefined) { cur = null }
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
@@ -16391,11 +16493,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A trailing statement modifier: STMT if/unless COND (run once when the guard
     // holds) or STMT while/until COND (a pre-condition loop). Break/next/return that
     // reach up from the statement thread through runLoopBody just like a plain loop.
+    // Modifiers stack left to right: `a unless b if c` is `(a unless b) if c`.
     function applyMod(items) {
-        if (items.length == 1) { return items[0] }
         var stmt = items[0]
-        var mod = items[1].mod
-        var cond = items[2]
+        for (var k = 1; k + 1 < items.length; k = k + 2) { stmt = modOnce(stmt, items[k].mod, items[k + 1]) }
+        return stmt
+    }
+    function modOnce(stmt, mod, cond) {
+        if (mod == "rescue") { return makeRescueMod([stmt, cond]) }
         if (mod == "if") { return function() { if (rtest(cond())) { return stmt() } return null } }
         if (mod == "unless") { return function() { if (!rtest(cond())) { return stmt() } return null } }
         if (mod == "while") {
@@ -16776,6 +16881,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // Only the LAST segment may be nil (`R::RV` after `RV = nil`); a nil scope
     // before it leaves the name unresolved.
+    // `mod::X` on a module VALUE. Twin of the "cconst" step of foldCallMember in
+    // ruby-to-llvm-ir.abnf.
+    function valueConst(mod, name) {
+        if (mod !== null && typeof mod == "object" && hasOwn(mod, "$c$" + name)) { return mod["$c$" + name] }
+        nameErr("NameError", "uninitialized constant " + rstr(mod) + "::" + name, name, findSelf())
+        return null
+    }
     function constMembers(head, parts) {
         var cur = anytype
         cur = head
@@ -16895,8 +17007,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             try {
                 var r0 = anytype
                 r0 = mainT()
-                // The compiled half runs mainT as a closure of its own, whose ret
-                // stores the site back (emitFunc).
+                // The site is put back on both paths, as makeTry does (the compiled
+                // half lowers `x rescue y` through its makeTry).
                 rbSitePos = site0
                 return r0
             } catch (e) {
@@ -16911,6 +17023,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var r = anytype
                 r = altT()
                 scopePut(rubyGlobals, "!", bang0)
+                rbSitePos = site0
                 return r
             }
         }

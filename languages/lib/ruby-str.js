@@ -125,14 +125,17 @@ function rbsSplit(s, sep, re, lim, last) {
 }
 
 // String#lines / #each_line: the pieces of s, each ending after an occurrence
-// of sep (kept), the rest last.
-function rbsLines(s, sep) {
+// of sep, the rest last. chomp (the `chomp: true` keyword) drops the separator,
+// and for "\n" a "\r" in front of it.
+function rbsLines(s, sep, chomp) {
     var out = []
     var p = 0
     while (p < s.length && sep.length > 0) {
         var at = rbsFind(s, sep, p)
         if (at < 0) { break }
-        out.push(s.substring(p, at + sep.length))
+        var e = at + sep.length
+        if (chomp) { e = sep == "\n" && at > p && s.charCodeAt(at - 1) == 13 ? at - 1 : at }
+        out.push(s.substring(p, e))
         p = at + sep.length
     }
     if (p < s.length) { out.push(s.substring(p, s.length)) }
@@ -1615,6 +1618,29 @@ function rbsU8Len(b) {
         n = n + 1
     }
     return n
+}
+
+// The code points of the bytes b of a String in encoding enc up to its first
+// invalid UTF-8 sequence, where err receives MRI's message: String#codepoints /
+// #each_codepoint of a box. Go twin: rubyBinCodepoints in abnf/jsrtrubystr.go.
+function rbsBinCodepoints(b, enc, err) {
+    var out = []
+    var i = 0
+    while (i < b.length) {
+        var k = 1
+        var cp = b.charCodeAt(i)
+        if (enc == "UTF-8") {
+            k = rbsU8At(b, i)
+            if (k == 0) {
+                err.push("invalid byte sequence in UTF-8")
+                return out
+            }
+            if (k > 1) { cp = rbsU8Cp(b, i, k) }
+        }
+        out.push(cp)
+        i = i + k
+    }
+    return out
 }
 
 // Whether every char of s is ASCII.

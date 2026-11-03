@@ -637,6 +637,48 @@
             "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "-code", "x = 1 rescue p 5", "-qq"]
         },
         {
+            "name": "Ruby interpreter, two expressions on one line SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:7",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "-code", "x = 1 2", "-q"]
+        },
+        {
+            "name": "Ruby to LLVM IR, two expressions on one line SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:7",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "-code", "x = 1 2", "-qq"]
+        },
+        {
+            "name": "Ruby interpreter, a yield command as an expression's rescue fallback SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:36",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "-code", "def f; x = raise('z') rescue yield 1; end", "-q"]
+        },
+        {
+            "name": "Ruby to LLVM IR, a yield command as an expression's rescue fallback SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:36",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "-code", "def f; x = raise('z') rescue yield 1; end", "-qq"]
+        },
+        {
+            "name": "Ruby interpreter, a return command as an expression's rescue fallback SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:37",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "-code", "def f; x = raise('z') rescue return 1; end", "-q"]
+        },
+        {
+            "name": "Ruby to LLVM IR, a return command as an expression's rescue fallback SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:37",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "-code", "def f; x = raise('z') rescue return 1; end", "-qq"]
+        },
+        {
             "name": "Dart interpreter -qq, a regexp error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",

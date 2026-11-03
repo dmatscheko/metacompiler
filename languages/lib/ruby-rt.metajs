@@ -394,6 +394,17 @@ function rbBinMethod(t, name, args) {
         while (g < gs.length) { rbCall1(blk, gs[g]); g = g + 1 }
         return t
     }
+    // Twin of the codepoints arm of binMethod in ruby-interpreter.abnf.
+    if (name == "codepoints" || name == "each_codepoint") {
+        var cerr = []
+        var cps = rbsBinCodepoints(b, enc, cerr)
+        var cq = 0
+        if (blk !== null) { while (cq < cps.length) { rbCall1(blk, cps[cq]); cq = cq + 1 } }
+        if (cerr.length > 0) { rbRaiseErr(name, "ArgumentError", cerr[0]) }
+        if (name == "codepoints") { return cps }
+        if (blk === null) { return rbEnumAt(rbMkEnum(cps), t, name, args) }
+        return t
+    }
     // Twin of the each_char / each_line arm of binMethod in ruby-interpreter.abnf.
     if (name == "each_char" || name == "each_line") {
         var es = anytype
@@ -13098,7 +13109,6 @@ function smMethod(s, name, sargs, nargs) {
     if (name == "rstrip" || name == "rstrip!") { return {ok: true, v: smRstrip(s)} }
     if (name == "strip!") { return {ok: true, v: smLstrip(smRstrip(s))} }
     if (name == "swapcase" || name == "swapcase!") { return {ok: true, v: smSwapcase(s)} }
-    if (name == "lines") { return {ok: true, v: rbsLines(s, sargs.length > 0 ? sargs[0] : "\n")} }
     if (name == "partition" || name == "rpartition") {
         var sep = sargs[0]
         var at = name == "partition" ? s.indexOf(sep) : rbsRfind(s, sep, s.length)
@@ -13163,12 +13173,20 @@ function rbStrExtra(target, name, args) {
     var nargs = []
     var i = 0
     var pos = rbPosArgs(args)
+    // Twin of the chomp keyword of strExtra in ruby-interpreter.abnf.
+    var chomp = false
+    if ((name == "lines" || name == "each_line") && pos.length > 0 && rbIsDict(pos[pos.length - 1])) {
+        var chi = rbDictFind(pos[pos.length - 1]["keys"], rbSym("chomp"))
+        chomp = chi >= 0 && rbTruthy(pos[pos.length - 1]["vals"][chi])
+        pos = pos.slice(0, pos.length - 1)
+    }
     while (i < pos.length) {
         sargs.push(rbStr(pos[i]))
         nargs.push(rbToF(pos[i]))
         i = i + 1
     }
     if (nargs.length == 0) { nargs.push(0) }
+    if (name == "lines") { return {ok: true, v: rbsLines(target, sargs.length > 0 ? sargs[0] : "\n", chomp)} }
     // Without a block, each_byte / each_codepoint / each_line / upto answer an
     // Enumerator over what they would yield.
     if (name == "each_byte" || name == "each_codepoint" || name == "each_grapheme_cluster" || name == "each_line"
@@ -13178,7 +13196,7 @@ function rbStrExtra(target, name, args) {
         if (name == "each_byte") { list = smUtf8Bytes(target) }
         if (name == "each_codepoint") { list = smCodePoints(target) }
         if (name == "each_grapheme_cluster") { list = rbsGraphemes(target) }
-        if (name == "each_line") { list = rbsLines(target, sargs.length > 0 ? sargs[0] : "\n") }
+        if (name == "each_line") { list = rbsLines(target, sargs.length > 0 ? sargs[0] : "\n", chomp) }
         if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, pos.length > 1 && rbTruthy(pos[1])) }
         if (blk === null) { return {ok: true, v: rbEnumAt(rbMkEnum(list), target, name, args)} }
         var k = 0

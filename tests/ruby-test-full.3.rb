@@ -1808,6 +1808,107 @@ def s199
         b.each_line.to_a.map(&:encoding) == [Encoding::ASCII_8BIT] * 2 && b.each_line.to_a == ["h\xC3\xA9\n".b, "x".b] &&
         u.each_char.map(&:encoding).uniq == [Encoding::US_ASCII])
 end
+# ===== SECTION 200: statement ends, keyword commands, `::` calls, lines(chomp:), invalid UTF-8 code points =====
+# A statement ends at a line break, a `;` or a closing token, and a `\` line join is
+# no break; `return v` / `yield v` / `super v` / `raise "m"` without parentheses are
+# commands, allowed as a statement, an and/or operand or an assignment's right
+# side; modifiers stack; `x rescue y` keeps the locals its fallback assigns;
+# `A::m(x)`, `self::K` and `def A::m` are a method call, a constant and a singleton
+# def; lines / each_line take chomp:; the code points of invalid UTF-8 stop with
+# ArgumentError. /usr/bin/ruby 2.6 settles each.
+module S200M
+  K = [4, 5]
+  def S200M::twice(x)
+    x * 2
+  end
+  def self::thrice(x)
+    x * 3
+  end
+  module N
+    def N::nm
+      "n"
+    end
+  end
+end
+class S200A
+  attr_reader :s
+  def initialize(a, b = 0)
+    @s = a + b
+  end
+  def self.k
+    self::KK
+  end
+  def kk
+    self.class::KK[1]
+  end
+end
+class S200A
+  KK = [7, 8]
+end
+class S200B < S200A
+  def initialize(x)
+    super x, 10
+  end
+end
+def s200r1
+  x = raise("z") rescue return
+  p x
+end
+def s200r2
+  x = raise "z" rescue return 7
+  x
+end
+def s200y
+  y = yield 2
+  w = 1 + yield(3)
+  [y, w]
+end
+def s200g(a, b)
+  a + b
+end
+def s200ret
+  return
+  5
+end
+def s200
+  v = [3, 5, "a\nb\n", "x\r\ny\r\n", 2, 17]
+  check("cc200a", S200M::twice(v[0]) == 6 && (S200M::twice v[1]) == 10 && S200M::K[1] == 5 &&
+        S200M::N::nm == "n" && S200M::thrice(v[4]) == 6 && Integer::sqrt(v[5]) == 4 &&
+        S200A.k == [7, 8] && S200A.new(1).kk == 8 && S200A.new(v[0]).class::KK[0] == 7)
+  ne = begin; S200A.new(1).class::NOPE; rescue NameError => e; e.message; end
+  check("cc200b", ne == "uninitialized constant S200A::NOPE" && S200B.new(1).s == 11)
+  x, y = s200g v[0], v[1]
+  t = []
+  true and t << s200g(v[4], v[4])
+  q = [1, 2, 3].map { |e| e * 2 } \
+    .sum
+  w = s200g \
+    v[0], v[1]
+  tz = v[4]
+  ::S200M::K
+  check("cm200c", x == 8 && y.nil? && t == [4] && q == 12 && w == 8 && tz == 2 && s200y { |a| a * 10 } == [20, 31] &&
+        s200ret.nil? && s200r1.nil? && s200r2 == 7)
+  m = []
+  m << 1 unless m.size > 0 if true
+  m << 2 if false unless false
+  m << 3 if v[0] == 3 rescue m << 4
+  a1 = raise("e") rescue b1 = v[4]
+  a2 = 1 rescue b2 = 3
+  check("md200d", m == [1, 3] && a1 == 2 && b1 == 2 && a2 == 1 && b2.nil?)
+  ce = begin; x2 = raise("e") rescue raise(TypeError, "t"); rescue TypeError => e; [e.class, e.message]; end
+  ls = []
+  v[3].each_line(chomp: true) { |l| ls << l }
+  check("ln200e", ce == [TypeError, "t"] && v[2].lines(chomp: true) == ["a", "b"] && ls == ["x", "y"] &&
+        "a\r\r\nb".lines(chomp: true) == ["a\r", "b"] && "x--y".lines("-", chomp: true) == ["x", "", "y"] &&
+        v[2].lines(chomp: false) == ["a\n", "b\n"] && v[2].each_line(chomp: true).to_a == ["a", "b"] &&
+        v[2].b.lines(chomp: true) == ["a", "b"])
+  bad = "a\xC3\xA9\xFFb".force_encoding("UTF-8")
+  got = []
+  e1 = begin; bad.each_codepoint { |c| got << c }; rescue ArgumentError => e; e.message; end
+  e2 = begin; bad.codepoints; rescue ArgumentError => e; e.message; end
+  check("cp200f", got == [97, 233] && e1 == "invalid byte sequence in UTF-8" && e2 == e1 &&
+        "a\xFF".b.codepoints == [97, 255] && "a\xFF".force_encoding("US-ASCII").codepoints == [97, 255])
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1854,5 +1955,6 @@ s196() # SECTION-CALL 196
 s197() # SECTION-CALL 197
 s198() # SECTION-CALL 198
 s199() # SECTION-CALL 199
+s200() # SECTION-CALL 200
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -9329,15 +9329,23 @@ func (rt *jsrt) rubySmSwapcase(o string) string {
 }
 
 // String#lines / #each_line: the pieces of o, each ending after an occurrence
-// of sep (kept), the rest last. Twin of rbsLines in lib/ruby-str.js.
-func rubySmLines(o, sep string) []string {
+// of sep, the rest last; chomp drops the separator (and for "\n" a "\r" in
+// front of it). Twin of rbsLines in lib/ruby-str.js.
+func rubySmLines(o, sep string, chomp bool) []string {
 	out := []string{}
 	for sep != "" {
 		at := strings.Index(o, sep)
 		if at < 0 {
 			break
 		}
-		out = append(out, o[:at+len(sep)])
+		e := at + len(sep)
+		if chomp {
+			e = at
+			if sep == "\n" && at > 0 && o[at-1] == '\r' {
+				e = at - 1
+			}
+		}
+		out = append(out, o[:e])
 		o = o[at+len(sep):]
 	}
 	if o != "" {
@@ -9541,12 +9549,6 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		return rubySmLstrip(rubySmRstrip(o)), true
 	case "swapcase", "swapcase!":
 		return rt.rubySmSwapcase(o), true
-	case "lines":
-		sep := "\n"
-		if len(sargs) > 0 {
-			sep = sargs[0]
-		}
-		return rubySmStrArr(rubySmLines(o, sep)), true
 	case "partition", "rpartition":
 		sep := sarg(0)
 		at := -1
@@ -12082,7 +12084,23 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		// The rest of the String surface (bytes / tr / center / ljust / rjust /
 		// count / delete and their families).
 		spos, sblk := rubyBlockArgs(args)
+		// Twin of the chomp keyword of strExtra in ruby-interpreter.abnf.
+		chomp := false
+		if n := len(spos); n > 0 && (name == "lines" || name == "each_line") {
+			if keys, vals, isDict := dictParts(spos[n-1]); isDict {
+				if i := rt.rubyDictFind(keys, jsSym{s: "chomp"}); i >= 0 {
+					chomp = rubyTruthy(vals.elems[i])
+				}
+				spos = spos[:n-1]
+			}
+		}
 		switch name {
+		case "lines":
+			sep := "\n"
+			if len(spos) > 0 {
+				sep = rt.rubyStr(spos[0])
+			}
+			return rubySmStrArr(rubySmLines(o, sep, chomp))
 		case "upto":
 			lim := o
 			if len(spos) > 0 {
@@ -12119,7 +12137,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if len(spos) > 0 {
 					sep = rt.rubyStr(spos[0])
 				}
-				list = rubySmStrArr(rubySmLines(o, sep)).elems
+				list = rubySmStrArr(rubySmLines(o, sep, chomp)).elems
 			}
 			if sblk == nil {
 				return rubyEnumAt(rubyMkEnum(&jsArray{elems: list}), o, name, spos)
