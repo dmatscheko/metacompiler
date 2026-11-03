@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1178** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1179** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,16 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1173 ruby: String#to_r/to_c/setbyte/grapheme_clusters/undump, unicode_normalize, Class.new reflection · P3 · RB · IN PROGRESS (RB worker, round 68) [V]
-Carried over from T-1167 (closed partial); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
-- Still NoMethodError: String#to_r and #to_c (needs a rational/complex string parser: "1/3".to_r, " 2.5 ".to_r, "1+2i".to_c, junk suffixes), #setbyte (byte-level mutation of the text model), #grapheme_clusters / #each_grapheme_cluster (UAX#29 segmentation; mapping to chars is wrong for combining marks — at least the common extend/ZWJ/regional-indicator rules), #undump.
-- String#unicode_normalize (and the ! form) is the identity; MRI NFC-composes "é" into a 1-character "é" (also :nfd/:nfkc/:nfkd).
-- `Class.new` anonymous classes have no reflection: `Class.new.ancestors` and `.include?` raise NoMethodError.
-- Binary strings (`"\xff"`) with scrub!/encode! go through the binary path where the bang forms are not covered.
-- stderr only: NoMethodError messages lack MRI 2.6's "Did you mean?" suggestion — record as a limit unless cheap.
+### T-1178 ruby: each_* return value, Proc#[] arity, class_eval/attr_accessor, each_index, Complex.polar, a**b warning, Math 1-ulp · P3 · RB · OPEN [V]
+Found while closing T-1173; oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. All engines unless noted.
+- String each_* with a block return a copy instead of the receiver: each_char, each_byte, each_line, each_codepoint, each_grapheme_cluster (also on binary Strings) — `x.each_char{}.equal?(x)` false; MRI true.
+- `x[a, b, c]` on a Proc/lambda drops the last argument: `->(*c){c}[1,2,3]` gives [1,2] (MRI [1,2,3]); `->(a,b,c){}[1,2,3]` raises ArgumentError. `.call` and `.()` work.
+- `attr_accessor` inside `class_eval` or a `Class.new` block does not define the accessors; `class_eval` does not pass the class to its block (`C.class_eval { |k| p k }`).
+- `Array#each_index` without a block crashes the engine (MRI returns an Enumerator).
+- `Complex.polar` is missing.
+- The warning "in a**b, b may be too big" (stderr) is missing for huge exponents.
+- Math.sin / Math.cos are 1 ulp off MRI on some inputs — find the inputs, check whether it is the libm used by each leg; do not hand-roll an approximation (record as a limit if it is the platform libm).
+- Record as limits: "Did you mean?" suggestions in NoMethodError messages; ISO-8859-1 / Shift_JIS / UTF-16 encodings.
 
 # JS — JavaScript and TypeScript
 
@@ -1217,6 +1220,7 @@ T-1174 kotlin: javaClass of a range's Long bound — merged a1eba73b: range/prog
 T-1172 bash: -a declarations through namerefs to unset globals, second operand after a circular nameref became an array — merged 138aab5e: -a/-A declarations through namerefs to unset globals become call-local arrays (compiler), values given to an array nameref are checked as nameref names (both engines); master probe matches bash 5.3
 T-1175 bash: nameref refusals naming the target, readonly through a callee's nameref, array assignment to a circular assoc nameref — merged d924ee3e: make_local_variable rule for declarations through a function's nameref (refusals name the nameref; a callee may hide a caller's readonly local, not a readonly global), circular associative array namerefs drop stores and read unset; master probe matches bash 5.3
 T-1176 bash: computed `unset $v` (compiler), declaration builtins on a circular assoc nameref, `${e[0]:=v}` through a NAME[SUB] nameref — merged 79c58121: computed unset $v in the compiler (rt_unset_word; also literal unset through a nameref), export/readonly on a circular assoc nameref, ${e[0]:=v} through a NAME[SUB] nameref; master probe matches bash 5.3; bench +0.15% on non-hot paths (master re-check blocked by a stale bench lock)
+T-1173 ruby: String#to_r/to_c/setbyte/grapheme_clusters/undump, unicode_normalize, Class.new reflection — merged (6 commits to caf91324): String#to_r/to_c and Rational()/Complex() of a String, setbyte, undump/dump, in-place scrub!/encode!, UAX#29 grapheme clusters, UAX#15 unicode_normalize(!)/normalized?, Class.new reflection; Did-you-mean recorded as a limit; master four-leg probe matches ruby 2.6; master paired bench -0.00%
 
 # Settled — do not re-open
 
