@@ -623,6 +623,20 @@
             "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "-code", "x = /(/", "-qq"]
         },
         {
+            "name": "Ruby interpreter, a paren-less call as an expression's rescue fallback SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:16",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "-code", "x = 1 rescue p 5", "-q"]
+        },
+        {
+            "name": "Ruby to LLVM IR, a paren-less call as an expression's rescue fallback SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:16",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "-code", "x = 1 rescue p 5", "-qq"]
+        },
+        {
             "name": "Dart interpreter -qq, a regexp error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",

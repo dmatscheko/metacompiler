@@ -4904,20 +4904,13 @@ func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
 		}
 		return rt.rubyBigNarrow(m), true
 	case "**":
-		far := y.Sign() < 0 || !y.IsInt64() || y.Int64() > 4096 || !x.IsInt64()
-		if y.Sign() < 0 && y.IsInt64() && y.Int64() >= -4096 {
-			return rt.rubyRatPow(rt.rubyAsRat(l), y), true
-		}
-		if far {
-			if v, ok := rt.rubyIntPowFar(x, y); ok {
-				return v, true
-			}
+		// Exact up to where MRI gives up (rubyIntPowFar); a negative exponent
+		// is an exact Rational, and rubyRatPow raises ZeroDivisionError for 0.
+		if v, ok := rt.rubyIntPowFar(x, y); ok {
+			return v, true
 		}
 		if y.Sign() < 0 {
-			return &jsFlo{f: crPow(rubyToF(l), rubyToF(r))}, true
-		}
-		if !y.IsInt64() || y.Int64() > 4096 {
-			return crPow(rubyToF(l), rubyToF(r)), true
+			return rt.rubyRatPow(rt.rubyAsRat(l), y), true
 		}
 		return rt.rubyBigNarrow(new(big.Int).Exp(x, y, nil)), true
 	case "&", "|", "^", "<<", ">>":
@@ -6291,13 +6284,10 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 				}
 				return x
 			}
-			if y >= -4096 {
-				return rt.rubyRatPow(rubyMkRat(x, 1), big.NewInt(int64(y)))
-			}
 			if v, ok := rt.rubyIntPowFar(big.NewInt(int64(x)), big.NewInt(int64(y))); ok {
 				return v
 			}
-			return &jsFlo{f: crPow(x, y)}
+			return rt.rubyRatPow(rubyMkRat(x, 1), big.NewInt(int64(y)))
 		}
 		if p := crPow(x, y); !rubyOver53(p) {
 			return p

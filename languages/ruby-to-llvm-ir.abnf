@@ -705,8 +705,57 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 // the very first token when the right side is anything else.
 // The right-hand side carries the rescue modifier (`x = f rescue "c"'), because
 // in Ruby `rescue' binds TIGHTER than `=': the fallback is what gets assigned.
+// After a value that is an expression rather than a paren-less call, the fallback
+// is an expression too: MRI's `arg rescue arg', so `x = 1 rescue p 5' is a syntax
+// error while `x = f 1 rescue p 5' is not. NoRescueNext keeps a fallback that is
+// not an expression from being re-read as a statement modifier on the assignment.
 AssignRhs   <~~ push(makeRescueMod(takeAll())) ~~>
-            = RhsCore [ SameLine KwRescue RhsCore ] ;
+            = ( SplatRhs | CommandForm ) [ SameLine KwRescue RhsCore ]
+            | AssignExpr ( SameLine KwRescue AssignExpr NotCmdTail | NoRescueNext ) ;
+// Fails after a fallback that is one word followed, on the same line, by what can
+// only be its argument (`rescue p $!', `rescue puts "w"', `rescue foo bar'). A
+// sign, `*`, `&`, `[` or `(` after it may be an operator, and passes.
+NotCmdTail  = :script(~~
+    (function() {
+        function isId(ch) { return (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 }
+        // Whether the word w stands at p, whole.
+        function wordIs(p, w) {
+            for (var k = 0; k < w.length; k++) { if (c.peek(p + k) !== w.charCodeAt(k)) { return false } }
+            var a = c.peek(p + w.length)
+            return !isId(a) && a !== 63 && a !== 33
+        }
+        var ws = -1
+        while (isId(c.peek(ws)) || c.peek(ws) === 63 || c.peek(ws) === 33) { ws = ws - 1 }
+        var f0 = c.peek(ws + 1)
+        if (ws === -1 || !isId(f0) || (f0 >= 48 && f0 <= 57) || wordIs(ws + 1, "defined?")) { return undefined }
+        var b = ws
+        while (c.peek(b) === 32 || c.peek(b) === 9) { b = b - 1 }
+        if (b === ws || !wordIs(b - 5, "rescue") || isId(c.peek(b - 6))) { return undefined }
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9) { i = i + 1 }
+        if (i === 0) { return undefined }
+        var cc = c.peek(i)
+        var bad = abnf.newToken("\x01cmdtail", 0)
+        if ((cc >= 48 && cc <= 57) || cc === 34 || cc === 39 || cc === 36 || cc === 64 || cc === 96) { return bad }
+        if (cc === 33 && c.peek(i + 1) !== 61 && c.peek(i + 1) !== 126) { return bad }
+        if (!isId(cc)) { return undefined }
+        var mods = ["if", "unless", "while", "until", "rescue", "and", "or", "then", "do", "end", "in"]
+        for (var k = 0; k < mods.length; k++) { if (wordIs(i, mods[k])) { return undefined } }
+        return bad
+    })()
+~~) ;
+// Fails when `rescue` follows on the same line.
+NoRescueNext = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9) { i = i + 1 }
+        var w = "rescue"
+        for (var k = 0; k < w.length; k++) { if (c.peek(i + k) !== w.charCodeAt(k)) { return undefined } }
+        var a = c.peek(i + w.length)
+        if ((a >= 48 && a <= 57) || (a >= 65 && a <= 90) || (a >= 97 && a <= 122) || a === 95 || a === 63 || a === 33) { return undefined }
+        return abnf.newToken("\x01rescue", 0)
+    })()
+~~) ;
 RhsCore     = SplatRhs | CommandForm | AssignExpr ;
 SplatRhs    <~~ push(makeSplatRhs(pop())) ~~>
             = "*" !"*" AssignExpr ;

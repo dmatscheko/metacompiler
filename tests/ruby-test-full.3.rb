@@ -1776,6 +1776,38 @@ def s198
         wa.inspect == "Infinity" && wb == 71 &&
         w.got == ["#{f}:#{ln}: warning: in a**b, b may be too big\n"] * 4 + ["#{f}:#{ln + 2}: warning: in a**b, b may be too big\n"])
 end
+# ===== SECTION 199: exact Integer powers past 4096, 0 ** -n, binary String iterators =====
+# An Integer power is exact (or an exact Rational for a negative exponent) up to
+# the point MRI gives up and warns; 0 to any negative power is ZeroDivisionError;
+# each_char / each_line of a String in another encoding than UTF-8 yield Strings
+# in that encoding, as chars / lines answer. /usr/bin/ruby 2.6 settles each.
+def s199
+  e = [5000, 4097, 2 ** 70, 3, 2, 10]
+  a = e[3] ** e[0]
+  m = e[3] ** -e[0]
+  n = (-e[3]) ** e[1]
+  q = e[5] ** -e[1]
+  t = Rational(-e[4], e[3]) ** -e[1]
+  check("pw199a", a.class == Integer && a.to_s.size == 2386 && a % 1000000007 == 22443616 && a.to_s[0, 12] == "403899762978" &&
+        m.class == Rational && m.numerator == 1 && m.denominator == a && n.to_s[0, 10] == "-583150411" &&
+        n.to_s.size == 1956 && (e[4] ** e[1]).to_s.size == 1234 &&
+        q.denominator.to_s.size == 4098 && (Rational(e[4], e[3]) ** e[0]).denominator == a &&
+        t.numerator == -(e[3] ** e[1]) && t.denominator == e[4] ** e[1] && e[4].pow(e[0]) % 999983 == 541570)
+  z = [-e[0], -e[3], -e[2], -1].map do |k|
+    begin; 0 ** k; rescue ZeroDivisionError => x; [x.class, x.message]; end
+  end
+  check("pz199b", z == [[ZeroDivisionError, "divided by 0"]] * 4)
+  b = "h\xC3\xA9\nx".b
+  u = "ab\ncd".force_encoding("US-ASCII")
+  ce = []
+  le = []
+  r1 = b.each_char { |c| ce << c.encoding }
+  r2 = u.each_line { |c| le << c.encoding }
+  check("bi199c", ce == [Encoding::ASCII_8BIT] * 5 && le == [Encoding::US_ASCII] * 2 && r1.equal?(b) && r2.equal?(u) &&
+        b.each_char.to_a == b.chars && b.each_char.map(&:encoding).uniq == [Encoding::ASCII_8BIT] &&
+        b.each_line.to_a.map(&:encoding) == [Encoding::ASCII_8BIT] * 2 && b.each_line.to_a == ["h\xC3\xA9\n".b, "x".b] &&
+        u.each_char.map(&:encoding).uniq == [Encoding::US_ASCII])
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1821,5 +1853,6 @@ s195() # SECTION-CALL 195
 s196() # SECTION-CALL 196
 s197() # SECTION-CALL 197
 s198() # SECTION-CALL 198
+s199() # SECTION-CALL 199
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -615,9 +615,10 @@ function rtBigStr(limbs) {
 //
 //     rtkABigNew(neg, limbs)   normalise limbs and build the language's box
 //
-// Schoolbook multiplication, and division by a per-limb binary search for the
-// quotient digit; the operands are integer literals and their results, so this
-// is small and exact rather than fast.
+// Schoolbook multiplication, Karatsuba's past RT_KARA_MIN limbs a side and a
+// number-theoretic transform past RT_NTT_MIN (Ruby's exact powers reach
+// millions of limbs), and division by a per-limb binary search for the
+// quotient digit.
 
 var RT_BIT_AND = 0
 var RT_BIT_OR = 1
@@ -738,35 +739,238 @@ function rtABigAdd(x, y) {
 
 function rtABigSub(x, y) { return rtABigAdd(x, rtABigNeg(y)) }
 
-function rtABigMul(x, y) {
-    var a = x["limbs"]
-    var b = y["limbs"]
+function rtABigMul(x, y) { return rtkABigNew(x["neg"] != y["neg"], rtABigMulMag(x["limbs"], y["limbs"])) }
+
+// |a| * |b| over two NORMALIZED limb arrays. Twin of magMul in
+// ruby-interpreter.abnf, which states the Karatsuba split.
+var RT_KARA_MIN = 40
+function rtABigMulMag(a, b) {
+    if (a.length >= RT_NTT_MIN && b.length >= RT_NTT_MIN && a.length + b.length <= RT_NTT_MAX) { return rtABigNtt(a, b) }
+    if (a.length >= RT_KARA_MIN && b.length >= RT_KARA_MIN) { return rtABigKara(a, b) }
     var out = []
     var z = 0
     while (z < a.length + b.length) {
         out.push(0)
         z = z + 1
     }
+    // The carries are deferred to one pass at the end: a column sums at most
+    // min(a.length, b.length) limb products below 1e8, far inside 2^53.
     var i = 0
     while (i < a.length) {
-        var carry = 0
+        var ai = a[i]
         var j = 0
         while (j < b.length) {
-            var cur = out[i + j] + a[i] * b[j] + carry
-            carry = Math.floor(cur / 10000)
-            out[i + j] = cur - carry * 10000
+            out[i + j] = out[i + j] + ai * b[j]
             j = j + 1
-        }
-        var k = i + b.length
-        while (carry > 0) {
-            var cur2 = out[k] + carry
-            carry = Math.floor(cur2 / 10000)
-            out[k] = cur2 - carry * 10000
-            k = k + 1
         }
         i = i + 1
     }
-    return rtkABigNew(x["neg"] != y["neg"], rtABigNorm(out))
+    var carry = 0
+    var k = 0
+    while (k < out.length) {
+        var cur = out[k] + carry
+        carry = Math.floor(cur / 10000)
+        out[k] = cur - carry * 10000
+        k = k + 1
+    }
+    return rtABigNorm(out)
+}
+
+function rtABigKara(a, b) {
+    var n = a.length
+    if (b.length > n) { n = b.length }
+    var h = Math.floor(n / 2)
+    var out = []
+    var z = 0
+    while (z < a.length + b.length) {
+        out.push(0)
+        z = z + 1
+    }
+    var a0 = rtABigPart(a, 0, h)
+    var a1 = rtABigPart(a, h, a.length)
+    var b0 = rtABigPart(b, 0, h)
+    var b1 = rtABigPart(b, h, b.length)
+    var z0 = rtABigMulMag(a0, b0)
+    rtABigAddAt(out, z0, 0)
+    // An operand that fits in the low half: a*b = a*b0 + a*b1*B^h.
+    if (a.length <= h) {
+        rtABigAddAt(out, rtABigMulMag(a0, b1), h)
+        return rtABigNorm(out)
+    }
+    if (b.length <= h) {
+        rtABigAddAt(out, rtABigMulMag(a1, b0), h)
+        return rtABigNorm(out)
+    }
+    var z2 = rtABigMulMag(a1, b1)
+    rtABigAddAt(out, z2, 2 * h)
+    rtABigAddAt(out, rtABigSubMag(rtABigSubMag(rtABigMulMag(rtABigAddMag(a0, a1), rtABigAddMag(b0, b1)), z0), z2), h)
+    return rtABigNorm(out)
+}
+
+// Limbs [from, to) of a, normalized.
+function rtABigPart(a, from, to) {
+    var out = []
+    var i = from
+    while (i < to && i < a.length) {
+        out.push(a[i])
+        i = i + 1
+    }
+    return rtABigNorm(out)
+}
+
+// out += x * 10000^off, in place; out is long enough for the whole sum.
+function rtABigAddAt(out, x, off) {
+    var carry = 0
+    var i = 0
+    while (i < x.length || carry > 0) {
+        var s = out[off + i] + carry
+        if (i < x.length) { s = s + x[i] }
+        if (s >= 10000) {
+            out[off + i] = s - 10000
+            carry = 1
+        } else {
+            out[off + i] = s
+            carry = 0
+        }
+        i = i + 1
+    }
+}
+
+// The limb convolution by number-theoretic transforms modulo two primes
+// p = c * 2^21 + 1, recombined by the Chinese remainder theorem. Every step is
+// exact in a double: a residue product is below p^2 < 2^53, and a convolution
+// sum (at most min(la, lb) * 9999^2 <= 2^20 * 9999^2 for a 2^21-point
+// transform) is below P1 * P2, so the recombined value IS the sum.
+var RT_NTT_MIN = 400
+var RT_NTT_MAX = 2097152
+var RT_NTT_P1 = 23068673
+var RT_NTT_P2 = 69206017
+function rtABigNtt(a, b) {
+    var n = 1
+    while (n < a.length + b.length) { n = n * 2 }
+    var r1 = rtANttConv(a, b, n, RT_NTT_P1, 3)
+    var r2 = rtANttConv(a, b, n, RT_NTT_P2, 5)
+    var inv = rtANttPow(RT_NTT_P1, RT_NTT_P2 - 2, RT_NTT_P2)
+    var out = []
+    var carry = 0
+    var k = 0
+    while (k < a.length + b.length) {
+        var d = r2[k] - r1[k]
+        if (d < 0) { d = d + RT_NTT_P2 }
+        var t = rtANttMod(d * inv, RT_NTT_P2)
+        var x = r1[k] + RT_NTT_P1 * t + carry
+        carry = Math.floor(x / 10000)
+        out.push(x - carry * 10000)
+        k = k + 1
+    }
+    return rtABigNorm(out)
+}
+
+// x mod p for 0 <= x < 2^53: the quotient of the rounded division is off by at
+// most one, which the two corrections absorb.
+function rtANttMod(x, p) {
+    var r = x - Math.floor(x / p) * p
+    if (r < 0) { return r + p }
+    if (r >= p) { return r - p }
+    return r
+}
+
+function rtANttPow(b, e, p) {
+    var acc = 1
+    var sq = b
+    var k = e
+    while (k > 0) {
+        if (k % 2 == 1) { acc = rtANttMod(acc * sq, p) }
+        k = Math.floor(k / 2)
+        sq = rtANttMod(sq * sq, p)
+    }
+    return acc
+}
+
+// The cyclic convolution of a and b (zero-padded to n points) modulo p, whose
+// multiplicative group has the generator g.
+function rtANttConv(a, b, n, p, g) {
+    var fa = rtANttLoad(a, n)
+    rtANtt(fa, n, p, g, false)
+    var fb = fa
+    if (a !== b) {
+        fb = rtANttLoad(b, n)
+        rtANtt(fb, n, p, g, false)
+    }
+    var i = 0
+    while (i < n) {
+        fa[i] = rtANttMod(fa[i] * fb[i], p)
+        i = i + 1
+    }
+    rtANtt(fa, n, p, g, true)
+    return fa
+}
+
+function rtANttLoad(a, n) {
+    var out = []
+    var i = 0
+    while (i < n) {
+        if (i < a.length) { out.push(a[i]) } else { out.push(0) }
+        i = i + 1
+    }
+    return out
+}
+
+// The in-place iterative radix-2 transform of A (n a power of two) modulo p:
+// the bit-reversal permutation, then log2(n) butterfly stages, each with its
+// table of twiddle powers. The inverse uses the inverse root and scales by 1/n.
+function rtANtt(A, n, p, g, inverse) {
+    var rev = [0]
+    var i = 1
+    while (i < n) {
+        var r = Math.floor(rev[Math.floor(i / 2)] / 2)
+        if (i % 2 == 1) { r = r + n / 2 }
+        rev.push(r)
+        if (i < r) {
+            var tmp = A[i]
+            A[i] = A[r]
+            A[r] = tmp
+        }
+        i = i + 1
+    }
+    var len = 2
+    while (len <= n) {
+        var w = rtANttPow(g, (p - 1) / len, p)
+        if (inverse) { w = rtANttPow(w, p - 2, p) }
+        var half = len / 2
+        var tw = [1]
+        var j = 1
+        while (j < half) {
+            tw.push(rtANttMod(tw[j - 1] * w, p))
+            j = j + 1
+        }
+        var st = 0
+        while (st < n) {
+            var m = 0
+            while (m < half) {
+                // Each name bound once, so none of them needs a scope slot.
+                var u = A[st + m]
+                var x = A[st + m + half] * tw[m]
+                var q = x - Math.floor(x / p) * p
+                var v = q < 0 ? q + p : (q >= p ? q - p : q)
+                var s = u + v
+                A[st + m] = s >= p ? s - p : s
+                var dv = u - v
+                A[st + m + half] = dv < 0 ? dv + p : dv
+                m = m + 1
+            }
+            st = st + len
+        }
+        len = len * 2
+    }
+    if (inverse) {
+        var ninv = rtANttPow(n, p - 2, p)
+        var k = 0
+        while (k < n) {
+            A[k] = rtANttMod(A[k] * ninv, p)
+            k = k + 1
+        }
+    }
 }
 
 // floor(rem / b) for rem < b * 10000, estimated from the three leading limbs of

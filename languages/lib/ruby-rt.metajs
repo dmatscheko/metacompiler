@@ -394,6 +394,15 @@ function rbBinMethod(t, name, args) {
         while (g < gs.length) { rbCall1(blk, gs[g]); g = g + 1 }
         return t
     }
+    // Twin of the each_char / each_line arm of binMethod in ruby-interpreter.abnf.
+    if (name == "each_char" || name == "each_line") {
+        var es = anytype
+        es = rbBinMethod(t, name == "each_char" ? "chars" : "lines", rbPosArgs(args))
+        if (blk === null) { return rbEnumAt(rbMkEnum(es), t, name, args) }
+        var e = 0
+        while (e < es.length) { rbCall1(blk, es[e]); e = e + 1 }
+        return t
+    }
     if (name == "inspect") { return rbBoxInspect(t) }
     if (name == "dump") { return rbEncStr(rbsDump(b, enc == "UTF-8"), enc) }
     if (name == "undump") { return rbStrUndump(b, enc) }
@@ -1183,22 +1192,16 @@ function rbABigStep(op, x, y) {
         return rtABigNarrow(dm["r"])
     }
     if (op == "**") {
-        var far = anytype
-        if (y["neg"]) {
-            var ny = rtABigNarrow(y)
-            if (typeof ny == "number" && ny >= -4096) { return rbRatPow(rbMkRat(rtABigNarrow(x), 1), ny) }
-            far = rbIntPowFar(rtABigNarrow(x), ny)
-            if (far !== undefined) { return far }
-            return rbMkFlo(Math.pow(rbABigToF(x), rbABigToF(y)))
-        }
+        // Exact up to where MRI gives up (rbIntPowFar); a negative exponent is
+        // an exact Rational, and rbRatPow raises ZeroDivisionError for 0. Twin
+        // of bigOp in ruby-interpreter.abnf.
         var e = rtABigNarrow(y)
         var bl = rtABigNarrow(x)
-        if (typeof e != "number" || e > 4096 || typeof bl != "number") {
-            far = rbIntPowFar(bl, e)
-            if (far !== undefined) { return far }
-        }
-        if (typeof e != "number") { return Math.pow(rbABigToF(x), rbABigToF(y)) }
-        if (e > 4096) { return Math.pow(rbABigToF(x), e) }
+        var far = anytype
+        far = rbIntPowFar(bl, e)
+        if (far !== undefined) { return far }
+        if (y["neg"]) { return rbRatPow(rbMkRat(bl, 1), e) }
+        if (rtABigIsZero(x)) { return rtABigIsZero(y) ? 1 : 0 }
         return rtABigNarrow(rtABigPow(x, e))
     }
     if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") {
@@ -2017,10 +2020,15 @@ function rbRatIntOpBig(n, d, mode) {
 }
 // A Rational to an Integer power, exactly. Twin of ratPow in ruby-interpreter.abnf.
 function rbRatPow(p, k) {
-    if (rbNumCmp(k, 0) >= 0) { return rbMkRat(rbNumBin("**", p["n"], k), rbNumBin("**", p["d"], k)) }
+    if (rbNumCmp(k, 0) >= 0) { return rbRatOfPows(rbNumBin("**", p["n"], k), rbNumBin("**", p["d"], k)) }
     if (rbEq(p["n"], 0)) { rbRaiseErr("**", "ZeroDivisionError", "divided by 0") }
     var nk = rbNeg(k)
-    return rbMkRat(rbNumBin("**", p["d"], nk), rbNumBin("**", p["n"], nk))
+    return rbRatOfPows(rbNumBin("**", p["d"], nk), rbNumBin("**", p["n"], nk))
+}
+function rbRatOfPows(n, d) {
+    if (rbIsFlo(n) || rbIsFlo(d)) { return rbMkRat(n, d) }
+    if (rbNumCmp(d, 0) < 0) { return {__rat: true, n: rbNeg(n), d: rbNeg(d)} }
+    return {__rat: true, n: n, d: d}
 }
 function rbRatDigitOp(v, mode, nd) {
     if (nd > 0) {
@@ -2159,11 +2167,10 @@ function rbNumBin(op, l, r) {
                 if (rbIMod(b, 2) == 0) { return 1 }
                 return a
             }
-            if (b >= -4096) { return rbRatPow(rbMkRat(a, 1), b) }
             var nfar = anytype
             nfar = rbIntPowFar(a, b)
             if (nfar !== undefined) { return nfar }
-            return rbMkFlo(Math.pow(a, b))
+            return rbRatPow(rbMkRat(a, 1), b)
         }
         var pw = Math.pow(a, b)
         if (pw >= 9007199254740992 || pw <= RB_MIN53) { return rbABigOr(op, a, b, pw) }
@@ -6411,9 +6418,16 @@ function rbNumMethod(t, name, args) {
         var cv = rbCpxMethod(t, name)
         if (cv !== undefined) { return cv }
     }
-    if (typeof t != "number" && rtTag(t, "__bint")) {
-        var bm = rbABigMethod(t, name, args)
-        if (bm !== undefined) { return bm }
+    if (typeof t != "number") {
+        if (rtTag(t, "__bint")) {
+            var bm = rbABigMethod(t, name, args)
+            if (bm !== undefined) { return bm }
+        }
+        // A Rational's parts ahead of rbToF, which a huge part pays dearly for.
+        if (rbIsRat(t)) {
+            if (name == "numerator") { return t["n"] }
+            if (name == "denominator") { return t["d"] }
+        }
     }
     var x = rbToF(t)
     var isInt = typeof t == "number"
@@ -10756,7 +10770,7 @@ function rbIntPowFar(l, r) {
     if (neg) { f = 1 / f }
     return rbMkFlo(f)
 }
-function rbFixMax() { return rbNumBin("-", rbNumBin("**", 2, 62), 1) }
+function rbFixMax() { return rbNumBin("-", rbNumBin("*", 2147483648, 2147483648), 1) }
 function rbPowTooBig(l, m, fix) {
     if (rbNumCmp(m, rbFixMax()) > 0) { return true }
     var x = anytype

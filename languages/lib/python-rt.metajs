@@ -3531,10 +3531,9 @@ function pySliceIndices(n, loV, hiV, stepV) {
 //     stripped, so pyABigFromStr accepts a sign and decimal digits only and
 //     fails loudly on anything else - exactly where Go's `!ok` fails.
 //
-//   * Karatsuba / Knuth-D. The multiplication is O(n*m) schoolbook and the
-//     division is a per-limb BINARY SEARCH for the quotient digit (14 compares a
-//     limb). The reachable operands are Python integer literals, so this is
-//     small and exact rather than fast.
+//   * Knuth-D. The division is a per-limb BINARY SEARCH for the quotient digit
+//     (14 compares a limb). The reachable operands are Python integer literals,
+//     so this is small and exact rather than fast.
 
 // The rtkABigNew hook of runtime.metajs's rtABig* layer: a normalised {__pybig}.
 function rtkABigNew(neg, limbs) {

@@ -3403,6 +3403,20 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 			rt.call(blk, jsUndef, []interface{}{g})
 		}
 		return t
+	case "each_char", "each_line":
+		// Twin of the each_char / each_line arm of binMethod in ruby-interpreter.abnf.
+		list := "chars"
+		if name == "each_line" {
+			list = "lines"
+		}
+		arr, _ := rt.rubyBinMethod(t, list, pos).(*jsArray)
+		if blk == nil {
+			return rubyEnumAt(rubyMkEnum(arr), t, name, pos)
+		}
+		for _, e := range arr.elems {
+			rt.call(blk, jsUndef, []interface{}{e})
+		}
+		return t
 	case "inspect":
 		return rubyBoxInspect(t)
 	case "dump":
