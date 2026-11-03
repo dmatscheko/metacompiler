@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1180 bash: `$!` before any background job, the readonly leak from a void indexed nameref (compiler), repeated `:=` refusals, the variable named "" · P3 · SH · OPEN [V]
+### T-1180 bash: `$!` before any background job, the readonly leak from a void indexed nameref (compiler), repeated `:=` refusals, the variable named "" · P3 · SH · IN PROGRESS (SH worker, round 58) [V]
 Found while closing T-1177; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - All engines: `$!` is unset until a background job runs. bash: `echo "[$!] ${!-u}"` → `[] u`; `${!:=x}` → "$!: cannot assign in this way" with status 1; under `set -u` → "$!: unbound variable". Ours: `[0] 0`. The interpreter also counts up fake pids. Keep both engines consistent.
 - Compiler only (run + native): `s6(){ local -n w=w; declare -a w=(p q); readonly w; }; s6; declare -p w; s7(){ local -n w=w; echo $?; }; s7`. bash: "declare: w: not found", then s7 prints 0. Compiled: `declare -r w`, then "local: w: readonly variable" and 1. The interpreter is right. Assert only the deterministic parts, because bash's readonly stderr here reads freed memory.
