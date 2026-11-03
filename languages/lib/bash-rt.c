@@ -359,6 +359,9 @@ char *rt_getvar_ref(char *n, int quiet);
 int rt_nref_void(char *n);
 int rt_nref_voidro(char *n, int ro, int asg);
 int rt_nref_vro(char *n);
+int rt_vv_store(char *n, char *v, int app);
+int rt_vv_drop(int d);
+int rt_vv_declp(char *who);
 int rt_nref_unglob(void);
 char *rt_nref_gread(void);
 int rt_unset_name(char *n);
@@ -6837,7 +6840,10 @@ int rt_nref_gset(char *n, char *v, int app, int at)
 int rt_nref_fstore(char *n, char *v, int at)
 {
     if (rt_nref_isarr(n, 0) != 0 && rt_isassoc(n) != 0) {
-        if (rt_nref_vro(n) == 0) return 1;
+        if (rt_nref_vro(n) == 0) {
+            rt_vv_store(n, v, 0);
+            return 1;
+        }
         arith_err = 0;
         return 2;
     }
@@ -6890,20 +6896,133 @@ int rt_nref_isarr(char *n, int sub)
     return 1;
 }
 
+/* THE VARIABLE NAMED "". A function's nameref that is an associative array
+ * (rt_nref_isarr) names the variable "" in the scope of its own binding, which
+ * every such nameref of that call shares (bash 5.3): a scalar store through one
+ * stores there, and export and readonly of one give it the attribute and unset
+ * it. The records live in the array row "%vv", which no variable can be, so a
+ * subshell's snapshot and the statement arena keep them as any value: key F holds
+ * the value of call F's "", key aF its attributes (2 readonly, 4 exported), F being
+ * the save-stack index of the call's FUNCNAME entry (rt_fn_enter), -1 outside
+ * every function.
+ * vv_on says a record was ever made, which is when a return drops its call's
+ * (rt_vv_drop). Twin of voidVars in bash-interpreter.abnf. */
+int vv_on;
+char *rt_vv_row(void)
+{
+    return "%vv";
+}
+
+/* The call whose scope holds the nameref n's binding. */
+int rt_vv_frame(char *n)
+{
+    int id = rt_varslot(n);
+    int fid = rt_varslot("FUNCNAME");
+    int t = ls_top - 1;
+    if (id < 0 || fid < 0) return -1;
+    while (t >= 0 && ls_id[t] != id) t = t - 1;
+    while (t >= 0 && ls_id[t] != fid) t = t - 1;
+    return t;
+}
+
+/* The attributes of the "" of n's call. */
+int rt_vv_at(char *n)
+{
+    char *k;
+    if (vv_on == 0) return 0;
+    k = rt_strcat("a", rt_int2str(rt_vv_frame(n)));
+    if (rt_arr_has(rt_vv_row(), k) == 0) return 0;
+    return (int)rt_str2int(rt_arr_get(rt_vv_row(), k));
+}
+
+/* v stored in the "" of n's call, appended to its value when app is 1. */
+int rt_vv_store(char *n, char *v, int app)
+{
+    char *k = rt_int2str(rt_vv_frame(n));
+    if (vv_on == 0) {
+        vv_on = 1;
+        rt_arr_amark(rt_vv_row());
+    }
+    if (app != 0 && rt_arr_has(rt_vv_row(), k) != 0) v = rt_strcat(rt_arr_get(rt_vv_row(), k), v);
+    rt_arr_set(rt_vv_row(), k, v);
+    return 0;
+}
+
+/* A return to save-stack depth d: the records of the calls above it go. */
+int rt_vv_drop(int d)
+{
+    int r = rt_ar_find(rt_vv_row());
+    int i;
+    char *k;
+    if (r < 0) return 0;
+    i = ar_n[r] - 1;
+    while (i >= 0) {
+        k = ar_k[r][i];
+        if (rt_str2int(k[0] == (char)97 ? k + 1 : k) >= d) rt_arr_del(rt_vv_row(), k);
+        i = i - 1;
+    }
+    return 0;
+}
+
+/* `declare -p ""`: the "" of the innermost call that has one, as bash prints a
+ * scalar with the name "", else "WHO: : not found" and 1. */
+int rt_vv_declp(char *who)
+{
+    int r = rt_ar_find(rt_vv_row());
+    int best = -2;
+    int i;
+    int f;
+    int at = 0;
+    char *k;
+    char *bk;
+    int saved;
+    i = 0;
+    while (r >= 0 && i < ar_n[r]) {
+        k = ar_k[r][i];
+        f = (int)rt_str2int(k[0] == (char)97 ? k + 1 : k);
+        if (f > best) best = f;
+        i = i + 1;
+    }
+    if (best == -2) {
+        saved = sink_out;
+        sink_out = sink_err;
+        rt_diag_pfx();
+        rt_prints(who);
+        rt_prints(": : not found\n");
+        sink_out = saved;
+        return 1;
+    }
+    bk = rt_int2str(best);
+    if (rt_arr_has(rt_vv_row(), rt_strcat("a", bk)) != 0) at = (int)rt_str2int(rt_arr_get(rt_vv_row(), rt_strcat("a", bk)));
+    rt_prints("declare -");
+    if (at == 0) rt_prints("-");
+    if ((at & 2) != 0) rt_prints("r");
+    if ((at & 4) != 0) rt_prints("x");
+    rt_prints(" ");
+    if (rt_arr_has(rt_vv_row(), bk) != 0) {
+        rt_prints("=");
+        rt_prints(rt_dqs(rt_arr_get(rt_vv_row(), bk)));
+    }
+    rt_prints("\n");
+    return 0;
+}
+
 /* export and readonly of the nameref n that is an array (rt_nref_isarr) find no
- * variable: nothing changes, except that for an associative one readonly (ro 1)
- * makes the variable bash finds instead readonly (mark 65536), after which each
- * refuses as a readonly variable named "" - twice, failing, with a value (asg 1).
- * Answers 0 for any other n, else 1, or 3 when refused. Twin of the same check
- * in declOne in bash-interpreter.abnf. */
+ * variable: nothing changes for an indexed one; for an associative one the
+ * "" of its call takes the attribute and loses its value (rt_vv_store), and once
+ * readonly each refuses as a readonly variable named "" - twice, failing, with a
+ * value (asg 1). Answers 0 for any other n, else 1, or 3 when refused. Twin of
+ * the same check in declOne in bash-interpreter.abnf. */
 int rt_nref_voidro(char *n, int ro, int asg)
 {
-    int r;
+    char *k;
     if (rt_nref_isarr(n, 0) == 0) return 0;
     if (rt_isassoc(n) == 0) return 1;
-    r = rt_ar_find(n);
-    if ((ar_mk[r] & 65536) == 0) {
-        if (ro != 0) ar_mk[r] = ar_mk[r] | 65536;
+    if ((rt_vv_at(n) & 2) == 0) {
+        rt_vv_store(n, "", 0);
+        k = rt_int2str(rt_vv_frame(n));
+        rt_arr_del(rt_vv_row(), k);
+        rt_arr_set(rt_vv_row(), rt_strcat("a", k), rt_int2str(rt_vv_at(n) | (ro != 0 ? 2 : 4)));
         return 1;
     }
     rt_berr("", "", "readonly variable");
@@ -6912,14 +7031,13 @@ int rt_nref_voidro(char *n, int ro, int asg)
     return 3;
 }
 
-/* A scalar store through the nameref n that is an array (rt_nref_isarr) changes
- * nothing, except that one rt_nref_voidro made readonly refuses it as a store
- * to the readonly variable "" (arith_err): answers 1 then, else 0. Twin of
- * voidRo in bash-interpreter.abnf. */
+/* A scalar store through the nameref n that is an array (rt_nref_isarr): through
+ * an associative one it is refused as a store to the readonly variable "" when
+ * that is readonly (arith_err), answering 1, else 0. Twin of voidRo in
+ * bash-interpreter.abnf. */
 int rt_nref_vro(char *n)
 {
-    int r = rt_ar_find(n);
-    if (r < 0 || (ar_mk[r] & 65536) == 0) return 0;
+    if (rt_isassoc(n) == 0 || (rt_vv_at(n) & 2) == 0) return 0;
     rt_berr("", "", "readonly variable");
     arith_err = 1;
     return 1;
@@ -7997,7 +8115,9 @@ char *rt_prompt(char *s) {
  * an attribute is printed as declared (`export e` gives `declare -x e`). A name
  * neither set nor declared is reported for the builtin who. */
 int rt_declp(char *nm, char *flag, int assoc, char *who) {
-    int n = rt_arr_count(nm);
+    int n;
+    if (nm[0] == 0) return rt_vv_declp(who);
+    n = rt_arr_count(nm);
     int isarr = (n > 0 || rt_arr_marked(nm) != 0) ? 1 : 0;
     char *v;
     int saved;
@@ -9189,6 +9309,7 @@ int rt_pop_locals(int d)
         las_top = las_top - cnt;
         t = ls_top;
     }
+    if (vv_on != 0) rt_vv_drop(d);
     return 0;
 }
 
@@ -9576,6 +9697,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
     if (nref_any != 0) {
         if (rt_nref_isarr(n, 0) != 0) {
             if (rt_nref_vro(n) != 0) sub_bad = 1;
+            else if (rt_isassoc(n) != 0) rt_vv_store(n, v, app);
             return 0;
         }
         if (rt_nref_gstore(n) != 0) return rt_nref_gset(n, v, app, at | bi | ro);
@@ -9912,7 +10034,7 @@ int rt_ar_nset(char *nm, char *k, char *v, int at, char *as)
     int i = -1;
     int r;
     if (rt_nref_isarr(nm, k != 0 ? 2 : 0) != 0) {
-        if (k == 0) rt_nref_vro(nm);
+        if (k == 0 && rt_nref_vro(nm) == 0 && rt_isassoc(nm) != 0) rt_vv_store(nm, v, 0);
         return 0;
     }
     if (nref_any != 0 && (rt_arr_marks(nm) & 32) != 0 && rt_nref_end(nm) == 0) {

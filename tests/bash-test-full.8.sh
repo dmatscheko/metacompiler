@@ -521,6 +521,44 @@ h:kept'
   e=$(w=; unset w; s172a 2>/dev/null; declare -p w 2>&1; s172b 2>/dev/null; w=5; echo "w:$w")
   check vrol "$(s172s "$e")" 'r:0;declare: w: not found;l:0;w:5;'
 }
+# ===== SECTION 173: the variable named "" =====
+# A function's nameref that is an associative array names the variable "" of the call that
+# binds it, which all such namerefs of that call share: a scalar store through one (=, +=,
+# read, printf -v, ((..)), let, ${w:=..}, for) stores there, a callee's store too, an array
+# store does not. readonly or export of one gives "" the attribute and unsets it; a store
+# through another nameref to a readonly "" is then refused. `declare -p ""` prints it, a
+# return drops it ("not found", status 1), and `local -p ""` never finds it. Every expected
+# value is bash 5.3's.
+s173() {
+  local e
+  s173a() { local -n w=w; declare -A w; w=3; declare -p ""; local -n v=v; declare -A v; v+=4; declare -p ""; echo "w=[$w]"; }
+  e=$(s173a 2>/dev/null; declare -p "" 2>/dev/null; echo "t:$?")
+  check vv1 "$e" 'declare -- ="3"
+declare -- ="34"
+w=[]
+t:1'
+  s173b() { local -n w=w; declare -A w; read w <<< "rd"; declare -p ""; printf -v w '%s' 'a"b$c'; declare -p ""; (( w = 9 )); declare -p ""
+            let w=10; declare -p ""; : ${w:=d}; declare -p ""; for w in p q; do :; done; declare -p ""; w=(a b); w[1]=x; declare -p ""; }
+  e=$(s173b 2>/dev/null)
+  check vv2 "$e" 'declare -- ="rd"
+declare -- ="a\"b\$c"
+declare -- ="9"
+declare -- ="10"
+declare -- ="d"
+declare -- ="q"
+declare -- ="q"'
+  s173c() { local -n w=w; declare -A w; w=1; s173d; declare -p ""; ( w=7; declare -p "" ); declare -p ""; readonly w; declare -p ""
+            local -n v=v; declare -A v; v=2; echo "v:$?"; }
+  s173d() { w=8; }
+  e=$(s173c 2>/dev/null; echo "r:$?")
+  check vv3 "$e" 'declare -- ="8"
+declare -- ="7"
+declare -- ="8"
+declare -r '
+  s173e() { local -n w=w; declare -A w; w=1; export w; declare -p ""; w=4; declare -p ""; local -p "" 2>/dev/null; echo "l:$?"; }
+  e=$(s173e 2>/dev/null)
+  check vv4 "${e//$'\n'/;}" 'declare -x ;declare -x ="4";l:1'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -542,5 +580,6 @@ s169  # SECTION-CALL 169
 s170  # SECTION-CALL 170
 s171  # SECTION-CALL 171
 s172  # SECTION-CALL 172
+s173  # SECTION-CALL 173
 echo "full: $checks checks, $fails failures"
 exit $fails

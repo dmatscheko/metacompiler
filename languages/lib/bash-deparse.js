@@ -909,7 +909,9 @@ function bashSubNeedsX(t) {
 // fields that are no operand, in order]}, or null: bash's "not a valid identifier", and -n's
 // refusal of a NAME[SUB] whose SUB the text spells 0, which names SUB as written. An option
 // field with a letter the builtin does not take answers {badOpt: bashDeclBadOpt's report}
-// instead: the builtin does nothing and fails with status 2.
+// instead: the builtin does nothing and fails with status 2. An empty field of a `declare
+// -p` or `typeset -p` is the variable named "", printed or "not found" by the engine: voids
+// counts them (`local -p ""` finds none).
 //
 // The builtin reads the SUB of a computed NAME[SUB]=VALUE as it stands, as an assignment
 // statement does (AsgIdx): an associative array's as a word, an indexed array's as
@@ -934,6 +936,8 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
     var bad = []
     var assoc = false
     var nref = false
+    var pq = false
+    var voids = 0
     var i
     var k
     for (i = 1; i < items.length; i++) {
@@ -941,6 +945,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
         if (it.dflag != undefined) {
             text = text + " " + it.dflag
             sflags = sflags + " " + it.dflag
+            if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("p") >= 0) { pq = true }
             if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("n") >= 0) { nref = !xr }
             if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("a") >= 0 || it.dflag.indexOf("A") >= 0)) { arr = true }
             if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("A") >= 0) { assoc = true }
@@ -974,9 +979,12 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
                 if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }
                 if (f.charAt(0) == "-" && f.indexOf("A") >= 0) { assoc = true }
                 if (f.charAt(0) == "-" && f.indexOf("n") >= 0) { nref = !xr }
+                if (f.charAt(0) == "-" && f.indexOf("p") >= 0) { pq = true }
                 continue
             }
             opts = false
+            if (f == "" && pq && items[0].dkw == "local") { bad.push(": not found"); continue }
+            if (f == "" && pq && !xr) { voids = voids + 1; continue }
             var op = bashDeclOperand(f, arr, quote, !xr)
             if (op == "") { bad.push("`" + f + "': not a valid identifier"); continue }
             var br = f.indexOf("[")
@@ -991,7 +999,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             text = text + " " + op
         }
     }
-    return {text: text, pre: pre, operands: operands, bad: bad}
+    return {text: text, pre: pre, operands: operands, bad: bad, voids: voids}
 }
 // AN OPTION WORD AFTER AN OPERAND. bash marks every array literal (NAME=(...), NAME+=(...))
 // that follows an unquoted word beginning with "-" for the kind its letters name - A

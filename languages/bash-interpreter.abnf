@@ -1777,6 +1777,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var fr = localFrames.pop()
         var i
         for (i = fr.length - 1; i >= 0; i--) { restoreLocal(fr[i]) }
+        if (voidVars.length > 0) {
+            var keep = []
+            for (i = 0; i < voidVars.length; i++) { if (voidVars[i].fr < localFrames.length) { keep.push(voidVars[i]) } }
+            voidVars = keep
+        }
     }
     function restoreLocal(e) {
         vars["$" + e.name] = e.val
@@ -3290,6 +3295,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (tn != null && roRefusedV(tn, "m", "")) { storeFail(); return "" }
                     if (refVoid && voidRo(refPn)) { diagErr(": readonly variable\n"); storeFail(); return "" }
                     if (tn != null && !refVoid) { d = storeAttr(tn, d, false) }
+                    if (refVoid) { voidStore(refPn, d, false) }
                     // A bad subscript of the element a nameref names is refused as a
                     // readonly name is.
                     if (takeSubBad()) { storeFail(); return "" }
@@ -3576,19 +3582,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (selfV) { diagErr(kw + ": warning: " + names[k] + ": circular name reference\n") }
             // export and readonly of a nameref that is an array (refIsArr) find no variable:
-            // nothing changes, status 0, except that for an associative one readonly makes the
-            // variable bash finds instead readonly (vro), after which each refuses as a
-            // readonly variable named "" - twice, status 1, with a value. Twin of
-            // rt_nref_voidro.
+            // nothing changes for an indexed one, status 0; for an associative one the
+            // variable "" it names takes the attribute and loses its value (voidAttr), and
+            // once readonly each refuses as a readonly variable named "" - twice, status 1,
+            // with a value. Twin of rt_nref_voidro.
             if ((kw == "export" || kw == "readonly") && flags.indexOf("n") < 0 && refIsArr(names[k]) && (aw == null || aw.idxT == null)
                 && (asgs[k] == null || asgs[k].lit == null)) {
-                var vra = arrs[arrKey(names[k])]
-                if (!vra.assoc) { return }
-                if (vra.vro == true) {
+                if (!arrs[arrKey(names[k])].assoc) { return }
+                if (voidRo(names[k])) {
                     diagErr(": readonly variable\n")
                     if (asgs[k] != null) { diagErr(": readonly variable\n"); roFail = true }
                 }
-                else if (kw == "readonly") { vra.vro = true }
+                else { voidAttr(names[k], (kw == "readonly") ? 2 : 4) }
                 return
             }
             if (declCircGlob(k, v)) { return }
@@ -4191,6 +4196,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var body = function() {
             var top = pending[pending.length - 1]
             if (top.errs != "") { emitErr(top.errs) }
+            if (top.vout != "") { emitOut(top.vout) }
             var r = anytype
             r = 0
             if (top.snip != null) { r = top.snip() }
@@ -4216,19 +4222,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var errs = ""
             var k
             for (k = 0; k < dt.bad.length; k++) { errs = errs + diagPfx() + kw + ": " + dt.bad[k] + "\n" }
+            // The variable named "" (voidDeclLine) for each empty operand of -p.
+            var vout = ""
+            for (k = 0; k < dt.voids; k++) {
+                var vl = voidDeclLine()
+                if (vl == "") { errs = errs + diagPfx() + kw + ": : not found\n" } else { vout = vout + vl + "\n" }
+            }
             // An option field it does not take fails the builtin (declBadOpt).
             var failSt = 1
             if (dt.badOpt != undefined && kw == "local" && fnDepth == 0) { errs = diagPfx() + "local: can only be used in a function\n" }
             else if (dt.badOpt != undefined) { errs = diagPfx() + dt.badOpt; failSt = 2 }
             var st = anytype
             st = 0
-            if (operands > 0 || errs != "") {
+            if (operands > 0 || errs != "" || vout != "") {
                 var snip = null
                 if (operands > 0) {
                     if (!hasOwn(compiled, "$" + text)) { compiled["$" + text] = compileSnippet(text, 0) }
                     snip = compiled["$" + text]
                 }
-                pending.push({snip: snip, errs: errs})
+                pending.push({snip: snip, errs: errs, vout: vout})
                 st = run()
                 pending.pop()
                 if (typeof st == "object") { return st }
@@ -5012,7 +5024,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A shallow copy of one array store, for `local`'s save entry.
     function arrCopy(a) {
-        var c2 = {assoc: a.assoc, keys: [], vals: {}, gone: {}, lit: a.lit, decl: a.decl, nb: a.nb, hv: {}, vro: a.vro == true}
+        var c2 = {assoc: a.assoc, keys: [], vals: {}, gone: {}, lit: a.lit, decl: a.decl, nb: a.nb, hv: {}}
         var i
         for (i = 0; i < a.keys.length; i++) {
             var kk = a.keys[i]
@@ -5997,6 +6009,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // An element store reports refArrBad's error and goes on (bash 5.3).
         if (refIsArr(name)) {
             if (key != null && !refIsAs(name)) { diagErr(arPfx + "`': not a valid identifier\n") }
+            if (key == null && refIsAs(name)) { voidStore(name, s, false) }
             return
         }
         if (anyRef && attrOn(refVars, name) && refTarget(name) == "") {
@@ -7084,6 +7097,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function runAssign(a, assoc, decl) {
         if (!decl && a.circ != true && refIsArr(a.name)) {
             if ((a.idxT != null || a.lit != null) && !refIsAs(a.name)) { refArrBad() }
+            if (a.idxT == null && a.lit == null && refIsAs(a.name)) {
+                var vv = (a.valT != null) ? wordJoin(a.valT()) : ""
+                if (!arithErr && abortSignal == null) { voidStore(a.name, vv, a.op == "+=") }
+            }
             return
         }
         if (!decl && anyRef && refVoidElem(a)) { return }
@@ -7213,14 +7230,72 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // array literal store is refused as one to the name "" (refArrBad), which abandons the
     // line or fails the builtin that stored. A declaration's literal is the nameref's own.
     // bash names the bytes of its array's header instead of "". One that is an associative
-    // array refuses nothing (refIsAs): it reads as unset, a store to it or through it is
-    // dropped, status 0, and `unset` of it unsets it as -n does. Twin of rt_nref_isarr.
+    // array refuses nothing (refIsAs): it reads as unset, a scalar store through it goes to
+    // the variable named "" (voidStore), any other store to it or through it is dropped,
+    // status 0, and `unset` of it unsets it as -n does. Twin of rt_nref_isarr.
     function refIsArr(name) { return anyRef && noRef == 0 && attrOn(refVars, name) && isArr(name) }
     function refIsAs(name) { return refIsArr(name) && arrs[arrKey(name)].assoc }
-    // Is NAME one that readonly made the variable bash finds instead readonly (vro)? A
-    // scalar store through it - one that binds the name - is then refused as a store to the
-    // readonly variable "". Twin of rt_nref_voidro's mark 65536.
-    function voidRo(name) { return refIsAs(name) && arrs[arrKey(name)].vro == true }
+    // Is the variable "" NAME names readonly? A scalar store through NAME - one that binds
+    // the name - is then refused as a store to the readonly variable "". Twin of rt_nref_vro.
+    function voidRo(name) {
+        if (!refIsAs(name)) { return false }
+        var r = voidRec(name, false)
+        return r != null && (r.at & 2) != 0
+    }
+    // THE VARIABLE NAMED "". A function's nameref that is an associative array (refIsAs)
+    // names the variable "" in the scope of its own binding, which every such nameref of that
+    // call shares (bash 5.3): a scalar store through one stores there, and export and readonly
+    // of one give it the attribute and unset it. A record {fr, set, val, at} is the "" of the
+    // call at index fr of localFrames (-1 outside every function), at 2 readonly and 4
+    // exported; a return drops its call's (popLocalFrame). Twin of rt_vv_store in
+    // languages/lib/bash-rt.c.
+    var voidVars = []
+    function voidFrame(n) {
+        var j
+        for (j = localFrames.length - 1; j >= 0; j--) {
+            var fr = localFrames[j]
+            var i
+            for (i = 0; i < fr.length; i++) { if (fr[i].name == n) { return j } }
+        }
+        return -1
+    }
+    function voidRec(n, make) {
+        var f = voidFrame(n)
+        var i
+        for (i = 0; i < voidVars.length; i++) { if (voidVars[i].fr == f) { return voidVars[i] } }
+        if (!make) { return null }
+        var r = {fr: f, set: false, val: "", at: 0}
+        voidVars.push(r)
+        return r
+    }
+    function voidStore(n, v, app) {
+        var r = voidRec(n, true)
+        r.val = (app && r.set) ? r.val + v : v
+        r.set = true
+    }
+    // export (at 4) or readonly (at 2) of NAME.
+    function voidAttr(n, at) {
+        var r = voidRec(n, true)
+        r.at = r.at | at
+        r.set = false
+        r.val = ""
+    }
+    function voidCopy() {
+        var out = []
+        var i
+        for (i = 0; i < voidVars.length; i++) { var r = voidVars[i]; out.push({fr: r.fr, set: r.set, val: r.val, at: r.at}) }
+        return out
+    }
+    // `declare -p ""`: the "" of the innermost call that has one, as bash prints a scalar
+    // named "", else "".
+    function voidDeclLine() {
+        var best = null
+        var i
+        for (i = 0; i < voidVars.length; i++) { if (best == null || voidVars[i].fr > best.fr) { best = voidVars[i] } }
+        if (best == null) { return "" }
+        var fl = ((best.at & 2) != 0 ? "r" : "") + ((best.at & 4) != 0 ? "x" : "")
+        return "declare -" + ((fl == "") ? "-" : fl) + " " + (best.set ? "=" + declQuote(best.val) : "")
+    }
     // A read of one: its elements, and their count or its length (whole), read as unset; its
     // value names no variable, which abandons the line with status 1.
     function refArrRead(whole, lenp) {
@@ -7279,6 +7354,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bn = isElemRef(name) ? splitSubscript(name).name : name
             if (refIsArr(bn)) {
                 if (bn != name && !refIsAs(bn)) { refArrBad() }
+                if (bn == name && refIsAs(bn)) { voidStore(name, v, false) }
                 return ""
             }
         }
@@ -9507,7 +9583,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         subLevels = subLevels + 1
         return {fl: funcLog.length, vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
                 e: optErrExit, u: optNounset, pf: optPipefail, eg: optExtglob, tr: exitTrap, ts: exitTrapSrc,
-                so: sinkOut, se: sinkErr, fd: fdTab, inb: stdinBuf, inp: stdinPos, tc: thisCmd, bg: lastBgPid}
+                so: sinkOut, se: sinkErr, fd: fdTab, inb: stdinBuf, inp: stdinPos, tc: thisCmd, bg: lastBgPid, vv: voidCopy()}
     }
     function restoreShellState(st) {
         while (funcLog.length > st.fl) {
@@ -9534,6 +9610,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         exitTrapSrc = st.ts
         thisCmd = st.tc
         lastBgPid = st.bg
+        voidVars = st.vv
     }
     // ( LIST ) : variables and positional parameters are restored afterwards, and both a
     // `return` and an `exit` inside end only the subshell. No EXIT trap is inherited. It starts outside every loop,
@@ -10245,7 +10322,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < vals.length; k++) {
                 // A nameref control variable is made to refer to each word in turn, unless its
                 // chain is circular, when the word is stored (storeAttr, refGlobStore). One that
-                // is an associative array stores nothing (refIsAs).
+                // is an associative array stores it in the variable named "" (voidStore).
                 var fVoid = refIsAs(fname)
                 var fRef = anyRef && attrOn(refVars, fname) && refGlobal(fname) == ""
                 // One readonly made refuse a scalar store (voidRo) is asked before noRef hides it.
@@ -10258,7 +10335,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     setStatus(1)
                     return 1
                 }
-                if (!fVoid) { storeAttr(fname, vals[k], false) }
+                if (fVoid) { voidStore(fname, vals[k], false) } else { storeAttr(fname, vals[k], false) }
                 if (fRef) { noRef = noRef - 1 }
                 // A word that names no variable ends the loop, status 1.
                 if (fRef && takeSubBad()) { setStatus(1); return 1 }

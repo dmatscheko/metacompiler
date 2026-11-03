@@ -6052,15 +6052,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         storeStatusI(b, outside ? 1 : 2)
         return b
     }
-    // The declaration dt (bashDeclText) spells, its bad fields reported first, under the
-    // redirections, after the literals of dt.pre. Twin of makeDeclDyn in bash-interpreter.abnf.
+    // The declaration dt (bashDeclText) spells, its bad fields reported first, then the
+    // variable named "" for each of dt.voids (rt_vv_declp), under the redirections, after the
+    // literals of dt.pre. Twin of makeDeclDyn in bash-interpreter.abnf.
     function makeDeclSpelled(kw, dt, redirs) {
         var body = function(b) {
             var k
             if (dt.badOpt != undefined) { return emitDeclBadOpt(b, kw, dt.badOpt) }
             for (k = 0; k < dt.bad.length; k++) { emitDiag(b, gepStr(b, kw + ": " + dt.bad[k] + "\n")) }
+            var vst = zero
+            for (k = 0; k < dt.voids; k++) { vst = b.NewOr(vst, b.NewCall(rtDeclp, [emptyPtr(b), emptyPtr(b), zero, gepStr(b, kw)])) }
             if (dt.operands > 0) { b = compileSnippet(dt.text, 0)(b) }
             if (dt.bad.length > 0 || dt.operands == 0) { storeStatusI(b, (dt.bad.length > 0) ? 1 : 0) }
+            if (dt.voids > 0) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), vst)) }
             return b
         }
         var run = (redirs.length == 0) ? body : mkRedirected([body].concat(redirs))
