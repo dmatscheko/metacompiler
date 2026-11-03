@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1183 bash: `declare -f NAME=(list)` and `declare -F NAME=VALUE` · P3 · SH · OPEN [V]
+### T-1183 bash: `declare -f NAME=(list)` and `declare -F NAME=VALUE` · P3 · SH · IN PROGRESS (SH worker, round 61) [V]
 Found while closing T-1182; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. All engines.
 - `declare -f q=(1 2); echo "s=$?"; declare -p q`: bash assigns the literal (`declare -a q=([0]="1" [1]="2")`, and s=1). Ours assigns nothing, so `declare -p q` says "q: not found".
 - `declare -F r=1` (and `-f r=1`): bash prints "declare: cannot use `-f' to make functions" with status 1. Ours prints no message.
