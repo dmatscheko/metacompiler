@@ -3509,6 +3509,9 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 	} else {
 		r = rt.rubyMethod(rubyBinText(t.b), name, args)
 	}
+	if blk != nil && rubyStrEachIter(name) {
+		return t
+	}
 	switch v := r.(type) {
 	case string:
 		return rubyEncStr(rubyBinOfText(v), enc)

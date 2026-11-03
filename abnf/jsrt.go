@@ -4904,10 +4904,16 @@ func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
 		}
 		return rt.rubyBigNarrow(m), true
 	case "**":
-		if y.Sign() < 0 {
-			if y.IsInt64() && y.Int64() >= -4096 {
-				return rt.rubyRatPow(rt.rubyAsRat(l), y), true
+		far := y.Sign() < 0 || !y.IsInt64() || y.Int64() > 4096 || !x.IsInt64()
+		if y.Sign() < 0 && y.IsInt64() && y.Int64() >= -4096 {
+			return rt.rubyRatPow(rt.rubyAsRat(l), y), true
+		}
+		if far {
+			if v, ok := rt.rubyIntPowFar(x, y); ok {
+				return v, true
 			}
+		}
+		if y.Sign() < 0 {
 			return &jsFlo{f: crPow(rubyToF(l), rubyToF(r))}, true
 		}
 		if !y.IsInt64() || y.Int64() > 4096 {
@@ -6287,6 +6293,9 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 			}
 			if y >= -4096 {
 				return rt.rubyRatPow(rubyMkRat(x, 1), big.NewInt(int64(y)))
+			}
+			if v, ok := rt.rubyIntPowFar(big.NewInt(int64(x)), big.NewInt(int64(y))); ok {
+				return v
 			}
 			return &jsFlo{f: crPow(x, y)}
 		}
@@ -12304,7 +12313,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if pos, blk := rubyBlockArgs(args); objIsCls && blk != nil {
 					if _, own := args[len(args)-1].(*jsObject).props["__rself"]; own {
 						if name == "class_eval" || name == "module_eval" {
-							pos = nil
+							pos = []interface{}{o}
 						}
 						if _, bi := o.props["__rbuiltin"]; bi {
 							rt.rubyBuiltinExt = true
@@ -12317,11 +12326,17 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				// body is compiled as a def): an instance method of the class.
 				if objIsCls {
 					nm, fn := rt.rubyBlockMethod(args)
-					o.props[nm] = fn
-					rubyIMNote(o, nm)
-					rubyIncludersPut(o, nm, fn)
-					rt.rubyHook(o, "method_added", jsSym{s: nm})
+					rt.rubyIMethodPut(o, nm, fn)
 					return jsSym{s: nm}
+				}
+			case "attr_accessor", "attr_reader", "attr_writer":
+				// Called at run time (a class_eval or Class.new block, a class
+				// method); a literal one in a class body is compiled as methods.
+				if pos, _ := rubyBlockArgs(args); objIsCls {
+					for _, a := range pos {
+						rt.rubyAttrDefine(o, name, rt.rubyStr(a))
+					}
+					return jsNull
 				}
 			case "instance_method":
 				if _, builtin := o.props["__rbuiltin"]; objIsCls && !builtin {
@@ -12419,6 +12434,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			bn, _ := o.props["__rbuiltin"].(string)
 			if bn == "Integer" && name == "sqrt" {
 				return rt.rubyIntSqrt(argAt(args, 0))
+			}
+			if bn == "Complex" && (name == "polar" || name == "rect" || name == "rectangular") {
+				return rt.rubyCpxClassNew(name, args)
 			}
 			// Regexp.last_match / last_match(n): $~, or its group n.
 			if bn == "Regexp" && name == "last_match" {
@@ -13384,7 +13402,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			rt.rubyRaiseErr(name, "ArgumentError", fmt.Sprintf("wrong number of arguments (given %d, expected 1)", len(pos)))
 		}
 		if name == "index" {
-			rt.rubyHidxWarn()
+			rt.rubySiteWarn("Hash#index is deprecated; use Hash#key")
 		}
 		for i := range vals.elems {
 			if rt.rubyEqual(vals.elems[i], argAt(pos, 0)) {
@@ -14155,6 +14173,13 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		return rt.rubyEnumSrc(t)
 	case "each_index":
+		if blk == nil {
+			idx := &jsArray{}
+			for i := range t.elems {
+				idx.elems = append(idx.elems, float64(i))
+			}
+			return rubyEnumAt(rubyMkEnum(idx), rt.rubyEnumSrc(t), name, pos)
+		}
 		for i := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{float64(i)})
 		}

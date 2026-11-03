@@ -468,6 +468,7 @@ function rbBinMethod(t, name, args) {
     } else {
         r = js_rxmcall(b, name, args)
     }
+    if (blk !== null && rbStrEachIter(name)) { return t }
     if (typeof r == "string" || (typeof r == "object" && rtTag(r, "__rstr"))) { return rbEncStr(rbSV(r), enc) }
     if (rbIsArr(r)) {
         var j = 0
@@ -759,7 +760,14 @@ function rbRStrMethod(b, name, args) {
     if (name == "tap") { rbCall1(rbBlockOf(args), b); return b }
     if (name == "equal?") { return rbIdenticalP(b, rbArgAt(args, 0)) }
     if (name == "object_id") { return rbObjectId(b) }
+    if (rbStrEachIter(name) && rbBlockOf(args) !== null) { js_rxmcall(b["__s"], name, args); return b }
     return undefined
+}
+// The String iterators that answer the receiver itself when given a block. Twin
+// of strEachIter in ruby-interpreter.abnf.
+function rbStrEachIter(n) {
+    return n == "each_char" || n == "each_byte" || n == "each_line" || n == "each_codepoint"
+        || n == "each_grapheme_cluster"
 }
 // A mutator is about to reach v: a plain string becomes a box, which replaces it
 // in the Array or Hash (o, k) it was read from. Twin of rubyStrPromote in
@@ -1175,12 +1183,20 @@ function rbABigStep(op, x, y) {
         return rtABigNarrow(dm["r"])
     }
     if (op == "**") {
+        var far = anytype
         if (y["neg"]) {
             var ny = rtABigNarrow(y)
             if (typeof ny == "number" && ny >= -4096) { return rbRatPow(rbMkRat(rtABigNarrow(x), 1), ny) }
+            far = rbIntPowFar(rtABigNarrow(x), ny)
+            if (far !== undefined) { return far }
             return rbMkFlo(Math.pow(rbABigToF(x), rbABigToF(y)))
         }
         var e = rtABigNarrow(y)
+        var bl = rtABigNarrow(x)
+        if (typeof e != "number" || e > 4096 || typeof bl != "number") {
+            far = rbIntPowFar(bl, e)
+            if (far !== undefined) { return far }
+        }
         if (typeof e != "number") { return Math.pow(rbABigToF(x), rbABigToF(y)) }
         if (e > 4096) { return Math.pow(rbABigToF(x), e) }
         return rtABigNarrow(rtABigPow(x, e))
@@ -2144,6 +2160,9 @@ function rbNumBin(op, l, r) {
                 return a
             }
             if (b >= -4096) { return rbRatPow(rbMkRat(a, 1), b) }
+            var nfar = anytype
+            nfar = rbIntPowFar(a, b)
+            if (nfar !== undefined) { return nfar }
             return rbMkFlo(Math.pow(a, b))
         }
         var pw = Math.pow(a, b)
@@ -4262,6 +4281,25 @@ function rbSingPut(o, name, fn) {
 // dispatch prepends the receiver exactly as it does for a compiled method, and the
 // block does not take it (it closes over its defining scope instead). Twin of
 // rubyBlockMethod in abnf/jsrt.go.
+// fn becomes the instance method nm of the class o at run time. Twin of
+// rubyIMethodPut in abnf/jsrtruby.go.
+function rbIMethodPut(o, nm, fn) {
+    o[nm] = fn
+    rbIMNote(o, nm)
+    rbIncludersPut(o, nm, fn)
+    rbHook(o, "method_added", rbSym(nm))
+}
+// The getter and/or setter attr_reader / attr_writer / attr_accessor (kind)
+// declares for the @ivar n. Twin of rubyAttrDefine in abnf/jsrtruby.go.
+function rbAttrDefine(o, kind, n) {
+    if (kind != "attr_writer") { rbIMethodPut(o, n, function(self) { return self[n] }) }
+    if (kind != "attr_reader") {
+        rbIMethodPut(o, n + "=", function(self, v) {
+            self[n] = v
+            return v
+        })
+    }
+}
 function rbBlockMethod(body) {
     return function() {
         var a = []
@@ -8225,7 +8263,7 @@ function rbHashMethod(o, keys, vals, name, args) {
     }
     if (name == "key" || name == "index") {
         if (nPos != 1) { rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given " + nPos + ", expected 1)") }
-        if (name == "index") { rbHidxWarn() }
+        if (name == "index") { rbSiteWarn("Hash#index is deprecated; use Hash#key") }
         while (i < vals.length) {
             if (vals[i] === rbArgAt(args, 0) || rbEq(vals[i], rbArgAt(args, 0))) { return rbKeyOut(keys[i]) }
             i = i + 1
@@ -8514,6 +8552,11 @@ function rbArrayMethod(t, name, args) {
     }
     if (name == "each_index") {
         var ei = 0
+        if (blk === null) {
+            var eix = []
+            while (ei < t.length) { eix.push(ei); ei = ei + 1 }
+            return rbEnumAt(rbMkEnum(eix), rbEnumSrc(t), name, args)
+        }
         while (ei < t.length) {
             rbCall1(blk, ei)
             ei = ei + 1
@@ -10309,12 +10352,13 @@ function rbMethod(target, name, args) {
                 && target["__isclass"] === true && rbBlockOf(args) !== null && args[args.length - 1]["__rself"] === true) {
                 // A def in the block of a builtin class reopens it, as `class String' does.
                 if (target["__rbuiltin"] !== undefined) { rbBuiltinExtOn = true }
+                // class_eval passes the module to its block, class_exec its arguments.
                 var eargs = [target]
                 if (name == "class_exec" || name == "module_exec") {
                     var en = rbNPos(args)
                     var ei = 0
                     while (ei < en) { eargs.push(args[ei]); ei = ei + 1 }
-                }
+                } else { eargs.push(target) }
                 return rbBlockOf(args).apply(undefined, eargs)
             }
             // Module#define_method run at run time (a literal one in a class body is
@@ -10334,14 +10378,16 @@ function rbMethod(target, name, args) {
                     var twin = rtPairGet(rbMTwinFns, rbMTwinVals, dbody)
                     if (twin !== undefined) { dfn = twin } else { dfn = rbBlockMethod(dbody) }
                 }
-                if (name == "define_method") {
-                    target[dnm] = dfn
-                    rbIMNote(target, dnm)
-                    rbIncludersPut(target, dnm, dfn)
-                    rbHook(target, "method_added", rbSym(dnm))
-                }
+                if (name == "define_method") { rbIMethodPut(target, dnm, dfn) }
                 else { rbSingPut(target, dnm, dfn) }
                 return rbSym(dnm)
+            }
+            // attr_* called at run time; a literal one in a class body is compiled
+            // as methods.
+            if ((name == "attr_accessor" || name == "attr_reader" || name == "attr_writer") && target["__isclass"] === true) {
+                var ai = 0
+                while (ai < rbNPos(args)) { rbAttrDefine(target, name, rbStr(rbArgAt(args, ai))); ai = ai + 1 }
+                return null
             }
             // Module#include run at run time; MRI includes the last first.
             if (name == "include" && target["__isclass"] === true) {
@@ -10415,6 +10461,7 @@ function rbMethod(target, name, args) {
             }
             if (name == "new") { return js_rnew(target, args) }
             if (name == "sqrt" && target["__rbuiltin"] === "Integer") { return rbIntSqrt(rbArgAt(args, 0)) }
+            if ((name == "polar" || name == "rect" || name == "rectangular") && target["__rbuiltin"] === "Complex") { return rbCpxClassNew(name, args) }
             // Regexp.last_match / last_match(n): $~, or its group n.
             if (name == "last_match" && target["__rbuiltin"] === "Regexp") {
                 var lmd = rbGlobals["$~"]
@@ -10673,21 +10720,70 @@ function js_rbxor(l, r) {
 function js_rshl(l, r) { return rbBin("<<", l, r) }
 function js_rshr(l, r) { return rbBin(">>", l, r) }
 function js_rneg(v) { return rbNeg(v) }
-// The running-site function. Twins: js_rsitefn and rubyHidxWarn in
+// The running-site function. Twins: js_rsitefn and rubySiteWarn in
 // abnf/jsrtruby.go, which state the rules.
 var rbSiteFns = []
 function js_rsitefn(f) {
     rbSiteFns.push(f)
     return undefined
 }
-function rbHidxWarn() {
+function rbSiteWarn(msg) {
     if (rbSiteFns.length == 0) { return }
     var s = rbStr(rbSiteFns[0]())
     var at = s.length - 5
     while (at >= 0 && s.slice(at, at + 5) != ":in `") { at = at - 1 }
     if (at >= 0) { s = s.slice(0, at) }
-    rbWarnWrite(s + ": warning: Hash#index is deprecated; use Hash#key\n")
+    rbWarnWrite(s + ": warning: " + msg + "\n")
 }
+// MRI's l ** r past the exact range. Twin of intPowFar in
+// ruby-interpreter.abnf, which states the rule, as for rbPowTooBig.
+function rbIntPowFar(l, r) {
+    var neg = rbNumCmp(r, 0) < 0
+    var m = anytype
+    m = r
+    if (neg) { m = rbNeg(r) }
+    if (rbEq(l, 1)) { return 1 }
+    if (rbEq(l, 0 - 1)) {
+        if (rbEq(rbNumBin("%", m, 2), 1)) { return 0 - 1 }
+        return 1
+    }
+    var fix = rbNumCmp(l, rbFixMax()) <= 0 && rbNumCmp(l, rbNeg(rbNumBin("+", rbFixMax(), 1))) >= 0
+    if (rbEq(l, 0) || !rbPowTooBig(l, m, fix)) { return undefined }
+    rbSiteWarn("in a**b, b may be too big")
+    var b = rbToF(l)
+    if (fix) { b = Math.abs(b) }
+    var f = Math.pow(b, rbToF(m))
+    if (neg) { f = 1 / f }
+    return rbMkFlo(f)
+}
+function rbFixMax() { return rbNumBin("-", rbNumBin("**", 2, 62), 1) }
+function rbPowTooBig(l, m, fix) {
+    if (rbNumCmp(m, rbFixMax()) > 0) { return true }
+    var x = anytype
+    x = l
+    if (rbNumCmp(l, 0) < 0) { x = rbNeg(l) }
+    if (!fix) { return rbPowHandoff(x, m) }
+    var y = anytype
+    y = m
+    var z = anytype
+    z = 1
+    if (rbEq(rbNumBin("%", y, 2), 1)) {
+        z = x
+        y = rbNumBin("-", y, 1)
+    }
+    while (rbNumCmp(y, 0) > 0) {
+        while (rbEq(rbNumBin("%", y, 2), 0)) {
+            if (rbNumCmp(x, 2147483648) >= 0) { return rbPowHandoff(x, y) }
+            x = rbNumBin("*", x, x)
+            y = rbNumBin("/", y, 2)
+        }
+        if (rbNumCmp(rbNumBin("*", x, z), rbFixMax()) > 0) { return rbPowHandoff(x, y) }
+        z = rbNumBin("*", x, z)
+        y = rbNumBin("-", y, 1)
+    }
+    return false
+}
+function rbPowHandoff(x, y) { return !rbEq(y, 1) && rbNumCmp(rbNumBin("*", rbIntBitLen(x), y), 33554432) > 0 }
 // A warning goes through $stderr's #write. Twin of rubyWarnWrite in
 // abnf/jsrtruby.go, which states the rule.
 function rbWarnWrite(s) {
@@ -12721,6 +12817,20 @@ function rbCpxPolar(x, y) {
     return rbMkCpx(rbMkFlo(rbToF(x) * Math.cos(a)), rbMkFlo(rbToF(x) * Math.sin(a)))
 }
 
+// Complex.rect / .rectangular / .polar. Twin of cpxClassNew in
+// ruby-interpreter.abnf, which states the rule.
+function rbCpxClassNew(name, args) {
+    var n = rbNPos(args)
+    if (n < 1 || n > 2) { rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given " + n + ", expected 1..2)") }
+    var i = 0
+    while (i < n) {
+        if (!rbIsNum(rbArgAt(args, i)) || rbIsCpx(rbArgAt(args, i))) { rbRaiseErr(name, "TypeError", "not a real") }
+        i = i + 1
+    }
+    if (n == 1) { return rbMkCpx(rbArgAt(args, 0), 0) }
+    if (name == "polar") { return rbCpxPolar(rbArgAt(args, 0), rbArgAt(args, 1)) }
+    return rbMkCpx(rbArgAt(args, 0), rbArgAt(args, 1))
+}
 function js_rkconv(name, args) {
     var v = anytype
     v = null

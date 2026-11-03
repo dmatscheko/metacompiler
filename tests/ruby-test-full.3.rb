@@ -1702,6 +1702,80 @@ def s197
   check("nm197d", g.unicode_normalize!(:nfkc).equal?(g) && h == ["fi1"] && g.unicode_normalized?(:nfkc) &&
         "".method(:unicode_normalize!).arity == -1)
 end
+# ===== SECTION 198: String#each_* answers, Proc#[], run-time attr_*, each_index, Complex.polar, a**b =====
+# The String iterators answer the receiver itself when given a block; a subscript
+# of zero or several arguments is the #[] method with all of them; attr_* called
+# at run time defines the accessors on the class self is, and class_eval passes
+# the class to its block; a blockless each_index is an Enumerator; Complex.polar
+# and .rect take one or two real parts; an Integer power MRI gives up on warns
+# "in a**b, b may be too big" and is a Float. /usr/bin/ruby 2.6 settles each.
+class S198Sink
+  attr_reader :got
+  def initialize; @got = []; end
+  def write(*s); @got.concat(s); 0; end
+end
+class S198Box
+  def [](a, b, c); [c, b, a]; end
+end
+class S198K
+  def show; [@aa, @bb]; end
+  [:aa, :bb].each { |n| attr_accessor n }
+  def self.mk(n); attr_reader n; end
+end
+def s198
+  x = "h\u00e9\nwo"
+  b = "ab".b
+  check("es198a", x.each_char {}.equal?(x) && x.each_byte {}.equal?(x) && x.each_line {}.equal?(x) &&
+        x.each_codepoint {}.equal?(x) && x.each_grapheme_cluster {}.equal?(x) && b.each_char {}.equal?(b) &&
+        b.each_line {}.equal?(b) && b.each_codepoint {}.equal?(b) && b.each_byte {}.equal?(b))
+  sp = ->(*c) { c }
+  l3 = ->(p, q, r) { [p, q, r] }
+  check("pr198b", sp[1, 2, 3] == [1, 2, 3] && sp[] == [] && l3[4, 5, 6] == [4, 5, 6] && proc { |p, q, r| r }[1, 2, 3] == 3 &&
+        ->() { 9 }[] == 9 && S198Box.new[1, 2, 3] == [3, 2, 1] && "hello"[1, 3] == "ell")
+  got = []
+  k = Class.new
+  r = k.class_eval { |c| got << c; attr_accessor :zz, :yy }
+  k.module_eval { |c| got << c; attr_reader :ro; attr_writer :wo }
+  o = k.new
+  o.zz = 4
+  o.yy = 5
+  d = Class.new { attr_accessor :q; attr_reader :r }.new
+  d.q = 7
+  S198K.mk(:cc)
+  s = S198K.new
+  s.aa = 3
+  s.bb = 1
+  e = begin; attr_accessor :s198top; rescue NoMethodError => m; m.message; end
+  check("at198c", r.nil? && got == [k, k] && o.zz == 4 && o.yy == 5 && o.respond_to?(:ro) && !o.respond_to?(:ro=) &&
+        o.respond_to?(:wo=) && !o.respond_to?(:wo) && d.q == 7 && d.r.nil? && s.show == [3, 1] &&
+        s.respond_to?(:cc) && !s.respond_to?(:cc=) && k.instance_methods(false).sort == [:ro, :wo=, :yy, :yy=, :zz, :zz=] &&
+        e == "undefined method `attr_accessor' for main:Object")
+  en = [5, 6, 7].each_index
+  check("ei198d", en.class == Enumerator && en.to_a == [0, 1, 2] && en.inspect == "#<Enumerator: [5, 6, 7]:each_index>" &&
+        en.map { |i| i * 2 } == [0, 2, 4] && [5, 6].each_index.size == 2)
+  pv = [Complex.polar(1, 0), Complex.polar(2), Complex.polar(3.0, 0.5), Complex.polar(-2, 1), Complex.polar(Rational(1, 2), 0),
+        Complex.polar(1, Math::PI), Complex.polar(2.0, Math::PI / 2), Complex.rect(1, 2), Complex.rectangular(1.5)].map(&:inspect)
+  pe = [[], ["a"], [1, "a"], [1, 2, 3], [1, Complex(1, 1)]].map do |a|
+    begin; Complex.polar(*a); rescue ArgumentError, TypeError => m; [m.class, m.message]; end
+  end
+  check("cp198e", pv == ["(1+0.0i)", "(2+0i)", "(2.6327476856711183+1.438276615812609i)",
+        "(-1.0806046117362795-1.682941969615793i)", "((1/2)+0.0i)", "(-1+0.0i)", "(0.0+2.0i)", "(1+2i)", "(1.5+0i)"] &&
+        pe == [[ArgumentError, "wrong number of arguments (given 0, expected 1..2)"], [TypeError, "not a real"],
+        [TypeError, "not a real"], [ArgumentError, "wrong number of arguments (given 3, expected 1..2)"], [TypeError, "not a real"]])
+  w = S198Sink.new
+  saved = $stderr
+  $stderr = w
+  big = [2 ** 64, 40000000, 4068000, 70]
+  pw = [2 ** big[0], 3 ** big[1], (-3) ** (big[1] + 1), 1 ** big[0], (-1) ** (big[0] + 1), 0 ** big[0], 2 ** -big[1]]
+  ln = __LINE__ - 1
+  wa = 256 ** big[2]
+  wb = (2 ** big[3]).bit_length
+  $stderr = saved
+  f = __FILE__
+  check("pw198f", pw.map(&:inspect) == ["Infinity", "Infinity", "Infinity", "1", "-1", "0", "0.0"] && pw[0].class == Float &&
+        wa.inspect == "Infinity" && wb == 71 &&
+        w.got == ["#{f}:#{ln}: warning: in a**b, b may be too big\n"] * 4 + ["#{f}:#{ln + 2}: warning: in a**b, b may be too big\n"])
+end
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
@@ -1746,5 +1820,6 @@ s194() # SECTION-CALL 194
 s195() # SECTION-CALL 195
 s196() # SECTION-CALL 196
 s197() # SECTION-CALL 197
+s198() # SECTION-CALL 198
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

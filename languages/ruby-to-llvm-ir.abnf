@@ -838,7 +838,7 @@ ParenTargetAhead = :script(~~
 // A subscript target may carry SEVERAL arguments (`@obj[1, *ary] = 4` reaches a
 // user-defined `[]=` with three). The first two are lowered (`a[1, 2] = 9' replaces two
 // elements); the rest are parsed so the surrounding file is understood.
-TIndex      <~~ var n = takeAll(); push({idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
+TIndex      <~~ var n = takeAll(); push({idx: n[0], idx2: n.length > 1 ? n[1] : null, idxs: n.length != 1 ? n : null}) ~~>
             = "[" Arg { "," Arg } "]" ;
 
 // The RIGHT operand of && / || may be an ASSIGNMENT: `true && false && x = 1` and
@@ -978,8 +978,8 @@ SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}
 // subscript is the ordinary index (js_rxget); a TWO-argument one is Ruby's
 // `s[start, len]' / `a[start, len]' subsequence and is routed through the `[]'
 // METHOD instead, which is also what a user class' `def [](a, b)' wants.
-IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
-            = LineCont "[" Arg { "," Arg } "]" ;
+IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.length > 1 ? n[1] : null, idxs: n.length != 1 ? n : null}) ~~>
+            = LineCont "[" [ Arg { "," Arg } ] "]" ;
 // SameLine is what stops an argument list from reaching across a line break: after
 // `n.to_s` a `(` that OPENS the next line is a fresh statement, not this call's
 // arguments. (Ruby wants the `(` glued to the name; requiring only the same line keeps
@@ -3805,22 +3805,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         // pop, keys, ...); routed through js_rmcall like the interpreter.
                         cur = callExt(b, "js_rxmcall", [cur, emitMKey(b, cur, s.name, false), callExt(b, "js_arr_new", [])])
                     }
-                } else if (s.idx2 == undefined || s.idx2 == null) {
+                } else if (s.idxs == undefined || s.idxs == null) {
                     var ir0 = s.idx(b)
                     b = ir0.b
                     if (mut) { pObj = cur; pKey = ir0.v }
                     cur = callExt(b, core.indexExt, [cur, ir0.v])
                 } else {
-                    // `x[start, len]': the two-argument subscript is the `[]' METHOD,
-                    // so String / Array answer a subsequence and a user class' own
-                    // `def [](a, b)' is reached with both arguments.
-                    var ir = s.idx(b)
-                    b = ir.b
-                    var ir2 = s.idx2(b)
-                    b = ir2.b
+                    // `x[start, len]': a subscript of other than one argument is the
+                    // `[]' METHOD, so String / Array answer a subsequence, and a Proc
+                    // or a user class' own `def [](a, b, c)' gets every argument.
                     var iav = callExt(b, "js_arr_new", [])
-                    callExt(b, "js_arr_push", [iav, ir.v])
-                    callExt(b, "js_arr_push", [iav, ir2.v])
+                    for (var ixi = 0; ixi < s.idxs.length; ixi++) {
+                        var ir = s.idxs[ixi](b)
+                        b = ir.b
+                        callExt(b, "js_arr_push", [iav, ir.v])
+                    }
                     cur = callExt(b, "js_rxmcall", [cur, emitMKey(b, cur, "[]", false), iav])
                 }
             }
@@ -5961,8 +5960,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // body, a `def self.m') - a class method, the class's own or an inherited one.
     function selfCallOf(name) {
         if (selfMethod(curClsName, name) || isSelfCall(name) || builtinSelfMethod(curClsName, name)) { return true }
-        // In a class_eval block self is the module, and include / extend act on it.
-        if (curEvalDef && (name == "include" || name == "extend") && rubyAllMethods["$" + name] !== true && !knownLocal(name)) { return true }
+        // In a class_eval block self is the module, and include / extend act on it;
+        // an attr_* call outside a class body's declaration acts on self anywhere
+        // (attrDirective in ruby-interpreter.abnf).
+        var evalWord = curEvalDef && (name == "include" || name == "extend")
+        var attrWord = name == "attr_accessor" || name == "attr_reader" || name == "attr_writer"
+        if ((evalWord || attrWord) && rubyAllMethods["$" + name] !== true && !knownLocal(name)) { return true }
         if (!curSelfIsCls) { return false }
         // Where self is the class, a bare `new' is Class#new on it, and a bare
         // `name' Module#name.

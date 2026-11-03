@@ -2601,6 +2601,26 @@ func (rt *jsrt) rubyCpxPolar(x, y interface{}) interface{} {
 	return jsCpx{re: &jsFlo{f: rubyToF(x) * math.Cos(a)}, im: &jsFlo{f: rubyToF(x) * math.Sin(a)}}
 }
 
+// rubyCpxClassNew is cpxClassNew of ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyCpxClassNew(name string, args []interface{}) interface{} {
+	pos, _ := rubyBlockArgs(args)
+	if len(pos) < 1 || len(pos) > 2 {
+		rt.rubyRaiseErr(name, "ArgumentError", "wrong number of arguments (given "+strconv.Itoa(len(pos))+", expected 1..2)")
+	}
+	for _, a := range pos {
+		if !rubyIsReal(a) {
+			rt.rubyRaiseErr(name, "TypeError", "not a real")
+		}
+	}
+	if len(pos) == 1 {
+		return jsCpx{re: pos[0], im: 0.0}
+	}
+	if name == "polar" {
+		return rt.rubyCpxPolar(pos[0], pos[1])
+	}
+	return jsCpx{re: pos[0], im: pos[1]}
+}
+
 // rubyStrConvArg is strConvArg of ruby-interpreter.abnf.
 func (rt *jsrt) rubyStrConvArg(name string, v interface{}) interface{} {
 	s, isStr := v.(string)
@@ -4608,11 +4628,10 @@ func (rt *jsrt) rubyRangeWideArr(lo, hi interface{}, excl bool) *jsArray {
 	return out
 }
 
-// rubyHidxWarn is MRI 2.6's warning on every call of Hash#index, the deprecated
-// alias of #key: "FILE:LINE: warning: Hash#index is deprecated; use Hash#key",
-// at the running site. Twin of rbHidxWarn in lib/ruby-rt.metajs; the
-// interpreter half warns in its Hash#index arm.
-func (rt *jsrt) rubyHidxWarn() {
+// rubySiteWarn is MRI's rb_warn: "FILE:LINE: warning: msg" at the running
+// site. Twins: siteWarn in ruby-interpreter.abnf, rbSiteWarn in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubySiteWarn(msg string) {
 	if rt.rubySiteFn == nil {
 		return
 	}
@@ -4620,7 +4639,82 @@ func (rt *jsrt) rubyHidxWarn() {
 	if at := strings.LastIndex(site, ":in `"); at >= 0 {
 		site = site[:at]
 	}
-	rt.rubyWarnWrite(site + ": warning: Hash#index is deprecated; use Hash#key\n")
+	rt.rubyWarnWrite(site + ": warning: " + msg + "\n")
+}
+
+// rubyFixMax is MRI's FIXNUM_MAX, 2**62 - 1.
+var rubyFixMax = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 62), big.NewInt(1))
+
+// rubyIntPowFar is intPowFar of ruby-interpreter.abnf, which states the rule;
+// ok is false where that answers undefined.
+func (rt *jsrt) rubyIntPowFar(l, r *big.Int) (interface{}, bool) {
+	m := new(big.Int).Abs(r)
+	switch {
+	case l.IsInt64() && l.Int64() == 1:
+		return 1.0, true
+	case l.IsInt64() && l.Int64() == -1:
+		if m.Bit(0) == 1 {
+			return -1.0, true
+		}
+		return 1.0, true
+	}
+	fix := l.CmpAbs(rubyFixMax) <= 0 || l.Cmp(new(big.Int).Neg(new(big.Int).Add(rubyFixMax, big.NewInt(1)))) == 0
+	if l.Sign() == 0 || !rubyPowTooBig(l, m, fix) {
+		return nil, false
+	}
+	rt.rubySiteWarn("in a**b, b may be too big")
+	b, _ := new(big.Float).SetInt(l).Float64()
+	if fix {
+		b = math.Abs(b)
+	}
+	e, _ := new(big.Float).SetInt(m).Float64()
+	f := crPow(b, e)
+	if r.Sign() < 0 {
+		f = 1 / f
+	}
+	return &jsFlo{f: f}, true
+}
+
+// rubyPowTooBig is powTooBig of ruby-interpreter.abnf, which states the rule.
+func rubyPowTooBig(l, m *big.Int, fix bool) bool {
+	if m.Cmp(rubyFixMax) > 0 {
+		return true
+	}
+	x := new(big.Int).Abs(l)
+	if !fix {
+		return rubyPowHandoff(x, m)
+	}
+	y := new(big.Int).Set(m)
+	z := big.NewInt(1)
+	one := big.NewInt(1)
+	if y.Bit(0) == 1 {
+		z.Set(x)
+		y.Sub(y, one)
+	}
+	lim := big.NewInt(2147483648)
+	for y.Sign() > 0 {
+		for y.Bit(0) == 0 {
+			if x.Cmp(lim) >= 0 {
+				return rubyPowHandoff(x, y)
+			}
+			x.Mul(x, x)
+			y.Rsh(y, 1)
+		}
+		xz := new(big.Int).Mul(x, z)
+		if xz.Cmp(rubyFixMax) > 0 {
+			return rubyPowHandoff(x, y)
+		}
+		z = xz
+		y.Sub(y, one)
+	}
+	return false
+}
+
+func rubyPowHandoff(x, y *big.Int) bool {
+	if y.IsInt64() && y.Int64() == 1 {
+		return false
+	}
+	return new(big.Int).Mul(big.NewInt(int64(x.BitLen())), y).Cmp(big.NewInt(33554432)) > 0
 }
 
 // rubyWarnWrite writes a warning the way MRI's rb_write_error_str does: through
@@ -5393,6 +5487,53 @@ func (rt *jsrt) rubyCaseEqv(l, r interface{}) bool {
 
 // rubyStrMutator: the names that change a String in place - every bang method and
 // the mutators that have none. Twin of strMutator in ruby-interpreter.abnf.
+// rubyIMethodPut makes fn the instance method nm of the class o at run time.
+// Twin of rbIMethodPut in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyIMethodPut(o *jsObject, nm string, fn interface{}) {
+	o.props[nm] = fn
+	rubyIMNote(o, nm)
+	rubyIncludersPut(o, nm, fn)
+	rt.rubyHook(o, "method_added", jsSym{s: nm})
+}
+
+// rubyAttrDefine installs what attr_reader / attr_writer / attr_accessor (kind)
+// declare for the @ivar n: its getter and/or setter as instance methods of the
+// class o. Twins: attrDirective in ruby-interpreter.abnf, rbAttrDefine in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyAttrDefine(o *jsObject, kind, n string) {
+	if kind != "attr_writer" {
+		rt.rubyIMethodPut(o, n, &hostFunc{name: "method:" + n,
+			fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+				if so, ok := argAt(a, 0).(*jsObject); ok {
+					if v, has := so.props[n]; has {
+						return v
+					}
+				}
+				return jsNull
+			}})
+	}
+	if kind != "attr_reader" {
+		rt.rubyIMethodPut(o, n+"=", &hostFunc{name: "method:" + n + "=",
+			fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+				v := argAt(a, 1)
+				if so, ok := argAt(a, 0).(*jsObject); ok {
+					so.set(n, v)
+				}
+				return v
+			}})
+	}
+}
+
+// rubyStrEachIter: the String iterators that answer the receiver itself when
+// given a block. Twin of strEachIter in ruby-interpreter.abnf.
+func rubyStrEachIter(n string) bool {
+	switch n {
+	case "each_char", "each_byte", "each_line", "each_codepoint", "each_grapheme_cluster":
+		return true
+	}
+	return false
+}
+
 func rubyStrMutator(n string) bool {
 	if len(n) > 1 && n[len(n)-1] == '!' {
 		return true
@@ -5547,6 +5688,12 @@ func (rt *jsrt) rubyRStrMethod(b *jsRStr, name string, args []interface{}) (inte
 			b.bin, b.s = nil, nv.s
 		}
 		return b, true
+	}
+	if b.bin == nil && rubyStrEachIter(name) {
+		if _, blk := rubyBlockArgs(args); blk != nil {
+			rt.rubyMethod(b.s, name, args)
+			return b, true
+		}
 	}
 	if b.bin != nil {
 		switch name {

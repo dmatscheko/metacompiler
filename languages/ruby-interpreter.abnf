@@ -799,7 +799,7 @@ ParenTargetAhead = :script(~~
 // A subscript target may carry SEVERAL arguments (`@obj[1, *ary] = 4` reaches a
 // user-defined `[]=` with three). The first two are lowered (`a[1, 2] = 9' replaces two
 // elements); the rest are parsed so the surrounding file is understood.
-TIndex      <~~ var n = takeAll(); push({idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
+TIndex      <~~ var n = takeAll(); push({idx: n[0], idx2: n.length > 1 ? n[1] : null, idxs: n.length != 1 ? n : null}) ~~>
             = "[" Arg { "," Arg } "]" ;
 
 // The RIGHT operand of && / || may be an ASSIGNMENT: `true && false && x = 1` and
@@ -939,8 +939,8 @@ SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: noteMName(up.in)}
 // subscript is the ordinary index; a TWO-argument one is Ruby's `s[start, len]' /
 // `a[start, len]' subsequence and is routed through the `[]' METHOD instead, which
 // is also what a user class' `def [](a, b)' wants.
-IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.length > 1 ? n[1] : null}) ~~>
-            = LineCont "[" Arg { "," Arg } "]" ;
+IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0], idx2: n.length > 1 ? n[1] : null, idxs: n.length != 1 ? n : null}) ~~>
+            = LineCont "[" [ Arg { "," Arg } ] "]" ;
 // SameLine is what stops an argument list from reaching across a line break: after
 // `n.to_s` a `(` that OPENS the next line is a fresh statement, not this call's
 // arguments. (Ruby wants the `(` glued to the name; requiring only the same line keeps
@@ -3580,6 +3580,54 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return {q: q, r: r}
     }
+    // MRI's l ** r for Integers where this engine stops computing the exact power
+    // (|r| past 4096, a Bignum r, a Bignum l): a base of 1 or -1 answers 1 or -1
+    // by r's parity, and a power MRI gives up on (powTooBig) warns "in a**b, b
+    // may be too big" and is the Float pow(|l| for a Fixnum l, r) - 1.0 / it for
+    // a negative r. undefined for any other. Twins: rubyIntPowFar in
+    // abnf/jsrtruby.go, rbIntPowFar in lib/ruby-rt.metajs.
+    function intPowFar(l, r) {
+        var neg = numCmp(r, 0) < 0
+        var m = anytype
+        m = neg ? rneg(r) : r
+        if (numEq(l, 1)) { return 1 }
+        if (numEq(l, 0 - 1)) { return numEq(numBin("%", m, 2), 1) ? 0 - 1 : 1 }
+        var fix = numCmp(l, fixMax()) <= 0 && numCmp(l, rneg(numBin("+", fixMax(), 1))) >= 0
+        if (numEq(l, 0) || !powTooBig(l, m, fix)) { return undefined }
+        siteWarn("in a**b, b may be too big")
+        var f = Math.pow(fix ? Math.abs(toF(l)) : toF(l), toF(m))
+        return mkFlo(neg ? 1 / f : f)
+    }
+    function fixMax() { return numBin("-", numBin("**", 2, 62), 1) }
+    // Whether MRI 2.6 gives l ** m (m > 0, |l| > 1) up as too big. rb_big_pow
+    // (bignum.c) does once its Bignum base's bit length times the exponent passes
+    // 32Mi, and always for a Bignum exponent; a Fixnum base reaches it from
+    // int_pow (numeric.c), which squares |l| while it is below 2**31 and
+    // multiplies it into the odd part while that stays a Fixnum, handing the
+    // state over at the first step that would not fit.
+    function powTooBig(l, m, fix) {
+        if (numCmp(m, fixMax()) > 0) { return true }
+        var x = anytype
+        x = numCmp(l, 0) < 0 ? rneg(l) : l
+        if (!fix) { return powHandoff(x, m) }
+        var y = anytype
+        y = m
+        var z = anytype
+        z = 1
+        if (numEq(numBin("%", y, 2), 1)) { z = x; y = numBin("-", y, 1) }
+        while (numCmp(y, 0) > 0) {
+            while (numEq(numBin("%", y, 2), 0)) {
+                if (numCmp(x, 2147483648) >= 0) { return powHandoff(x, y) }
+                x = numBin("*", x, x)
+                y = numBin("/", y, 2)
+            }
+            if (numCmp(numBin("*", x, z), fixMax()) > 0) { return powHandoff(x, y) }
+            z = numBin("*", x, z)
+            y = numBin("-", y, 1)
+        }
+        return false
+    }
+    function powHandoff(x, y) { return !numEq(y, 1) && numCmp(numBin("*", intBitLen(x), y), 33554432) > 0 }
     function bigPow(a, n) {
         var acc = bigOb(1, [1])
         for (var i = 0; i < n; i++) { acc = bigOb(acc.sign * a.sign, magMul(acc.limbs, a.limbs)) }
@@ -3760,11 +3808,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (op == "/") { return {v: bigOut(bigDivMod(a, b, op).q)} }
         if (op == "%") { return {v: bigOut(bigDivMod(a, b, op).r)} }
         if (op == "**") {
+            var far = anytype
             if (b.sign < 0 && !bigIsZero(b)) {
                 if (typeof r == "number" && r >= -4096) { return {v: ratPow(mkRat(l, 1), r)} }
+                far = intPowFar(l, r)
+                if (far !== undefined) { return {v: far} }
                 return {v: mkFlo(Math.pow(bigToNum(l), bigToNum(r)))}
             }
             var e = bigToNum(r)
+            if (e > 4096 || isBig(l)) {
+                far = intPowFar(l, r)
+                if (far !== undefined) { return {v: far} }
+            }
             if (e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
             return {v: bigOut(bigPow(a, e))}
         }
@@ -4139,6 +4194,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var r = anytype
         r = isBinOpName(name) ? rbin(name, b, binText(args[0])) : mcall(b, name, args, blk)
+        if (blk != null && strEachIter(name)) { return t }
         if (typeof r == "string" || isRStr(r)) { return encStr(binText(r), enc) }
         if (Array.isArray(r) && name != "bytes" && name != "unpack") {
             for (var j = 0; j < r.length; j++) { if (typeof r[j] == "string" || isRStr(r[j])) { r[j] = encStr(binText(r[j]), enc) } }
@@ -4370,6 +4426,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The names that change a String in place: every bang method and the mutators
     // that have none. Twins: rubyStrMutator in abnf/jsrtruby.go, rbStrMutator in
     // lib/ruby-rt.metajs.
+    // The String iterators that answer the receiver itself when given a block.
+    // Twins: rubyStrEachIter in abnf/jsrtruby.go, rbStrEachIter in lib/ruby-rt.metajs.
+    function strEachIter(n) {
+        return n == "each_char" || n == "each_byte" || n == "each_line" || n == "each_codepoint"
+            || n == "each_grapheme_cluster"
+    }
     function strMutator(n) {
         if (n.length > 1 && n.charAt(n.length - 1) == "!") { return true }
         return n == "<<" || n == "concat" || n == "replace" || n == "insert" || n == "prepend"
@@ -4691,6 +4753,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isFlo(y) && y.f == Math.PI / 2) { return mkCpx(mkFlo(0), x) }
         var a = toF(y)
         return mkCpx(mkFlo(toF(x) * Math.cos(a)), mkFlo(toF(x) * Math.sin(a)))
+    }
+    // Complex.rect / .rectangular / .polar (nucomp_s_new / nucomp_s_polar of
+    // complex.c): one or two real parts, the second defaulting to Integer 0.
+    // Twins: rubyCpxClassNew in abnf/jsrtruby.go, rbCpxClassNew in
+    // lib/ruby-rt.metajs.
+    function cpxClassNew(name, args) {
+        if (args.length < 1 || args.length > 2) {
+            raiseErr(name, "ArgumentError", "wrong number of arguments (given " + args.length + ", expected 1..2)")
+        }
+        for (var i = 0; i < args.length; i++) {
+            if (!isNumV(args[i]) || isCpx(args[i])) { raiseErr(name, "TypeError", "not a real") }
+        }
+        if (args.length == 1) { return mkCpx(args[0], 0) }
+        if (name == "polar") { return cpxPolar(args[0], args[1]) }
+        return mkCpx(args[0], args[1])
     }
     function trunc0(x) { return x < 0 ? Math.ceil(x) : Math.floor(x) }
     function isKernelConv(name) {
@@ -5764,10 +5841,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (r < 0) {
                 if (l == 1 || l == 0 - 1) { return imod(r, 2) == 0 ? 1 : l }
                 if (r >= -4096) { return ratPow(mkRat(l, 1), r) }
+                var nfar = anytype
+                nfar = intPowFar(l, r)
+                if (nfar !== undefined) { return nfar }
                 return mkFlo(Math.pow(l, r))
             }
             var pw = Math.pow(l, r)
             if (over53(pw) && r <= 4096) { return bigOut(bigPow(bigOf(l), r)) }
+            if (over53(pw)) {
+                var pfar = anytype
+                pfar = intPowFar(l, r)
+                if (pfar !== undefined) { return pfar }
+            }
             return pw
         }
         // & | ^ << >> are INFINITE two's complement at arbitrary precision. Inside
@@ -10467,6 +10552,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (isBin(fe)) { becomeBin(target, fe) }
                 return target
             }
+            if (blk != null && strEachIter(name)) { mcall(target.__rs, name, args, blk); return target }
             return mcall(target.__rs, name, args, blk)
         }
         if (isBig(target)) { return bigMethod(target, name, args, blk) }
@@ -10862,6 +10948,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "new" && target === hostGlobals["Class"]) { return classNew(args, blk) }
             if (name == "new" && target === hostGlobals["Enumerator"] && blk != null) { return enumGenNew(args, blk) }
             if (name == "sqrt" && target === hostGlobals["Integer"]) { return intSqrt(args[0]) }
+            if ((name == "polar" || name == "rect" || name == "rectangular") && target === hostGlobals["Complex"]) { return cpxClassNew(name, args) }
             // Regexp.last_match / last_match(n): $~, or its group n.
             if (name == "last_match" && target === hostGlobals["Regexp"]) {
                 var lm = anytype
@@ -10950,7 +11037,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "define_singleton_method") { return blockMethodDef(target, true, args, blk) }
             if (name == "define_method") { return blockMethodDef(target, false, args, blk) }
             if ((name == "class_eval" || name == "module_eval" || name == "class_exec" || name == "module_exec") && blk != null) {
-                return classEval(target, name == "class_exec" || name == "module_exec" ? args : [], blk)
+                return classEval(target, name == "class_exec" || name == "module_exec" ? args : [target], blk)
             }
             if (name == "singleton_methods") { return singNames(target) }
             if (name == "respond_to?") { return respondTo(target, args) }
@@ -11209,7 +11296,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // in rubyHashMethod (abnf/jsrt.go) and rbHashMethod (lib/ruby-rt.metajs).
         if (name == "key" || name == "index") {
             if (args.length != 1) { raiseErr(name, "ArgumentError", "wrong number of arguments (given " + args.length + ", expected 1)") }
-            if (name == "index" && rbSitePos >= 0) { warnWrite(c.file + ":" + c.lineOf(rbSitePos) + ": warning: Hash#index is deprecated; use Hash#key\n") }
+            if (name == "index") { siteWarn("Hash#index is deprecated; use Hash#key") }
             for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return keyOut(target.keys[ky]) } }
             return null
         }
@@ -12895,7 +12982,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return prod
         }
+        // Without a block, an Enumerator over the indices. Twins: rubyArrayMethod in
+        // abnf/jsrt.go, rbArrayMethod in lib/ruby-rt.metajs.
         if (name == "each_index") {
+            if (blk == null) {
+                var eix = []
+                for (i = 0; i < t.length; i++) { eix.push(i) }
+                return enumAt(mkEnum(eix), enumSrc(t), name, args)
+            }
             for (i = 0; i < t.length; i++) { blockCall(blk, [i]) }
             return t
         }
@@ -13027,11 +13121,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
                     else if (s.name == "to_s") { cur = isRStr(cur) || isBin(cur) ? cur : mkRStr(rstr(cur)) }
                     else { cur = boxOut(cur, mcall(cur, s.name, [])) }
-                } else if (s.idx2 != undefined && s.idx2 != null) {
-                    // `x[start, len]': the two-argument subscript is the `[]' METHOD,
-                    // so String / Array answer a subsequence and a user class' own
-                    // `def [](a, b)' is reached with both arguments.
-                    cur = boxOut(cur, mcall(cur, "[]", [s.idx(), s.idx2()], null))
+                } else if (s.idxs != undefined && s.idxs != null) {
+                    // `x[start, len]': a subscript of other than one argument is the
+                    // `[]' METHOD, so String / Array answer a subsequence, and a Proc
+                    // or a user class' own `def [](a, b, c)' gets every argument.
+                    cur = boxOut(cur, mcall(cur, "[]", evalArgList(s.idxs), null))
                 } else {
                     var ik = anytype
                     ik = s.idx()
@@ -13752,6 +13846,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // so a program that assigns its own object there captures it. Twins:
     // rubyWarnWrite in abnf/jsrtruby.go, rbWarnWrite in lib/ruby-rt.metajs.
     function warnWrite(s) { mcall(rubyGlobals["stderr"], "write", [mkRStr(s)], null) }
+    // MRI's rb_warn: "FILE:LINE: warning: msg" at the running site. Twins:
+    // rubySiteWarn in abnf/jsrtruby.go, rbSiteWarn in lib/ruby-rt.metajs.
+    function siteWarn(msg) {
+        if (rbSitePos >= 0) { warnWrite(c.file + ":" + c.lineOf(rbSitePos) + ": warning: " + msg + "\n") }
+    }
     // $stdout = v / $stderr = v: MRI refuses a value without #write. Twins:
     // js_rioset in abnf/jsrtruby.go and lib/ruby-rt.metajs.
     function ioGlobalCheck(name, v) {
@@ -17424,6 +17523,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (c === null || c === undefined) { noMethod(ivarSelf(), name) }
         return c
     }
+    // attr_reader / attr_writer / attr_accessor called at run time (in a
+    // class_eval or Class.new block, or a class method): the @ivar getters and
+    // setters of the class self is, answering nil as MRI 2.6 does. Twins: the
+    // attr arm of rubyMethod in abnf/jsrt.go, rbAttrDefine in lib/ruby-rt.metajs.
+    function attrDirective(kind, args) {
+        var c = moduleDirective(kind)
+        for (var i = 0; i < args.length; i++) {
+            var n = rstr(args[i])
+            if (kind != "attr_writer") { declareMethods(c, [attrGetterFn(n)]) }
+            if (kind != "attr_reader") { declareMethods(c, [attrSetterFn(n)]) }
+        }
+        return null
+    }
     hostGlobals["alias_method"] = function(nu, old) { doAlias(moduleDirective("alias_method"), rstr(nu), rstr(old)); return null }
     hostGlobals["define_method"] = function(nm, blk) { return blockMethodDef(moduleDirective("define_method"), false, [nm], blk) }
     // private / protected / public: with no argument they switch the mode for the
@@ -17478,9 +17590,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["public"] = function() { return visDirective("public", argsArray(arguments)) }
     // module_function: every following def is ALSO a method of the module object.
     hostGlobals["module_function"] = function() { curVis = "module_function"; return null }
-    hostGlobals["attr_reader"] = function() { return null }
-    hostGlobals["attr_accessor"] = function() { return null }
-    hostGlobals["attr_writer"] = function() { return null }
+    hostGlobals["attr_reader"] = function() { return attrDirective("attr_reader", argsArray(arguments)) }
+    hostGlobals["attr_accessor"] = function() { return attrDirective("attr_accessor", argsArray(arguments)) }
+    hostGlobals["attr_writer"] = function() { return attrDirective("attr_writer", argsArray(arguments)) }
     hostGlobals["freeze"] = function(v) { return v }
 
     // ----- Builtins -----
