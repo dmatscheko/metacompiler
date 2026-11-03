@@ -6873,16 +6873,28 @@ int rt_nref_void(char *n)
  * "not a valid identifier", arith_err and sub_bad; sub 2 reports it alone, as
  * arithmetic does. A read of its value (sub 3) is refused as naming no variable,
  * with arith_err, which abandons the line. One that is an associative array
- * refuses nothing: its value reads as unset and every store is dropped. Twin of
- * refIsArr, refArrBad and refArrRead in bash-interpreter.abnf. */
+ * refuses nothing: its value reads as unset and every store is dropped. One
+ * never assigned (a nameref -a or -A made an array, bash's invisible variable)
+ * refuses an element store either way, and an array literal stored to it (sub
+ * 4, else as 1) takes the nameref mark away with bash's warning: 0, the literal
+ * is stored. Twin of refIsArr, refArrBad, refArrRead and the unseen arm of
+ * runAssign in bash-interpreter.abnf. */
 int rt_nref_isarr(char *n, int sub)
 {
     int r;
+    int unseen;
     if (nref_any == 0 || (rt_arr_marks(n) & 32) == 0) return 0;
     /* An empty one is an array too. */
     r = rt_ar_find(n);
     if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 4099) == 0)) return 0;
-    if ((ar_mk[r] & 4096) != 0) return 1;
+    unseen = ar_n[r] == 0 && (ar_mk[r] & 1) == 0;
+    if (sub == 4 && unseen) {
+        rt_berr("warning", n, "removing nameref attribute");
+        rt_nmark(n, 0);
+        return 0;
+    }
+    if (sub == 4) sub = 1;
+    if ((ar_mk[r] & 4096) != 0 && !(sub == 1 && unseen)) return 1;
     if (sub == 3) {
         rt_berr("", "", "invalid variable name for name reference");
         arith_err = 1;
@@ -7118,13 +7130,20 @@ int rt_nref_noarr(char *kw, char *nm, int chk)
 
 /* -a or -A of the nameref nm whose value is unset or empty, which refers to
  * nothing, makes it a plain array: the nameref mark goes. One that is an array
- * already stays a nameref. */
-int rt_nref_drop(char *nm)
+ * already stays a nameref, and so does a local of the call whose save stack
+ * starts at d, when the declaration localizes (d >= 0). */
+int rt_nref_drop(char *nm, int d)
 {
     int i;
+    int t;
     if (nref_any == 0 || (rt_arr_marks(nm) & 32) == 0 || rt_nref_isarr(nm, 0) != 0) return 0;
     i = rt_varslot(nm);
     if (i >= 0 && gvars[i] != &unset_marker[0] && gvars[i][0] != 0) return 0;
+    t = d;
+    while (i >= 0 && t >= 0 && t < ls_top) {
+        if (ls_id[t] == i) return 0;
+        t = t + 1;
+    }
     return rt_nmark(nm, 0);
 }
 
@@ -9172,6 +9191,33 @@ int rt_local_p(char *nm, char *flag, int assoc, int d, int fn)
         return 0;
     }
     return rt_declp(nm, flag, assoc, "local");
+}
+
+/* A field f of a computed operand of `declare -p` (who: the builtin), or of
+ * `local -p` when d >= 0 (d and fn as rt_local_p takes them): f names a
+ * variable literally, so a word that is no name, NAME=VALUE or NAME[SUB]
+ * included, is "who: f: not found" and 1, unless a hidden local has that name
+ * (rt_nref_hid); "" is rt_declp's. While options may still come (opt), -2 for
+ * the "--" that ends them and -1 for any other word of - or + and more, an
+ * option only the emitter could apply. Twin of declpWord in
+ * bash-interpreter.abnf. */
+int rt_declp_word(char *f, char *flag, int opt, char *who, int d, int fn)
+{
+    int saved;
+    if (opt != 0 && (f[0] == 45 || f[0] == 43) && f[1] != 0) return f[0] == 45 && f[1] == 45 && f[2] == 0 ? -2 : -1;
+    if (d >= 0) return rt_local_p(f, flag, rt_isassoc(f), d, fn);
+    if (f[0] != 0 && rt_isname(f) == 0 && rt_nref_hid(f) < 0) {
+        saved = sink_out;
+        sink_out = sink_err;
+        rt_diag_pfx();
+        rt_prints(who);
+        rt_prints(": ");
+        rt_prints(f);
+        rt_prints(": not found\n");
+        sink_out = saved;
+        return 1;
+    }
+    return rt_declp(f, flag, rt_isassoc(f), who);
 }
 
 /* A computed option field of a declaration (rt_decl_word answered 2), given

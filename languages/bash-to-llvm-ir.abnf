@@ -561,7 +561,7 @@ DollarBrace <~~ push(mkParamExp(takeAll())) ~~>
 // "#" (length) and "!" (indirection) prefix a whole expansion; PeBraceEnd closes the
 // alternatives that can end early, because ordered choice commits.
 // Twin of PeBody in bash-interpreter.abnf; see there.
-PeBody      = PeLen | PeIndForm | PeCore | PeLenBad | PeBad ;
+PeBody      = PeLen | PeIndSp | PeIndForm | PeCore | PeLenBad | PeBad ;
 PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
 // `${#x-default}` and `${#a[0]/1/xxx}` PARSE in bash and then fail at run time with
 // "bad substitution"; this is the alternative that reaches that documented behaviour.
@@ -574,9 +574,13 @@ PeBad       <~~ push(badRec(up.start, arSrc(up.start, up.pos), false)) ~~> = PeB
 PeBadFirst  = !@+"} \t\n|" ;
 PeBadCh     = !@+"}" ;
 PeIndForm   <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | PeCore ) ;
+// Twin of PeIndSp in bash-interpreter.abnf; see there.
+PeIndSp     = PeIndSpAhead ( PeIndOpAhead PeIndForm | PeIndBad ) ;
+PeIndBad    <~~ push(badRec(up.start, arSrc(up.start, up.pos), false)) ~~> = "!" { PeBadCh } ;
 // ${!prefix*} / ${!prefix@}: the NAMES of the set variables starting with the prefix.
 // Twin of PePfxNames in bash-interpreter.abnf; see there.
-PePfxNames  <~~ push({pfx: up.in}) ~~> = PeName PfxTok PeBraceEnd ;
+PePfxNames  <~~ push({pfx: up.in}) ~~> = PePfxName PfxTok PeBraceEnd ;
+PePfxName   <~~ push({pname: up.in}) ~~> = PeIdent ;
 PfxTok      = "*" | "@" ;
 PeCore      = PePatForm | PeCaseForm | PeReplForm | PeXform | PeOpForm | PeSubstrForm | PePlain ;
 PeOpForm    = PeTarget PeOp [ BraceWord ] ;
@@ -699,12 +703,14 @@ BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DqExpSeg    = ArithExp | CmdSub | DqBackSub | FunSub | ReplySub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
 DqDollarBrace <~~ push(mkParamExp(dqIdxItems(takeAll()))) ~~>
             = "${" :whitespace() DqPeBody "}" ;
-DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
+DqPeBody    = PeLen | DqPeIndSp | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
 // In double quotes, a bad ${NAME[...} whose "[" is never closed is reported with the whole
 // word it is in (badRec, badClaim): bash 5.3, echo x"${m[[]-v}"y is "bad substitution: no
 // closing `}' in x"${m[[]-v}"y".
 DqPeBad     <~~ push(badRec(up.start, arSrc(up.start, up.pos), true)) ~~> = PeBadFirst { PeBadCh } ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
+DqPeIndSp   = PeIndSpAhead ( PeIndOpAhead DqPeIndForm | DqPeIndBad ) ;
+DqPeIndBad  <~~ push(badRec(up.start, arSrc(up.start, up.pos), true)) ~~> = "!" { PeBadCh } ;
 DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqAnsiOpForm | DqSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
@@ -1053,6 +1059,13 @@ ArEndHere = :script(~~
 // Succeeds only when the very next character closes the ${...}. See PeBody for why.
 PeBraceEnd = :script(~~
     (function() { if (c.peek(0) !== 125) { return abnf.newToken("\x01pe-end", 0) } })()
+~~) ;
+// PeIndSp's: "!" and "#", "?", "@" or "*" come next; then one of "#%:-=?+/@}".
+PeIndSpAhead = :script(~~
+    (function() { var d = c.peek(1); if (c.peek(0) !== 33 || (d !== 35 && d !== 63 && d !== 64 && d !== 42)) { return abnf.newToken("\x01pe-indsp", 0) } })()
+~~) ;
+PeIndOpAhead = :script(~~
+    (function() { var d = c.peek(2); if (d < 0 || "#%:-=?+/@}".indexOf(String.fromCharCode(d)) < 0) { return abnf.newToken("\x01pe-indop", 0) } })()
 ~~) ;
 
 // A bare "$" is a literal dollar, but never in front of "{": there it is the head of a
@@ -2021,7 +2034,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // local nameref; 1 when the value names no variable.
     var rtDeclCirc = rtDecl("rt_decl_circ", false, [1, 1, 1, 0])
     var rtNrefNoArr = rtDecl("rt_nref_noarr", false, [1, 1, 0])
-    var rtNrefDrop = rtDecl("rt_nref_drop", false, [1])
+    var rtNrefDrop = rtDecl("rt_nref_drop", false, [1, 0])
     var rtNrefSubdrop = rtDecl("rt_nref_subdrop", false, [1, 0])
     var rtNrefArrstore = rtDecl("rt_nref_arrstore", true, [1])
     var rtNrefSelfBad = rtDecl("rt_nref_self_bad", false, [1, 1])
@@ -2040,6 +2053,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `local` without names and `local -p NAME` (bash-rt.c).
     var rtLocalNames = rtDecl("rt_local_names", true, [0, 0])
     var rtLocalP = rtDecl("rt_local_p", false, [1, 1, 0, 0, 0])
+    // i32 rt_declp_word(i8* f, i8* flag, i32 opt, i8* who, i32 d, i32 fn): a field of a
+    // computed operand of `declare -p` / `local -p`.
+    var rtDeclpWord = rtDecl("rt_declp_word", false, [1, 1, 0, 1, 0, 0])
     // i32 rt_decl_opt(i8* f, i32 at): a computed option of a declaration (bash-rt.c).
     var rtDeclOpt = rtDecl("rt_decl_opt", false, [1, 0])
     // i8* rt_opt_bad(i8* f, i8* ok): the letter of option word f that ok lacks, or "".
@@ -2421,6 +2437,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return false
     }
+    // The name ${!REF} lands on: REF's value, the positional parameters joined by blanks for
+    // REF @. Twin of indName in bash-interpreter.abnf.
+    function indValue(b, name) {
+        if (name == "@") { return b.NewCall(rtParams, [gepStr(b, " "), one]) }
+        return varString(b, name)
+    }
     function mkParamExpAt(items) {
         var name = "", indp = false, hasIdx = false, bare = true, pfx = false, lenp = false, xfAttr = false
         var idxIt = null
@@ -2491,7 +2513,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {c: undefined, f: true, fn: function(b) {
             var tg = null
             if (idxW == null) {
-                tg = b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one])
+                tg = b.NewCall(rtIndName, [gepStr(b, name), nullStr, indValue(b, name), one])
             } else {
                 var ikind = idxKind(idxIt, idxW)
                 var rs = subKeyOf(b, name, idxW, null, ikind == 0, idxAqOf(idxIt))
@@ -2955,7 +2977,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {f: true, c: undefined, fn: function(b) {
                 // ${!REF} of a nameref is the name its chain ends at.
                 if (attrOn(refVars, name)) { return {b: b, v: b.NewCall(rtNrefName, [gepStr(b, name), zero])} }
-                return {b: b, v: b.NewCall(rtGetInd, b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one]))}
+                return {b: b, v: b.NewCall(rtGetInd, b.NewCall(rtIndName, [gepStr(b, name), nullStr, indValue(b, name), one]))}
             }}
         }
         // ${!ref OP arg} and ${!a[k] OP arg}: the operator applies to the variable the
@@ -4213,10 +4235,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A store through a nameref that is an array changes nothing (rt_nref_isarr): an
         // element or a literal one is refused, which abandons the line or fails the builtin
         // (a.soft), and a declaration's scalar is reported, where its literal is the
-        // nameref's own. Twin of runAssign and runAssignV in bash-interpreter.abnf.
+        // nameref's own. A literal stored to one never assigned is stored. Twin of runAssign
+        // and runAssignV in bash-interpreter.abnf.
         var whole = a.lit == null && a.idxT == null
         if (!attrOn(refVars, a.name) || (litDecl ? a.lit != null : whole)) { return emitAssignTo(b, a, assoc, mk) }
-        var isA = b.NewCall(rtNrefIsarr, [gepStr(b, a.name), whole ? llvm.constant.NewInt(i32, 2) : one])
+        var isA = b.NewCall(rtNrefIsarr, [gepStr(b, a.name), llvm.constant.NewInt(i32, whole ? 2 : ((a.lit != null) ? 4 : 1))])
         var noB = curF.NewBlock(""), goB = curF.NewBlock(""), joinB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, isA, zero), noB, goB)
         if (!whole && a.soft != undefined) { noB.NewStore(noB.NewOr(noB.NewLoad(i32, a.soft), noB.NewCall(rtTakeSubbad)), a.soft) }
@@ -4592,8 +4615,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (opts.indexOf("I") >= 0) { fail(kw + " " + opts + " is not supported") }
         }
+        // -p prints the variables computed operands name (emitDeclpDyn).
+        var printDyn = kw != "export" && kw != "readonly" && flags.indexOf("p") >= 0 && flags.indexOf("f") < 0 && flags.indexOf("F") < 0
         // Operands that are constant words (`declare -a 'b[1]=x'`) spell a declaration known now.
-        if (anyDyn) {
+        if (anyDyn && !printDyn) {
             // The kind of an array is known only at run time, where rt_decl_word reads a
             // quoted SUB as bashDeclText describes.
             var dt = bashDeclText(items, constFields, bashSq, function(n) { return "" })
@@ -4607,7 +4632,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var dynOk = (kw == "export") ? "-+xgnaA" : "-+xgaA"
         for (fk = 0; fk < flags.length; fk++) { if (dynOk.indexOf(flags.charAt(fk)) < 0) { attrOpt = true } }
         for (fk = 0; fk < plus.length; fk++) { if ("-+xga".indexOf(plus.charAt(fk)) < 0) { attrOpt = true } }
-        if (anyDyn && (kw == "readonly" || attrOpt)) {
+        if (anyDyn && !printDyn && (kw == "readonly" || attrOpt)) {
             fail("a computed operand of `" + kw + " " + flags + plus + "` is not supported by this compiler")
         }
         var isArray = (flags.indexOf("a") >= 0) || (flags.indexOf("A") >= 0)
@@ -5417,8 +5442,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 asgs[j] = a
                 return b
             }
-            // -a or -A of a nameref that refers to nothing makes it a plain array (rt_nref_drop).
-            if (!isRef && bareArr && attrOn(refVars, names[j])) { b.NewCall(rtNrefDrop, gepStr(b, names[j])) }
+            // -a or -A of a nameref that refers to nothing makes it a plain array, unless it is
+            // the call's own local (rt_nref_drop).
+            if (!isRef && bareArr && attrOn(refVars, names[j])) {
+                var dLoc = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset")
+                b.NewCall(rtNrefDrop, [gepStr(b, names[j]), dLoc ? b.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1)])
+            }
             // -n, in bash 5.3's order. An array value or -a/-A on a local is refused here, after
             // the value is assigned and the local made an empty array; an array variable and
             // a set value naming no variable at run time (rt_nref_noarr). A global declaration
@@ -5774,6 +5803,47 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             nextB.NewBr(head)
             return done
         }
+        // The builtin `declare -p` reports for.
+        var declpWho = (kw == "typeset") ? kw : "declare"
+        // The fields of a computed operand of -p, each printed by rt_declp_word, its status
+        // or-ed into *accP; *optP: options may still come, which a "--" ends and any other
+        // option field stops the shell at (optAbort). fnId: FUNCNAME's slot for `local -p`.
+        // Twin of declpWord in bash-interpreter.abnf.
+        var emitDeclpDyn = function(b, words, accP, optP, fnId) {
+            var listP = slotOf(i8ptr)
+            b.NewStore(nilList(b), listP)
+            var w
+            for (w = 0; w < words.length; w++) {
+                var rw = words[w].fn(b)
+                b = rw.b
+                b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), rw.v]), listP)
+            }
+            b = emitAbortCheck(b)
+            var all = b.NewLoad(i8ptr, listP)
+            var n = b.NewCall(rtNFields, all)
+            var iP = slotOf(i32)
+            b.NewStore(zero, iP)
+            var head = curF.NewBlock(""), step = curF.NewBlock(""), done = curF.NewBlock("")
+            var optB = curF.NewBlock(""), endB = curF.NewBlock(""), stB = curF.NewBlock(""), nextB = curF.NewBlock("")
+            b.NewBr(head)
+            var iv = head.NewLoad(i32, iP)
+            head.NewCondBr(head.NewICmp(llvm.enum.IPredSLT, iv, n), step, done)
+            var fld = step.NewCall(rtGetField, [all, iv])
+            var loc = kw == "local"
+            var rc = step.NewCall(rtDeclpWord, [fld, attrLettersAt(step, fld), step.NewLoad(i32, optP), gepStr(step, declpWho),
+                                                loc ? step.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1), loc ? fnId : zero])
+            step.NewCondBr(step.NewICmp(llvm.enum.IPredSLT, rc, zero), optB, stB)
+            optB.NewCondBr(optB.NewICmp(llvm.enum.IPredEQ, rc, llvm.constant.NewInt(i32, -2)), endB, curF.NewBlock(""))
+            optAbort(optB.Term.TargetFalse, fld)
+            endB.NewStore(zero, optP)
+            endB.NewBr(nextB)
+            stB.NewStore(zero, optP)
+            stB.NewStore(stB.NewOr(stB.NewLoad(i32, accP), rc), accP)
+            stB.NewBr(nextB)
+            nextB.NewStore(nextB.NewAdd(nextB.NewLoad(i32, iP), one), iP)
+            nextB.NewBr(head)
+            return done
+        }
         // A name's first `local` in a call: saved for the return, then empty and unset.
         var freshLocal = function(b, j) {
             b.NewCall(rtLocalNew, [llvm.constant.NewInt(i32, getVarId(names[j])), b.NewLoad(i32, curFrame.depth)])
@@ -5894,54 +5964,47 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeStatusI(lDone, 0)
                 return lDone
             }
-            if (kw == "local" && isPrint) {
-                var lacc = zero
-                for (j = 0; j < names.length; j++) {
+            if (isPrint && order.length > 0) {
+                // `declare -p NAME` PRINTS. The attribute letters are decided HERE because
+                // -i/-u/-l are compile-time facts in this grammar; rt_declp asks the runtime
+                // for array-ness and the value. `local -p NAME` prints only a local of the
+                // call (rt_local_p). A computed operand is printed field by field
+                // (emitDeclpDyn).
+                var accP = slotOf(i32)
+                b.NewStore(zero, accP)
+                var dOptP = slotOf(i32)
+                b.NewStore((dashEnd || order[0].dyn == undefined) ? zero : one, dOptP)
+                var o
+                for (o = 0; o < order.length; o++) {
+                    if (order[o].dyn != undefined) { b = emitDeclpDyn(b, order[o].dyn, accP, dOptP, fnId); continue }
+                    b.NewStore(zero, dOptP)
+                    j = order[o].j
+                    // The name gets its slot, which a computed operand may have stored into.
                     getVarId(names[j])
-                    var lrp = b.NewCall(rtLocalP, [gepStr(b, names[j]), gepStr(b, scalarAttrLetters(names[j])), b.NewCall(rtIsAssoc, gepStr(b, names[j])),
-                                                   b.NewLoad(i32, curFrame.depth), fnId])
-                    lacc = b.NewOr(lacc, lrp)
+                    var lt = gepStr(b, scalarAttrLetters(names[j]))
+                    // A name readonly only at run time (roFlag) shows the -r there.
+                    if (kw != "local" && hasOwn(roAnywhere, "$" + names[j]) && !attrOn(roVars, names[j]) && !attrOn(refVars, names[j])) {
+                        roVars["$" + names[j]] = true
+                        var ltR = gepStr(b, scalarAttrLetters(names[j]))
+                        roVars["$" + names[j]] = false
+                        lt = b.NewSelect(roRtCond(b, names[j]), ltR, lt)
+                    }
+                    var rp = null
+                    // NAME[SUB] names a variable literally: the hidden local of that name while
+                    // there is one (rt_nref_hid), else none.
+                    if (kw == "local") {
+                        var lnmj = gepStr(b, (darrs[j] != null) ? darrs[j] : names[j])
+                        rp = b.NewCall(rtLocalP, [lnmj, (darrs[j] != null) ? emptyPtr(b) : lt, b.NewCall(rtIsAssoc, lnmj), b.NewLoad(i32, curFrame.depth), fnId])
+                    } else if (darrs[j] != null) {
+                        rp = b.NewCall(rtDeclpWord, [gepStr(b, darrs[j]), emptyPtr(b), zero, gepStr(b, declpWho), llvm.constant.NewInt(i32, -1), zero])
+                    } else { rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), lt, b.NewCall(rtIsAssoc, gepStr(b, names[j])), gepStr(b, declpWho)]) }
+                    b.NewStore(b.NewOr(b.NewLoad(i32, accP), rp), accP)
                 }
-                storeStatus(b, lacc)
+                storeStatus(b, b.NewLoad(i32, accP))
                 return b
             }
-            if (query) {
-                // `declare -p NAME` PRINTS. The attribute letter is decided HERE because -i/-u/-l are
-                // compile-time facts in this grammar; rt_declp asks the runtime for array-ness and the value.
-                // A bare `declare -p` stays silent in both engines (bash lists every shell variable).
-                if (isPrint && names.length > 0) {
-                    var acc = zero
-                    for (j = 0; j < names.length; j++) {
-                        // The name gets its slot, which a computed operand may have stored into.
-                        getVarId(names[j])
-                        var lt = gepStr(b, scalarAttrLetters(names[j]))
-                        // A name readonly only at run time (roFlag) shows the -r there.
-                        if (hasOwn(roAnywhere, "$" + names[j]) && !attrOn(roVars, names[j]) && !attrOn(refVars, names[j])) {
-                            roVars["$" + names[j]] = true
-                            var ltR = gepStr(b, scalarAttrLetters(names[j]))
-                            roVars["$" + names[j]] = false
-                            lt = b.NewSelect(roRtCond(b, names[j]), ltR, lt)
-                        }
-                        var dwho = gepStr(b, (kw == "typeset") ? kw : "declare")
-                        var rp = null
-                        // NAME[SUB] is the hidden local of that name while there is one (rt_nref_hid).
-                        if (darrs[j] != null) {
-                            var hpB = curF.NewBlock(""), apB = curF.NewBlock(""), jpB = curF.NewBlock("")
-                            b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, b.NewCall(rtNrefHid, gepStr(b, darrs[j])), zero), hpB, apB)
-                            var hrp = hpB.NewCall(rtDeclp, [gepStr(hpB, darrs[j]), emptyPtr(hpB), hpB.NewCall(rtIsAssoc, gepStr(hpB, darrs[j])), dwho])
-                            hpB.NewBr(jpB)
-                            var arp = apB.NewCall(rtDeclp, [gepStr(apB, names[j]), lt, apB.NewCall(rtIsAssoc, gepStr(apB, names[j])), dwho])
-                            apB.NewBr(jpB)
-                            b = jpB
-                            rp = b.NewPhi([llvm.ir.NewIncoming(hrp, hpB), llvm.ir.NewIncoming(arp, apB)])
-                        } else { rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), lt, b.NewCall(rtIsAssoc, gepStr(b, names[j])), dwho]) }
-                        acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, acc, zero), acc, rp)
-                    }
-                    storeStatus(b, acc)
-                    return b
-                }
-                storeStatusI(b, 0); return b
-            }
+            // A bare `declare -p` stays silent in both engines (bash lists every shell variable).
+            if (query) { storeStatusI(b, 0); return b }
             var badP = anyDyn ? slotOf(i32) : null
             if (anyDyn) { b.NewStore(zero, badP) }
             subBadP = anyIdx ? slotOf(i32) : null

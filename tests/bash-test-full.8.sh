@@ -559,6 +559,34 @@ declare -r '
   e=$(s173e 2>/dev/null)
   check vv4 "${e//$'\n'/;}" 'declare -x ;declare -x ="4";l:1'
 }
+# ===== SECTION 174: declare -p of computed operands, ${!#x}, a function's nameref made an array =====
+# declare -p looks each operand up as a variable name, literally, a computed one too: NAME[SUB],
+# NAME=VALUE, a word that is no name and an option word after an operand are "not found".
+# ${!#...}, ${!?...}, ${!@...} and ${!*...} are indirections of $#, $?, $@ and $*, whose name
+# must end at an operator, or the expansion is a bad substitution. A function's nameref with
+# no value that -a or -A makes an array keeps -n; an array literal stored to it takes -n away
+# with a warning, an element store is refused. Every expected value is bash 5.3's.
+s174() {
+  local e
+  s174s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s174a() { local x=abc q=x n=5 a=(1 2); declare -p "$q"; echo "s=$?"; declare -p 'a[1]' "x=1" "$q" -x; echo "s=$?"
+            declare -p a[1]; echo "s=$?"; q='n q'; declare -p $q; o=--; declare -p $o "" x; echo "s=$?"
+            typeset -p "1x"; echo "s=$?"; local -p "$1" "l=2"; echo "s=$?"; }
+  e=$(s174a q 2>&1)
+  check dp1 "$(s174s "$e")" 'declare -- x="abc";s=0;declare: a[1]: not found;declare: x=1: not found;declare -- x="abc";declare: -x: not found;s=1;declare: a[1]: not found;s=1;declare -- n="5";declare -- q="n q";declare: : not found;declare -- x="abc";s=1;typeset: 1x: not found;s=1;declare -- q="n q";local: l=2: not found;s=1;'
+  s174b() { set -- a b; echo "${!#} ${!#:-d} ${!##} ${!#%b}|${!#/a/b} ${!#@Q}"; ( echo "${!#x}"; echo no ); echo "s=$?"
+            ( : "${!?x}" ); echo "s=$?"; ( : ${!#^}; ); echo "s=$?"; ( : "${!@Q}" ); echo "s=$?"; ( : "${!#@}" ); echo "s=$?"
+            ( : "${!@}" ); echo "s=$?"; }
+  e=$(s174b 2>&1)
+  check ib1 "$(s174s "$e")" "b b b |b 'b';\${!#x}: bad substitution;s=1;\${!?x}: bad substitution;s=1;\${!#^}: bad substitution;s=1;\${!@Q}: bad substitution;s=1;\${!#@}: bad substitution;s=1;a b: invalid variable name;s=1;"
+  s174c() { declare -n h; declare -A h; declare -p h; h=5; declare -p h ""; h=([0]=6); declare -p h
+            declare -n g; declare -a g; declare -p g; g+=(1 2); declare -p g
+            declare -n k; declare -A k; k[x]=1; echo no; }
+  e=$(s174c 2>&1)
+  check nr1 "$(s174s "$e")" 'declare -An h;declare -An h;declare -- ="5";warning: h: removing nameref attribute;declare -A h=([0]="6" );declare -an g;warning: g: removing nameref attribute;declare -a g=([0]="1" [1]="2");`'"'"': not a valid identifier;'
+  e=$(declare -gn s174t; declare -gA s174t; declare -p s174t)
+  check nr2 "$e" 'declare -A s174t'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -581,5 +609,6 @@ s170  # SECTION-CALL 170
 s171  # SECTION-CALL 171
 s172  # SECTION-CALL 172
 s173  # SECTION-CALL 173
+s174  # SECTION-CALL 174
 echo "full: $checks checks, $fails failures"
 exit $fails

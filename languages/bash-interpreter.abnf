@@ -596,7 +596,7 @@ DollarBrace <~~ push(mkParamExp(takeAll())) ~~>
 // early - the bare length form and the bare name - assert the closing brace themselves with
 // PeBraceEnd, which is what lets `${##}` (length of $#, = 1) and `${###}` ($# with an empty
 // "#" strip, = 2) both come out the way bash prints them.
-PeBody      = PeLen | PeIndForm | PeCore | PeLenBad | PeBad ;
+PeBody      = PeLen | PeIndSp | PeIndForm | PeCore | PeLenBad | PeBad ;
 PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
 // `${#x-default}` and `${#a[0]/1/xxx}` PARSE in bash and then fail at run time with
 // "bad substitution"; this is the alternative that reaches that documented behaviour.
@@ -609,13 +609,19 @@ PeBad       <~~ push(badRec(up.start, arSrc(up.start, up.pos), false)) ~~> = PeB
 PeBadFirst  = !@+"} \t\n|" ;
 PeBadCh     = !@+"}" ;
 PeIndForm   <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | PeCore ) ;
+// "!" before "#", "?", "@" or "*" is always an indirection (of $#, $?, $@, $*), never $!
+// and an operator, and the text up to an operator ("#%:-=?+/@" or the "}") must be empty:
+// bash 5.3 answers ${!#x}, ${!?x}, ${!#^}, ${!@Q} and ${!#@} with "bad substitution".
+PeIndSp     = PeIndSpAhead ( PeIndOpAhead PeIndForm | PeIndBad ) ;
+PeIndBad    <~~ push(badRec(up.start, arSrc(up.start, up.pos), false)) ~~> = "!" { PeBadCh } ;
 PeCore      = PePatForm | PeCaseForm | PeReplForm | PeXform | PeOpForm | PeSubstrForm | PePlain ;
 PeOpForm    = PeTarget PeOp [ BraceWord ] ;
 PePlain     = PeTarget PeBraceEnd ;
 // ${!prefix*} / ${!prefix@} : the NAMES of every set variable starting with that prefix.
 // PeBraceEnd, or `${!r@a}` would match this rule with PfxTok = "@" and then choke on the
 // "a}" it left behind - ordered choice commits, so it would never reach PeCore's PeXform.
-PePfxNames  <~~ push({pfx: up.in}) ~~> = PeName PfxTok PeBraceEnd ;
+PePfxNames  <~~ push({pfx: up.in}) ~~> = PePfxName PfxTok PeBraceEnd ;
+PePfxName   <~~ push({pname: up.in}) ~~> = PeIdent ;
 PfxTok      = "*" | "@" ;
 // ${v@Q} ${v@U} ${v@L} ${v@u} ${v@E} ${v@a} ${v@A} ${v@K} ${v@k} ${v@P} : the transform
 // operators. Verified against GNU bash 5.3.15 with x='a b' and a=(pa pb):
@@ -758,12 +764,14 @@ BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DqExpSeg    = ArithExp | CmdSub | DqBackSub | FunSub | ReplySub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
 DqDollarBrace <~~ push(mkParamExp(dqIdxItems(takeAll()))) ~~>
             = "${" :whitespace() DqPeBody "}" ;
-DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
+DqPeBody    = PeLen | DqPeIndSp | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
 // In double quotes, a bad ${NAME[...} whose "[" is never closed is reported with the whole
 // word it is in (badRec, badClaim): bash 5.3, echo x"${m[[]-v}"y is "bad substitution: no
 // closing `}' in x"${m[[]-v}"y".
 DqPeBad     <~~ push(badRec(up.start, arSrc(up.start, up.pos), true)) ~~> = PeBadFirst { PeBadCh } ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
+DqPeIndSp   = PeIndSpAhead ( PeIndOpAhead DqPeIndForm | DqPeIndBad ) ;
+DqPeIndBad  <~~ push(badRec(up.start, arSrc(up.start, up.pos), true)) ~~> = "!" { PeBadCh } ;
 DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqAnsiOpForm | DqSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
@@ -1199,6 +1207,13 @@ ArEndHere = :script(~~
 // Succeeds only when the very next character closes the ${...}. See PeBody for why.
 PeBraceEnd = :script(~~
     (function() { if (c.peek(0) !== 125) { return abnf.newToken("\x01pe-end", 0) } })()
+~~) ;
+// PeIndSp's: "!" and "#", "?", "@" or "*" come next; then one of "#%:-=?+/@}".
+PeIndSpAhead = :script(~~
+    (function() { var d = c.peek(1); if (c.peek(0) !== 33 || (d !== 35 && d !== 63 && d !== 64 && d !== 42)) { return abnf.newToken("\x01pe-indsp", 0) } })()
+~~) ;
+PeIndOpAhead = :script(~~
+    (function() { var d = c.peek(2); if (d < 0 || "#%:-=?+/@}".indexOf(String.fromCharCode(d)) < 0) { return abnf.newToken("\x01pe-indop", 0) } })()
 ~~) ;
 
 // The extglob prefix characters are only that when a "(" follows immediately.
@@ -3325,7 +3340,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (sub == null) {
             var special = !isIdentText(name) && !allDigits(name)
             if (!special && !isArr(name) && !isSetVar(name)) { return indFail(name + ": invalid indirect expansion") }
-            v = getVarVal(name)
+            // REF @ is the positional parameters joined by blanks.
+            v = (name == "@") ? joinParams(" ") : getVarVal(name)
         } else {
             if (!isArr(name) && !isSetVar(name) && !attrOn(dclVars, name)) {
                 return indFail(name + "[" + raw + "]: invalid indirect expansion")
@@ -3820,8 +3836,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // -n declares the reference itself, whatever it referred to before.
             var nk = "$" + names[k]
             // -a or -A of a nameref that refers to nothing makes it a plain array; one that
-            // is an array already stays a nameref.
-            if (!isRef && bareArr && attrOn(refVars, names[k]) && !isArr(names[k])) { refVars[nk] = false }
+            // is an array already stays a nameref, and so does a function's own local.
+            if (!isRef && bareArr && attrOn(refVars, names[k]) && !isArr(names[k]) && !(localizes() && localHere(names[k]))) { refVars[nk] = false }
             // -n, in bash 5.3's order. An array variable, an array value or -a/-A on a local
             // is refused with "reference variable cannot be an array" (status 1), after a
             // compound value is assigned and a local made an empty array. Then a set variable
@@ -4073,31 +4089,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 setStatus(0)
                 return 0
             }
-            if (kw == "local" && isPrint) {
-                var lst = 0
-                for (k = 0; k < names.length; k++) {
-                    if (!localHere(names[k]) || tmpHere(names[k])) { diagErr("local: " + names[k] + ": not found\n"); lst = 1 }
-                    else { emitOut(declLocal(names[k]) + "\n") }
-                }
-                setStatus(lst)
-                return lst
+            // -p with names PRINTS (declpWord), -p bare stays silent (declLine's comment says
+            // why). A NAME[SUB] operand names a variable literally.
+            if (isPrint && names.length > 0) {
+                var pst = 0
+                for (k = 0; k < names.length; k++) { pst = pst | declpWord(kw, (darrs[k] != null) ? darrs[k] : names[k]) }
+                setStatus(pst)
+                return pst
             }
-            if (query) {
-                // -p with names PRINTS, -p bare stays silent (declLine's comment says why),
-                // and a name that is not set is a diagnostic and status 1.
-                if (isPrint && names.length > 0) {
-                    var pst = 0
-                    for (k = 0; k < names.length; k++) {
-                        // NAME[SUB] is the hidden local of that name while there is one.
-                        var line = declLineRaw((darrs[k] != null && hidLocal(darrs[k])) ? darrs[k] : names[k])
-                        if (line == "") { diagErr(((kw == "typeset") ? kw : "declare") + ": " + names[k] + ": not found\n"); pst = 1 }
-                        else { emitOut(line + "\n") }
-                    }
-                    setStatus(pst)
-                    return pst
-                }
-                setStatus(0); return 0
-            }
+            if (query) { setStatus(0); return 0 }
             var lates0 = lateStack[lateStack.length - 1]
             for (k = 0; k < names.length; k++) {
                 // export and readonly take no NAME[SUB], with a value or without. Twin of
@@ -4183,6 +4183,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return r
         }
     }
+    // An operand f of `declare -p` / `local -p` (kw): the variable f names literally, so a
+    // word that is no name (NAME=VALUE, NAME[SUB]) is "not found", unless a hidden local
+    // has that name; "" is the variable named "" (voidDeclLine). `local -p` prints only a
+    // local of the call. Answers the status. Twin of rt_declp_word in
+    // languages/lib/bash-rt.c.
+    function declpWord(kw, f) {
+        if (kw == "local") {
+            if (!localHere(f) || tmpHere(f)) { diagErr("local: " + f + ": not found\n"); return 1 }
+            emitOut(declLocal(f) + "\n")
+            return 0
+        }
+        var line = ""
+        if (f == "") { line = voidDeclLine() }
+        else if (isIdentText(f) || hidLocal(f)) { line = declLineRaw(f) }
+        if (line == "") { diagErr(((kw == "typeset") ? kw : "declare") + ": " + f + ": not found\n"); return 1 }
+        emitOut(line + "\n")
+        return 0
+    }
     // A declaration with a computed operand ({dyn}) runs as the declaration its words spell
     // once expanded (bashDeclText in lib/bash-deparse.js). A field that is no name is bash's
     // "not a valid identifier" and makes the status 1. Twin of the dyn arm of makeDecl in
@@ -4191,10 +4209,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var kw = items[0].dkw
         var compiled = {}
         var pending = []
+        // -p prints the variables its operands name, in order (declpWord): pending's top has
+        // them as {pf}. Unless a leading field is an option other than "--", which has the
+        // declaration spelled as below. Twin of emitDeclpDyn in bash-to-llvm-ir.abnf.
+        var printQ = kw != "export" && kw != "readonly"
+        var anyP = false
+        var i
+        for (i = 1; i < items.length; i++) {
+            var df = items[i].dflag
+            if (df != undefined && df.charAt(0) == "-" && df.indexOf("p") >= 0) { anyP = true }
+            if (df != undefined && df.charAt(0) == "-" && (df.indexOf("f") >= 0 || df.indexOf("F") >= 0)) { printQ = false }
+        }
+        printQ = printQ && anyP
         // pending's top: the run's diagnostics and its declaration (null when it has no
         // operand), both under the redirections.
         var body = function() {
             var top = pending[pending.length - 1]
+            if (top.pf != undefined) {
+                var pst = 0
+                var k
+                for (k = 0; k < top.pf.length; k++) { pst = pst | declpWord(kw, top.pf[k]) }
+                return pst
+            }
             if (top.errs != "") { emitErr(top.errs) }
             if (top.vout != "") { emitOut(top.vout) }
             var r = anytype
@@ -4206,7 +4242,48 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (redirs.length > 0) { run = mkRedirected([body].concat(redirs)) }
         return function() {
             vars["$LINENO"] = lnAt(ln)
+            // printQ: each computed operand's fields, expanded once, in order.
+            var dynFs = []
+            if (printQ) {
+                var pf = []
+                var opt = true
+                var spell = false
+                var q
+                for (q = 1; q < items.length; q++) {
+                    var it = items[q]
+                    if (it.dflag != undefined) { continue }
+                    if (it.dyn == undefined) {
+                        opt = false
+                        pf.push((it.dname == undefined) ? it.a.name : ((it.darr != undefined) ? it.darr : it.dname))
+                        continue
+                    }
+                    var efs = expandWords(it.dyn)
+                    if (abortSignal != null || arithErr) { return takeAbort() }
+                    dynFs.push(efs)
+                    var e
+                    for (e = 0; e < efs.length; e++) {
+                        var f = efs[e]
+                        if (opt && f.length > 1 && (f.charAt(0) == "-" || f.charAt(0) == "+")) {
+                            if (f == "--") { opt = false } else { spell = true }
+                            continue
+                        }
+                        opt = false
+                        pf.push(f)
+                    }
+                }
+                if (!spell) {
+                    pending.push({pf: pf})
+                    var pst = anytype
+                    pst = run()
+                    pending.pop()
+                    if (typeof pst == "object") { return pst }
+                    setStatus(pst)
+                    return pst
+                }
+            }
+            var dynAt = 0
             var dt = bashDeclText(items, function(dyn) {
+                if (printQ) { dynAt = dynAt + 1; return dynFs[dynAt - 1] }
                 var fs = expandWords(dyn)
                 return (abortSignal != null || arithErr) ? null : fs
             }, shellQuote, function(n) { return assocFact(n, false) ? "A" : "a" })
@@ -7095,13 +7172,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // array literal reports an element as applyArrayLit says. Twin of the emitAbortCheck in
     // emitAssign.
     function runAssign(a, assoc, decl) {
+        // One never assigned (a nameref -a or -A made an array, bash's invisible variable)
+        // refuses an element store too; an array literal takes the nameref attribute away
+        // with a warning and is stored. Twin of rt_nref_isarr in languages/lib/bash-rt.c.
         if (!decl && a.circ != true && refIsArr(a.name)) {
-            if ((a.idxT != null || a.lit != null) && !refIsAs(a.name)) { refArrBad() }
-            if (a.idxT == null && a.lit == null && refIsAs(a.name)) {
-                var vv = (a.valT != null) ? wordJoin(a.valT()) : ""
-                if (!arithErr && abortSignal == null) { voidStore(a.name, vv, a.op == "+=") }
+            var unseen = !declIsArr(a.name)
+            if (unseen && a.lit != null && a.idxT == null) {
+                diagErr("warning: " + a.name + ": removing nameref attribute\n")
+                refVars["$" + a.name] = false
+            } else {
+                if ((a.idxT != null || a.lit != null) && (!refIsAs(a.name) || unseen)) { refArrBad() }
+                if (a.idxT == null && a.lit == null && refIsAs(a.name)) {
+                    var vv = (a.valT != null) ? wordJoin(a.valT()) : ""
+                    if (!arithErr && abortSignal == null) { voidStore(a.name, vv, a.op == "+=") }
+                }
+                return
             }
-            return
         }
         if (!decl && anyRef && refVoidElem(a)) { return }
         if (anyRef && a.circ != true && refGlobStore(a)) {
