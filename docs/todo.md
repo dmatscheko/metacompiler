@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1192 ruby: commands as nested arguments and in interpolation, inherited `B::X`, rescue modifier catching non-StandardError, compiler break/$! in rescue · P3 · RB · OPEN [V]
+### T-1192 ruby: commands as nested arguments and in interpolation, inherited `B::X`, rescue modifier catching non-StandardError, compiler break/$! in rescue · P3 · RB · IN PROGRESS (RB worker, round 72) [V]
 Found while closing T-1188 (worker-reported; verify on the oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6 first).
 - All engines, now loud parse errors (before, silently wrong output): `p(g 1)`, a command as the only argument in parentheses (MRI 2), and `a.concat Array g 3`, a constant-named command nested in a command argument (MRI `[6]`). This blocks stdlib rdoc/parser/changelog.rb, rubygems/config_file.rb and rubygems/request_set/gem_dependency_api.rb. Accepting a command anywhere in LowNot cost +11% parse instructions, so find the narrower MRI positions (`command_args` / paren_args with one command).
 - All engines: `"#{g 10}"`, a command inside string interpolation, fails to parse. TplExpr takes an Expression; MRI takes a full statement list (`"#{a = 1; a + 1}"` too).
