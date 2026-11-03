@@ -163,10 +163,27 @@ s178g() { :; }
   while IFS= read -r x; do o+="${x#*: line };"; done <<< "$e"
   check fo3 "$o" "$((l + 4)): s178g: readonly function;$((l + 7)): s178g: readonly function;$((l + 9)): s178g: readonly function;$((l + 13)): s178g: readonly function;$l;"
 }
+# ===== SECTION 179: the operands of a -f / -F query spelled from fields, and "--" before them =====
+# A declaration whose first operand is a quoted option word reads its words as fields: under
+# -f / -F -p each is looked up in operand order, so a "not found" sits between the functions
+# printed (a quote, an empty field and a "--" after the options spell no other word). A
+# written "--" ends the options for a computed field after it too, which is then an operand.
+# Every expected value is bash 5.3's.
+s179() {
+  local e
+  s179s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$( { s179g() { :; }; s179h() { :; }
+       declare -F '-p' s179g 'x y' s179h; echo "s=$?"; declare -F '-p' s179g "it's" '' s179h; echo "s=$?"
+       typeset -F '-p' s179g 'a b' s179h >/dev/null; echo "s=$?"; declare -F '-p' -- '-x' s179g; echo "s=$?"; } 2>&1 )
+  check fp1 "$(s179s "$e")" "declare -f s179g;declare: x y: not found;declare -f s179h;s=1;declare -f s179g;declare: it's: not found;declare: : not found;declare -f s179h;s=1;typeset: a b: not found;s=1;declare: -x: not found;declare -f s179g;s=1;"
+  e=$( { v=-x; declare -- "$v" s179q=1; echo "s=$?"; declare -p s179q; v=-p; declare -- "$v"; echo "s=$?"; } 2>&1 )
+  check fp2 "$(s179s "$e")" "declare: \`-x': not a valid identifier;s=1;declare -- s179q=\"1\";declare: \`-p': not a valid identifier;s=1;"
+}
 # ===== END SECTIONS =====
 
 s176  # SECTION-CALL 176
 s177  # SECTION-CALL 177
 s178  # SECTION-CALL 178
+s179  # SECTION-CALL 179
 echo "full: $checks checks, $fails failures"
 exit $fails

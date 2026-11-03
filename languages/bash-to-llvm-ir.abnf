@@ -6196,7 +6196,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vst = zero
             for (k = 0; k < dt.voids; k++) { vst = b.NewOr(vst, b.NewCall(rtDeclp, [emptyPtr(b), emptyPtr(b), zero, gepStr(b, kw)])) }
             if (dt.operands > 0) { b = compileSnippet(dt.text, 0)(b) }
-            if (dt.bad.length > 0 || dt.fails > 0 || dt.operands == 0) { storeStatusI(b, (dt.bad.length > 0 || dt.fails > 0) ? 1 : 0) }
+            if (dt.bad.length > 0 || dt.operands == 0) { storeStatusI(b, (dt.bad.length > 0) ? 1 : 0) }
             if (dt.voids > 0) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), vst)) }
             return b
         }

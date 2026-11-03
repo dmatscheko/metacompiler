@@ -1016,8 +1016,8 @@ function bashSubNeedsX(t) {
 // field with a letter the builtin does not take answers {badOpt: bashDeclBadOpt's report}
 // instead: the builtin does nothing and fails with status 2. An empty field of a `declare
 // -p` or `typeset -p` is the variable named "", printed or "not found" by the engine: voids
-// counts them (`local -p ""` finds none). fails counts the fields a -f / -F query without -p
-// looks up as no function silently, each making the status 1.
+// counts them (`local -p ""` finds none). Every field after the options of a -f / -F query is
+// an operand, a function name the spelled declaration looks up.
 //
 // The builtin reads the SUB of a computed NAME[SUB]=VALUE as it stands, as an assignment
 // statement does (AsgIdx): an associative array's as a word, an indexed array's as
@@ -1045,7 +1045,6 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
     var pq = false
     var fq = false
     var voids = 0
-    var fails = 0
     var i
     var k
     for (i = 1; i < items.length; i++) {
@@ -1076,11 +1075,15 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
         if (fs == null) { return null }
         for (k = 0; k < fs.length; k++) {
             var f = fs[k]
-            if (opts && f == "--") { opts = false; continue }
+            if (opts && f == "--") {
+                opts = false
+                if (fq) { text = text + " --" }
+                continue
+            }
             var optWord = opts && f.length > 1 && (f.charAt(0) == "-" || (f.charAt(0) == "+" && !xr))
             if (optWord && !bashDeclFlagText(f)) {
                 var bo = bashDeclBadOpt(items[0].dkw, " " + f)
-                if (bo != "") { return {text: text, pre: "", operands: 0, bad: [], fails: 0, badOpt: bo} }
+                if (bo != "") { return {text: text, pre: "", operands: 0, bad: [], badOpt: bo} }
             }
             if (optWord && bashDeclFlagText(f)) {
                 text = text + " " + f
@@ -1093,9 +1096,12 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
                 continue
             }
             opts = false
-            // A -f / -F query looks every other field up as a function name (bashDeclFnWords).
-            if (fq && bashDeclOperand(f, false, quote, false) == "") {
-                if (pq) { bad.push(f + ": not found") } else if (xr) { bad.push(f + ": not a function") } else { fails = fails + 1 }
+            // A -f / -F query looks every other field up as a function name (bashDeclFnWords),
+            // in operand order: a field that is no NAME or assignment is spelled as one word.
+            if (fq) {
+                var fop = bashDeclOperand(f, false, quote, false)
+                operands = operands + 1
+                text = text + " " + ((fop == "") ? bashSq(f) : fop)
                 continue
             }
             if (f == "" && pq && items[0].dkw == "local") { bad.push(": not found"); continue }
@@ -1114,7 +1120,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             text = text + " " + op
         }
     }
-    return {text: text, pre: pre, operands: operands, bad: bad, voids: voids, fails: fails}
+    return {text: text, pre: pre, operands: operands, bad: bad, voids: voids}
 }
 // AN OPTION WORD AFTER AN OPERAND. bash marks every array literal (NAME=(...), NAME+=(...))
 // that follows an unquoted word beginning with "-" for the kind its letters name - A
@@ -1206,8 +1212,8 @@ function bashDeclFnWords(items) {
     }
     return out
 }
-// The one field of a word written s that has no expansion, pattern or backslash, its quotes
-// removed; null for any other word.
+// The one field of a word written s that has no expansion or pattern, its quotes removed and
+// an unquoted \X read as X; null for any other word (a backslash inside "..." among them).
 function bashConstWord(s) {
     var out = ""
     var q = ""
@@ -1215,6 +1221,11 @@ function bashConstWord(s) {
     for (i = 0; i < s.length; i++) {
         var ch = s.charAt(i)
         if (q != "" && ch == q) { q = ""; continue }
+        if (q == "" && ch == "\\" && i + 1 < s.length && s.charAt(i + 1) != "\n") {
+            i = i + 1
+            out = out + s.charAt(i)
+            continue
+        }
         if (q == "" && (ch == "'" || ch == "\"")) { q = ch; continue }
         if ((q != "'" && "$`\\".indexOf(ch) >= 0) || (q == "" && "*?[~{".indexOf(ch) >= 0)) { return null }
         out = out + ch

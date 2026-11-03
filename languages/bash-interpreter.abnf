@@ -3401,11 +3401,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeDecl(items, redirs, ln, keepTc) {
         var kw = items[0].dkw
         items = bashDeclFnWords(items)
-        // A `--` before every operand ends the options and is no operand. Twin of dashEnd in
-        // makeDecl in bash-to-llvm-ir.abnf.
+        // A `--` before every operand ends the options and is no operand. A computed operand
+        // after it keeps it, for makeDeclDyn to end the options its fields may spell. Twin of
+        // dashEnd in makeDecl in bash-to-llvm-ir.abnf.
         var de = 1
         while (de < items.length && items[de].dflag != undefined) { de = de + 1 }
-        if (de < items.length && items[de].dsrc == "--") { items = items.slice(0, de).concat(items.slice(de + 1)) }
+        var dynAfter = false
+        var dk
+        for (dk = de + 1; dk < items.length; dk++) { if (items[dk].dyn != undefined) { dynAfter = true } }
+        if (de < items.length && items[de].dsrc == "--" && !dynAfter) { items = items.slice(0, de).concat(items.slice(de + 1)) }
         var flags = ""
         var plus = ""
         var names = []
@@ -4392,7 +4396,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pending.pop()
                 if (typeof st == "object") { return st }
             }
-            if (errs != "" || dt.fails > 0) { st = failSt }
+            if (errs != "") { st = failSt }
             setStatus(st)
             return st
         }
