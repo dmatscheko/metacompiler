@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1191** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1192** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -129,11 +129,13 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1190 bash: syntax errors - `eval` of bad text aborts the program, top-level report and exit status 2, `a[=b() {` · P3 · SH · IN PROGRESS (SH worker, round 67) [V]
-Found while closing T-1189; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. All engines.
-- `eval 'x=y() { :; }'; echo "s=$?"`: bash prints "eval: line 1: syntax error near unexpected token `('" plus the offending line, then continues with s=2. The interpreter aborts the whole program with the parse dump. The compiler fails at compile time, even though a constant eval string with a syntax error must compile into a run-time report and status 2. Computed eval text that fails to parse must report and continue too.
-- Top-level: a script with a syntax error (`x=y() { :; }`) gets bash's "FILE: line N: syntax error near unexpected token `('" / "FILE: line N: `x=y() { :; }'" and exit 2. bash runs the commands before the bad line first. Ours prints the generic parse dump and exits 1. Decide how far the grammar can report bash's token. At minimum, give exit status 2 and a bash-shaped first line for the common cases (unexpected `(`, `)`, `fi`, `done`, `}`, unexpected end of file).
-- Low: `a[=b() { :; }` is rejected by bash ("unexpected EOF while looking for matching `]'"); ours defines a function named `a[=b`.
+### T-1191 bash: `select`, `! !`, eval syntax error under `set -e` · P3 · SH · OPEN [V]
+Found while closing T-1190 (worker-reported; verify on the oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3 first). All engines.
+- `select` is not supported. `select x in a b; do echo "$x"; break; done <<< 2` should print the numbered menu on stderr and then `b`. A bare `select` is "syntax error near unexpected token `newline'" with exit 2; ours says "select: command not found", 127. Implement the compound command (PS3, REPLY, the menu layout on stderr, EOF ending the loop, break) in both engines.
+- `! ! true; echo $?` is silent with status 0 in bash; ours prints "!: command not found".
+- An eval syntax error under `set -e`: bash prints only the first message line and exits 2. Ours prints both lines.
+- Record only, by design: bash keeps parser state between eval errors inside a function or subshell, so a second `eval 'x=(a b'` reports differently. We model the fresh-shell behaviour.
+- Record only, by design: the compiler stops on a COMPUTED eval string that is not an assignment ("eval: only assignments can be compiled from a computed string"), so computed eval text with a syntax error cannot report bash's message there. The interpreter handles it.
 
 # C — C subset
 
@@ -1229,6 +1231,7 @@ T-1186 bash: interleaving of "not found" with a run-time -f/-F -p operand (inter
 T-1179 ruby: exact Integer powers capped at exponent 4096, 0**-n, binary String iterator encodings — DONE - exact Integer powers up to MRI's 32Mi-bit limit in all engines (repeated squaring; runtime bignum multiply gets Karatsuba + a two-prime NTT, an algorithm in the runtime library, no optimizer pass), 0**-n raises ZeroDivisionError, binary String each_char/each_line yield ASCII-8BIT, paren-less call as a rescue-modifier fallback is a syntax error; MRI 2.6's 32-bit exponent truncation not replicated (oracle bug); oracle-probed on all legs (Ruby + Python products through Karatsuba/NTT); full suite + full native green after rebase; paired bench python +0.03% ruby -0.00%
 T-1187 bash: a quoted assignment-shaped -f/-F operand, `function a=b` (interp) — DONE - a quoted assignment-shaped -f/-F operand behaves as the unquoted one (cannot use `-f' to make functions / not found / not a function), `function a=b` definitions parse in both grammars and are listed, printed with the function keyword, called, made readonly, refused by export; oracle-probed on all legs; bash gates green after rebase; bench module IR byte-identical
 T-1189 bash: keyword-less function definitions whose name holds "=" (`=x() {`, `1=2() {`) — DONE - keyword-less function names may hold "=" unless the word spells an assignment (backward :script guard after the parens, so no cost on non-definitions), assignment-shaped x=y() stays a syntax error; oracle-probed on all legs; bench module IR byte-identical, parse time within noise
+T-1190 bash: syntax errors - `eval` of bad text aborts the program, top-level report and exit status 2, `a[=b() {` — DONE - syntax errors reported as bash does (unexpected token / newline / end of file from KW command / unexpected EOF while looking for matching, [[ ]] messages) via the shared languages/lib/bash-synerr.js, lines before the bad one run, top-level exit 2 after the EXIT trap, eval/trap strings fail with status 2 and the script goes on (constant strings in the compiler too), a[=b() and stray ; rejected; oracle-probed on all legs incl. stderr and exit status; matrix rows with expectExit 2; parse time unchanged; computed eval in the compiler by design
 
 # Settled — do not re-open
 
