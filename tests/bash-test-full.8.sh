@@ -489,6 +489,38 @@ s171() {
   e=$( (s171x; s171y) 2>&1)
   check vro3 "$(s171s "$e")" 'x:0;declare -an w=();x2:0;declare -an w=();y:0;declare -an w=();'
 }
+# ===== SECTION 172: $!, and a line an expansion error abandons =====
+# $! is unset until the first `cmd &`: ${!-u} is the word, ${!:=x} is refused ("$!: cannot
+# assign in this way", status 1), and under set -u $! is "$!: unbound variable" and ${!} is
+# "!: unbound variable", while ${#!} is 0. Each `cmd &` then sets it to a new value, which
+# a job in a subshell does not change for the shell and the job itself does not see. After
+# an expansion error the rest of the command is not expanded: a later ${NAME=WORD} stores
+# nothing and is not refused again, a later ${NAME?WORD} raises nothing. A function's
+# readonly of its circular nameref that is an indexed array changes nothing after it
+# returns. Every expected value is bash 5.3's.
+s172() {
+  local e
+  s172s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$(echo "[$!] ${!-u} <${!+set}> ${!:-e} ${#!}"; (: ${!:=x}; echo no) 2>&1; echo "a:$?"
+      (set -u; echo "${#!} ${!-d}"; echo "$!"; echo no) 2>&1; echo "b:$?"; (set -u; echo "${!}"; echo no) 2>&1; echo "c:$?")
+  check bgp1 "$(s172s "$e")" '[] u <> e 0;$!: cannot assign in this way;a:1;0 d;$!: unbound variable;b:1;!: unbound variable;c:1;'
+  e=$( (: &); echo "d:${!+set}"; s172f() { : & }; s172f; s172p=$!; echo "e:${!+set}"
+       s172j=$({ [ "$s172p" = "$!" ] && echo same; } &); echo "f:$s172j"
+       : & [ "$s172p" != "$!" ] && echo g:new; ( : & ); [ "$s172p" != "$!" ] && echo h:kept)
+  check bgp2 "$e" 'd:
+e:set
+f:same
+g:new
+h:kept'
+  e=$( (readonly s172r; : ${s172r:=1} ${s172r:=2} ${s172z:=3} ${s172u:?no} $(echo sub >&2); echo no) 2>&1; echo "i:$? ${s172z-U}"
+       (unset s172t; readonly s172t; declare -n s172q=s172t; : ${s172q:=5} "${s172q:=6}"; echo no) 2>&1; echo "j:$?"
+       (: $((1/0)) ${s172y:=6}; echo no) 2>&1; echo "k:$? ${s172y-U}")
+  check ast1 "$(s172s "$e")" 's172r: readonly variable;i:2 U;s172t: readonly variable;j:2;1/0: division by 0 (error token is "0");k:1 U;'
+  s172a() { local -n w=w; declare -a w=(p q); readonly w; echo "r:$?"; }
+  s172b() { local -n w=w; echo "l:$?"; }
+  e=$(w=; unset w; s172a 2>/dev/null; declare -p w 2>&1; s172b 2>/dev/null; w=5; echo "w:$w")
+  check vrol "$(s172s "$e")" 'r:0;declare: w: not found;l:0;w:5;'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -509,5 +541,6 @@ s168  # SECTION-CALL 168
 s169  # SECTION-CALL 169
 s170  # SECTION-CALL 170
 s171  # SECTION-CALL 171
+s172  # SECTION-CALL 172
 echo "full: $checks checks, $fails failures"
 exit $fails

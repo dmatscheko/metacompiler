@@ -797,7 +797,7 @@ DollarQ     <~~ push(mkVarRef("?")) ~~> = "$?" ;
 DollarStar  <~~ push(mkVarRef("*")) ~~> = "$*" ;
 DollarAt    <~~ push(mkVarRef("@")) ~~> = "$@" ;
 DollarPid   <~~ push(mkVarRef("$")) ~~> = "$$" ;
-DollarBang  <~~ push(mkVarRef("!")) ~~> = "$!" ;
+DollarBang  <~~ push(function() { return bgPidVal("$!") }) ~~> = "$!" ;
 DollarDash  <~~ push(mkVarRef("-")) ~~> = "$-" ;
 DollarLit   <~~ push(makeConst("$")) ~~> = "$" NotDollarBrace ;
 
@@ -1709,8 +1709,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (isElemRef(name) && hidLocal(name)) { return varsHas[key] == true }
         if (isElemRef(name)) { var sp = splitSubX(name); return scHas(sp.name, subKey(sp.name, sp.key)) }
-        // The special parameters always are ($!, a fixed value, too).
-        if (!hasOwn(varsHas, key)) { return name == "#" || name == "?" || name == "$" || name == "-" || name == "!" }
+        // The special parameters always are, except $! before the first `cmd &`.
+        if (!hasOwn(varsHas, key)) { return name == "#" || name == "?" || name == "$" || name == "-" || (name == "!" && lastBgPid > 0) }
         return varsHas[key]
     }
     // NAME IS SET for ${NAME-w}, ${NAME+w} and ${NAME?w}: a set scalar, or an array with an
@@ -1943,9 +1943,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function getVarVal(name) {
         if (name == "?") { return numToStr(lastStatus) }
-        // There is no process behind a grammar run, so $$ and $! are fixed, documented values.
+        // There is no process behind a grammar run, so $$ is a fixed, documented value.
         if (name == "$") { return "1000" }
-        if (name == "!") { return numToStr(lastBgPid) }
+        if (name == "!") { return bgPidVal("!") }
         if (name == "-") { return "hB" }
         if (name == "#") { return numToStr(posParams.length) }
         if (name == "*") { return joinParams(ifsFirst()) }
@@ -2806,7 +2806,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (set -- p q; x=@; "${!x:1}" is "${@:1}", the words p q). That expansion is built on
     // first use, once per target text. A plain NAME is handed to the scalar arms through
     // `cell`. A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-to-llvm-ir.abnf.
+    // After an expansion error the rest of the command is abandoned unexpanded, so a later
+    // ${NAME=WORD} stores nothing and a later ${NAME?WORD} raises nothing (bash 5.3: with R
+    // readonly and z unset, `: ${R:=1} ${R:=2} ${z:=3}` reports R once and leaves z unset).
     function mkParamExp(items) {
+        var t = mkParamExpAt(items)
+        if (!peStopsAfterErr(items)) { return t }
+        return function() {
+            if (arithErr || abortSignal != null) { return "" }
+            return t()
+        }
+    }
+    // Does ${...} have a side effect an earlier expansion error must stop: = or ?. Twin of
+    // peStopsAfterErr in bash-to-llvm-ir.abnf.
+    function peStopsAfterErr(items) {
+        var i
+        for (i = 0; i < items.length; i++) {
+            var o = (typeof items[i] == "function") ? "" : items[i].op
+            if (o == "=" || o == ":=" || o == "?" || o == ":?") { return true }
+        }
+        return false
+    }
+    function mkParamExpAt(items) {
         var name = "", indp = false, hasIdx = false, bare = true, pfx = false, lenp = false, xfAttr = false
         var idxAll0 = anytype
         idxAll0 = null
@@ -3163,7 +3184,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
-        if (pe == "len") { return function() { return numToStr(charLen(getVarVal(name))) } }
+        // bash 5.3: ${#!} is 0 before the first `cmd &`, under set -u too.
+        if (pe == "len") { return function() { return numToStr(charLen((name == "!") ? quietVal(name) : getVarVal(name))) } }
         // ${!REF} of a nameref answers the name its chain ends at (rt_nref_name).
         if (pe == "ind") { return function() {
             if (anyRef && attrOn(refVars, name)) {
@@ -9269,11 +9291,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // asynchronous statement is run to completion HERE, in a subshell copy of the shell
     // state, and reports status 0 immediately - which is what a real `cmd & wait` pair
     // observes. What it cannot model is overlap: `sleep 1 & echo hi` prints "hi" after the
-    // sleep, not before it. $! answers a fresh, monotonically increasing fake pid.
+    // sleep, not before it.
+    // $! is unset until the first `cmd &`, then each one takes a fresh fake pid above $$ (bgSeq
+    // never goes back, so a job in a subshell does not reuse one). The job itself, a subshell,
+    // still sees the $! from before it. Twin of mkAsync in bash-to-llvm-ir.abnf.
     var lastBgPid = 0
+    var bgSeq = 0
+    // $!, whose set -u diagnostic names it dn: "$!" for $!, "!" for ${!...}, as bash 5.3 does.
+    function bgPidVal(dn) {
+        if (lastBgPid > 0) { return numToStr(lastBgPid) }
+        if (optNounset) { diagErr(dn + ": unbound variable\n"); abortSignal = {ret: 1, isExit: 1} }
+        return ""
+    }
     function mkAsync(t) {
         return function() {
-            lastBgPid = lastBgPid + 1
             var saved = saveShellState()
             localFrames = framesCopy()
             exitTrap = null
@@ -9281,6 +9312,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             r = t()
             runExitTrap(endStatus(r))
             restoreShellState(saved)
+            bgSeq = bgSeq + 1
+            lastBgPid = 1000 + bgSeq
             setStatus(0)
             return 0
         }
@@ -9474,7 +9507,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         subLevels = subLevels + 1
         return {fl: funcLog.length, vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
                 e: optErrExit, u: optNounset, pf: optPipefail, eg: optExtglob, tr: exitTrap, ts: exitTrapSrc,
-                so: sinkOut, se: sinkErr, fd: fdTab, inb: stdinBuf, inp: stdinPos, tc: thisCmd}
+                so: sinkOut, se: sinkErr, fd: fdTab, inb: stdinBuf, inp: stdinPos, tc: thisCmd, bg: lastBgPid}
     }
     function restoreShellState(st) {
         while (funcLog.length > st.fl) {
@@ -9500,6 +9533,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         exitTrap = st.tr
         exitTrapSrc = st.ts
         thisCmd = st.tc
+        lastBgPid = st.bg
     }
     // ( LIST ) : variables and positional parameters are restored afterwards, and both a
     // `return` and an `exit` inside end only the subshell. No EXIT trap is inherited. It starts outside every loop,

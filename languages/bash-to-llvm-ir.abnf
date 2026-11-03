@@ -734,7 +734,7 @@ DollarQ     <~~ push(mkVarRef("?")) ~~> = "$?" ;
 DollarStar  <~~ push(mkVarRef("*")) ~~> = "$*" ;
 DollarAt    <~~ push(mkVarRef("@")) ~~> = "$@" ;
 DollarPid   <~~ push(mkVarRef("$")) ~~> = "$$" ;
-DollarBang  <~~ push(mkVarRef("!")) ~~> = "$!" ;
+DollarBang  <~~ push({lean: true, fn: function(b) { return {b: b, v: bgPidStr(b, "$!")} }, c: undefined}) ~~> = "$!" ;
 DollarDash  <~~ push(mkVarRef("-")) ~~> = "$-" ;
 DollarLit   <~~ push(makeConst("$")) ~~> = "$" NotDollarBrace ;
 
@@ -1500,6 +1500,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gExited = rtGlobal("exited", i32)        // set by `exit`
     var gSsDepth = rtGlobal("ss_depth", i32)     // the subshell nesting
     var gExitCode = rtGlobal("exit_code", i32)
+    // $! (0: unset) and the count of `cmd &` statements run, which never goes back (mkAsync).
+    var gBgPid = m.NewGlobalDef("bg_pid", zero)
+    var gBgSeq = m.NewGlobalDef("bg_seq", zero)
 
     // A real "" at a NONZERO address. The IR interpreter traps loads at address 0, so an
     // empty / unset value must be a genuine pointer to a NUL byte, never a null pointer.
@@ -2200,14 +2203,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < t.length; i++) { var cc = t.charCodeAt(i); if (cc < 48 || cc > 57) { return false } }
         return true
     }
+    // $!: the unset marker before the first `cmd &`, with set -u's check naming it dn ("$!"
+    // for $!, "!" for ${!...}, as bash 5.3 does). See mkAsync.
+    function bgPidStr(b, dn) {
+        var pid = b.NewLoad(i32, gBgPid)
+        var v = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, pid, zero), unsetPtr(b), i2s(b, pid))
+        return b.NewCall(rtVar, [gepStr(b, dn), v])
+    }
     function varString(b, name) {
         if (name == "?") { return i2s(b, b.NewLoad(i32, gStatus)) }
         if (name == "#") { return i2s(b, b.NewLoad(i32, gFrameN)) }
         if (name == "*") { return b.NewCall(rtParams, [ifsFirstValue(b), one]) }
         if (name == "@") { return b.NewCall(rtParams, [ifsFirstValue(b), zero]) }
-        // There is no process behind a compiled run, so $$ and $! are fixed values.
+        // There is no process behind a compiled run, so $$ is a fixed value.
         if (name == "$") { return gepStr(b, "1000") }
-        if (name == "!") { return gepStr(b, "0") }
+        if (name == "!") { return bgPidStr(b, "!") }
         if (name == "-") { return gepStr(b, "hB") }
         if (allDigits(name)) {
             var idx = parseDec(name)
@@ -2388,13 +2398,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // array and any other NAME[SUB], whose name and subscript come from the target (cell.nm,
     // cell.sub). A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-interpreter.abnf.
     // ${...}, through a caller's nameref where one may stand (refMayThunk).
+    // After an expansion error a ${NAME=WORD} or ${NAME?WORD} is not expanded (subAfterErr).
+    // Twin of mkParamExp in bash-interpreter.abnf.
     function mkParamExp(items) {
         var t = mkParamExpAt(items)
         var i
         for (i = 0; i < items.length; i++) {
             if (typeof items[i] != "function" && items[i].pname != undefined) { t.fn = refMayThunk(items[i].pname, t.fn) }
         }
+        if (peStopsAfterErr(items)) {
+            var f0 = t.fn
+            t.fn = function(b) { return subAfterErr(b, f0) }
+        }
         return t
+    }
+    // Twin of peStopsAfterErr in bash-interpreter.abnf.
+    function peStopsAfterErr(items) {
+        var i
+        for (i = 0; i < items.length; i++) {
+            var o = (typeof items[i] == "function") ? "" : items[i].op
+            if (o == "=" || o == ":=" || o == "?" || o == ":?") { return true }
+        }
+        return false
     }
     function mkParamExpAt(items) {
         var name = "", indp = false, hasIdx = false, bare = true, pfx = false, lenp = false, xfAttr = false
@@ -2917,7 +2942,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pe == "len") {
             return {c: undefined, fn: function(b) {
                 // ${#v} counts CHARACTERS in bash (rt_strlen counts bytes).
+                // bash 5.3: ${#!} is 0 before the first `cmd &`, under set -u too.
+                var nu = b.NewLoad(i32, gOptU)
+                if (name == "!") { b.NewStore(zero, gOptU) }
                 var lv = attrOn(refVars, name) ? b.NewCall(rtGetRef, [gepStr(b, name), one]) : varString(b, name)
+                if (name == "!") { b.NewStore(nu, gOptU) }
                 return {b: b, v: i2s(b, b.NewCall(rtCharLen, lv))}
             }}
         }
@@ -4970,9 +4999,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 vrB.NewBr(vrEnd)
                 // What the other path gives the name lexically is a run-time mark there.
                 var vrAt = caseAtBits(names[j]), vrRo = attrOn(roVars, names[j])
+                var vrFr = roFrameSnap(names[j])
                 voidRoDone = true
                 vrNo = declOne(vrNo, j, v)
                 voidRoDone = false
+                roFrameBack(vrFr)
                 vrNo = roBack(atBack(vrNo, names[j], vrAt), names[j], vrRo)
                 vrNo.NewBr(vrEnd)
                 return vrEnd
@@ -6361,6 +6392,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             roVars["$" + name] = false
         }
         return b
+    }
+    // What a function body has recorded of NAME's global being readonly - the global's
+    // attributes its local's undo entries keep, and fnRoNote's list - to put back after a
+    // path taken only when the code runs: its readonly is then the run-time flag alone
+    // (roFlag), which later code asks (roRtMay).
+    function roFrameSnap(name) {
+        if (curFrame == null) { return null }
+        var es = [], rs = [], fr = []
+        var u
+        for (u = curFrame.undo; u < attrUndo.length; u++) {
+            if (attrUndo[u].name == name) { es.push(attrUndo[u]); rs.push(attrUndo[u].r) }
+        }
+        for (u = 0; u < curFrame.ro.length; u++) { fr.push({n: curFrame.ro[u].n, g: curFrame.ro[u].g}) }
+        return {es: es, rs: rs, fr: fr}
+    }
+    function roFrameBack(sn) {
+        if (sn == null) { return }
+        var u
+        for (u = 0; u < sn.es.length; u++) { sn.es[u].r = sn.rs[u] }
+        curFrame.ro = sn.fr
     }
     // The case attribute's letter: c, l, u or none. Twin of caseLetter in
     // bash-interpreter.abnf.
@@ -8024,11 +8075,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (n = 3; n <= 9; n++) {
             if (usedFd[n]) { var fs = slotOf(i32); b.NewStore(b.NewLoad(i32, fdGlobal(n)), fs); fds.push({g: fdGlobal(n), s: fs}) }
         }
-        var tc = slotOf(i32)
+        var tc = slotOf(i32), bg = slotOf(i32)
         b.NewStore(b.NewLoad(i32, tcSlot), tc)
+        b.NewStore(b.NewLoad(i32, gBgPid), bg)
         var ros = []
         for (n = 0; n < roNames.length; n++) { var rs = slotOf(i32); b.NewStore(b.NewLoad(i32, roFlag(roNames[n])), rs); ros.push({g: roFlag(roNames[n]), s: rs}) }
-        return {e: se, u: su, pf: sp, x: sx, so: so, sr: sr, sb: sb, si: si, fds: fds, tc: tc, ros: ros}
+        return {e: se, u: su, pf: sp, x: sx, so: so, sr: sr, sb: sb, si: si, fds: fds, tc: tc, bg: bg, ros: ros}
     }
     // The streams an `exec` may have redirected come back too; the standard input only when
     // the subshell REPLACED it, since what it read of an inherited input is consumed for the
@@ -8041,6 +8093,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(b.NewLoad(i32, sv.so), gSinkOut)
         b.NewStore(b.NewLoad(i32, sv.sr), gSinkErr)
         b.NewStore(b.NewLoad(i32, sv.tc), tcSlot)
+        b.NewStore(b.NewLoad(i32, sv.bg), gBgPid)
         var k
         for (k = 0; k < sv.fds.length; k++) { b.NewStore(b.NewLoad(i32, sv.fds[k].s), sv.fds[k].g) }
         for (k = 0; k < sv.ros.length; k++) { b.NewStore(b.NewLoad(i32, sv.ros[k].s), sv.ros[k].g) }
@@ -9146,10 +9199,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // either, so an asynchronous statement is emitted as a SUBSHELL that runs to completion
     // here and then reports status 0. `cmd & wait` observes the same thing a real shell does;
     // what neither half can model is overlap (`sleep 1 & echo hi` prints "hi" second).
+    // Each one then sets $! to a fresh fake pid above $$. Twin of mkAsync in
+    // bash-interpreter.abnf.
     function mkAsync(t) {
         var inner = makeSubshell(t)
         return function(b) {
             var eb = inner(b)
+            var seq = eb.NewAdd(eb.NewLoad(i32, gBgSeq), one)
+            eb.NewStore(seq, gBgSeq)
+            eb.NewStore(eb.NewAdd(seq, llvm.constant.NewInt(i32, 1000)), gBgPid)
             eb.NewStore(zero, gStatus)
             return eb
         }
