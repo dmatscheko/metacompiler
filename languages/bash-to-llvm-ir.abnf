@@ -167,7 +167,7 @@ ForWords    <~~ push({words: takeAll()}) ~~>
             = { CWord } ;
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
-FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos))) ~~>
+FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) ~~>
             = FuncDefHead OptSep FuncBody [ RedirList ] ;
 // The redirections after the body belong to it: they apply at every call (`f() { echo a; }
 // >/dev/null; f` prints nothing).
@@ -1826,10 +1826,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // i32 fnk_NAME: which definition of the name is in force, 0 until one has RUN. A name is
     // looked up when it is called, so `f; f() {...}` is "f: command not found", a definition
     // in a branch not taken defines nothing, and a redefinition is what an earlier caller's
-    // body runs. Bit fnTrBit is the trace attribute (`declare -ft`), which a redefinition
-    // keeps and `unset -f` drops with the rest; fnDefOf masks it off.
-    var fnTrBit = 65536
-    function fnDefOf(b, name) { return b.NewAnd(b.NewLoad(i32, fnSlot(name)), llvm.constant.NewInt(i32, fnTrBit - 1)) }
+    // body runs. Bit fnAtBit << k is the function's attribute letter k of bashFnAttrLetters
+    // (`declare -fr`), which a redefinition keeps and `unset -f` drops with the rest; fnDefOf
+    // masks them off.
+    var fnAtBit = 65536
+    function fnDefOf(b, name) { return b.NewAnd(b.NewLoad(i32, fnSlot(name)), llvm.constant.NewInt(i32, fnAtBit - 1)) }
     var fnSlots = {}
     function fnSlot(name) {
         var key = "$" + name
@@ -1887,20 +1888,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function fnIsDefined(b, name) {
         return b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, fnSlot(name)), zero)
     }
-    // `unset -f`: the function named nameV is no longer defined. lit: the name when it is a
-    // literal word; a computed one is compared with every name the program defines.
+    // `unset -f`: the function named nameV is no longer defined, unless it is readonly:
+    // "cannot unset: readonly function". lit: the name when it is a literal word; a computed
+    // one is compared with every name the program defines. Answers {b, st}: st an i32, 1 when
+    // refused. Twin of unsetFunc in bash-interpreter.abnf.
     function emitUnsetFn(b, nameV, lit) {
         var i
+        var st = zero
         for (i = 0; i < declaredFuncList.length; i++) {
             var fn = declaredFuncList[i]
-            if (lit != undefined) { if (fn == lit) { fnStore(b, zero, fn) }; continue }
-            var hit = curF.NewBlock(""), miss = curF.NewBlock("")
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [nameV, gepStr(b, fn)]), zero), hit, miss)
-            fnStore(hit, zero, fn)
+            if (lit != undefined && fn != lit) { continue }
+            var hit = b, miss = null
+            if (lit == undefined) {
+                hit = curF.NewBlock("")
+                miss = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [nameV, gepStr(b, fn)]), zero), hit, miss)
+            }
+            var sv = hit.NewLoad(i32, fnSlot(fn))
+            var ro = hit.NewICmp(llvm.enum.IPredNE, hit.NewAnd(sv, llvm.constant.NewInt(i32, fnAtBit)), zero)
+            fnStore(hit, hit.NewSelect(ro, sv, zero), fn)
+            hit = emitDiagIf(hit, ro, gepStr(hit, "unset: " + fn + ": cannot unset: readonly function\n"))
+            var hst = hit.NewZExt(ro, i32)
+            if (miss == null) { b = hit; st = b.NewOr(st, hst); continue }
+            var hOr = hit.NewOr(st, hst)
             hit.NewBr(miss)
+            st = miss.NewPhi([llvm.ir.NewIncoming(st, b), llvm.ir.NewIncoming(hOr, hit)])
             b = miss
         }
-        return b
+        return {b: b, st: st}
     }
 
     // ===================================================================================
@@ -3802,12 +3817,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function lnPop() { return lnStack.length > 0 ? lnStack.pop() : -1 }
     function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
     function arCompile(text, rule, claimAll) {
-        var svS = arSnip, svIn = arInSnip, svR = arRecs, svQ = arSqRecs, svB = badRecs
+        var svS = arSnip, svIn = arInSnip, svR = arRecs, svQ = arSqRecs, svB = badRecs, svD = fnDefsSeen
         arSnip = text
         arInSnip = true
         arRecs = []
         arSqRecs = []
         badRecs = []
+        fnDefsSeen = []
         var t = c.compile(c.parseFrom(c.agrammar, text, rule)).stack[0]
         if (claimAll) { arClaimText(text, 0, text.length) }
         arSnip = svS
@@ -3815,6 +3831,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         arRecs = svR
         arSqRecs = svQ
         badRecs = svB
+        fnDefsSeen = svD
         return t
     }
     // Twin of arSqPart / arSqClaim in bash-interpreter.abnf; ansiWord keeps raw bytes.
@@ -4697,11 +4714,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         var fnQuery = (flags.indexOf("F") >= 0) ? "F" : ((flags.indexOf("f") >= 0) ? "f" : "")
         var fqi
-        for (fqi = 0; fnQuery != "" && fqi < flags.length; fqi++) {
-            if ("-fFptaAincglu".indexOf(flags.charAt(fqi)) < 0) { fail(kw + " " + flags + " is not supported") }
-        }
         for (fqi = 0; fnQuery != "" && fqi < plus.length; fqi++) {
-            if ("+t".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
+            if ("+aAinrtxclug".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
         }
         // fnLit[j]: the declaration that assigns operand j's array literal under a -f / -F
         // query (bashDeclFnLitHead), else null. Twin of fnLit in makeDecl in
@@ -7613,6 +7627,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(saved, gSinkOut)
     }
     // A shell diagnostic: msg after bash's "SCRIPT: line N: " (rt_diag_pfx).
+    // emitDiag where the i1 c holds; answers the block after.
+    function emitDiagIf(b, c, msg) {
+        var hit = curF.NewBlock(""), cont = curF.NewBlock("")
+        b.NewCondBr(c, hit, cont)
+        emitDiag(hit, msg)
+        hit.NewBr(cont)
+        return cont
+    }
     function emitDiag(b, msg) {
         var saved = b.NewLoad(i32, gSinkOut)
         b.NewStore(b.NewLoad(i32, gSinkErr), gSinkOut)
@@ -8569,34 +8591,40 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return (bad == null) ? null : {v: bad, err: err}
     }
-    // declare -f / -F: with names and an attribute (-t, +t) and no -p, they set or clear it
-    // on each function, a name that is none failing silently. Otherwise they print: -f the
-    // definitions, -F the names, and a function's attribute line `declare -ft NAME` when no
-    // name is given or with -p; with no name an attribute picks the functions holding it,
-    // and with -p a name that is none is "not found". With no name, the functions printed are
-    // the ones defined when it runs, so a definition the printer does not model stops the
-    // shell then (status 2) instead of refusing the program. vals[k] is the i8* word a
-    // NAME=VALUE operand expanded to, else null: see declFuncs. Twin of declFuncs in
+    // declare -f / -F, export -f and readonly -f: see declFuncs. With no name, the functions
+    // printed are the ones defined when it runs, so a definition the printer does not model
+    // stops the shell then (status 2) instead of refusing the program. vals[k] is the i8*
+    // word a NAME=VALUE operand expanded to, else null. Twin of declFuncs in
     // bash-interpreter.abnf.
     function emitDeclFuncs(b, kw, q, names, vals, flags, plus) {
         var p = flags.indexOf("p") >= 0
-        var tOn = flags.indexOf("t") >= 0
-        var tOff = plus.indexOf("t") >= 0
-        var trB = llvm.constant.NewInt(i32, fnTrBit)
+        var ops = bashFnAttrOps(kw, flags, plus)
         var st = zero
         var k
         var bad = (!p && names.length > 0) ? bashDeclFnBadOpt(kw, flags) : ""
         if (bad != "") { emitDiag(b, gepStr(b, bad)); storeStatusI(b, 1); return b }
         var noFn = kw + ": cannot use `-f' to make functions\n"
-        if (!p && names.length > 0 && (tOn || tOff)) {
+        var xr = kw == "export" || kw == "readonly"
+        if (!p && names.length > 0 && ops.set) {
             for (k = 0; k < names.length; k++) {
-                if (vals[k] != null) { emitDiag(b, gepStr(b, noFn)); storeStatusI(b, 1); return b }
-                if (funcFor(names[k]) == null) { st = one; continue }
+                if (vals[k] != null && !xr) { emitDiag(b, gepStr(b, noFn)); storeStatusI(b, 1); return b }
+                if (vals[k] != null || funcFor(names[k]) == null) {
+                    if (xr) { emitDiag(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, kw + ": "), (vals[k] != null) ? vals[k] : gepStr(b, names[k])]), gepStr(b, ": not a function\n")])) }
+                    st = one
+                    continue
+                }
                 var sv = b.NewLoad(i32, fnSlot(names[k]))
-                var nv = tOff ? b.NewAnd(sv, llvm.constant.NewInt(i32, -1 - fnTrBit)) : b.NewOr(sv, trB)
                 var isDef = fnIsDefined(b, names[k])
-                fnStore(b, b.NewSelect(isDef, nv, sv), names[k])
-                st = b.NewOr(st, b.NewXor(b.NewZExt(isDef, i32), one))
+                var ok = isDef
+                if (xr) { b = emitDiagIf(b, b.NewXor(isDef, llvm.constant.NewInt(llvm.types.I1, 1)), gepStr(b, kw + ": " + names[k] + ": not a function\n")) }
+                if ((ops.off & 1) != 0) {
+                    var roHit = b.NewAnd(isDef, b.NewICmp(llvm.enum.IPredNE, b.NewAnd(sv, llvm.constant.NewInt(i32, fnAtBit)), zero))
+                    b = emitDiagIf(b, roHit, gepStr(b, kw + ": " + names[k] + ": readonly function\n"))
+                    ok = b.NewAnd(ok, b.NewXor(roHit, llvm.constant.NewInt(llvm.types.I1, 1)))
+                }
+                var nv = b.NewAnd(b.NewOr(sv, llvm.constant.NewInt(i32, ops.on * fnAtBit)), llvm.constant.NewInt(i32, -1 - ops.off * fnAtBit))
+                fnStore(b, b.NewSelect(ok, nv, sv), names[k])
+                st = b.NewOr(st, b.NewXor(b.NewZExt(ok, i32), one))
             }
             storeStatus(b, st)
             return b
@@ -8618,27 +8646,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 continue
             }
             var def = fnIsDefined(b, fn)
-            var tr = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(b.NewLoad(i32, fnSlot(fn)), trB), zero)
-            var shown = (tOn && names.length == 0) ? b.NewAnd(def, tr) : def
+            var atBits = b.NewAnd(b.NewLoad(i32, fnSlot(fn)), llvm.constant.NewInt(i32, -fnAtBit))
+            var shown = def
+            if (ops.pick != 0 && names.length == 0) { shown = b.NewAnd(def, b.NewICmp(llvm.enum.IPredNE, b.NewAnd(atBits, llvm.constant.NewInt(i32, ops.pick * fnAtBit)), zero)) }
             var bad = (q == "f" && names.length == 0) ? emitFnTextBad(b, fn) : null
             if (bad != null) { b = emitPrintStop(b, b.NewAnd(shown, bad.v), kw, bad.err) }
+            // `declare -fATTRS NAME`, the letters in bashFnAttrLetters' order.
+            var atText = gepStr(b, "declare -f")
+            var ai
+            for (ai = 0; full && ai < bashFnAttrLetters.length; ai++) {
+                var has = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(atBits, llvm.constant.NewInt(i32, fnAtBit << ai)), zero)
+                atText = b.NewCall(rtStrcat, [atText, b.NewSelect(has, gepStr(b, bashFnAttrLetters.charAt(ai)), emptyPtr(b))])
+            }
+            if (full) { atText = b.NewCall(rtStrcat, [atText, gepStr(b, " " + fn + "\n")]) }
             var line = null
             if (q == "f") {
                 line = b.NewCall(rtStrcat, [emitFnText(b, fn, bad != null), gepStr(b, "\n")])
-                if (full) { line = b.NewCall(rtStrcat, [line, b.NewSelect(tr, gepStr(b, "declare -ft " + fn + "\n"), emptyPtr(b))]) }
+                if (full) { line = b.NewCall(rtStrcat, [line, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, atBits, zero), atText, emptyPtr(b))]) }
             } else if (full) {
-                line = b.NewSelect(tr, gepStr(b, "declare -ft " + fn + "\n"), gepStr(b, "declare -f " + fn + "\n"))
+                line = atText
             } else {
                 line = gepStr(b, fn + "\n")
             }
             b.NewCall(rtPrints, b.NewSelect(shown, line, emptyPtr(b)))
-            if (p && names.length > 0) {
-                var miss = curF.NewBlock(""), cont = curF.NewBlock("")
-                b.NewCondBr(def, cont, miss)
-                emitDiag(miss, nf)
-                miss.NewBr(cont)
-                b = cont
-            }
+            if (p && names.length > 0) { b = emitDiagIf(b, b.NewXor(def, llvm.constant.NewInt(llvm.types.I1, 1)), nf) }
             if (names.length > 0) { st = b.NewOr(st, b.NewXor(b.NewZExt(def, i32), one)) }
         }
         storeStatus(b, st)
@@ -8946,12 +8977,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return b
                 }
                 if (uf) {
+                    var ufSt = zero
                     for (; uk < argTs.length; uk++) {
                         var rf = evalWord(b, argTs[uk])
                         b = rf.b
-                        b = emitUnsetFn(b, rf.v, argTs[uk].c)
+                        var uf1 = emitUnsetFn(b, rf.v, argTs[uk].c)
+                        b = uf1.b
+                        ufSt = b.NewOr(ufSt, uf1.st)
                     }
-                    storeStatusI(b, 0)
+                    storeStatus(b, ufSt)
                     return b
                 }
                 // The status: 1 when an operand failed (rt_arr_unset), else 0.
@@ -8967,7 +9001,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                              b.NewICmp(llvm.enum.IPredEQ, b.NewOr(b.NewCall(rtArrAny, rn.v), b.NewCall(rtArrSmarked, rn.v)), zero))
                         var fnB = curF.NewBlock(""), varB = curF.NewBlock("")
                         b.NewCondBr(noVar, fnB, varB)
-                        emitUnsetFn(fnB, rn.v, argTs[uk].c).NewBr(varB)
+                        var uf2 = emitUnsetFn(fnB, rn.v, argTs[uk].c)
+                        var fnSt = uf2.b.NewOr(ust, uf2.st)
+                        uf2.b.NewBr(varB)
+                        ust = varB.NewPhi([llvm.ir.NewIncoming(ust, b), llvm.ir.NewIncoming(fnSt, uf2.b)])
                         b = varB
                     }
                     // A name built by expansion (`unset "d[$((i+1))]"`) is resolved at run time;
@@ -10283,10 +10320,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // items = [{fname}, bodyThunk]; src is the definition's text. Each definition is numbered
-    // (funcDefs) while the program is parsed; running it stores that number in fnk_NAME. The
-    // body is emitted the first time the definition is.
-    function makeFuncDef(items, src) {
+    // The definitions of the text being compiled (bashFnDefClaim).
+    var fnDefsSeen = []
+    // items = [{fname}, bodyThunk]; src is the definition's text, from offset start. Each
+    // definition is numbered (funcDefs) while the program is parsed; running it stores that
+    // number in fnk_NAME, unless the function is readonly: see makeFuncDef in
+    // bash-interpreter.abnf. The body is emitted the first time the definition is.
+    function makeFuncDef(items, src, start) {
         var fname = items[0].fname
         var bodyT = mkRedirected(items.slice(1))
         var kdef = hasOwn(funcDefs, "$" + fname) ? funcDefs["$" + fname] + 1 : 1
@@ -10296,10 +10336,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // keysOf is not bound for grammar scripts.
         if (kdef == 1) { declaredFuncList.push(fname) }
         var emitted = false
+        var roEmit = function(rb) {
+            emitDiag(rb, gepStr(rb, fname + ": readonly function\n"))
+            storeStatusI(rb, 1)
+            return rb
+        }
+        var roAt = {f: atLine(roEmit, start + src.length, tcKeep)}
+        fnDefsSeen = bashFnDefClaim(fnDefsSeen, {s: start, lb: start + bashFnBodyOff(src, fname), at: function(p) { roAt.f = atLine(roEmit, p, tcKeep) }})
         return function(b) {
-            var trKeep = b.NewAnd(b.NewLoad(i32, fnSlot(fname)), llvm.constant.NewInt(i32, fnTrBit))
-            fnStore(b, b.NewOr(trKeep, llvm.constant.NewInt(i32, kdef)), fname)
-            storeStatusI(b, 0)
+            var sv = b.NewLoad(i32, fnSlot(fname))
+            var roB = curF.NewBlock(""), okB = curF.NewBlock(""), doneB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewAnd(sv, llvm.constant.NewInt(i32, fnAtBit)), zero), roB, okB)
+            roB = roAt.f(roB)
+            roB.NewBr(doneB)
+            fnStore(okB, okB.NewOr(okB.NewAnd(sv, llvm.constant.NewInt(i32, -fnAtBit)), llvm.constant.NewInt(i32, kdef)), fname)
+            storeStatusI(okB, 0)
+            okB.NewBr(doneB)
+            b = doneB
             if (emitted) { return b }
             emitted = true
             var f = defFunc(fname, kdef)

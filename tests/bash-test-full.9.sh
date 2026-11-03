@@ -73,8 +73,55 @@ s176() {
   e=$(s176b 2>&1)
   check fq2 "$(s176s "$e")" 'declare: -i: invalid option;s=1;declare -ai n=([0]="2");s=1;declare -au u=([0]="AB");local: -A: invalid option;s=1;declare -A m=([a]="1" );declare: -n: invalid option;s=1;declare: -A: invalid option;s=1;s=0;s=0;'
 }
+# ===== SECTION 177: function attributes: declare -f with -x/-r/-c/-l/-u and +ATTR, export -f, readonly -f =====
+# A function keeps the attributes r, t, x, c, l and u, printed in that order after `declare
+# -f`. With operands and no -p, -f / -F set each attribute given and clear each +ATTR, a
+# name that is no function failing silently; any +ATTR, +a and +i too, makes it set rather
+# than print, and -c, -l and -u each clear the other two. With no operand an attribute picks
+# the functions holding any of them. export -f sets x (-n clears it), readonly -f sets r; for
+# both a name that is no function is "not a function". A readonly function is not
+# redefined ("NAME: readonly function", inside a function body on the line where the body
+# of its last definition starts), unset or given +r, each status 1. A redefinition keeps
+# the attributes. Every expected value is bash 5.3's.
+s177() {
+  local e
+  s177s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$( { s177g() { :; }; s177h() { :; }; s177k() { :; }
+       declare -f +a s177g; echo "a=$?"; declare -F +i s177g; echo "i=$?"; declare -fx s177g s177h; echo "x=$?"
+       declare -ft s177g; declare -fx s177n; echo "n=$?"; declare -Fx; declare -Ftr; declare -f +x s177h; declare -Fp s177h
+       declare -fl s177k; declare -Fp s177k; declare -fu s177k; declare -Fp s177k; declare -fcu s177k; declare -Fp s177k
+       declare -f -x +x s177k; declare -Fp s177k; declare -fpx s177k; echo "p=$?"; declare -f +g s177k; declare -Fp s177k
+       s177h() { echo 2; }; declare -Fx; s177g() { echo 3; }; declare -F s177g; declare -Fp s177g; } 2>&1 )
+  check fa1 "$(s177s "$e")" 'a=0;i=0;x=0;n=1;declare -ftx s177g;declare -fx s177h;declare -ftx s177g;declare -f s177h;declare -fl s177k;declare -fu s177k;declare -f s177k;declare -f s177k;s177k () ;{ ;    :;};p=0;s177k () ;{ ;    :;};declare -f s177k;declare -ftx s177g;s177g;declare -ftx s177g;'
+  e=$( { s177g() { echo g; }; declare -fr s177g; echo "r=$?"
+       s177g() {
+         echo h
+       }
+       echo "d=$? $(s177g)"; ( s177g() { :; }; echo "s=$?" ); declare -f +r s177g; echo "pr=$?"; declare -f +x s177g; echo "px=$?"
+       unset -f s177g; echo "u=$?"; unset s177g; echo "u=$?"; declare -Fp s177g; declare -Fr; declare -f -r
+       f() { s177g() { :; }; echo "in=$?"; }; f; } 2>&1 )
+  check fr1 "$(s177s "$e")" "r=0;s177g: readonly function;d=1 g;s177g: readonly function;s=1;declare: s177g: readonly function;pr=1;px=0;unset: s177g: cannot unset: readonly function;u=1;unset: s177g: cannot unset: readonly function;u=1;declare -fr s177g;declare -fr s177g;s177g () ;{ ;    echo g;};declare -fr s177g;s177g: readonly function;in=1;"
+  e=$( { s177g() { :; }; s177h() { :; }; x=1
+       export -f s177g; echo "e=$?"; export -f s177n s177h x s177g=1; echo "e=$?"; declare -Fp s177g s177h; export -f; export -pf
+       export -nf s177g; declare -Fp s177g; export -fn s177n; echo "n=$?"; readonly -f s177h; echo "r=$?"; readonly -nf s177h; declare -Fp s177h
+       readonly -f s177n; echo "r=$?"; readonly -pf; readonly -af s177g; declare -Fp s177g; readonly -fa; echo "ra=$?"; } 2>&1 )
+  check fx1 "$(s177s "$e")" 'e=0;export: s177n: not a function;export: x: not a function;export: s177g=1: not a function;e=1;declare -fx s177g;declare -fx s177h;s177g () ;{ ;    :;};declare -fx s177g;s177h () ;{ ;    :;};declare -fx s177h;s177g () ;{ ;    :;};declare -fx s177g;s177h () ;{ ;    :;};declare -fx s177h;declare -f s177g;export: s177n: not a function;n=1;r=0;declare -frx s177h;readonly: s177n: not a function;r=1;s177h () ;{ ;    :;};declare -frx s177h;declare -fr s177g;ra=0;'
+  s177r() { declare -fr s177g; local l0=$LINENO
+            s177g() {
+              :
+            }
+            function   s177g
+            {
+              :
+            }; echo "$l0"; }
+  e=$(s177g() { :; }; s177r 2>&1)
+  local l=${e##*$'\n'} o= x
+  while IFS= read -r x; do o+="${x#*: line };"; done <<< "$e"
+  check fr2 "$o" "$((l + 5)): s177g: readonly function;$((l + 5)): s177g: readonly function;$l;"
+}
 # ===== END SECTIONS =====
 
 s176  # SECTION-CALL 176
+s177  # SECTION-CALL 177
 echo "full: $checks checks, $fails failures"
 exit $fails

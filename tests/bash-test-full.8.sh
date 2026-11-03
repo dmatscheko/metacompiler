@@ -587,6 +587,7 @@ s174() {
   e=$(declare -gn s174t; declare -gA s174t; declare -p s174t)
   check nr2 "$e" 'declare -A s174t'
 }
+# ===== SECTION 175: declare -p of NAME=VALUE and NAME=(...) operands =====
 s175() {
   local e
   s175s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }

@@ -788,13 +788,82 @@ function bashDeclFnLitHead(kw, flags) {
     return head
 }
 // The report of a -f / -F query with operands and no -p that names an option it refuses
-// (bash 5.3: -n, then -i, -A, -a; "KW: -X: invalid option", status 1), or "".
+// (bash 5.3: -n, then -i, -A, -a; "KW: -X: invalid option", status 1), or "". export and
+// readonly refuse none of them.
 function bashDeclFnBadOpt(kw, flags) {
+    if (kw == "export" || kw == "readonly") { return "" }
     var k
     for (k = 0; k < 4; k++) {
         if (flags.indexOf("niAa".charAt(k)) >= 0) { return kw + ": -" + "niAa".charAt(k) + ": invalid option\n" }
     }
     return ""
+}
+
+// THE ATTRIBUTES OF A FUNCTION. bash 5.3 keeps r, t, x, c, l and u on a function, printed
+// in that order after `declare -f`; bit k is letter k of bashFnAttrLetters. Answers what a
+// -f / -F declaration with operands and without -p does: {on, off} the bits it sets, then
+// clears, set: false when it prints the functions instead, and pick: the bits a listing
+// with no operand picks the functions by (0: every one). -c, -l and -u each clear
+// the other two, so two of them cancel. +a, +A, +i and +n change nothing yet still make it
+// set, as does any attribute; -g and +g do not. export sets x (with -n clears it), readonly
+// sets r (with -n does nothing), and both always set; readonly's -a or -A lists only
+// arrays, so no function (pick 64, a bit none holds).
+var bashFnAttrLetters = "rtxclu"
+function bashFnAttrOps(kw, flags, plus) {
+    var nOpt = flags.indexOf("n") >= 0
+    if (kw == "export") { return {on: nOpt ? 0 : 4, off: nOpt ? 4 : 0, set: true, pick: 4} }
+    if (kw == "readonly") { return {on: nOpt ? 0 : 1, off: 0, set: true, pick: (flags.indexOf("a") >= 0 || flags.indexOf("A") >= 0) ? 64 : 1} }
+    var on = 0
+    var off = 0
+    var k
+    for (k = 0; k < 6; k++) {
+        var c = bashFnAttrLetters.charAt(k)
+        if (flags.indexOf(c) >= 0) { on = on | (1 << k); if (k >= 3) { off = off | (56 & ~(1 << k)) } }
+        if (plus.indexOf(c) >= 0) { off = off | (1 << k) }
+    }
+    var set = on != 0
+    for (k = 0; k < plus.length; k++) { if ("aAinrtxclu".indexOf(plus.charAt(k)) >= 0) { set = true } }
+    return {on: on, off: off, set: set, pick: on}
+}
+// Where the body of the definition src of function fname starts: the offset past its head
+// (`function`, the name, `()`) and the blanks and newlines after it.
+function bashFnBodyOff(src, fname) {
+    var i = 0
+    if (src.slice(0, 8) == "function" && " \t".indexOf(src.charAt(8)) >= 0) {
+        i = 8
+        while (i < src.length && " \t".indexOf(src.charAt(i)) >= 0) { i = i + 1 }
+    }
+    i = i + fname.length
+    while (i < src.length && " \t\n()".indexOf(src.charAt(i)) >= 0) { i = i + 1 }
+    return i
+}
+// THE LINE A REFUSED REDEFINITION IS REPORTED ON. bash 5.3 reports a definition inside a
+// function body on the line where the body of the textually last definition anywhere in
+// that function body starts (`f() { g() {<nl>:<nl>}; h() { :; }; }` reports g on h's line),
+// and one outside every function on the line it ends on. seen: the definitions of the text
+// being compiled so far, in source order, each {s: its start, lb: the last body start in
+// it, at: told the line's offset when it is found inside a function}. me, the definition
+// whose own children are compiled, claims the entries inside it; answers the list with me.
+function bashFnDefClaim(seen, me) {
+    var k = seen.length - 1
+    var lb = -1
+    while (k >= 0 && seen[k].s > me.s) {
+        if (seen[k].lb > lb) { lb = seen[k].lb }
+        k = k - 1
+    }
+    var j
+    for (j = k + 1; j < seen.length; j++) { seen[j].at(lb) }
+    if (lb > me.lb) { me.lb = lb }
+    var out = seen.slice(0, k + 1)
+    out.push(me)
+    return out
+}
+// The letters of a function's attribute bits, in bash's order.
+function bashFnAttrText(bits) {
+    var s = ""
+    var k
+    for (k = 0; k < 6; k++) { if ((bits & (1 << k)) != 0) { s = s + bashFnAttrLetters.charAt(k) } }
+    return s
 }
 
 // Does a declaration with these options change an attribute a readonly variable keeps?

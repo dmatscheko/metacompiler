@@ -176,7 +176,7 @@ ForWords    <~~ push({words: takeAll()}) ~~>
             = { CWord } ;
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
-FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos))) ~~>
+FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) ~~>
             = FuncDefHead OptSep FuncBody [ RedirList ] ;
 // The redirections after the body belong to it: they apply at every call (`f() { echo a; }
 // >/dev/null; f` prints nothing).
@@ -1471,7 +1471,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var funcs = {}       // functions:  funcs["$" + name] = body thunk, null once unset
     var funcLn = {}      // and the lnCtx each was defined under
     var funcSrc = {}     // and the source text of its definition
-    var funcTr = {}      // `declare -ft`: the trace attribute, kept by a redefinition, gone with `unset -f`
+    var funcAt = {}      // and its attribute bits (bashFnAttrOps), kept by a redefinition, gone with `unset -f`
     var funcNames = []   // every name ever defined, in definition order
     var posParams = []   // current positional parameters $1.. (an array of strings)
     var lastStatus = 0   // $? : exit status of the most recent command
@@ -3533,11 +3533,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         var fnQuery = (flags.indexOf("F") >= 0) ? "F" : ((flags.indexOf("f") >= 0) ? "f" : "")
         var fqi
-        for (fqi = 0; fnQuery != "" && fqi < flags.length; fqi++) {
-            if ("-fFptaAincglu".indexOf(flags.charAt(fqi)) < 0) { fail(kw + " " + flags + " is not supported") }
-        }
         for (fqi = 0; fnQuery != "" && fqi < plus.length; fqi++) {
-            if ("+t".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
+            if ("+aAinrtxclug".indexOf(plus.charAt(fqi)) < 0) { fail(kw + " " + plus + " is not supported") }
         }
         // fnLit[k]: the declaration that assigns operand k's array literal under a -f / -F
         // query (bashDeclFnLitHead), else null. Twin of fnLit in makeDecl in
@@ -6285,12 +6282,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function lnAt(lp) { return (lnCtx == null) ? lp.l : "" + bashCsLine(lnCtx.tab, lnCtx.base, strToInt(lp.l), lp.p) }
     function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
     function arCompile(text, rule, claimAll) {
-        var svS = arSnip, svIn = arInSnip, svR = arRecs, svQ = arSqRecs, svB = badRecs
+        var svS = arSnip, svIn = arInSnip, svR = arRecs, svQ = arSqRecs, svB = badRecs, svD = fnDefsSeen
         arSnip = text
         arInSnip = true
         arRecs = []
         arSqRecs = []
         badRecs = []
+        fnDefsSeen = []
         var t = c.compile(c.parseFrom(c.agrammar, text, rule)).stack[0]
         if (claimAll) { arClaimText(text, 0, text.length) }
         arSnip = svS
@@ -6298,6 +6296,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         arRecs = svR
         arSqRecs = svQ
         badRecs = svB
+        fnDefsSeen = svD
         return t
     }
     // The single-quoted parts of subscripts in an arithmetic text that is still being read:
@@ -9152,7 +9151,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return 1
             }
             for (; ui < args.length; ui++) {
-                if (uf) { if (isFunc(args[ui])) { setFunc(args[ui], null, null, null) }; continue }
+                if (uf) { if (isFunc(args[ui]) && unsetFunc(args[ui]) != 0) { ust = 1 }; continue }
                 // `unset -n` of a name that is no nameref - an element, a function - leaves it
                 // alone, a readonly one refused (bash 5.3's unbind_nameref). Twin of the un
                 // arm of rt_unset_word.
@@ -9181,7 +9180,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     sp = {name: (ue != sp.name && hidLocal(ue)) ? ue : splitSubscript(ue).name, key: sp.key}
                 }
                 if (!uv && sp.key == null && isFunc(sp.name) && !isSetVar(sp.name) && !isArr(sp.name) && !attrOn(dclVars, sp.name)) {
-                    setFunc(sp.name, null, null, null)
+                    if (unsetFunc(sp.name) != 0) { ust = 1 }
                     continue
                 }
                 if (unRef) { noRef = noRef + 1 }
@@ -9367,33 +9366,41 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         setStatus(st)
         return st
     }
-    // `declare -f [NAME...]` prints each function's definition, `declare -F [NAME...]` its
-    // name; with no NAME every function, sorted, -F as `declare -f NAME`. A NAME that is no
-    // function prints nothing and makes the status 1. Twin of emitDeclFuncs in
-    // bash-to-llvm-ir.abnf.
-    // declare -f / -F: with names and an attribute (-t, +t) and no -p, they set or clear it
-    // on each function, a name that is none failing silently. Otherwise they print: -f the
-    // definitions, -F the names, and a function's attribute line `declare -ft NAME` when no
-    // name is given or with -p; with no name an attribute picks the functions holding it,
-    // and with -p a name that is none is "not found". vals[k] is the word a NAME=VALUE
-    // operand expanded to, else null: -p looks it up as a name, and without -p it ends the
-    // builtin with "cannot use `-f' to make functions", status 1 (bash 5.3). Twin of
+    // declare -f / -F: with names and no -p, an attribute (bashFnAttrOps) is set or cleared
+    // on each function, a name that is none failing silently; +r of a readonly one is
+    // "NAME: readonly function", status 1. export -f and readonly -f do so too, a name that
+    // is none "not a function". Otherwise they print: -f the definitions, -F the names, and
+    // a function's attribute line `declare -fATTRS NAME` when no name is given or with -p;
+    // with no name an attribute picks the functions holding any of them, and with -p a name
+    // that is none is "not found". vals[k] is the word a NAME=VALUE operand expanded to, else
+    // null: -p looks it up as a name, export and readonly report it as no function, and
+    // declare ends with "cannot use `-f' to make functions", status 1 (bash 5.3). Twin of
     // emitDeclFuncs in bash-to-llvm-ir.abnf.
     function declFuncs(kw, q, names, vals, flags, plus) {
         var p = flags.indexOf("p") >= 0
-        var tOn = flags.indexOf("t") >= 0
-        var tOff = plus.indexOf("t") >= 0
+        var ops = bashFnAttrOps(kw, flags, plus)
         var st = 0
         var k
         var bad = (!p && names.length > 0) ? bashDeclFnBadOpt(kw, flags) : ""
         if (bad != "") { diagErr(bad); setStatus(1); return 1 }
         var noFn = kw + ": cannot use `-f' to make functions\n"
-        if (!p && names.length > 0 && (tOn || tOff)) {
+        var xr = kw == "export" || kw == "readonly"
+        if (!p && names.length > 0 && ops.set) {
             for (k = 0; k < names.length; k++) {
-                if (vals[k] != null) { diagErr(noFn); setStatus(1); return 1 }
-                if (!isFunc(names[k])) { st = 1; continue }
-                funcLogNote("$" + names[k])
-                funcTr["$" + names[k]] = !tOff
+                if (vals[k] != null && !xr) { diagErr(noFn); setStatus(1); return 1 }
+                if (vals[k] != null || !isFunc(names[k])) {
+                    if (xr) { diagErr(kw + ": " + ((vals[k] != null) ? vals[k] : names[k]) + ": not a function\n") }
+                    st = 1
+                    continue
+                }
+                var fk = "$" + names[k]
+                if ((ops.off & 1) != 0 && (funcAttrs(names[k]) & 1) != 0) {
+                    diagErr(kw + ": " + names[k] + ": readonly function\n")
+                    st = 1
+                    continue
+                }
+                funcLogNote(fk)
+                funcAt[fk] = (funcAttrs(names[k]) | ops.on) & ~ops.off
             }
             setStatus(st)
             return st
@@ -9402,7 +9409,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (names.length == 0) {
             list = []
             var j
-            for (j = 0; j < funcNames.length; j++) { if (isFunc(funcNames[j]) && (!tOn || funcTraced(funcNames[j]))) { list.push(funcNames[j]) } }
+            for (j = 0; j < funcNames.length; j++) { if (isFunc(funcNames[j]) && (ops.pick == 0 || (funcAttrs(funcNames[j]) & ops.pick) != 0)) { list.push(funcNames[j]) } }
             list = bashSortNames(list)
         }
         var full = p || names.length == 0
@@ -9418,7 +9425,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 st = 1
                 continue
             }
-            var at = funcTraced(list[k]) ? "t" : ""
+            var at = bashFnAttrText(funcAttrs(list[k]))
             if (q == "f") { emitOut(funcText(list[k]) + "\n" + ((full && at != "") ? "declare -f" + at + " " + list[k] + "\n" : "")) }
             else { emitOut((full ? "declare -f" + at + " " : "") + list[k] + "\n") }
         }
@@ -9759,7 +9766,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             funcs[fu.k] = fu.b
             funcLn[fu.k] = fu.l
             funcSrc[fu.k] = fu.s
-            funcTr[fu.k] = fu.t
+            funcAt[fu.k] = fu.t
         }
         subLevels = subLevels - 1
         sinkOut = st.so
@@ -10533,20 +10540,43 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         funcs[k] = body
         funcLn[k] = ln
         funcSrc[k] = src
-        if (body == null) { funcTr[k] = false }
+        if (body == null) { funcAt[k] = 0 }
     }
     function funcLogNote(k) {
         if (subLevels == 0) { return }
         funcLog.push({k: k, b: hasOwn(funcs, k) ? funcs[k] : null, l: hasOwn(funcLn, k) ? funcLn[k] : null, s: hasOwn(funcSrc, k) ? funcSrc[k] : null,
-                      t: hasOwn(funcTr, k) && funcTr[k]})
+                      t: hasOwn(funcAt, k) ? funcAt[k] : 0})
     }
-    function funcTraced(name) { return hasOwn(funcTr, "$" + name) && funcTr["$" + name] }
-    // items = [{fname}, bodyThunk]; src is the definition's text. Registration happens when
-    // the statement runs.
-    function makeFuncDef(items, src) {
+    // `unset` of a function: a readonly one is refused, status 1. Twin of emitUnsetFn in
+    // bash-to-llvm-ir.abnf.
+    function unsetFunc(name) {
+        if ((funcAttrs(name) & 1) != 0) {
+            diagErr("unset: " + name + ": cannot unset: readonly function\n")
+            return 1
+        }
+        setFunc(name, null, null, null)
+        return 0
+    }
+    function funcAttrs(name) { return hasOwn(funcAt, "$" + name) ? funcAt["$" + name] : 0 }
+    // The definitions of the text being compiled (bashFnDefClaim). Twin of fnDefsSeen in
+    // bash-to-llvm-ir.abnf.
+    var fnDefsSeen = []
+    // items = [{fname}, bodyThunk]; src is the definition's text, from offset start.
+    // Registration happens when the statement runs; a readonly function is not redefined:
+    // "NAME: readonly function" on the line bashFnDefClaim gives, status 1. Twin of
+    // makeFuncDef in bash-to-llvm-ir.abnf.
+    function makeFuncDef(items, src, start) {
         var fname = items[0].fname
         var bodyT = mkRedirected(items.slice(1))
+        var roLn = {l: lnOf(start + src.length)}
+        fnDefsSeen = bashFnDefClaim(fnDefsSeen, {s: start, lb: start + bashFnBodyOff(src, fname), at: function(p) { roLn.l = lnOf(p) }})
         return function() {
+            if ((funcAttrs(fname) & 1) != 0) {
+                vars["$LINENO"] = lnAt(roLn.l)
+                diagErr(fname + ": readonly function\n")
+                setStatus(1)
+                return 1
+            }
             setFunc(fname, bodyT, lnCtx, src)
             setStatus(0)
             return 0
