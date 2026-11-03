@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1193** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1194** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -130,13 +130,12 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1191 bash: `select`, `! !`, eval syntax error under `set -e` · P3 · SH · IN PROGRESS (SH worker, round 68) [V]
-Found while closing T-1190 (worker-reported; verify on the oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3 first). All engines.
-- `select` is not supported. `select x in a b; do echo "$x"; break; done <<< 2` should print the numbered menu on stderr and then `b`. A bare `select` is "syntax error near unexpected token `newline'" with exit 2; ours says "select: command not found", 127. Implement the compound command (PS3, REPLY, the menu layout on stderr, EOF ending the loop, break) in both engines.
-- `! ! true; echo $?` is silent with status 0 in bash; ours prints "!: command not found".
-- An eval syntax error under `set -e`: bash prints only the first message line and exits 2. Ours prints both lines.
-- Record only, by design: bash keeps parser state between eval errors inside a function or subshell, so a second `eval 'x=(a b'` reports differently. We model the fresh-shell behaviour.
-- Record only, by design: the compiler stops on a COMPUTED eval string that is not an assignment ("eval: only assignments can be compiled from a computed string"), so computed eval text with a syntax error cannot report bash's message there. The interpreter handles it.
+### T-1193 bash: `set -x` tracing, the `time` keyword, PIPESTATUS after a simple command, newlines before `in` · P3 · SH · OPEN [V]
+Found while closing T-1191 (worker-reported; verify on the oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3 first). All engines unless noted.
+- `set -x` traces nothing. bash writes `+ CMD` lines to stderr, built from the expanded words with bash's quoting (`+ echo 'a b'`). They are prefixed by PS4 (default "+ "), whose first character repeats for nesting depth. Assignments, for/case/[[ ]]/(( )) headers and `set +x` itself are traced too. Implement it in both engines; check the quoting of each word class on the oracle.
+- `time` is "command not found" (127). It is a reserved word that times the whole pipeline and prints `real/user/sys` on stderr (TIMEFORMAT). The timings are not deterministic, so assert the format and status only. `time -p` and a bare `time` count too.
+- PIPESTATUS after a plain simple command: `false | true; true; echo ${PIPESTATUS[*]}` gives bash "0"; ours gives "1 0" (interpreter and llvm.Run). A single-stage pipeline with no bang skips the PIPESTATUS update. Keep the hot path cost-neutral: measure with the paired bench.
+- Probe `for x<newline>in a; do` (bash accepts it) and `select` with the same layout.
 
 # C — C subset
 
@@ -1234,6 +1233,7 @@ T-1187 bash: a quoted assignment-shaped -f/-F operand, `function a=b` (interp) �
 T-1189 bash: keyword-less function definitions whose name holds "=" (`=x() {`, `1=2() {`) — DONE - keyword-less function names may hold "=" unless the word spells an assignment (backward :script guard after the parens, so no cost on non-definitions), assignment-shaped x=y() stays a syntax error; oracle-probed on all legs; bench module IR byte-identical, parse time within noise
 T-1190 bash: syntax errors - `eval` of bad text aborts the program, top-level report and exit status 2, `a[=b() {` — DONE - syntax errors reported as bash does (unexpected token / newline / end of file from KW command / unexpected EOF while looking for matching, [[ ]] messages) via the shared languages/lib/bash-synerr.js, lines before the bad one run, top-level exit 2 after the EXIT trap, eval/trap strings fail with status 2 and the script goes on (constant strings in the compiler too), a[=b() and stray ; rejected; oracle-probed on all legs incl. stderr and exit status; matrix rows with expectExit 2; parse time unchanged; computed eval in the compiler by design
 T-1188 ruby: two expressions on one line, rescue-modifier laxness (yield/return, compiler `rescue y = 3`), lines(chomp:), each_codepoint on invalid UTF-8 — DONE - statements need a terminator (StmtTerm replaces the optional ; everywhere), so x = 1 2 and rescue yield/return fallbacks are syntax errors; KwCmd return/break/next/yield/raise/super commands, line joins, stacked modifiers, x::m / expr::C parse as MRI (stdlib corpus 613 -> 714 files); compiler rescue-modifier locals live in the enclosing frame; lines/each_line(chomp:); each_codepoint raises on invalid UTF-8; oracle-probed on all legs; full suite + full native green; paired bench +0.02% (noise), parse +1.9%
+T-1191 bash: `select`, `! !`, eval syntax error under `set -e` — DONE - select as a compound command in both engines (bash's menu layout on stderr, PS3, REPLY, re-menu on empty, EOF status 1, break/continue/return), ! ! toggles and a lone ! is the inverted null command, an inverted pipeline runs its stages as conditions under set -e, eval/trap/script syntax errors under set -e print one line and exit 2; oracle-probed on all legs incl. stderr menus and exit status; master paired bench -0.00%
 
 # Settled — do not re-open
 
