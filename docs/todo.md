@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1187 bash: a quoted assignment-shaped -f/-F operand, `function a=b` (interp) · P3 · SH · OPEN [V]
+### T-1187 bash: a quoted assignment-shaped -f/-F operand, `function a=b` (interp) · P3 · SH · IN PROGRESS (SH worker, round 65) [V]
 Found while closing T-1186; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - All engines: `g(){ :; }; h(){ :; }; declare -F g 'a=b' h 2>&1; echo "st=$?"`. bash prints g, then "declare: cannot use `-f' to make functions", then st=1, and h is NOT printed. Ours prints g, h, st=1, because bashDeclFnWords turns the constant word 'a=b' into a plain function name. The unquoted `a=b` is already right.
 - Interpreter only: `function a=b { :; }` fails to parse. Check what bash does with it (definition, `declare -F`, and calling it) before implementing.
