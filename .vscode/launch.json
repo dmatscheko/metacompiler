@@ -4028,6 +4028,20 @@
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-synerr.sh", "-q", "-exe", "tests/bash-abort-synerr.out"]
         },
         {
+            "name": "Bash top-level syntax error under set -e, one line of report (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "tests/bash-abort-test-synerr-e.sh: line 10: syntax error near unexpected token `then'",
+            "expectExit": 2,
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test-synerr-e.sh", "-q"]
+        },
+        {
+            "name": "Bash top-level syntax error under set -e, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-synerr-e.sh", "-q", "-exe", "tests/bash-abort-synerr-e.out"]
+        },
+        {
             "name": "Speed Test",
             "type": "go",
             "request": "launch",

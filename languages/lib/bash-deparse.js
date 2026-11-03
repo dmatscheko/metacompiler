@@ -378,9 +378,16 @@ function dpAndOr(st) {
     }
     return {parts: parts, ops: ops}
 }
+// Each `!` inverts the status again; `!`s before the end of a list stand before the null
+// command, which prints as nothing.
 function dpPipeline(st) {
     var bang = false
-    if (dpIsWord(dpPeek(st), "!")) { dpNext(st); bang = true }
+    var nb = 0
+    while (dpIsWord(dpPeek(st), "!")) { dpNext(st); bang = !bang; nb = nb + 1 }
+    var tk = dpPeek(st)
+    if (nb > 0 && (tk.t == "nl" || tk.t == "eof" || dpIsOp(tk, ";") || dpIsOp(tk, "&"))) {
+        return {bang: bang, cmds: [{k: "simple", words: [], rd: []}], seps: []}
+    }
     var cmds = [dpCommand(st)]
     var seps = []
     while (st.err == "") {

@@ -273,6 +273,103 @@ s182() {
   e=$( { (eval $'echo a\necho $(fi)'; echo no); echo "st=$?"; } 2>&1 )
   check sx4 "$(s182s "$e")" "a;eval: 0 syntax error near unexpected token \`fi' while looking for matching \`)';eval: 0 \`echo \$(fi)';st=1;"
 }
+# ===== SECTION 183: select =====
+# select NAME in WORDS (the positional parameters without `in`) writes the words as a numbered
+# menu on standard error - in columns filled top to bottom, as many as COLUMNS fits, one
+# column when a row would hold them all - then PS3 ("#? " unset), and reads a line as `read`
+# with no name does: an empty one shows the menu again, a number from 1 to the count, blanks
+# and a sign allowed, stores that word in NAME (through a nameref, as an assignment does),
+# anything else "". The body runs until break; the end of the input ends the loop with a
+# newline on standard output and status 1, and no words run nothing, status 0. `for NAME do`
+# and `select NAME do` need no separator. Every expected value is bash 5.3's.
+s183() {
+  local e COLUMNS=80
+  s183s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$( { select s183v in a b; do echo "v=$s183v R=$REPLY"; break; done <<< 2; echo "s=$?"; } 2>&1 )
+  check se1 "${e//$'\n'/;}" "1) a;2) b;#? v=b R=2;s=0"
+  e=$( { PS3='> '; select s183v in x y z; do echo "[$s183v][$REPLY]"; done <<< $'1\n9\n\n +3 \n-1\n0x1\nq'; echo "s=$? [$s183v][$REPLY]"; } 2>&1 )
+  check se2 "${e//$'\n'/;}" "1) x;2) y;3) z;> [x][1];> [][9];> 1) x;2) y;3) z;> [z][ +3 ];> [][-1];> [][0x1];> [][q];> ;s=1 [][]"
+  e=$( { COLUMNS=30; select s183v in a1 b2 c3 d4 e5 f6 g7 h8 i9 j10 k11 l12 m13 n14 o15; do break; done <<< 1
+       COLUMNS=; select s183v in a b c d e f g h i j k l; do break; done <<< 1
+       COLUMNS=200; PS3=; select s183v in a b c d e f g h i j k; do break; done <<< 1; } 2>&1 )
+  check se3 "${e//$'\t'/<T>}" "1) a1<T>  6) f6<T>  11) k11
+2) b2<T>  7) g7<T>  12) l12
+3) c3<T>  8) h8<T>  13) m13
+4) d4<T>  9) i9<T>  14) n14
+5) e5<T> 10) j10  15) o15
+#? 1) a    3) c   5) e   7) g   9) i  11) k
+2) b    4) d   6) f   8) h  10) j  12) l
+#?  1) a
+ 2) b
+ 3) c
+ 4) d
+ 5) e
+ 6) f
+ 7) g
+ 8) h
+ 9) i
+10) j
+11) k"
+  e=$( { set -- p q; select s183v; do echo "v=$s183v"; break; done <<< 2
+       set --; select s183v; do echo no; done; echo "s=$?"; select s183v in; do echo no; done; echo "s=$?"
+       for s183v do echo no; done; set -- u; for s183v do echo "f=$s183v"; done
+       select s183v do echo "w=$s183v"; break; done <<< 1; } 2>&1 )
+  check se4 "${e//$'\n'/;}" "1) p;2) q;#? v=q;s=0;s=0;f=u;1) u;#? w=u"
+  e=$( { s183t=; declare -n s183n=s183t; select s183n in a b; do echo "t=$s183t"; break; done <<< 2
+       declare -i s183i; select s183i in 1+1 b; do echo "i=$s183i"; break; done <<< 1
+       declare -u s183u; select s183u in ab; do echo "u=$s183u"; break; done <<< 1
+       readonly s183r=1; select s183r in a; do echo no; done <<< 1; echo "s=$?"; } 2>&1 )
+  check se5 "$(s183s "$e")" "1) a;2) b;#? t=b;1) 1+1;2) b;#? i=2;1) ab;#? u=AB;1) a;s183r: readonly variable;s=1;"
+  s183f() select s183w in "$@"; do echo "w=$s183w"; return 3; done
+  e=$( { for s183k in 1 2; do select s183w in a b; do echo "$s183k$s183w"; continue 2; done; echo no; done <<< $'1\n2'
+       s183f m n <<< 2; echo "s=$?"
+       select s183w in a; do select s183x in b c; do echo "$s183w$s183x"; break 2; done; done <<< $'1\n2'; echo "s=$?"
+       declare -f s183f; } 2>&1 )
+  check se6 "${e//$'\n'/;}" "1) a;2) b;#? 1a;1) a;2) b;#? 2b;1) m;2) n;#? w=n;s=3;1) a;#? 1) b;2) c;#? ac;s=0;s183f () ;{ ;    select s183w in \"\$@\";;    do;        echo \"w=\$s183w\";;        return 3;;    done;}"
+  e=$( { eval 'select'; echo "s=$?"; eval 'f() { select; }'; echo "s=$?"; } 2>&1 )
+  check se7 "$(s183s "$e")" "syntax error near unexpected token \`newline';\`select';s=2;syntax error near unexpected token \`;';\`f() { select; }';s=2;"
+}
+# ===== SECTION 184: ! ! and a lone ! =====
+# Each `!` before a pipeline inverts its status again, so `! ! CMD` is CMD - set -e included -
+# and an inverted pipeline runs with set -e off inside it. `!` with no command before the end
+# of a list is the null command inverted: status 1, 0 for `! !`. Every expected value is bash
+# 5.3's.
+s184() {
+  local e
+  e=$( ! ! true; echo "a $?"; ! ! false; echo "b $?"; ! ! ! true; echo "c $?"; ! ! true | false; echo "d $?"
+       if ! ! true; then echo e; fi; eval '! ; echo "f $?"; ! !; echo "g $?"; { ! ; }; echo "h $?"'
+       eval 'while ! ! ; do echo i; break; done; ! # comment
+echo "j $?"; ! &
+echo "k $?"' )
+  check bg1 "${e//$'\n'/;}" "a 0;b 1;c 1;d 1;e;f 1;g 0;h 1;i;j 1;k 0"
+  e=$( set -e; ! { false; echo x1; }; echo "a $?"; ! eval 'false; echo x2'; echo "b $?"; !; echo "c $?"
+       ! ! { false; echo no; }; echo no ); s=$?
+  check bg2 "${e//$'\n'/;} s=$s" "x1;a 1;x2;b 1;c 1 s=1"
+  e=$( set -e; ! ! true && echo and; ! ! false; echo no ); s=$?
+  check bg3 "${e//$'\n'/;} s=$s" "and s=1"
+  s184f() { !; echo a; ! !
+    echo b; { ! ; }; ! ! ! false | true; ! &
+  }
+  e=$(declare -f s184f)
+  check bg4 "${e//$'\n'/;}" "s184f () ;{ ;    ! ;;    echo a;;    ;;    echo b;;    { ;        ! ;    };;    ! false | true;;    !  &;}"
+}
+# ===== SECTION 185: a syntax error in eval under set -e =====
+# Where set -e is in force, a syntax error leaves the shell at the first line of its report,
+# status 2, from an eval or a trap string alike; where it is not - a condition, `!`, the
+# left of || - both lines are reported and the eval fails with status 2. Every expected
+# value is bash 5.3's.
+s185() {
+  local e
+  s185s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  e=$( (set -e; eval 'if then'; echo no) 2>&1; echo "s=$?" )
+  check sy1 "$(s185s "$e")" "syntax error near unexpected token \`then';s=2;"
+  e=$( (set -e; eval 'x=(a b'; echo no) 2>&1; echo "s=$?"; (set -e; eval 'x=$(if then)'; echo no) 2>&1; echo "s=$?" )
+  check sy2 "$(s185s "$e")" "unexpected EOF while looking for matching \`)';s=2;syntax error near unexpected token \`then' while looking for matching \`)';s=2;"
+  e=$( (set -e; eval 'fi' || echo "or $?"; if eval 'fi'; then :; else echo "if $?"; fi; ! eval 'fi'; echo "bang $?") 2>&1 )
+  check sy3 "$(s185s "$e")" "syntax error near unexpected token \`fi';\`fi';or 2;syntax error near unexpected token \`fi';\`fi';if 2;syntax error near unexpected token \`fi';\`fi';bang 0;"
+  e=$( (set -e; trap 'echo t; fi' EXIT; echo in) 2>&1; echo "s=$?"; (set -e; f() { eval 'fi'; echo no; }; f; echo no) 2>&1; echo "s=$?" )
+  check sy4 "$(s185s "$e")" "in;syntax error near unexpected token \`fi';s=2;syntax error near unexpected token \`fi';s=2;"
+}
 # ===== END SECTIONS =====
 
 s176  # SECTION-CALL 176
@@ -282,5 +379,8 @@ s179  # SECTION-CALL 179
 s180  # SECTION-CALL 180
 s181  # SECTION-CALL 181
 s182  # SECTION-CALL 182
+s183  # SECTION-CALL 183
+s184  # SECTION-CALL 184
+s185  # SECTION-CALL 185
 echo "full: $checks checks, $fails failures"
 exit $fails

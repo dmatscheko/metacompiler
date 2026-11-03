@@ -161,14 +161,21 @@ CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
 ForStmt     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, up.start, up.start); push(atLine(makeFor(takeAll()), up.start, tcKeep)) ~~>
-            = KwFor ForName [ ForIn ] Sep LoopBody ;
+            = KwFor ForName ForHead LoopBody ;
 // A for loop's body is do LIST done or, as bash also takes it, { LIST; }.
 LoopBody    = ( KwDo CompoundList KwDone ) | ( "{" BraceKwEnd CompoundList "}" ) ;
+// The word list ends at a ; or a newline; without one the body may follow the name at
+// once (`for x do`).
+ForHead     = ( ForIn Sep ) | OptSep ;
 ForIn       = KwIn ForWords ;
 ForName     <~~ push({fname: up.in}) ~~>
             = Name ;
 ForWords    <~~ push({words: takeAll()}) ~~>
             = { CWord } ;
+// select NAME in WORD...; do LIST; done / select NAME; do LIST; done (the positional
+// parameters): the same parts as a for loop, run as a menu (makeSelect).
+SelectStmt  <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, up.start, up.start); push(atLine(makeSelect(takeAll()), up.start, tcKeep)) ~~>
+            = KwSelect ForName ForHead LoopBody ;
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) ~~>
@@ -177,7 +184,7 @@ FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) 
 // >/dev/null; f` prints nothing).
 // A function body may be any compound command; { LIST; } and ( LIST ) are the two that
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
-FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
+FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | SelectStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
 FuncBraceBody <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" ;
 FuncDefHead = ( KwFunction FuncKwName [ "(" ")" ] ) | ( FuncKwName "(" ")" NotAsgName ) ;
 // A bash function name is a WORD, not an identifier: `show-len() {...}`, `ble/foo() {...}`,
@@ -203,7 +210,10 @@ AndOrOp     <~~ push({op: up.in}) ~~>
 AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
             = Pipeline { AndOrOp Linebreak Pipeline } ;
 Pipeline    <~~ push(makePipeline(takeAll())) ~~>
-            = [ BangOp ] Command { PipeOp Linebreak Command } ;
+            = ( { BangOp } Command { PipeOp Linebreak Command } ) | BareBang ;
+// `!` with no command after it, before the end of the list (BangEnd): bash's null command,
+// inverted once for each `!`.
+BareBang    <~~ push(makeBareBang(takeAll().length)) ~~> = BangOp { BangOp } BangEnd ;
 // Newlines may follow && || and | (and stand around [[ ]] terms, see CondNot).
 Linebreak   = { "\n" } ;
 BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
@@ -221,7 +231,7 @@ CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ]
 CompoundCore = ArithCmd | CondCmd | FlowCmd ;
 // The compound commands set -e does not look at as a whole (eeExempt): what failed in them was
 // answered there.
-FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
+FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | SelectStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
 
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
@@ -902,6 +912,7 @@ KwElif      = "elif" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwFi        = "fi" KwEnd ;
 KwFor       = "for" KwEnd ;
+KwSelect    = "select" KwEnd ;
 KwWhile     = "while" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwDone      = "done" KwEnd ;
@@ -1176,6 +1187,21 @@ KwEnd = :script(~~
     })()
 ~~) ;
 
+// After the `!`s of a BareBang, past blanks: a comment, a newline, a ; that opens no case
+// terminator, an & that is no && or &>, or the end of the text.
+BangEnd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(0)
+        while (cc == 32 || cc == 9 || cc == 13) { i = i + 1; cc = c.peek(i) }
+        var n1 = c.peek(i + 1)
+        if (cc == -1 || cc == 10 || cc == 35) { return undefined }
+        if (cc == 59 && n1 != 59 && n1 != 38) { return undefined }
+        if (cc == 38 && n1 != 38 && n1 != 62) { return undefined }
+        return abnf.newToken("\x01bang-end", 0)
+    })()
+~~) ;
+
 // The boundary after the "{" that opens a brace group. Verified against GNU bash 5.3.15:
 //   { echo hi; } OK    {ls; } syntax error    {(echo hi);} OK ("(" is a metacharacter).
 BraceKwEnd = :script(~~
@@ -1294,7 +1320,7 @@ NotReserved = :script(~~
         cc = c.peek(i)
         while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) { w = w + String.fromCharCode(cc); i = i + 1; cc = c.peek(i) }
         var boundary = (cc == -1 || cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 59 || cc == 38 || cc == 124 || cc == 40 || cc == 41 || cc == 60 || cc == 62 || cc == 35)
-        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "while" || w == "do" || w == "done" || w == "in" || w == "case" || w == "esac" || w == "until" || w == "function")
+        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "select" || w == "while" || w == "do" || w == "done" || w == "in" || w == "case" || w == "esac" || w == "until" || w == "function")
         if (kw && boundary) { return abnf.newToken("\x01reserved-word", 0) }
         return undefined
     })()
@@ -2072,6 +2098,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtIsAsgRef = rtDecl("rt_isasgref", false, [1])
     var rtFPos = rtDecl("rt_fpos", false, [1])
     var rtFNext = rtDecl("rt_fnext", false, [1, 0])
+    var rtSelMenu = rtDecl("rt_sel_menu", true, [1, 1])
+    var rtSelPick = rtDecl("rt_sel_pick", true, [1, 1])
     var rtFAt = rtDecl("rt_fat", true, [1, 0])
     // rt_ljoin(list, sep): the fields joined with sep. A field list flattened to one word is
     // wordJoin, the fields space-joined.
@@ -7253,8 +7281,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- pipelines, subshells, groups, (( )), [[ ]], redirections ----
 
-    // items = [{bang}?, (stageThunk {cpd}?)...] : with two stages or more every stage runs in
-    // a subshell (bash without lastpipe). Twin of makePipeline in bash-interpreter.abnf.
+    // items = [{bang}..., (stageThunk {cpd}?)...] : with two stages or more every stage runs in
+    // a subshell (bash without lastpipe); an odd number of `!` inverts the status and emits
+    // the stages as conditions. Twin of makePipeline in bash-interpreter.abnf.
     function makePipeline(items) {
         var bang = false
         var stages = []
@@ -7264,7 +7293,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (typeof it == "function") { stages.push(it); cpds.push(false) }
             else if (it.cpd != undefined) { cpds[cpds.length - 1] = true }
-            else { bang = true }
+            else { bang = !bang }
         }
         if (!bang && stages.length == 1) { return stages[0] }
         if (stages.length > 1) {
@@ -7283,7 +7312,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < stages.length; k++) {
                 var isLast = (k == stages.length - 1)
                 if (!isLast) { b.NewCall(rtCapBegin, zero) }
-                b = stages[k](b)
+                b = bang ? emitCond(stages[k], b) : stages[k](b)
                 // The text a stage hands on lives until the pipeline ends: every release
                 // the next stage makes goes to a mark taken after it.
                 if (!isLast) {
@@ -7308,6 +7337,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // a ! pipeline is exempt from set -e; any other answers it by its status
             eeDone = bang
+            asgKept = false
+            return b
+        }
+    }
+
+    // A BareBang of n `!`s. Twin of makeBareBang in bash-interpreter.abnf.
+    function makeBareBang(n) {
+        var st = n % 2
+        return function(b) {
+            b.NewCall(rtArrClear, gepStr(b, "PIPESTATUS"))
+            b.NewCall(rtPstat, [gepStr(b, "0"), zero])
+            storeStatusI(b, st)
+            eeDone = st == 1
             asgKept = false
             return b
         }
@@ -8251,6 +8293,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         kill.NewStore(one, gExited)
         kill.NewBr(viaUnwind(curExit, curExitRd))
         return cont
+    }
+    // Is set -e in force here: an i1, or null in code emitted as a condition.
+    function errExitOn(b) {
+        if (condDepth > 0) { return null }
+        return b.NewAnd(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gOptE), zero),
+                        b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gCondRt), zero))
     }
     // Emit a thunk as a CONDITION.
     function emitCond(t, b) {
@@ -9505,16 +9553,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var msg = ""
         var k
         for (k = 0; k < ls.length; k++) { msg = msg + pfx + ls[k] + "\n" }
+        var msg1 = pfx + ls[0] + "\n"
         var code = se.code
-        if (arInSnip && !se.sub) { return function(b) { emitOnStderr(b, gepStr(b, msg)); storeStatusI(b, code); return b } }
+        var leave = !arInSnip || se.sub
         var st = (arInSnip) ? 1 : code
         return function(b) {
+            var ee = errExitOn(b)
+            if (ee != null) {
+                var kill = curF.NewBlock(""), cont = curF.NewBlock("")
+                b.NewCondBr(ee, kill, cont)
+                emitOnStderr(kill, gepStr(kill, msg1))
+                emitExitWith(kill, 2)
+                b = cont
+            }
             emitOnStderr(b, gepStr(b, msg))
-            b.NewStore(llvm.constant.NewInt(i32, st), gExitCode)
-            b.NewStore(one, gExited)
-            b.NewBr(viaUnwind(curExit, curExitRd))
+            if (!leave) { storeStatusI(b, code); return b }
+            emitExitWith(b, st)
             return deadBlock()
         }
+    }
+    // Leave the shell with status st.
+    function emitExitWith(b, st) {
+        b.NewStore(llvm.constant.NewInt(i32, st), gExitCode)
+        b.NewStore(one, gExited)
+        b.NewBr(viaUnwind(curExit, curExitRd))
     }
     function linkAsync(items) {
         var out = []
@@ -10382,36 +10444,49 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // items = [{fname}, {words:[wordObjs]}, bodyThunk]. The word list is static -> unrolled.
-    function makeFor(items) {
-        var fname = "", wordThunks = null, bodyT = null
+    // items = [{fname}, {words:[wordObjs]}?, bodyThunk] in source order, as {fname, words
+    // (null without `in`), body}. Twin of forParts in bash-interpreter.abnf.
+    function forParts(items) {
+        var fp = {fname: "", words: null, body: null}
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (typeof it == "function") { bodyT = it }
-            else if (it.words != undefined) { wordThunks = it.words }
-            else if (it.fname != undefined) { fname = it.fname }
+            if (typeof it == "function") { fp.body = it }
+            else if (it.words != undefined) { fp.words = it.words }
+            else if (it.fname != undefined) { fp.fname = it.fname }
         }
-        return function(b) {
-            // Build the whole word list as ONE field list at run time, then walk it: the
-            // words can each expand to any number of fields ("${a[@]}", "$@", an unquoted
-            // expansion), so the iteration count is not known while emitting.
-            var listP = slotOf(i8ptr)
-            var mk0 = heapMark(b)
-            if (wordThunks == null) {
-                b.NewStore(b.NewCall(rtParams, [gepStr(b, " "), zero]), listP)
-            } else {
-                b.NewStore(nilList(b), listP)
-                var k
-                for (k = 0; k < wordThunks.length; k++) {
-                    var r = wordThunks[k].fn(b)
-                    b = r.b
-                    b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), r.v]), listP)
-                }
+        return fp
+    }
+    // The words a for or select head walks, built as ONE field list at run time into a new
+    // slot: the words can each expand to any number of fields ("${a[@]}", "$@", an unquoted
+    // expansion), so the count is not known while emitting. With no `in` list, the
+    // positional parameters. Answers {b, p}, p the slot.
+    function emitForList(b, wordThunks) {
+        var listP = slotOf(i8ptr)
+        var mk0 = heapMark(b)
+        if (wordThunks == null) {
+            b.NewStore(b.NewCall(rtParams, [gepStr(b, " "), zero]), listP)
+        } else {
+            b.NewStore(nilList(b), listP)
+            var k
+            for (k = 0; k < wordThunks.length; k++) {
+                var r = wordThunks[k].fn(b)
+                b = r.b
+                b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), r.v]), listP)
             }
-            // The list holds its own copy of every field, so the strings its words expanded
-            // through are garbage once it is built.
-            b.NewCall(rtRelease, [mk0.a, hPos(b, 1)])
+        }
+        // The list holds its own copy of every field, so the strings its words expanded
+        // through are garbage once it is built.
+        b.NewCall(rtRelease, [mk0.a, hPos(b, 1)])
+        return {b: b, p: listP}
+    }
+    function makeFor(items) {
+        var fp = forParts(items)
+        var fname = fp.fname, wordThunks = fp.words, bodyT = fp.body
+        return function(b) {
+            var fl = emitForList(b, wordThunks)
+            b = fl.b
+            var listP = fl.p
             // ip is the position of the next field in the list (rt_fpos / rt_fnext), -1 past
             // the last, so each pass reads only its own field.
             var ip = slotOf(i32)
@@ -10476,6 +10551,83 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             bb.NewBr(step)
             step.NewStore(step.NewCall(rtFNext, [list, i]), ip)
             step.NewBr(head)
+            var xb = heapRelease(ex, mk)
+            storeStatus(xb, xb.NewLoad(i32, lst))
+            return xb
+        }
+    }
+
+    // select: the menu of the words on standard error (rt_sel_menu) and PS3 ("#? " unset),
+    // then one line read as `read` with no name reads it. An empty line shows the menu
+    // again; any other is stored in NAME as the word it numbers, or "" (rt_sel_pick), and
+    // the body runs. The end of the input ends the loop with a newline on standard output
+    // and status 1; no words at all run nothing, status 0. Twin of makeSelect in
+    // bash-interpreter.abnf.
+    function makeSelect(items) {
+        var fp = forParts(items)
+        var fname = fp.fname, wordThunks = fp.words, bodyT = fp.body
+        return function(b) {
+            var fl = emitForList(b, wordThunks)
+            b = fl.b
+            var list = b.NewLoad(i8ptr, fl.p)
+            var lst = loopStatusSlot(b)
+            var menuP = slotOf(i32)
+            b.NewStore(one, menuP)
+            var head = curF.NewBlock(""), menuB = curF.NewBlock(""), ask = curF.NewBlock("")
+            var eof = curF.NewBlock(""), got = curF.NewBlock(""), pick = curF.NewBlock(""), ex = curF.NewBlock("")
+            var mk = heapMark(b)
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredSGE, b.NewCall(rtFPos, list), zero), head, ex)
+            var hd = heapRelease(head, mk)
+            hd.NewCondBr(hd.NewICmp(llvm.enum.IPredNE, hd.NewLoad(i32, menuP), zero), menuB, ask)
+            emitOnStderr(menuB, menuB.NewCall(rtSelMenu, [list, loadVar(menuB, "COLUMNS")]))
+            menuB.NewBr(ask)
+            var ps3 = loadVar(ask, "PS3")
+            emitOnStderr(ask, ask.NewSelect(ask.NewICmp(llvm.enum.IPredEQ, ps3, unsetPtr(ask)), gepStr(ask, "#? "), ps3))
+            var rb = emitRead(ask, [], null)
+            rb.NewCondBr(rb.NewICmp(llvm.enum.IPredNE, rb.NewLoad(i32, gStatus), zero), eof, got)
+            eof.NewCall(rtPrints, gepStr(eof, "\n"))
+            eof.NewStore(one, lst)
+            eof.NewBr(ex)
+            var rep = loadVar(got, "REPLY")
+            var blank = got.NewICmp(llvm.enum.IPredEQ, got.NewLoad(i8, rep), llvm.constant.NewInt(i8, 0))
+            got.NewStore(got.NewZExt(blank, i32), menuP)
+            got.NewCondBr(blank, head, pick)
+            // NAME is assigned as `NAME=WORD` assigns it, through a nameref to the variable it
+            // names; a readonly one ends the loop, status 1. Twin of the store in makeSelect
+            // in bash-interpreter.abnf.
+            var v = pick.NewCall(rtSelPick, [list, rep])
+            if (roRefusedV(pick, fname)) {
+                pick.NewStore(one, lst)
+                pick.NewBr(ex)
+                pick = deadBlock()
+            }
+            var rr = roRtTest(pick, fname)
+            if (rr != null) {
+                rr.ro.NewStore(one, lst)
+                rr.ro.NewBr(ex)
+                pick = rr.ok
+            }
+            var subP = slotOf(i32)
+            pick.NewStore(zero, subP)
+            var asg = namedAsg(fname, v, subP)
+            var store = function(sb) { return emitAssign(sb, asg, false, null) }
+            var selMay = refMay(fname)
+            var body = selMay ? viaRefMay(pick, fname, false, store) : store(pick)
+            // Through a nameref the store is refused when it runs (subP), as by a readonly
+            // variable it names.
+            if (selMay || attrOn(refVars, fname)) {
+                var refB = curF.NewBlock(""), goB = curF.NewBlock("")
+                body.NewCondBr(body.NewICmp(llvm.enum.IPredNE, body.NewLoad(i32, subP), zero), refB, goB)
+                refB.NewStore(one, lst)
+                refB.NewBr(ex)
+                body = goB
+            }
+            body.NewStore(zero, tcSlot)
+            loopStack.push({brk: ex, cont: head, lst: lst, rd: redirStack.length})
+            var bb = bodyT(body)
+            loopStack.pop()
+            bb.NewStore(bb.NewLoad(i32, gStatus), lst)
+            bb.NewBr(head)
             var xb = heapRelease(ex, mk)
             storeStatus(xb, xb.NewLoad(i32, lst))
             return xb

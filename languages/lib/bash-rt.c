@@ -222,6 +222,8 @@ char *rt_fadd(char *acc, char *f);
 int rt_fpos(char *v);
 int rt_fnext(char *v, int p);
 char *rt_fat(char *v, int p);
+char *rt_sel_menu(char *v, char *cols);
+char *rt_sel_pick(char *v, char *r);
 char *rt_uqlist(char *l, char *ifs);
 char *rt_splitifs(char *v, char *ifs);
 int rt_ifsws(char *ifs, int ch);
@@ -5062,6 +5064,99 @@ char *rt_fat(char *v, int p) {
     }
     dst[o] = 0;
     return dst;
+}
+
+/* SELECT. The menu select prints for the field list v, as bash lays it out:
+ * entry k is "K) WORD", the numbers right-aligned; every column is as wide as
+ * the longest entry plus two, as many as fit in cols (COLUMNS: 80 when empty,
+ * else its leading number), filled top to bottom - and when one row would hold
+ * them all, one column instead. The first column's numbers are only as wide as
+ * its last, and the gap to the next column is tabs to each tab stop it passes
+ * (every 8), then spaces. Twin of selMenu in bash-interpreter.abnf. */
+int rt_sel_nlen(int n) {
+    return n < 10 ? 1 : n < 100 ? 2 : n < 1000 ? 3 : n < 10000 ? 4 : n < 100000 ? 5 : 6;
+}
+
+char *rt_sel_menu(char *v, char *cols) {
+    int n = 0, maxl = 0, p, k = 0, width, il, nc, rows, fil, row, ind, pos, w, from, to, o = 0, ln;
+    char **fs;
+    char *out, *num;
+    for (p = rt_fpos(v); p >= 0; p = rt_fnext(v, p)) n = n + 1;
+    fs = (char **)rt_bump8(n * 8);
+    for (p = rt_fpos(v); p >= 0; p = rt_fnext(v, p)) {
+        fs[k] = rt_fat(v, p);
+        ln = (int)strlen(fs[k]);
+        if (ln > maxl) maxl = ln;
+        k = k + 1;
+    }
+    width = cols[0] == 0 ? 80 : (int)rt_str2int(cols);
+    il = rt_sel_nlen(n);
+    maxl = maxl + il + 4;
+    nc = width > 0 ? width / maxl : 0;
+    if (nc == 0) nc = 1;
+    rows = n / nc + (n % nc != 0 ? 1 : 0);
+    nc = n / rows + (n % rows != 0 ? 1 : 0);
+    if (rows == 1) { rows = nc; nc = 1; }
+    fil = rt_sel_nlen(rows);
+    /* An entry is at most its column's width plus the 13 bytes of a number. */
+    out = rt_bump(n * (maxl + 13) + rows + 1);
+    for (row = 0; row < rows; row = row + 1) {
+        ind = row;
+        pos = 0;
+        while (ind < n) {
+            w = pos == 0 ? fil : il;
+            num = rt_int2str((long)(ind + 1));
+            ln = (int)strlen(num);
+            while (ln < w) { out[o] = 32; o = o + 1; ln = ln + 1; }
+            ln = (int)strlen(num);
+            memmove(out + o, num, (unsigned long)ln);
+            o = o + ln;
+            out[o] = 41;
+            out[o + 1] = 32;
+            o = o + 2;
+            ln = (int)strlen(fs[ind]);
+            memmove(out + o, fs[ind], (unsigned long)ln);
+            o = o + ln;
+            from = pos + ln + w + 2;
+            ind = ind + rows;
+            if (ind < n) {
+                to = pos + maxl;
+                while (from < to) {
+                    if (to / 8 > from / 8) { out[o] = 9; from = from + 8 - from % 8; }
+                    else { out[o] = 32; from = from + 1; }
+                    o = o + 1;
+                }
+                pos = pos + maxl;
+            }
+        }
+        out[o] = 10;
+        o = o + 1;
+    }
+    out[o] = 0;
+    return out;
+}
+
+/* The field of v a select reply r numbers: one decimal number, optionally
+ * signed, white space around it allowed, from 1 to the number of fields;
+ * anything else is "". Twin of selPick in bash-interpreter.abnf. */
+char *rt_sel_pick(char *v, char *r) {
+    int i = 0, d0, n = 0, neg, p;
+    long k = 0;
+    for (p = rt_fpos(v); p >= 0; p = rt_fnext(v, p)) n = n + 1;
+    while (r[i] == 32 || (r[i] >= 9 && r[i] <= 13)) i = i + 1;
+    neg = r[i] == 45 ? 1 : 0;
+    if (r[i] == 45 || r[i] == 43) i = i + 1;
+    d0 = i;
+    while (r[i] >= 48 && r[i] <= 57) {
+        if (k <= (long)n) k = k * 10 + (long)((int)r[i] - 48);
+        i = i + 1;
+    }
+    if (i == d0) return "";
+    while (r[i] == 32 || (r[i] >= 9 && r[i] <= 13)) i = i + 1;
+    if (r[i] != 0 || neg != 0 || k < 1 || k > (long)n) return "";
+    p = rt_fpos(v);
+    while (k > 1) { p = rt_fnext(v, p); k = k - 1; }
+    return rt_fat(v, p);
 }
 
 /* The fields of the list l joined with sep into one string, in one

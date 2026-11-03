@@ -169,14 +169,21 @@ CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
 // Each word is one iteration value (no re-splitting).
 ForStmt     <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, up.start, up.start); push(makeFor(takeAll(), lnOf(up.start))) ~~>
-            = KwFor ForName [ ForIn ] Sep LoopBody ;
+            = KwFor ForName ForHead LoopBody ;
 // A for loop's body is do LIST done or, as bash also takes it, { LIST; }.
 LoopBody    = ( KwDo CompoundList KwDone ) | ( "{" BraceKwEnd CompoundList "}" ) ;
+// The word list ends at a ; or a newline; without one the body may follow the name at
+// once (`for x do`).
+ForHead     = ( ForIn Sep ) | OptSep ;
 ForIn       = KwIn ForWords ;
 ForName     <~~ push({fname: up.in}) ~~>
             = Name ;
 ForWords    <~~ push({words: takeAll()}) ~~>
             = { CWord } ;
+// select NAME in WORD...; do LIST; done / select NAME; do LIST; done (the positional
+// parameters): the same parts as a for loop, run as a menu (makeSelect).
+SelectStmt  <~~ fnDefsSeen = bashFnDefPin(fnDefsSeen, up.start, up.start); push(makeSelect(takeAll(), lnOf(up.start))) ~~>
+            = KwSelect ForName ForHead LoopBody ;
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) ~~>
@@ -185,7 +192,7 @@ FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos), up.start)) 
 // >/dev/null; f` prints nothing).
 // A function body may be ANY compound command; { LIST; } and ( LIST ) are the two that
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
-FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
+FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | SelectStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
 FuncBraceBody <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" ;
 FuncDefHead = ( KwFunction FuncKwName [ "(" ")" ] ) | ( FuncKwName "(" ")" NotAsgName ) ;
 // A bash function name is a WORD, not an identifier: `show-len() {...}`, `ble/foo() {...}`,
@@ -211,7 +218,10 @@ AndOrOp     <~~ push({op: up.in}) ~~>
 AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
             = Pipeline { AndOrOp Linebreak Pipeline } ;
 Pipeline    <~~ push(makePipeline(takeAll())) ~~>
-            = [ BangOp ] Command { PipeOp Linebreak Command } ;
+            = ( { BangOp } Command { PipeOp Linebreak Command } ) | BareBang ;
+// `!` with no command after it, before the end of the list (BangEnd): bash's null command,
+// inverted once for each `!`.
+BareBang    <~~ push(makeBareBang(takeAll().length)) ~~> = BangOp { BangOp } BangEnd ;
 // Newlines may follow && || and | (and stand around [[ ]] terms, see CondNot).
 Linebreak   = { "\n" } ;
 BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
@@ -229,7 +239,7 @@ CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ]
 CompoundCore = ArithCmd | CondCmd | FlowCmd ;
 // The compound commands set -e does not look at as a whole (eeExempt): what failed in them was
 // answered there.
-FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
+FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | SelectStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
 
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
@@ -979,6 +989,7 @@ KwElif      = "elif" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwFi        = "fi" KwEnd ;
 KwFor       = "for" KwEnd ;
+KwSelect    = "select" KwEnd ;
 KwWhile     = "while" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwDone      = "done" KwEnd ;
@@ -1126,6 +1137,21 @@ KwEnd = :script(~~
         if (cc == 59 || cc == 38 || cc == 124) { return undefined }
         if (cc == 40 || cc == 41 || cc == 60 || cc == 62 || cc == 35) { return undefined }
         return abnf.newToken("\x01kw-boundary", 0)
+    })()
+~~) ;
+
+// After the `!`s of a BareBang, past blanks: a comment, a newline, a ; that opens no case
+// terminator, an & that is no && or &>, or the end of the text.
+BangEnd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(0)
+        while (cc == 32 || cc == 9 || cc == 13) { i = i + 1; cc = c.peek(i) }
+        var n1 = c.peek(i + 1)
+        if (cc == -1 || cc == 10 || cc == 35) { return undefined }
+        if (cc == 59 && n1 != 59 && n1 != 38) { return undefined }
+        if (cc == 38 && n1 != 38 && n1 != 62) { return undefined }
+        return abnf.newToken("\x01bang-end", 0)
     })()
 ~~) ;
 
@@ -1378,7 +1404,7 @@ NotReserved = :script(~~
         cc = c.peek(i)
         while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) { w = w + String.fromCharCode(cc); i = i + 1; cc = c.peek(i) }
         var boundary = (cc == -1 || cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 59 || cc == 38 || cc == 124 || cc == 40 || cc == 41 || cc == 60 || cc == 62 || cc == 35)
-        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "while" || w == "do" || w == "done" || w == "in" || w == "case" || w == "esac" || w == "until" || w == "function")
+        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "select" || w == "while" || w == "do" || w == "done" || w == "in" || w == "case" || w == "esac" || w == "until" || w == "function")
         if (kw && boundary) { return abnf.newToken("\x01reserved-word", 0) }
         return undefined
     })()
@@ -9772,9 +9798,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- pipelines, subshells, groups, (( )), [[ ]], redirections ----
 
-    // items = [{bang}?, (stageThunk {cpd}?)...] : with two stages or more every stage runs in
+    // items = [{bang}..., (stageThunk {cpd}?)...] : with two stages or more every stage runs in
     // a subshell (bash without lastpipe), and each but the last has its stdout captured as
-    // the next stage's standard input. A lone `! CMD` runs in the current shell.
+    // the next stage's standard input. A lone `! CMD` runs in the current shell. Each `!`
+    // inverts the status again, so `! ! CMD` is CMD; an inverted pipeline runs as a
+    // condition, set -e off inside it.
     function makePipeline(items) {
         var bang = false
         var stages = []
@@ -9784,7 +9812,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (typeof it == "function") { stages.push(it); cpds.push(false) }
             else if (it.cpd != undefined) { cpds[cpds.length - 1] = true }
-            else { bang = true }
+            else { bang = !bang }
         }
         if (!bang && stages.length == 1) { return stages[0] }
         if (stages.length > 1) {
@@ -9800,7 +9828,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < stages.length; k++) {
                 var lastStage = (k == stages.length - 1)
                 if (!lastStage) { capOpen() }
-                st = stages[k]()
+                st = bang ? runCond(stages[k]) : stages[k]()
                 statuses.push((typeof st == "object") ? st.ret : st)
                 if (typeof st != "object" && st != 0 && firstFail == 0) { firstFail = st }
                 if (!lastStage) {
@@ -9819,6 +9847,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (bang) { st = (st == 0) ? 1 : 0 }
             // a ! pipeline is exempt from set -e; any other answers it by its status
             eeDone = bang
+            setStatus(st)
+            return st
+        }
+    }
+
+    // A BareBang of n `!`s: status 1 for an odd n, exempt from set -e as `! CMD` is, and
+    // PIPESTATUS (0), the null command's. Twin of makeBareBang in bash-to-llvm-ir.abnf.
+    function makeBareBang(n) {
+        var st = n % 2
+        return function() {
+            arrFromList("PIPESTATUS", false, [0])
+            eeDone = st == 1
             setStatus(st)
             return st
         }
@@ -10545,26 +10585,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         })
     }
 
-    // items = [{fname}, {words:[wordThunks]}, bodyThunk] in source order.
-    function makeFor(items, ln) {
-        var fname = ""
-        var wordThunks = null
-        var bodyT = anytype
+    // items = [{fname}, {words:[wordThunks]}?, bodyThunk] in source order, as {fname, words
+    // (null without `in`), body}.
+    function forParts(items) {
+        var fp = {fname: "", words: null, body: anytype}
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (typeof it == "function") { bodyT = it }
-            else if (it.words != undefined) { wordThunks = it.words }
-            else if (it.fname != undefined) { fname = it.fname }
+            if (typeof it == "function") { fp.body = it }
+            else if (it.words != undefined) { fp.words = it.words }
+            else if (it.fname != undefined) { fp.fname = it.fname }
         }
+        return fp
+    }
+    // The words a for or select head walks: with no `in` list, the positional parameters.
+    function forVals(wordThunks) {
+        var vals = []
+        if (wordThunks == null) {
+            var w
+            for (w = 0; w < posParams.length; w++) { vals.push(posParams[w]) }
+        } else { vals = expandWords(wordThunks) }
+        return vals
+    }
+    function makeFor(items, ln) {
+        var fp = forParts(items)
+        var fname = fp.fname, wordThunks = fp.words, bodyT = fp.body
         return inLoop(function() {
             vars["$LINENO"] = lnAt(ln)
-            // `for NAME; do` with no `in` list iterates the positional parameters.
-            var vals = []
-            if (wordThunks == null) {
-                var w
-                for (w = 0; w < posParams.length; w++) { vals.push(posParams[w]) }
-            } else { vals = expandWords(wordThunks) }
+            var vals = forVals(wordThunks)
             var last = 0
             var r = anytype
             var k
@@ -10601,6 +10649,120 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return last
         })
     }
+
+    // select: the words as a numbered menu on standard error (selMenu), then PS3 ("#? "
+    // unset), then one line of standard input, read as `read` with no name reads it. An
+    // empty line shows the menu again; any other stores in NAME the word it numbers, or ""
+    // (selPick), and runs the body. The end of the input ends the loop with a newline on
+    // standard output and status 1; no words at all run nothing, status 0. Twin of
+    // makeSelect in bash-to-llvm-ir.abnf.
+    function makeSelect(items, ln) {
+        var fp = forParts(items)
+        var fname = fp.fname, wordThunks = fp.words, bodyT = fp.body
+        return inLoop(function() {
+            vars["$LINENO"] = lnAt(ln)
+            var vals = forVals(wordThunks)
+            var last = 0
+            var r = anytype
+            var menu = vals.length > 0
+            var go = menu
+            while (go) {
+                if (menu) { emitErr(selMenu(vals)) }
+                emitErr(isSetVar("PS3") ? quietVal("PS3") : "#? ")
+                if (readBuiltin([]) != 0) { emitOut("\n"); last = 1; go = false; continue }
+                var rep = quietVal("REPLY")
+                menu = rep == ""
+                if (menu) { continue }
+                // NAME is assigned as `NAME=WORD` assigns it, through a nameref to the variable
+                // it names; a readonly one ends the loop, status 1.
+                if (roRefusedV(fname, "m", "")) { setStatus(1); return 1 }
+                storeAttr(fname, selPick(vals, rep), false)
+                thisCmd = ""
+                r = bodyT()
+                if (typeof r == "object") {
+                    var sg = loopSignal(r)
+                    if (sg == 0 || sg == 3) { return (sg == 3) ? loopOuter(r) : r }
+                    last = sigStatus(r)
+                    if (sg == 1) { go = false }
+                } else { last = r }
+            }
+            setStatus(last)
+            return last
+        })
+    }
+    // The menu of select over vals, as bash lays it out: entry k is "K) WORD", the numbers
+    // right-aligned; every column is as wide as the longest entry plus two, as many as fit
+    // in COLUMNS (80 when unset or empty, else its leading number), filled top to bottom -
+    // and when one row would hold them all, one column instead. The first column's numbers
+    // are only as wide as its last, and the gap to the next column is tabs to each tab stop
+    // it passes (every 8), then spaces. A length is in bytes. Twin of rt_sel_menu in
+    // languages/lib/bash-rt.c.
+    function selNumLen(n) { return (n < 10) ? 1 : (n < 100) ? 2 : (n < 1000) ? 3 : (n < 10000) ? 4 : (n < 100000) ? 5 : 6 }
+    function selMenu(vals) {
+        var n = vals.length
+        var cv = quietVal("COLUMNS")
+        var width = (cv == "") ? 80 : strToInt(cv)
+        var lens = []
+        var maxl = 0
+        var k
+        for (k = 0; k < n; k++) {
+            lens.push(strBytes(vals[k]).length)
+            if (lens[k] > maxl) { maxl = lens[k] }
+        }
+        var il = selNumLen(n)
+        maxl = maxl + il + 4
+        var cols = (width > 0) ? Math.floor(width / maxl) : 0
+        if (cols == 0) { cols = 1 }
+        var rows = Math.floor(n / cols) + ((n % cols != 0) ? 1 : 0)
+        cols = Math.floor(n / rows) + ((n % rows != 0) ? 1 : 0)
+        if (rows == 1) { rows = cols; cols = 1 }
+        var fil = selNumLen(rows)
+        var s = ""
+        var row
+        for (row = 0; row < rows; row++) {
+            var ind = row
+            var pos = 0
+            while (ind < n) {
+                var w = (pos == 0) ? fil : il
+                var num = numToStr(ind + 1)
+                while (num.length < w) { num = " " + num }
+                s = s + num + ") " + vals[ind]
+                var from = pos + lens[ind] + w + 2
+                ind = ind + rows
+                if (ind < n) {
+                    var to = pos + maxl
+                    while (from < to) {
+                        if (Math.floor(to / 8) > Math.floor(from / 8)) { s = s + "\t"; from = from + 8 - from % 8 }
+                        else { s = s + " "; from = from + 1 }
+                    }
+                    pos = pos + maxl
+                }
+            }
+            s = s + "\n"
+        }
+        return s
+    }
+    // The word a select reply numbers: one decimal number, optionally signed, with white
+    // space around it allowed, from 1 to the number of words; anything else is "". Twin of
+    // rt_sel_pick in languages/lib/bash-rt.c.
+    function selPick(vals, rep) {
+        var n = rep.length
+        var i = 0
+        while (i < n && selSpace(rep.charCodeAt(i))) { i = i + 1 }
+        var neg = i < n && rep.charAt(i) == "-"
+        if (i < n && (rep.charAt(i) == "-" || rep.charAt(i) == "+")) { i = i + 1 }
+        var d0 = i
+        var v = 0
+        while (i < n && rep.charCodeAt(i) >= 48 && rep.charCodeAt(i) <= 57) {
+            if (v <= vals.length) { v = v * 10 + rep.charCodeAt(i) - 48 }
+            i = i + 1
+        }
+        var d1 = i
+        while (i < n && selSpace(rep.charCodeAt(i))) { i = i + 1 }
+        if (d1 == d0 || i < n || neg || v < 1 || v > vals.length) { return "" }
+        return vals[v - 1]
+    }
+    function selSpace(cc) { return cc == 32 || (cc >= 9 && cc <= 13) }
 
     // A definition or `unset -f` inside a subshell ends with it: while subLevels > 0 each
     // one logs the binding it replaces, which restoreShellState puts back. Twin of fnTouch
@@ -10689,7 +10851,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The syntax error of the line from offset from, where the parse stopped at p
     // (lib/bash-synerr.js): reported when the line would run, leaving the script with status 2
     // and an eval or trap string with status 2 (1 for an array never closed) - or, when it
-    // stands inside a $( ), the shell with status 1 (bash 5.3). Twin of synErrLine in
+    // stands inside a $( ), the shell with status 1 (bash 5.3). Where set -e is in force
+    // the shell leaves at the first line of the report, status 2. Twin of synErrLine in
     // bash-to-llvm-ir.abnf.
     var snipWho = ""
     function synErrLine(from, p) {
@@ -10700,12 +10863,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var msg = ""
         var k
         for (k = 0; k < ls.length; k++) { msg = msg + pfx + ls[k] + "\n" }
+        var msg1 = pfx + ls[0] + "\n"
         var code = se.code
-        if (!arInSnip || se.sub) {
-            var st = (arInSnip) ? 1 : code
-            return function() { emitErr(msg); return {ret: st, isExit: 1} }
+        var leave = !arInSnip || se.sub
+        var st = (arInSnip) ? 1 : code
+        return function() {
+            if (optErrExit && condDepth == 0) { emitErr(msg1); return {ret: 2, isExit: 1} }
+            emitErr(msg)
+            if (leave) { return {ret: st, isExit: 1} }
+            setStatus(code)
+            return code
         }
-        return function() { emitErr(msg); setStatus(code); return code }
     }
     function runProgram(items) {
         var lines = splitLines(items)
