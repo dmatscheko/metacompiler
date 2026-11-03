@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1188 ruby: two expressions on one line, rescue-modifier laxness (yield/return, compiler `rescue y = 3`), lines(chomp:), each_codepoint on invalid UTF-8 · P3 · RB · OPEN [V]
+### T-1188 ruby: two expressions on one line, rescue-modifier laxness (yield/return, compiler `rescue y = 3`), lines(chomp:), each_codepoint on invalid UTF-8 · P3 · RB · IN PROGRESS (RB worker, round 71) [V]
 Found while closing T-1179 (worker-reported); oracle `LC_ALL=en_US.UTF-8 /usr/bin/ruby` 2.6. Verify each on the oracle first.
 - Both grammars accept two expressions on one line with no separator: `x = 1 2` runs, where MRI gives a syntax error. This is the root of the rescue-modifier laxness. Fix the statement separator rule, not more guards. Then `x = … rescue yield 1` and `x = … rescue return 1` must be syntax errors too: the interpreter currently runs them, and the compiler fails with a parse error that is not MRI's.
 - Compiler only: `x = raise("z") rescue y = 3; p x, y` gives "undefined local variable or method `y'"; MRI and the interpreter print 3, 3.
@@ -129,7 +129,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1189 bash: keyword-less function definitions whose name holds "=" (`=x() {`, `1=2() {`) · P3 · SH · OPEN [V]
+### T-1189 bash: keyword-less function definitions whose name holds "=" (`=x() {`, `1=2() {`) · P3 · SH · IN PROGRESS (SH worker, round 66) [V]
 Found while closing T-1187; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3. All engines.
 - `=x() { echo hi; }; '=x'; 1=2() { echo onetwo; }; '1=2'; declare -F`: bash prints hi, onetwo, `declare -f 1=2`, `declare -f =x`. Ours fails to parse at 1:3, because FuncNameTok excludes "=". The name may hold "=" only when the word does not spell an assignment: `x=y() { :; }` must stay a syntax error. This needs a negative lookahead for an assignment word.
 
