@@ -128,7 +128,7 @@ Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignm
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1177 bash: `unset -n` on a non-nameref, unset of a caller's prefix binding (interp), `${1:=x}`, stores after readonly on a circular assoc nameref · P3 · SH · OPEN [V]
+### T-1177 bash: `unset -n` on a non-nameref, unset of a caller's prefix binding (interp), `${1:=x}`, stores after readonly on a circular assoc nameref · P3 · SH · IN PROGRESS (SH worker, round 57) [V]
 Found while closing T-1176; oracle `LC_ALL=C /opt/homebrew/bin/bash` 5.3.
 - All engines: `unset -n` on a non-nameref is a no-op in bash 5.3 — `x=1; unset -n x; echo ${x-U}` gives `1` (ours `U`); same for a function local (`declare -- y="1"`).
 - Interpreter only: `in4(){ unset x4; declare -p x4; }; o4(){ x4=1 in4; echo "o4:${x4-U}"; }; x4=G; o4` — oracle `declare -- x4="G"` and `o4:G`; interp `declare -n x4="G"` and `o4:U` (literal and computed unset). The compiler is right.
