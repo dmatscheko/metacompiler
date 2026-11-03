@@ -4670,12 +4670,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             global = ownFl.global || m.indexOf("g") >= 0
             lateOnly = !ownFl.bareArr && kind
         }
-        var lateDiag = function(b, at) {
+        // Under -p (accP, its status slot) such a word is a field -p looks up (declpField).
+        var declpField = null
+        var lateDiag = function(b, at, accP) {
             var q
             for (q = 0; q < lateBad.length; q++) {
-                if (lateBad[q].at == at) { emitDiag(b, gepStr(b, kw + ": `" + lateBad[q].w + "': not a valid identifier\n")); roFail = true }
+                if (lateBad[q].at != at) { continue }
+                if (accP != null) { b.NewStore(b.NewOr(b.NewLoad(i32, accP), declpField(b, gepStr(b, lateBad[q].w))), accP) }
+                else { emitDiag(b, gepStr(b, kw + ": `" + lateBad[q].w + "': not a valid identifier\n")); roFail = true }
             }
             return b
+        }
+        // The report a literal of operand j left while the words expanded (litLate), if any.
+        var lateMsg = function(b, j) {
+            if (pre.late[j] == null) { return b }
+            var lm = b.NewLoad(i8ptr, pre.late[j])
+            var lmB = curF.NewBlock(""), lmEnd = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i8, lm), llvm.constant.NewInt(i8, 0)), lmB, lmEnd)
+            emitDiag(lmB, lm)
+            lmB.NewBr(lmEnd)
+            return lmEnd
         }
         // -p/-f/-F are QUERIES, not declarations: -p with names prints, -f/-F print functions
         // (emitDeclFuncs). None of them may be read as `declare NAME`, which below would make
@@ -4716,7 +4730,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var k
         // Which names an array literal may find associative (maybeAssoc), from the whole program.
         for (k = 0; k < names.length; k++) {
-            if (assoc && !query && (bareArr || asgs[k] != null)) { assocArrays["$" + names[k]] = true }
+            if (assoc && (!query || (isPrint && asgs[k] != null && asgs[k].lit != null)) && (bareArr || asgs[k] != null)) { assocArrays["$" + names[k]] = true }
             if (lates[k].indexOf("A") >= 0) { assocArrays["$" + names[k]] = true }
         }
         if (assoc && anyDyn) { assocDyn = true }
@@ -5905,15 +5919,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 roFail = true
                 return b
             }
-            b = lateDiag(b, o)
-            if (pre.late[j] != null) {
-                var lm = b.NewLoad(i8ptr, pre.late[j])
-                var lmB = curF.NewBlock(""), lmEnd = curF.NewBlock("")
-                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i8, lm), llvm.constant.NewInt(i8, 0)), lmB, lmEnd)
-                emitDiag(lmB, lm)
-                lmB.NewBr(lmEnd)
-                b = lmEnd
-            }
+            b = lateMsg(lateDiag(b, o, null), j)
             if (listAt[j] != null) {
                 b = listAt[j].late(b)
                 b.NewStore(b.NewOr(b.NewLoad(i32, refuseP), b.NewZExt(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gStatus), zero), i32)), refuseP)
@@ -5972,6 +5978,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // (emitDeclpDyn).
                 var accP = slotOf(i32)
                 b.NewStore(zero, accP)
+                declpField = function(fb, f) {
+                    var lcl = kw == "local"
+                    return fb.NewCall(rtDeclpWord, [f, emptyPtr(fb), zero, gepStr(fb, declpWho),
+                                                    lcl ? fb.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1), lcl ? fnId : zero])
+                }
                 var dOptP = slotOf(i32)
                 b.NewStore((dashEnd || order[0].dyn == undefined) ? zero : one, dOptP)
                 var o
@@ -5979,6 +5990,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (order[o].dyn != undefined) { b = emitDeclpDyn(b, order[o].dyn, accP, dOptP, fnId); continue }
                     b.NewStore(zero, dOptP)
                     j = order[o].j
+                    b = lateMsg(lateDiag(b, o, accP), j)
+                    if (pre.vals[j] != null) {
+                        b.NewStore(b.NewOr(b.NewLoad(i32, accP), declpField(b, pre.vals[j])), accP)
+                        continue
+                    }
                     // The name gets its slot, which a computed operand may have stored into.
                     getVarId(names[j])
                     var lt = gepStr(b, scalarAttrLetters(names[j]))
@@ -6000,6 +6016,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     } else { rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), lt, b.NewCall(rtIsAssoc, gepStr(b, names[j])), gepStr(b, declpWho)]) }
                     b.NewStore(b.NewOr(b.NewLoad(i32, accP), rp), accP)
                 }
+                b = lateDiag(b, order.length, accP)
                 storeStatus(b, b.NewLoad(i32, accP))
                 return b
             }
@@ -6037,7 +6054,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             optP = null
             rtAtP = null
-            b = lateDiag(b, order.length)
+            b = lateDiag(b, order.length, null)
             storeStatusI(b, roFail ? 1 : 0)
             if (anyDyn) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, badP))) }
             if (refuseP != null) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, refuseP))) }
@@ -6061,10 +6078,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (attrOn(refVars, names[j]) || (roRtMay(names[j]) && !attrOn(roVars, names[j]))) { rtRefuse = true }
                 if ((kw == "export" || kw == "readonly") && refMay(names[j])) { rtRefuse = true }
             }
-            refuseP = (isRef || plusArr || bareArr || rtRefuse || late != null || anyQuoted() || listOps.length > 0) && !query ? slotOf(i32) : null
+            refuseP = (isRef || plusArr || bareArr || rtRefuse || late != null || anyQuoted() || listOps.length > 0) && (!query || isPrint) ? slotOf(i32) : null
             if (refuseP != null) { b.NewStore(zero, refuseP) }
             var mine = []
-            for (j = 0; j < names.length && !query; j++) {
+            for (j = 0; j < names.length && (!query || isPrint); j++) {
                 var a = asgs[j]
                 vals.push(null)
                 mine.push(null)
@@ -6078,6 +6095,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = declAt(b, j, null)
                     litLate = svLate
                     if (lates[j] != "") { lateFor(-1) }
+                }
+                // -p looks a NAME=VALUE operand up as the word it expands to. Twin of
+                // asgWordText in bash-interpreter.abnf.
+                else if (isPrint && asgsWritten[j] != null) {
+                    var aw = asgsWritten[j]
+                    var txt = gepStr(b, aw.name)
+                    if (aw.idxT != null) {
+                        var iw = evalWord(b, aw.idxT)
+                        b = iw.b
+                        txt = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [txt, gepStr(b, "[")]), iw.v]), gepStr(b, "]")])
+                    }
+                    txt = b.NewCall(rtStrcat, [txt, gepStr(b, aw.op)])
+                    if (aw.valT != null) {
+                        var vw = evalWord(b, aw.valT)
+                        b = vw.b
+                        txt = b.NewCall(rtStrcat, [txt, vw.v])
+                    }
+                    vals[j] = txt
+                    b = emitAbortCheck(b)
                 }
                 // A literal value has nothing to expand: emitAssign keeps its compile-time forms.
                 else if (a != null && a.valT != null && a.valT.c == undefined) {

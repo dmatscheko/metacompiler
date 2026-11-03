@@ -1006,9 +1006,10 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
 // associative, else a indexed, and g global - and applies the mark as the words are expanded
 // (make_cmd.c, fix_assignment_words). The builtin itself reads such a word after an operand
 // as no option but "not a valid identifier" (bash 5.3: `declare w=7 -A e=([z]=3)` makes e
-// associative, status 1). items are a declaration's, each {dyn} carrying {dsrc}, its word as
-// written. Answers null unless a written word marks a literal (and no other operand is
-// computed, and it is no query); else {items: the declaration without those words, each
+// associative, status 1), and -p looks it up as a name ("-A: not found"). items are a
+// declaration's, each {dyn} carrying {dsrc}, its word as written. Answers null unless a
+// written word marks a literal (and no other operand is computed, and it is no -f or -F
+// query); else {items: the declaration without those words, each
 // marked literal given {dlate: its letters}, bad: [{at: the operands before it, w: the
 // word}]}.
 function bashDeclLate(items) {
@@ -1021,7 +1022,7 @@ function bashDeclLate(items) {
     var i
     for (i = 0; i < items.length; i++) {
         var it = items[i]
-        if (it.dflag != undefined && (it.dflag.indexOf("p") >= 0 || it.dflag.indexOf("f") >= 0 || it.dflag.indexOf("F") >= 0)) { return null }
+        if (it.dflag != undefined && (it.dflag.indexOf("f") >= 0 || it.dflag.indexOf("F") >= 0)) { return null }
         if (it.dyn != undefined) {
             // "--" ends the options only where the next one could be read; anywhere else it is
             // an operand, and no mark. The marking itself ignores it (bash 5.3: `declare -- -A

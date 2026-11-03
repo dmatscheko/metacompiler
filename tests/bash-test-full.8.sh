@@ -587,6 +587,19 @@ s174() {
   e=$(declare -gn s174t; declare -gA s174t; declare -p s174t)
   check nr2 "$e" 'declare -A s174t'
 }
+s175() {
+  local e
+  s175s() { local l; while IFS= read -r l; do case $l in *": line "*) l=${l#*: line }; l=${l#*: } ;; esac; printf '%s;' "$l"; done <<< "$1"; }
+  s175a() { local x=abc a=(1 2) i=1 v=q y; declare -p x=1; echo "s=$?"; declare -p a[$i]=$v x+=1 x a[1+1]=2; echo "s=$?"
+            declare -p x=$((y=5)) 'x'=$v; echo "s=$? y=$y"; typeset -p x="a  b"; echo "s=$?"; declare -p -- x=; echo "s=$?"
+            local -p x=2 x; echo "s=$?"; declare -ip n=9; echo "s=$?"; }
+  e=$(s175a 2>&1)
+  check dp2 "$(s175s "$e")" 'declare: x=1: not found;s=1;declare: a[1]=q: not found;declare: x+=1: not found;declare -- x="abc";declare: a[1+1]=2: not found;s=1;declare: x=5: not found;declare: x=q: not found;s=1 y=5;typeset: x=a  b: not found;s=1;declare: x=: not found;s=1;local: x=2: not found;declare -- x="abc";s=1;declare: n=9: not found;s=1;'
+  s175b() { local x=abc u; declare -p u=(7) u=2; echo "s=$?"; declare -pA w=([k]=1); echo "s=$? ${w[k]}"; declare -pi n=(1+1 3); echo "s=$?"
+            local -p m=(4) -A o=([z]=3); echo "s=$?"; declare -p o; declare -p "$1" x=1 c=(5); echo "s=$?"; declare -p c; }
+  e=$(s175b x 2>&1)
+  check dp3 "$(s175s "$e")" 'declare -a u=([0]="7");declare: u=2: not found;s=1;declare -A w=([k]="1" );s=0 1;declare -ai n=([0]="2" [1]="3");s=0;declare -a m=([0]="4");local: -A: not found;declare -A o=([z]="3" );s=1;declare -A o=([z]="3" );declare -- x="abc";declare: x=1: not found;declare -a c=([0]="5");s=1;declare -a c=([0]="5");'
+}
 # ===== END SECTIONS =====
 
 s154  # SECTION-CALL 154
@@ -610,5 +623,6 @@ s171  # SECTION-CALL 171
 s172  # SECTION-CALL 172
 s173  # SECTION-CALL 173
 s174  # SECTION-CALL 174
+s175  # SECTION-CALL 175
 echo "full: $checks checks, $fails failures"
 exit $fails

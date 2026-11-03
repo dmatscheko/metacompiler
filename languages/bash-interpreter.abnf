@@ -3400,6 +3400,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // bash-to-llvm-ir.abnf.
     function makeDecl(items, redirs, ln, keepTc) {
         var kw = items[0].dkw
+        // A `--` before every operand ends the options and is no operand. Twin of dashEnd in
+        // makeDecl in bash-to-llvm-ir.abnf.
+        var de = 1
+        while (de < items.length && items[de].dflag != undefined) { de = de + 1 }
+        if (de < items.length && items[de].dsrc == "--") { items = items.slice(0, de).concat(items.slice(de + 1)) }
         var flags = ""
         var plus = ""
         var names = []
@@ -3517,7 +3522,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lateDiag = function(at) {
             var q
             for (q = 0; q < lateBad.length; q++) {
-                if (lateBad[q].at == at) { diagErr(kw + ": `" + lateBad[q].w + "': not a valid identifier\n"); roFail = true }
+                if (lateBad[q].at != at) { continue }
+                if (isPrint) { if (declpWord(kw, lateBad[q].w) != 0) { roFail = true } }
+                else { diagErr(kw + ": `" + lateBad[q].w + "': not a valid identifier\n"); roFail = true }
             }
         }
         // -p/-f/-F are QUERIES, not declarations: -p with names prints (declLine), -f/-F print
@@ -4090,10 +4097,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return 0
             }
             // -p with names PRINTS (declpWord), -p bare stays silent (declLine's comment says
-            // why). A NAME[SUB] operand names a variable literally.
+            // why). A NAME[SUB] operand names a variable literally, a NAME=VALUE one by its
+            // expanded text; an array literal was assigned with the words and names its NAME.
             if (isPrint && names.length > 0) {
                 var pst = 0
-                for (k = 0; k < names.length; k++) { pst = pst | declpWord(kw, (darrs[k] != null) ? darrs[k] : names[k]) }
+                for (k = 0; k < names.length; k++) {
+                    lateDiag(k)
+                    if (lateStack[lateStack.length - 1][k] != "") { diagErr(lateStack[lateStack.length - 1][k]) }
+                    var awp = asgsWritten[k]
+                    pst = pst | declpWord(kw, (darrs[k] != null) ? darrs[k] : ((awp != null && awp.lit == null) ? vals[k] : names[k]))
+                }
+                lateDiag(names.length)
+                if (roFail) { pst = 1 }
+                roFail = false
                 setStatus(pst)
                 return pst
             }
@@ -4153,7 +4169,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vals = []
             var mine = []
             for (k = 0; k < names.length; k++) { mine.push("") }
-            for (k = 0; k < names.length && !query; k++) {
+            for (k = 0; k < names.length && (!query || isPrint); k++) {
                 var a = asgs[k]
                 if (listAt[k] != null) {
                     var lab = declListPre(listAt[k], kw)
@@ -4169,7 +4185,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     litLate = svLate
                     if (lates[k] != "") { lateFor(-1) }
                 }
-                vals.push((a != null && a.lit == null && a.valT != null) ? wordJoin(a.valT()) : "")
+                // -p looks a NAME=VALUE operand up as the word it expands to (declpWord).
+                var aw = asgsWritten[k]
+                if (isPrint && aw != null && aw.lit == null) { vals.push(asgWordText(aw)) }
+                else { vals.push((a != null && a.lit == null && a.valT != null) ? wordJoin(a.valT()) : "") }
                 var ab = takeAbort()
                 if (ab != null) { return ab }
             }
@@ -4182,6 +4201,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (keepTc != true) { thisCmd = "" }
             return r
         }
+    }
+    // The word a written NAME[SUB]=VALUE or NAME+=VALUE (a) expands to. Twin of the -p arm
+    // of makeDecl in bash-to-llvm-ir.abnf.
+    function asgWordText(a) {
+        var sub = (a.idxT != null) ? "[" + wordJoin(a.idxT()) + "]" : ""
+        return a.name + sub + a.op + ((a.valT != null) ? wordJoin(a.valT()) : "")
     }
     // An operand f of `declare -p` / `local -p` (kw): the variable f names literally, so a
     // word that is no name (NAME=VALUE, NAME[SUB]) is "not found", unless a hidden local
@@ -4221,6 +4246,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (df != undefined && df.charAt(0) == "-" && (df.indexOf("f") >= 0 || df.indexOf("F") >= 0)) { printQ = false }
         }
         printQ = printQ && anyP
+        // A written array literal is assigned as the words expand, by the declaration without
+        // -p (litDecl[i] for item i); -p then prints its NAME.
+        var litDecl = []
+        var litOpts = []
+        for (i = 1; i < items.length && printQ; i++) {
+            var lf = items[i].dflag
+            if (lf != undefined && lf.split("p").join("").length > 1) { litOpts.push({dflag: lf.split("p").join("")}) }
+        }
+        for (i = 0; i < items.length; i++) {
+            var la = items[i].a
+            litDecl.push((printQ && la != undefined && la.lit != null) ? makeDecl([items[0]].concat(litOpts, [items[i]]), [], ln, true) : null)
+        }
         // pending's top: the run's diagnostics and its declaration (null when it has no
         // operand), both under the redirections.
         var body = function() {
@@ -4254,6 +4291,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (it.dflag != undefined) { continue }
                     if (it.dyn == undefined) {
                         opt = false
+                        if (litDecl[q] != null) {
+                            var lr = anytype
+                            lr = litDecl[q]()
+                            if (typeof lr == "object") { return lr }
+                        }
+                        // A NAME=VALUE operand names the word it expands to.
+                        if (it.a != undefined && it.a.lit == null) {
+                            pf.push(asgWordText(it.a))
+                            if (abortSignal != null || arithErr) { return takeAbort() }
+                            continue
+                        }
                         pf.push((it.dname == undefined) ? it.a.name : ((it.darr != undefined) ? it.darr : it.dname))
                         continue
                     }
